@@ -1,0 +1,73 @@
+# mcpd across regions, on one machine: one Postgres, a daemon for each of two
+# regions against it, and an edge relay that ships to region A first and to
+# region B when A does not answer.
+#
+#   docker compose -f docker-compose.multi-region.yml up
+#
+# Agents send to the relay on port 4317. Stop `mcpd-region-a` and the relay
+# carries on through `mcpd-region-b`; start it again and the relay goes back
+# to it. Each request carries an Idempotency-Key, so a resend lands once.
+#
+# Copy .env.example to .env and fill it in first. The relay's own key
+# (EDGE_INGEST_KEYS) is the one agents present; it presents the daemons'
+# ingest key upstream.
+
+x-daemon: &daemon
+  image: ghcr.io/mcpd/mcpd:0.1.0
+  restart: unless-stopped
+  depends_on:
+    - postgres
+  environment: &daemon-env
+    MCPD_LISTEN: 0.0.0.0:4317
+    MCPD_POSTGRES_URL: postgres://mcpd:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/mcpd
+    # The run store is an embedded file, so it is off on replicas that share
+    # a database.
+    MCPD_RUNS_DATA: "off"
+    MCPD_LOG_FORMAT: json
+    MCPD_INGEST_KEYS: ${MCPD_INGEST_KEYS:?set MCPD_INGEST_KEYS in .env}
+    MCPD_READ_KEYS: ${MCPD_READ_KEYS:?set MCPD_READ_KEYS in .env}
+    MCPD_REDACT_KEY: ${MCPD_REDACT_KEY:?set MCPD_REDACT_KEY in .env}
+  stop_grace_period: 45s
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mcpd
+      POSTGRES_DB: mcpd
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  mcpd-region-a:
+    <<: *daemon
+    ports:
+      - "127.0.0.1:4318:4317"
+
+  mcpd-region-b:
+    <<: *daemon
+    ports:
+      - "127.0.0.1:4319:4317"
+
+  relay:
+    image: ghcr.io/mcpd/mcpd:0.1.0
+    command: ["relay"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4317:4317"
+    environment:
+      MCPD_LISTEN: 0.0.0.0:4317
+      MCPD_UPSTREAMS: http://mcpd-region-a:4317,http://mcpd-region-b:4317
+      MCPD_UPSTREAM_KEY: ${MCPD_INGEST_KEYS:?set MCPD_INGEST_KEYS in .env}
+      MCPD_INGEST_KEYS: ${EDGE_INGEST_KEYS:?set EDGE_INGEST_KEYS in .env}
+      MCPD_SPOOL_DIR: /data/spool
+      MCPD_SPOOL_MAX_BYTES: "1073741824"
+      MCPD_LOG_FORMAT: json
+    volumes:
+      - relay-spool:/data
+    stop_grace_period: 45s
+
+volumes:
+  postgres-data:
+  relay-spool:

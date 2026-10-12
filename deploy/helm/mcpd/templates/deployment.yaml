@@ -63,6 +63,9 @@ spec:
         - name: mcpd
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if eq .Values.mode "relay" }}
+          args: ["relay"]
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ include "mcpd.port" . }}
@@ -129,11 +132,33 @@ spec:
                 secretKeyRef:
                   name: {{ include "mcpd.secretName" . }}
                   key: ingest-keys
+            {{- if or (ne .Values.mode "relay") .Values.keys.read }}
             - name: MCPD_READ_KEYS
               valueFrom:
                 secretKeyRef:
                   name: {{ include "mcpd.secretName" . }}
                   key: read-keys
+            {{- end }}
+            {{- if eq .Values.mode "relay" }}
+            - name: MCPD_UPSTREAMS
+              value: {{ join "," .Values.relay.upstreams | quote }}
+            {{- if or .Values.relay.upstreamKey .Values.keys.existingSecret }}
+            - name: MCPD_UPSTREAM_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpd.secretName" . }}
+                  key: upstream-key
+                  optional: true
+            {{- end }}
+            {{- end }}
+            {{- if .Values.spool.dir }}
+            - name: MCPD_SPOOL_DIR
+              value: {{ .Values.spool.dir | quote }}
+            {{- end }}
+            {{- if .Values.spool.maxBytes }}
+            - name: MCPD_SPOOL_MAX_BYTES
+              value: {{ .Values.spool.maxBytes | int64 | toString | quote }}
+            {{- end }}
             {{- if or .Values.keys.write .Values.keys.existingSecret }}
             - name: MCPD_WRITE_KEYS
               valueFrom:
@@ -220,6 +245,14 @@ spec:
             {{- if .Values.forward.endpoint }}
             - name: MCPD_FORWARD_ENDPOINT
               value: {{ .Values.forward.endpoint | quote }}
+            {{- end }}
+            {{- if .Values.forward.vendor }}
+            - name: MCPD_FORWARD_VENDOR
+              value: {{ .Values.forward.vendor | quote }}
+            {{- end }}
+            {{- if .Values.forward.protocol }}
+            - name: MCPD_FORWARD_PROTOCOL
+              value: {{ .Values.forward.protocol | quote }}
             {{- end }}
             {{- if .Values.forward.headers }}
             - name: MCPD_FORWARD_HEADERS

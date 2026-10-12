@@ -102,7 +102,11 @@ true
      store, and the run store whenever runs are on. A file has one writer, so
      this is what holds the Deployment to one replica and to Recreate. */}}
 {{- define "mcpd.localState" -}}
-{{- if or (not (include "mcpd.externalStore" .)) (include "mcpd.runsEnabled" .) -}}
+{{- if eq .Values.mode "relay" -}}
+{{- if .Values.persistence.enabled -}}
+true
+{{- end -}}
+{{- else if or (not (include "mcpd.externalStore" .)) (include "mcpd.runsEnabled" .) -}}
 true
 {{- end -}}
 {{- end -}}
@@ -133,6 +137,23 @@ Secret
      Each one names the setting and the fix: a message at install time instead
      of a crash loop after it. */}}
 {{- define "mcpd.validate" -}}
+{{- if not (has .Values.mode (list "daemon" "relay")) -}}
+{{- fail (printf "mode is %q. Set it to daemon or relay." (toString .Values.mode)) -}}
+{{- end -}}
+{{- if eq .Values.mode "relay" -}}
+{{- if not .Values.relay.upstreams -}}
+{{- fail "mode is relay but relay.upstreams is empty, so the relay would have nowhere to ship. List the daemons in order of preference, for example [\"https://mcpd.eu-west.example:4317\", \"https://mcpd.us-east.example:4317\"]." -}}
+{{- end -}}
+{{- if ne (include "mcpd.storeType" .) "none" -}}
+{{- fail "mode is relay and externalStore.type is set. A relay opens no store; set externalStore.type on the daemons it ships to, and none here." -}}
+{{- end -}}
+{{- if and (gt (int .Values.replicaCount) 1) .Values.persistence.enabled -}}
+{{- fail (printf "mode is relay with replicaCount %d and persistence.enabled true, so every pod would share one spool volume. Run one release per relay pod, or set persistence.enabled=false to give each pod a spool that lasts as long as the pod." (int .Values.replicaCount)) -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.relay.upstreams (ne .Values.mode "relay") -}}
+{{- fail "relay.upstreams is set but mode is daemon, so nothing would read it. Set mode=relay, or clear relay.upstreams." -}}
+{{- end -}}
 {{- $type := include "mcpd.storeType" . -}}
 {{- $ext := .Values.externalStore -}}
 {{- if and (ne $type "postgres") $ext.postgresUrl -}}
@@ -160,10 +181,10 @@ Secret
 {{- if lt $replicas 1 -}}
 {{- fail (printf "replicaCount is %v. Set it to 1 or more." .Values.replicaCount) -}}
 {{- end -}}
-{{- if and (gt $replicas 1) (not (include "mcpd.externalStore" .)) -}}
+{{- if and (gt $replicas 1) (ne .Values.mode "relay") (not (include "mcpd.externalStore" .)) -}}
 {{- fail (printf "replicaCount is %d, but the signals are stored in an embedded SQLite file, which has one writer: two pods on it corrupt the database. Set replicaCount=1, or set externalStore.type (postgres or clickhouse) and runs.enabled=false to run more than one pod." $replicas) -}}
 {{- end -}}
-{{- if and (gt $replicas 1) (include "mcpd.runsEnabled" .) -}}
+{{- if and (gt $replicas 1) (ne .Values.mode "relay") (include "mcpd.runsEnabled" .) -}}
 {{- fail (printf "replicaCount is %d, but runs.enabled is true, and the run store is an embedded SQLite file whatever the signal store is: each pod would hold its own run store, and a run started on one pod would be invisible to the others. Set runs.enabled=false to scale out with no run surface, or replicaCount=1 to keep it." $replicas) -}}
 {{- end -}}
 {{- $runsPath := toString .Values.config.runsPath -}}
@@ -192,8 +213,21 @@ Secret
 {{- if get ($cf.content.judge | default dict) "api_key" -}}
 {{- $found = append $found "judge.api_key" -}}
 {{- end -}}
-{{- if get ($cf.content.forward | default dict) "headers" -}}
-{{- $found = append $found "forward.headers" -}}
+{{- $forwards := $cf.content.forward | default list -}}
+{{- if kindIs "map" $forwards -}}
+{{- $forwards = list $forwards -}}
+{{- end -}}
+{{- range $i, $f := $forwards -}}
+{{- range $k := list "headers" "api_key" "token" "secret_key" "public_key" "dsn" -}}
+{{- $v := toString (get ($f | default dict) $k | default "") -}}
+{{- if and $v (not (hasPrefix "${" $v)) (ne $v "[]") (ne $v "map[]") -}}
+{{- $found = append $found (ternary (printf "forward.%s" $k) (printf "forward[%d].%s" $i $k) (kindIs "map" $cf.content.forward)) -}}
+{{- end -}}
+{{- end -}}
+{{- $url := toString (get ($f | default dict) "endpoint" | default "") -}}
+{{- if or (contains "@" $url) (contains "?" $url) -}}
+{{- $found = append $found (ternary "forward.endpoint" (printf "forward[%d].endpoint" $i) (kindIs "map" $cf.content.forward)) -}}
+{{- end -}}
 {{- end -}}
 {{- /* A webhook URL is often its own credential, which is why the API returns
        only its host; a URL carrying a user, a password or a query parameter
@@ -208,7 +242,7 @@ Secret
 {{- $found = append $found (printf "slos[%d].webhook" $i) -}}
 {{- end -}}
 {{- end -}}
-{{- range $block := list "forward" "judge" -}}
+{{- range $block := list "judge" -}}
 {{- $url := toString (get ((get $cf.content $block) | default dict) "endpoint" | default "") -}}
 {{- if or (contains "@" $url) (contains "?" $url) -}}
 {{- $found = append $found (printf "%s.endpoint" $block) -}}
