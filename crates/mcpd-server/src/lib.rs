@@ -2,8 +2,10 @@
 //!
 //! One process serves five things:
 //!
-//! * **OTLP ingest** at `/v1/traces`, `/v1/logs`, `/v1/metrics`, so any
-//!   OpenTelemetry SDK works with no mcpd-specific code.
+//! * **OTLP ingest** at `/v1/traces`, `/v1/logs`, `/v1/metrics`, and over
+//!   gRPC on the same port, so any OpenTelemetry SDK works with no
+//!   mcpd-specific code. Zipkin and Jaeger senders are taken too, in `ingest`
+//!   and `grpc`.
 //! * **Native ingest** at `/v1/ingest`, which carries the full model.
 //! * **The query API** under `/v1/api`, which the UI and the SDKs both use.
 //! * **The run surface**, also under `/v1/api`: definitions, runs, events and
@@ -23,6 +25,7 @@ pub mod derive;
 pub mod error;
 pub mod eval;
 pub mod forward;
+pub mod grpc;
 pub mod identity;
 pub mod ingest;
 pub mod judge;
@@ -64,7 +67,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(ingest_router())
         .merge(api_router(&state.config))
         .merge(ops_router())
-        .merge(ui::router());
+        .merge(ui::router())
+        .layer(axum::middleware::from_fn(grpc::refuse_unknown));
     layered(routes, state)
 }
 
@@ -107,14 +111,29 @@ pub fn layered(routes: Router<Arc<AppState>>, state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// The four ingest doors. No CORS: an SDK is not a browser, and a browser page
+/// The ingest doors. No CORS: an SDK is not a browser, and a browser page
 /// posting telemetry across origins is not a case this daemon serves.
+///
+/// The gRPC methods are routes like any other, because a gRPC call is an
+/// HTTP/2 `POST` to a path named after its method.
 fn ingest_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/traces", post(ingest::otlp_traces))
         .route("/v1/logs", post(ingest::otlp_logs))
         .route("/v1/metrics", post(ingest::otlp_metrics))
         .route("/v1/ingest", post(ingest::native))
+        .route("/api/v2/spans", post(ingest::zipkin_spans))
+        .route("/api/traces", post(ingest::jaeger_traces))
+        .route(
+            "/opentelemetry.proto.collector.trace.v1.TraceService/Export",
+            post(grpc::otlp_traces),
+        )
+        .route("/opentelemetry.proto.collector.logs.v1.LogsService/Export", post(grpc::otlp_logs))
+        .route(
+            "/opentelemetry.proto.collector.metrics.v1.MetricsService/Export",
+            post(grpc::otlp_metrics),
+        )
+        .route("/jaeger.api_v2.CollectorService/PostSpans", post(grpc::jaeger_post_spans))
 }
 
 /// The query API under `/v1/api`, with its origin policy.
