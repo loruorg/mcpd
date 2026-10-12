@@ -3,7 +3,7 @@ import { defineConfig } from 'astro/config'
 import react from '@astrojs/react'
 import sitemap from '@astrojs/sitemap'
 import tailwind from '@tailwindcss/vite'
-import { panelTheme } from './src/lib/shiki-theme'
+import { SHIKI_THEMES } from './src/lib/shiki-theme'
 import { LOCALES, LOCALE_CODES, DEFAULT_LOCALE } from './src/lib/locales'
 
 export const SITE = 'https://mcpd.sh'
@@ -68,9 +68,10 @@ export default defineConfig({
   },
   markdown: {
     shikiConfig: {
-      // One theme, built from this site's own signal colours. A stock theme
+      // Two themes, built from this site's own signal colours. A stock theme
       // would drop a second, unrelated colour world into every page.
-      theme: panelTheme,
+      themes: SHIKI_THEMES,
+      defaultColor: false,
       wrap: false,
     },
   },

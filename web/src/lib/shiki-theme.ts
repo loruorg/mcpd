@@ -1,38 +1,38 @@
 /**
- * The panel syntax theme.
+ * The site's syntax themes, one per colour scheme.
  *
  * Built from the site's own signal colours rather than imported from a stock
- * theme, because a stock theme drops a second, unrelated colour world into the
- * middle of every documentation page — one of the loudest ways a careful site
- * stops looking careful.
- *
- * The mapping is semantic and consistent across every language: oxide is a
- * keyword (the language's own machinery), olive is a literal string (data you
- * typed), amber is a number, slate is a call or a type, and comments recede to
- * the panel's tertiary ink. Contrast against the well background was measured;
- * the lowest pair, comments at #75776a on #c6c8bb, is 4.6:1.
+ * theme, so code reads as part of the page. The mapping is the same in both:
+ * red is a keyword, green a string, amber a number, blue a call or a type,
+ * and comments recede. Both are written into every token by Shiki, and
+ * `panel.css` picks one with `light-dark()`, so a code block follows the theme
+ * with no script.
  */
 
 import type { ThemeRegistration } from 'shiki'
 
-const ink = '#191a15'
-const ink2 = '#43453b'
-const ink3 = '#5f6155'
-const comment = '#75776a'
-const oxide = '#8d2f1e'
-const olive = '#3f5c28'
-const amber = '#8f5206'
-const slate = '#38505c'
+type Palette = { ink: string; ink2: string; ink3: string; comment: string; oxide: string; olive: string; amber: string; slate: string }
 
-export const panelTheme: ThemeRegistration = {
-  name: 'mcpd-panel',
-  type: 'light',
+const LIGHT: Palette = {
+  ink: '#0f1412', ink2: '#3a433f', ink3: '#59625d', comment: '#6b746f',
+  oxide: '#b3312a', olive: '#1f7a43', amber: '#94560a', slate: '#2d5ec2',
+}
+const DARK: Palette = {
+  ink: '#e6eae8', ink2: '#c3cac6', ink3: '#97a09b', comment: '#7b847f',
+  oxide: '#ff8a7d', olive: '#7fdca2', amber: '#f2bd62', slate: '#93b4ff',
+}
+
+function theme(name: string, type: 'light' | 'dark', c: Palette): ThemeRegistration {
+  const { ink, ink2, ink3, comment, oxide, olive, amber, slate } = c
+  return {
+    name,
+    type,
   colors: {
     'editor.background': 'transparent',
     'editor.foreground': ink,
   },
   settings: [
-    { scope: ['comment', 'punctuation.definition.comment', 'string.comment'], settings: { foreground: comment, fontStyle: 'italic' } },
+    { scope: ['comment', 'punctuation.definition.comment', 'string.comment'], settings: { foreground: comment } },
 
     { scope: ['keyword', 'storage', 'storage.type', 'keyword.control', 'keyword.operator.new',
               'keyword.other', 'variable.language', 'constant.language', 'support.type.primitive'],
@@ -63,4 +63,11 @@ export const panelTheme: ThemeRegistration = {
     { scope: ['markup.bold'], settings: { fontStyle: 'bold' } },
     { scope: ['markup.italic'], settings: { fontStyle: 'italic' } },
   ],
+  }
 }
+
+export const panelTheme = theme('mcpd-light', 'light', LIGHT)
+export const panelThemeDark = theme('mcpd-dark', 'dark', DARK)
+
+/** Pass to Shiki or `<Code themes>` together with `defaultColor: false`. */
+export const SHIKI_THEMES = { light: panelTheme, dark: panelThemeDark }
