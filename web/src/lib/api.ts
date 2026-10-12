@@ -8,6 +8,7 @@
  */
 
 import type {
+  AccountNotice,
   Account,
   AccountKey,
   AccountSession,
@@ -72,7 +73,10 @@ export interface StoredSession {
   endpoint: string
   token: string
   email: string
-  project: string
+  /** Absent for an account with no project of its own. */
+  project?: string
+  /** Set for a single sign-on session, which reaches this organisation only. */
+  org_id?: string
   expires_at: string
 }
 
@@ -168,7 +172,7 @@ async function request<T>(
   path: string,
   opts: ClientOptions = {},
   body?: unknown,
-  method?: 'GET' | 'POST' | 'DELETE',
+  method?: 'GET' | 'POST' | 'DELETE' | 'PATCH' | 'PUT',
 ): Promise<T> {
   const endpoint = (opts.endpoint ?? DEFAULT_ENDPOINT).replace(/\/$/, '')
   const headers: Record<string, string> = { accept: 'application/json' }
@@ -322,12 +326,12 @@ export const api = {
     o?: ClientOptions,
   ) => request<DeltaResponse>(`/v1/api/deltas${qs(params)}`, o),
 
-  /* Accounts, on a daemon started with --signup. */
+  /* Accounts, on a daemon started with --signup or --accounts. */
   signup: (email: string, password: string, o?: ClientOptions) =>
-    request<AccountSession>('/v1/api/account/signup', o, { email, password }),
+    request<AccountNotice>('/v1/api/account/signup', o, { email, password }),
 
-  login: (email: string, password: string, o?: ClientOptions) =>
-    request<AccountSession>('/v1/api/account/login', o, { email, password }),
+  login: (email: string, password: string, totp_code: string | undefined, o?: ClientOptions) =>
+    request<AccountSession>('/v1/api/account/login', o, { email, password, totp_code: totp_code || undefined }),
 
   logout: (o?: ClientOptions) => request<DeleteResult>('/v1/api/account/logout', o, {}),
 
@@ -335,12 +339,29 @@ export const api = {
 
   accountKeys: (o?: ClientOptions) => request<AccountKey[]>('/v1/api/account/keys', o),
 
-  createAccountKey: (scope: KeyScope, name: string | undefined, o?: ClientOptions) =>
-    request<CreatedAccountKey>('/v1/api/account/keys', o, { scope, name: name || undefined }),
+  createAccountKey: (scope: KeyScope, name: string | undefined, o?: ClientOptions, project?: string) =>
+    request<CreatedAccountKey>('/v1/api/account/keys', o, { scope, name: name || undefined, project }),
 
   revokeAccountKey: (id: string, o?: ClientOptions) =>
     request<DeleteResult>(`/v1/api/account/keys/${encodeURIComponent(id)}`, o, undefined, 'DELETE'),
 }
+
+/**
+ * The account lifecycle, organisations and single sign-on. One generic call,
+ * because every one of these is a session door with a JSON body and a JSON
+ * answer, and the screens name the path and the type themselves.
+ */
+export function accountCall<T>(
+  method: 'GET' | 'POST' | 'DELETE' | 'PATCH' | 'PUT',
+  path: string,
+  o: ClientOptions,
+  body?: unknown,
+): Promise<T> {
+  return request<T>(path, o, body ?? (method === 'POST' ? {} : undefined), method)
+}
+
+/** A path segment, encoded. */
+export const seg = (v: string) => encodeURIComponent(v)
 
 /* ----------------------------------------------------- what is missing --- */
 
