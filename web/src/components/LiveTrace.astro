@@ -1,0 +1,189 @@
+---
+/**
+ * One trace, filling in live, from five frameworks in three languages.
+ *
+ * The idea it carries is the product's: mcpd does not care what produced a
+ * span. A TypeScript route built on the Vercel AI SDK calls a Go service
+ * instrumented with plain OpenTelemetry, which reads through LlamaIndex, and
+ * hands off to a Python agent on LangChain that calls Anthropic. All of it
+ * lands in one waterfall, on one clock.
+ *
+ * The markup is the finished trace. Playing replays it: rows arrive in start
+ * order, bars grow from their start time, a "now" line sweeps, and the
+ * counters in the header add up. Bars scale on the compositor only.
+ */
+import { localeOf } from '@/lib/i18n'
+import { strings } from '@/lib/ui-strings'
+
+interface Props {
+  class?: string
+}
+const { class: className = '' } = Astro.props
+const s = strings(localeOf(Astro.url.pathname))
+
+type Row = {
+  depth: number
+  kind: string
+  name: string
+  source: string
+  lang: string
+  at: number
+  ms: number
+  tokens?: number
+  cost?: number
+}
+
+const ROWS: Row[] = [
+  { depth: 0, kind: 'agent', name: 'POST /api/chat', source: 'Vercel AI SDK', lang: 'TS', at: 0, ms: 3180 },
+  { depth: 1, kind: 'model', name: 'gpt-4.1-mini', source: 'Vercel AI SDK', lang: 'TS', at: 80, ms: 760, tokens: 1290, cost: 0.00062 },
+  { depth: 1, kind: 'tool', name: 'search_orders', source: 'Vercel AI SDK', lang: 'TS', at: 870, ms: 830 },
+  { depth: 2, kind: 'span', name: 'GET /orders/{id}', source: 'OpenTelemetry', lang: 'Go', at: 920, ms: 720 },
+  { depth: 3, kind: 'retrieval', name: 'vector.query', source: 'LlamaIndex', lang: 'Py', at: 980, ms: 430 },
+  { depth: 1, kind: 'agent', name: 'refund_agent', source: 'LangChain', lang: 'Py', at: 1730, ms: 1400 },
+  { depth: 2, kind: 'model', name: 'claude-sonnet-4', source: 'Anthropic SDK', lang: 'Py', at: 1790, ms: 980, tokens: 2140, cost: 0.00921 },
+  { depth: 2, kind: 'tool', name: 'issue_refund', source: 'LangChain', lang: 'Py', at: 2800, ms: 310 },
+]
+const TOTAL = Math.max(...ROWS.map((r) => r.at + r.ms))
+const pct = (n: number) => `${((n / TOTAL) * 100).toFixed(3)}%`
+const tokens = ROWS.reduce((a, r) => a + (r.tokens ?? 0), 0)
+const cost = ROWS.reduce((a, r) => a + (r.cost ?? 0), 0)
+const ticks = [0, 1000, 2000, 3000]
+---
+
+<figure class={`fig ${className}`} data-motion data-live-trace data-total={TOTAL}>
+  <div class="fig-head">
+    <span class="live-dot" aria-hidden="true"></span>
+    <span class="legend">{s('fig.live.title')}</span>
+    <span class="data hidden text-[0.75rem] text-ink-3 sm:inline">7f3a91c2</span>
+    <span class="data ml-auto flex gap-4 text-[0.75rem] text-ink-2">
+      <span><span data-count="spans">{ROWS.length}</span> <span class="text-ink-3">spans</span></span>
+      <span class="hidden sm:inline"><span data-count="tokens">{tokens.toLocaleString('en')}</span> <span class="text-ink-3">tok</span></span>
+      <span><span data-count="ms">{(TOTAL / 1000).toFixed(2)} s</span></span>
+      <span class="text-ink">$<span data-count="cost">{cost.toFixed(4)}</span></span>
+    </span>
+  </div>
+
+  <div class="lt-grid border-b border-scribe-2 px-4 py-1.5">
+    <span class="legend hidden sm:block">{s('fig.live.source')}</span>
+    <span class="legend">{s('fig.live.span')}</span>
+    <div class="relative h-4">
+      {ticks.map((t, i) => (
+        <span
+          class="data absolute top-0 text-[0.625rem] text-ink-3"
+          style={`left:${pct(t)}; transform:translateX(${i === 0 ? '0' : '-50%'})`}
+        >{t === 0 ? '0' : `${t / 1000}s`}</span>
+      ))}
+    </div>
+  </div>
+
+  <div class="relative">
+    <ol class="m-0 list-none p-0 py-1.5" style="padding-left:0">
+      {ROWS.map((r) => (
+        <li class="lt-row lt-grid items-center px-4 py-[0.4rem]" data-kind={r.kind} data-at={r.at} data-ms={r.ms} data-tokens={r.tokens ?? 0} data-cost={r.cost ?? 0}>
+          <span class="hidden min-w-0 items-center gap-1.5 sm:flex">
+            <span class="data shrink-0 rounded-[3px] border border-scribe px-1 text-[0.5625rem] leading-[1.15rem] text-ink-3">{r.lang}</span>
+            <span class="truncate text-[0.75rem] text-ink-2">{r.source}</span>
+          </span>
+          <span class="flex min-w-0 items-center gap-2" style={`padding-left:${r.depth * 0.75}rem`}>
+            <span class="h-2 w-2 shrink-0 rounded-[2px]" style="background:var(--kind)" aria-hidden="true"></span>
+            <span class="min-w-0">
+              <span class="data block truncate text-[0.75rem] text-ink">{r.name}</span>
+              <span class="block truncate text-[0.625rem] leading-tight text-ink-3 sm:hidden">{r.source} · {r.lang}</span>
+            </span>
+          </span>
+          <span class="relative h-[0.9rem]">
+            <span class="lt-track absolute inset-y-0" style={`left:${pct(r.at)}; width:max(3px, ${pct(r.ms)})`}>
+              <span class="lt-bar absolute inset-0 rounded-[3px]" style="background:color-mix(in oklab, var(--kind) 80%, transparent)"></span>
+            </span>
+          </span>
+        </li>
+      ))}
+    </ol>
+    <div class="lt-now pointer-events-none absolute inset-y-0 w-px bg-accent opacity-0" aria-hidden="true"></div>
+  </div>
+
+  <figcaption class="fig-foot flex flex-wrap items-center gap-x-4 gap-y-1">
+    <span class="text-ink">{s('fig.live.caption')}</span>
+    <span class="data text-[0.75rem] text-ink-3">TypeScript · Go · Python</span>
+  </figcaption>
+</figure>
+
+<style>
+  .lt-grid {
+    display: grid;
+    grid-template-columns: minmax(7rem, 11rem) minmax(0, 1fr);
+    column-gap: 0.75rem;
+  }
+  .lt-grid > :nth-child(1) { display: none; }
+  @media (min-width: 640px) {
+    .lt-grid { grid-template-columns: 8.5rem minmax(9rem, 12rem) minmax(0, 1fr); }
+    .lt-grid > :nth-child(1) { display: flex; }
+  }
+  .lt-bar { transform-origin: left center; }
+</style>
+
+<script>
+  import { animate, each, easeOut } from '@/lib/motion'
+
+  each('[data-live-trace]', (fig) => {
+    const total = Number(fig.dataset.total)
+    const rows = [...fig.querySelectorAll<HTMLElement>('.lt-row')].map((el) => ({
+      el,
+      at: Number(el.dataset.at),
+      ms: Number(el.dataset.ms),
+      tokens: Number(el.dataset.tokens),
+      cost: Number(el.dataset.cost),
+      bar: el.querySelector<HTMLElement>('.lt-bar')!,
+      track: el.querySelector<HTMLElement>('.lt-track')!,
+    }))
+    const now = fig.querySelector<HTMLElement>('.lt-now')!
+    const count = (k: string) => fig.querySelector<HTMLElement>(`[data-count="${k}"]`)!
+    const c = { spans: count('spans'), tokens: count('tokens'), ms: count('ms'), cost: count('cost') }
+
+    // One cycle: the trace plays in FILL seconds, holds, then clears.
+    const FILL = 4.6
+    const HOLD = 3.2
+    const CYCLE = FILL + HOLD + 0.5
+
+    // The "now" line has to sit on the bar track, which the grid places.
+    let left = 0
+    let width = 0
+    const measure = () => {
+      const box = fig.getBoundingClientRect()
+      const t = rows[0]!.track.getBoundingClientRect()
+      left = t.left - box.left
+      width = t.width
+    }
+    measure()
+    addEventListener('resize', measure, { passive: true })
+    document.fonts?.ready.then(measure)
+
+    animate(fig, (time) => {
+      const k = time % CYCLE
+      const u = Math.min(1, k / FILL) * total
+      const fade = k > FILL + HOLD ? 1 - (k - FILL - HOLD) / 0.5 : 1
+      let spans = 0
+      let tokens = 0
+      let cost = 0
+      for (const r of rows) {
+        const started = u >= r.at
+        const p = Math.max(0, Math.min(1, (u - r.at) / r.ms))
+        if (started) spans += 1
+        if (p >= 1) {
+          tokens += r.tokens
+          cost += r.cost
+        }
+        const appear = easeOut(Math.min(1, Math.max(0, (u - r.at) / 160)))
+        r.el.style.opacity = String((started ? 0.35 + 0.65 * appear : 0.12) * fade)
+        r.bar.style.transform = `scaleX(${p})`
+      }
+      const live = k < FILL
+      now.style.opacity = live ? '0.8' : '0'
+      now.style.transform = `translateX(${left + (u / total) * width}px)`
+      c.spans.textContent = String(spans)
+      c.tokens.textContent = tokens.toLocaleString('en')
+      c.ms.textContent = `${(u / 1000).toFixed(2)} s`
+      c.cost.textContent = cost.toFixed(4)
+    })
+  })
+</script>
