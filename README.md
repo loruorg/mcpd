@@ -2,8 +2,9 @@
 
 # mcpd
 
-**Durable runs and observability for agents, in one binary.**
+**The unopinionated agent observatory.**
 
+[Hosted](https://mcpd.sh/app) ·
 [Documentation](https://mcpd.sh/docs) ·
 [Quickstart](https://mcpd.sh/docs/quickstart) ·
 [Deploy](https://mcpd.sh/deploy) ·
@@ -14,42 +15,50 @@
 
 ---
 
-mcpd records what your AI agents actually did. Every model call, every tool
-call, every retrieval, with the exact prompt, the exact completion, the latency
-and the cost attached to each.
+mcpd watches any agent, in any framework, in any language, against any model
+provider. Send it OpenTelemetry, or use one of six SDKs: TypeScript, Python,
+Rust, Go, Kotlin and Elixir. It records every model call, every tool call and
+every retrieval, with the exact prompt, the exact completion, the latency and
+the cost attached to each.
 
-It is **not a framework**. It is a daemon: one static Rust binary that holds a
+It is a daemon, not a framework: one static Rust binary that holds a durable
 workflow between its steps, the cursor, the retries, the timers and the waits,
 while your own code, in any language, does the work inside each step. It records
-every step as a trace with its cost, and it speaks OpenTelemetry, so agents that
-already exist are recorded without a rewrite. It has no opinion about how you
-built the agent, which model or provider it calls, or whether a framework was
-involved at all.
+every step as a trace with its cost, and agents that already emit OpenTelemetry
+are recorded without a rewrite. It has no opinion about how you built the agent,
+which model or provider it calls, or whether a framework was involved at all.
 
-> **Not released yet.** There is no published image and no published package on
-> any registry, so the commands in this file describe the intended distribution
-> and do not work today. Build from source:
->
-> ```shell
-> make build && ./target/release/mcpd demo
-> ```
->
-> `make build`, not `cargo build`. The interface is compiled into the binary
-> with `include_dir!` from `crates/mcpd-server/ui`, which is generated and
-> gitignored, so a plain `cargo build` on a fresh clone fails until `make ui`
-> has produced it. Needs Node as well as Rust.
->
-> Then open <http://localhost:4317>. No account, no database to stand up,
-> nothing to sign. The intended install, once a release exists, is
-> `docker run -p 4317:4317 ghcr.io/mcpd/mcpd`.
+## Start
+
+**Hosted.** The fastest start is the free hosted version at
+<https://mcpd.sh/app>. Sign-up is open and every feature is free.
+
+**Self-hosted.** Build from source and run the demo:
+
+```shell
+make build && ./target/release/mcpd demo
+```
+
+Then open <http://localhost:4317>. No account, no database to stand up,
+nothing to sign.
+
+Use `make build`, not `cargo build`. The interface is compiled into the binary
+with `include_dir!` from `crates/mcpd-server/ui`, which `make ui` generates and
+the repository does not track, so a plain `cargo build` on a fresh clone has no
+interface to embed. The build needs Node as well as Rust.
+
+The container image is `ghcr.io/mcpd/mcpd`:
+
+```shell
+docker run -p 4317:4317 ghcr.io/mcpd/mcpd
+```
 
 ## Why this exists
 
 Observability for agents usually arrives attached to a framework: to be seen,
-your agent is expected to have been built with it, in the language it prefers.
-That is a large price for a debugging tool.
+your agent has to be built with it, in the language it prefers.
 
-mcpd inverts it. Point any OpenTelemetry SDK at it, or use one of the six native
+mcpd works the other way round. Point any OpenTelemetry SDK at it, or use one of the six native
 SDKs, and the run shows up. The native SDKs are a convenience over an HTTP
 surface anyone can call, not a condition of being recorded. The same binary runs
 on a laptop with no configuration and as several replicas on a cluster.
@@ -78,10 +87,10 @@ chart opens the trace that caused it and a trace shows the log lines it emitted.
 Six SDKs with one behaviour: recording a span never blocks, never throws, and
 never grows without bound. If mcpd is unreachable, your agent does not notice.
 
-None of these is published yet. The coordinates below are the intended ones;
-today each SDK is used from this repository, under `sdks/`.
+Each SDK lives in this repository under `sdks/`, with these package
+coordinates:
 
-| Language | Intended package |
+| Language | Package |
 | --- | --- |
 | TypeScript | `npm install @mcpd/sdk` |
 | Python | `pip install mcpd` |
@@ -90,7 +99,7 @@ today each SDK is used from this repository, under `sdks/`.
 | Kotlin | `implementation("dev.mcpd:mcpd-kotlin:0.1.0")` |
 | Elixir | `{:mcpd, "~> 0.1"}` |
 
-They are not merely six libraries that pass their own tests. Each one writes the
+Each one writes the
 same canonical run against one live daemon, and a conformance suite reads all of
 them back and asserts the traces are structurally identical, seven channels
 including plain `curl`. A behaviour that holds in one language and not another
@@ -165,8 +174,9 @@ build and never a licence key:
 - **`mcpd doctor`**, which grades a deployment and names the flag that fixes
   each thing it finds. A check it could not run says so rather than saying ok.
 
-Nothing leaves the machine unless you configure it to. There is no telemetry, no
-licence check and no account. There is no paid tier. A free hosted version runs at [mcpd.sh](https://mcpd.sh).
+Nothing leaves the machine unless you configure it to. Self-hosted mcpd has no
+telemetry, no licence check and no account. Every feature is free, whether you
+run it yourself or use the hosted version at [mcpd.sh/app](https://mcpd.sh/app).
 
 ## Repository layout
 
