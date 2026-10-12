@@ -27,6 +27,10 @@ gen-check: ## Fail if any generated file is out of date with the spec
 # It lists every crate and npm package a release is built from, by licence,
 # so a dependency bump that changes a licence changes a committed file in the
 # same pull request.
+.PHONY: prices
+prices: ## Refresh the built-in price book from the public model catalogue
+	$(CARGO) run -q -p mcpd -- prices refresh --out crates/mcpd-core/prices/builtin.json
+
 .PHONY: third-party
 third-party: ## Regenerate THIRD_PARTY.md from Cargo.lock and web/package-lock.json
 	$(NODE) tools/third-party.mjs

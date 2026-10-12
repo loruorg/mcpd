@@ -250,6 +250,7 @@ pub async fn run(
     store: &Arc<dyn Store>,
     runs: Option<&Arc<dyn mcpd_runs::RunStore>>,
     listen: &str,
+    book: &PriceBook,
 ) -> Result<()> {
     // Before anything is read or printed, because the failure is a panic rather
     // than a bad report.
@@ -302,9 +303,8 @@ pub async fn run(
             ));
             findings.extend(check_clock(&activity, now));
 
-            let book = mcpd_core::cost::builtin_book();
             let (considered, unpriced) =
-                unpriced_models(store.as_ref(), with_data, &book, now - window, now).await;
+                unpriced_models(store.as_ref(), with_data, book, now - window, now).await;
             findings.push(check_pricing(considered, &unpriced, window));
         }
         None => {
@@ -2576,7 +2576,7 @@ async fn unpriced_models(
                 continue;
             }
             considered += 1;
-            if book.lookup(model).is_none() {
+            if book.lookup_with_provider(model, s.provider.as_deref()).is_none() {
                 *unpriced.entry(model.to_owned()).or_default() += 1;
             }
         }

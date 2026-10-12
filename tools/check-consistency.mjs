@@ -473,6 +473,7 @@ const CONFIG_LINE_OF = {
   '--max-batch-signals': 'limits',
   '--forward-endpoint': 'forwarding',
   '--forward-header': 'forwarding',
+  '--price-book': 'prices',
   monitors: 'monitors',
   monitor_interval_seconds: 'monitors',
   slos: 'objectives',
@@ -484,6 +485,7 @@ const CONFIG_LINE_OF = {
   max_batch_signals: 'limits',
   derived_metrics: 'derived',
   aspects: 'aspects',
+  price_book: 'prices',
 }
 
 /** The translated page trees: every two-letter directory under the pages. */

@@ -10,7 +10,7 @@
 
 use crate::{Cost, InputTokenDetails, OutputTokenDetails, TokenUsage};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Per-meter rates for one model, in currency units per million tokens.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -56,16 +56,100 @@ pub struct ModelRates {
     /// Reasoning tokens, when a provider bills them apart from output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<f64>,
+    /// Dearer rates that apply to the whole call once its prompt passes a size.
+    ///
+    /// Several providers charge more for every token of a long prompt, not
+    /// only for the tokens past the line: a 300 000 token prompt to a model
+    /// priced up above 200 000 costs the higher rate on all 300 000. The tier
+    /// with the largest threshold under the prompt's size wins, and a meter the
+    /// tier leaves unset keeps its rate from the entry above.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<RateTier>,
+    /// Rates for a service tier, such as `batch`, `flex` or `priority`, where
+    /// this model prices it apart from the book's multiplier for the provider.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub service_tiers: BTreeMap<String, ModelRates>,
+    /// The largest prompt the model accepts, in tokens. Recorded, never used to
+    /// price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// The most output tokens the model returns from one call. Recorded, never
+    /// used to price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<u64>,
+}
+
+/// One long-context tier of a model's rates.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RateTier {
+    /// The tier applies when the prompt holds more than this many tokens,
+    /// cached tokens included.
+    pub above_input_tokens: u64,
+    /// The rates inside the tier. `input` and `output` are always read; an
+    /// optional meter left unset keeps the base entry's rate.
+    #[serde(flatten)]
+    pub rates: ModelRates,
+}
+
+impl ModelRates {
+    /// The rates with `over` laid on top: its `input` and `output` always, and
+    /// each optional meter only where `over` sets one.
+    fn overlaid(&self, over: &ModelRates) -> ModelRates {
+        ModelRates {
+            input: over.input,
+            output: over.output,
+            cache_read: over.cache_read.or(self.cache_read),
+            cache_write: over.cache_write.or(self.cache_write),
+            cache_write_5m: over.cache_write_5m.or(self.cache_write_5m),
+            cache_write_1h: over.cache_write_1h.or(self.cache_write_1h),
+            audio_input: over.audio_input.or(self.audio_input),
+            audio_output: over.audio_output.or(self.audio_output),
+            image_input: over.image_input.or(self.image_input),
+            image_output: over.image_output.or(self.image_output),
+            reasoning: over.reasoning.or(self.reasoning),
+            tiers: Vec::new(),
+            service_tiers: BTreeMap::new(),
+            context_window: self.context_window,
+            max_output: self.max_output,
+        }
+    }
+
+    /// Every rate this entry holds, its tiers and service tiers included, so a
+    /// loaded book can be checked for a negative or non-finite one.
+    fn each_rate(&self, out: &mut Vec<f64>) {
+        out.push(self.input);
+        out.push(self.output);
+        out.extend(
+            [
+                self.cache_read,
+                self.cache_write,
+                self.cache_write_5m,
+                self.cache_write_1h,
+                self.audio_input,
+                self.audio_output,
+                self.image_input,
+                self.image_output,
+                self.reasoning,
+            ]
+            .into_iter()
+            .flatten(),
+        );
+        for t in &self.tiers {
+            t.rates.each_rate(out);
+        }
+        for r in self.service_tiers.values() {
+            r.each_rate(out);
+        }
+    }
 }
 
 /// A named set of model rates.
 ///
-/// mcpd ships one small built-in book and runs it. Nothing loads another: there
-/// is no flag, no config file key, and `AppState::with_price_book` has no caller
-/// outside a fork. So an organisation with negotiated rates cannot price its own
-/// traffic without building its own binary, and this type being `Deserialize`
-/// does not change that. A book is data and always was; what is missing is the
-/// door.
+/// mcpd ships one built-in book, generated from data by `mcpd prices refresh`
+/// and kept in `crates/mcpd-core/prices/builtin.json`. An operator can load
+/// their own with `--price-book`, either alone or on top of the built-in one
+/// (`"extends": "builtin"`), so negotiated rates and models nobody else serves
+/// are priced without building a binary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceBook {
     /// Identifier recorded on every [`Cost`] this book produces.
@@ -96,6 +180,25 @@ pub struct PriceBook {
     /// prices exactly as it did.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub providers: HashMap<String, HashMap<String, ModelRates>>,
+    /// Other spellings of a provider, mapped to the name this book uses.
+    ///
+    /// Producers spell one provider several ways (`azure`, `az.ai.openai`,
+    /// `azure.ai.openai`), and the rate tables and multipliers are keyed once.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub provider_aliases: HashMap<String, String>,
+    /// Multipliers by provider and then by service tier, such as `batch` at
+    /// 0.5, applied to a call's whole cost when the model holds no rates of its
+    /// own for that tier.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub service_tier_multipliers: HashMap<String, HashMap<String, f64>>,
+    /// The book this one is laid over. Only `builtin` is recognised: every
+    /// model, provider table, alias and multiplier of the built-in book that
+    /// this book does not name is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extends: Option<String>,
+    /// Where the rates came from, as the tool that wrote the book recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 fn default_currency() -> String {
@@ -113,6 +216,10 @@ impl PriceBook {
             as_of: None,
             models: HashMap::new(),
             providers: HashMap::new(),
+            provider_aliases: HashMap::new(),
+            service_tier_multipliers: HashMap::new(),
+            extends: None,
+            source: None,
         }
     }
 
@@ -142,6 +249,135 @@ impl PriceBook {
                 })
                 .collect();
         }
+        self.provider_aliases = self
+            .provider_aliases
+            .drain()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.to_ascii_lowercase()))
+            .collect();
+        self.service_tier_multipliers = self
+            .service_tier_multipliers
+            .drain()
+            .map(|(p, tiers)| {
+                let tiers = tiers.into_iter().map(|(t, m)| (t.to_ascii_lowercase(), m)).collect();
+                (p.to_ascii_lowercase(), tiers)
+            })
+            .collect();
+    }
+
+    /// Read a book from JSON, lowercase its keys and check every rate.
+    ///
+    /// # Errors
+    /// Returns a message naming the first thing wrong with the book.
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        let mut book: PriceBook =
+            serde_json::from_str(text).map_err(|e| format!("not a price book: {e}"))?;
+        book.normalise();
+        book.check()?;
+        Ok(book)
+    }
+
+    /// Refuse a book that would price wrongly rather than fail later.
+    ///
+    /// # Errors
+    /// Returns a message naming the key that is wrong and what it must be.
+    pub fn check(&self) -> Result<(), String> {
+        if self.id.trim().is_empty() {
+            return Err("a price book needs an `id`, recorded on every cost it produces".into());
+        }
+        if self.currency.len() != 3 || !self.currency.bytes().all(|b| b.is_ascii_uppercase()) {
+            return Err(format!(
+                "`currency` must be an ISO 4217 code such as USD, got {:?}",
+                self.currency
+            ));
+        }
+        if let Some(base) = self.extends.as_deref().filter(|b| *b != "builtin") {
+            return Err(format!("`extends` can only name builtin, got {base:?}"));
+        }
+        let tables = std::iter::once(("models".to_owned(), &self.models))
+            .chain(self.providers.iter().map(|(p, t)| (format!("providers.{p}"), t)));
+        for (where_, table) in tables {
+            for (id, rates) in table {
+                let mut all = Vec::new();
+                rates.each_rate(&mut all);
+                if let Some(bad) = all.iter().find(|r| !r.is_finite() || **r < 0.0) {
+                    return Err(format!(
+                        "{where_}.{id} has a rate of {bad}; every rate must be a number of zero \
+                         or more, in currency units per million tokens"
+                    ));
+                }
+                let mut last = None;
+                for t in &rates.tiers {
+                    if last.is_some_and(|l| t.above_input_tokens <= l) {
+                        return Err(format!(
+                            "{where_}.{id} lists its tiers out of order; sort them by \
+                             `above_input_tokens`, smallest first, with no repeats"
+                        ));
+                    }
+                    last = Some(t.above_input_tokens);
+                }
+            }
+        }
+        for (p, tiers) in &self.service_tier_multipliers {
+            for (t, m) in tiers {
+                if !m.is_finite() || *m < 0.0 {
+                    return Err(format!(
+                        "service_tier_multipliers.{p}.{t} is {m}; a multiplier must be zero or more"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Lay this book over `base`: everything `base` holds that this book does
+    /// not name is kept, and every entry this book names wins.
+    pub fn extend(&mut self, base: PriceBook) {
+        for (id, rates) in base.models {
+            self.models.entry(id).or_insert(rates);
+        }
+        for (p, table) in base.providers {
+            let mine = self.providers.entry(p).or_default();
+            for (id, rates) in table {
+                mine.entry(id).or_insert(rates);
+            }
+        }
+        for (k, v) in base.provider_aliases {
+            self.provider_aliases.entry(k).or_insert(v);
+        }
+        for (p, tiers) in base.service_tier_multipliers {
+            let mine = self.service_tier_multipliers.entry(p).or_default();
+            for (t, m) in tiers {
+                mine.entry(t).or_insert(m);
+            }
+        }
+        if self.as_of.is_none() {
+            self.as_of = base.as_of;
+        }
+    }
+
+    /// The name this book uses for a provider, as a span spells it.
+    ///
+    /// Tries the whole name, then an alias, then the name with ONE leading
+    /// vendor segment stripped, then an alias of that.
+    fn provider_names(&self, provider: &str) -> Vec<String> {
+        let lower = provider.trim().to_ascii_lowercase();
+        let tail = lower.split_once('.').map(|(_, t)| t.to_owned());
+        let mut out = Vec::new();
+        for want in std::iter::once(lower).chain(tail) {
+            if let Some(alias) = self.provider_aliases.get(&want) {
+                out.push(alias.clone());
+            }
+            out.push(want);
+        }
+        out
+    }
+
+    /// The multiplier the book applies to `provider` on `tier`, if any.
+    fn service_tier_multiplier(&self, provider: Option<&str>, tier: &str) -> Option<(String, f64)> {
+        let provider = provider?;
+        self.provider_names(provider).into_iter().find_map(|name| {
+            self.service_tier_multipliers.get(&name)?.get(tier).map(|m| (name.clone(), *m))
+        })
     }
 
     /// Look up a model, tolerating the prefixes and suffixes that gateways and
@@ -200,19 +436,17 @@ impl PriceBook {
         if self.providers.is_empty() {
             return None;
         }
-        let lower = provider.to_ascii_lowercase();
         // One leading segment, not the last one. `aws.bedrock` is `bedrock`
         // with a vendor prefix; `az.ai.openai` is not `openai` with one.
-        let tail = lower.split_once('.').map(|(_, t)| t.to_owned());
-        for want in std::iter::once(lower.as_str()).chain(tail.as_deref()) {
-            if let Some((k, table)) = self.providers.get_key_value(want) {
+        for want in self.provider_names(provider) {
+            if let Some((k, table)) = self.providers.get_key_value(want.as_str()) {
                 return Some((k.as_str(), table));
             }
             // The smallest matching key, never the first one iteration reaches,
             // for the reason `lookup_in` gives below: HashMap order is seeded
             // per process, and a cost computed at ingest is kept forever.
             let mut matches: Vec<&String> =
-                self.providers.keys().filter(|k| k.eq_ignore_ascii_case(want)).collect();
+                self.providers.keys().filter(|k| k.eq_ignore_ascii_case(&want)).collect();
             matches.sort_unstable();
             if let Some(k) = matches.first() {
                 if let Some((k, table)) = self.providers.get_key_value(k.as_str()) {
@@ -240,8 +474,64 @@ pub struct PriceMatch<'a> {
 /// (`openai/gpt-4o`, `us.anthropic.claude-x`); and the id with a trailing date
 /// version stripped (`gpt-4o-2024-08-06`). Returning `None` is a normal
 /// outcome, not an error.
+///
+/// When none of those finds it, the same ladder runs again on the id with a
+/// cloud version tag removed (`claude-sonnet-4-5@20250929` on Vertex,
+/// `anthropic.claude-sonnet-4-5-20250929-v1:0` on Bedrock), and then with
+/// dots between digits written as dashes (`claude-sonnet-4.5`).
 fn lookup_in<'a>(models: &'a HashMap<String, ModelRates>, model: &str) -> Option<&'a ModelRates> {
     let lower = model.to_ascii_lowercase();
+    if let Some(r) = ladder(models, &lower) {
+        return Some(r);
+    }
+    let untagged = strip_version_tag(&lower);
+    if untagged != lower {
+        if let Some(r) = ladder(models, &untagged) {
+            return Some(r);
+        }
+    }
+    let dashed = dots_between_digits_to_dashes(&untagged);
+    if dashed != untagged {
+        return ladder(models, &dashed);
+    }
+    None
+}
+
+/// Remove a trailing `@...` (Vertex) or `-vN` / `-vN:M` (Bedrock) version tag.
+fn strip_version_tag(model: &str) -> String {
+    let mut out = match model.split_once('@') {
+        Some((head, _)) if !head.is_empty() => head,
+        _ => model,
+    };
+    if let Some(at) = out.rfind("-v") {
+        let tag = &out[at + 2..];
+        let (major, minor) = tag.split_once(':').unwrap_or((tag, "0"));
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        if at > 0 && digits(major) && digits(minor) {
+            out = &out[..at];
+        }
+    }
+    out.to_owned()
+}
+
+/// `claude-sonnet-4.5` as `claude-sonnet-4-5`. Only a dot with a digit on each
+/// side moves, so a vendor prefix such as `anthropic.` is left alone.
+fn dots_between_digits_to_dashes(model: &str) -> String {
+    let b = model.as_bytes();
+    let mut out = String::with_capacity(model.len());
+    for (i, c) in model.char_indices() {
+        let between_digits = c == '.'
+            && i > 0
+            && b[i - 1].is_ascii_digit()
+            && b.get(i + 1).is_some_and(u8::is_ascii_digit);
+        out.push(if between_digits { '-' } else { c });
+    }
+    out
+}
+
+/// One pass of the resolution ladder over an already lowercased id.
+fn ladder<'a>(models: &'a HashMap<String, ModelRates>, lower: &str) -> Option<&'a ModelRates> {
+    let lower = lower.to_owned();
     if let Some(r) = models.get(&lower) {
         return Some(r);
     }
@@ -371,8 +661,83 @@ pub fn compute_with_provider(
     provider: Option<&str>,
     usage: &TokenUsage,
 ) -> Option<Cost> {
+    price_call(book, &Call { model, provider, usage, service_tier: None })
+}
+
+/// One model call, as much as pricing it needs.
+#[derive(Debug, Clone, Copy)]
+pub struct Call<'a> {
+    /// The model id the span recorded.
+    pub model: &'a str,
+    /// Who served it, as the span spells it.
+    pub provider: Option<&'a str>,
+    /// What the provider reported.
+    pub usage: &'a TokenUsage,
+    /// The service tier the call ran on (`batch`, `flex`, `priority`), when
+    /// the producer recorded one. Standard tiers are spelt several ways and
+    /// all read as none.
+    pub service_tier: Option<&'a str>,
+}
+
+/// The service tier a call ran on, or `None` for the standard one.
+#[must_use]
+pub fn service_tier_name(raw: &str) -> Option<String> {
+    let t = raw.trim().to_ascii_lowercase().replace('-', "_");
+    match t.as_str() {
+        "" | "default" | "standard" | "auto" | "on_demand" | "standard_only" => None,
+        _ => Some(t),
+    }
+}
+
+/// Every token in the prompt, cached ones included, which is the size a
+/// long-context tier is judged on.
+fn prompt_tokens(usage: &TokenUsage) -> u64 {
+    let d = usage.input_details.clone().unwrap_or_default();
+    let parts: u64 = [d.cache_read, d.cache_write, d.cache_write_5m, d.cache_write_1h]
+        .into_iter()
+        .flatten()
+        .sum();
+    match (d.text, usage.input_tokens) {
+        (Some(t), _) => t + parts + d.audio.unwrap_or(0) + d.image.unwrap_or(0),
+        // A total smaller than its cached share is the net-of-cache reading,
+        // as in `price_call` below.
+        (None, Some(total)) if total < parts => total + parts,
+        (None, Some(total)) => total,
+        (None, None) => parts,
+    }
+}
+
+/// Price one model call, honouring long-context tiers and the service tier.
+///
+/// Returns `None` when the model is unknown to the book or no usage was
+/// reported, exactly as [`compute`] does.
+#[must_use]
+pub fn price_call(book: &PriceBook, call: &Call<'_>) -> Option<Cost> {
+    let (model, provider, usage) = (call.model, call.provider, call.usage);
     let found = book.lookup_with_provider(model, provider)?;
-    let rates = found.rates;
+
+    // The long-context tier first, then the service tier on top of it, which
+    // is the order providers state them in: a batch discount applies to the
+    // long-context rate as well.
+    let prompt = prompt_tokens(usage);
+    let mut effective = match found.rates.tiers.iter().rev().find(|t| prompt > t.above_input_tokens)
+    {
+        Some(tier) => found.rates.overlaid(&tier.rates),
+        None => found.rates.clone(),
+    };
+    let tier = call.service_tier.and_then(service_tier_name);
+    let mut multiplier = 1.0;
+    let mut tier_note = None;
+    if let Some(t) = tier.as_deref() {
+        if let Some(own) = found.rates.service_tiers.get(t) {
+            effective = effective.overlaid(own);
+            tier_note = Some(t.to_owned());
+        } else if let Some((_, m)) = book.service_tier_multiplier(found.provider.or(provider), t) {
+            multiplier = m;
+            tier_note = Some(t.to_owned());
+        }
+    }
+    let rates = &effective;
 
     let empty_in = InputTokenDetails::default();
     let empty_out = OutputTokenDetails::default();
@@ -494,20 +859,29 @@ pub fn compute_with_provider(
     if !any_input && !any_output {
         return None;
     }
+    input_cost *= multiplier;
+    output_cost *= multiplier;
 
+    // The book id alone cannot say whether a provider-qualified rate or the
+    // model-only fallback produced this figure, and the figure is stored
+    // rather than recomputed, so that has to travel with it. A book with no
+    // provider tables records exactly what it always did. A service tier is
+    // recorded the same way, because a batch figure at half the list price
+    // reads as a mistake unless it says why.
+    let mut attribution = match found.provider {
+        Some(p) => format!("{}@{p}", book.id),
+        None => book.id.clone(),
+    };
+    if let Some(t) = tier_note {
+        attribution.push('+');
+        attribution.push_str(&t);
+    }
     Some(Cost {
         currency: book.currency.clone(),
         input_cost: any_input.then_some(input_cost),
         output_cost: any_output.then_some(output_cost),
         total_cost: Some(input_cost + output_cost),
-        // The book id alone cannot say whether a provider-qualified rate or the
-        // model-only fallback produced this figure, and the figure is stored
-        // rather than recomputed, so that has to travel with it. A book with no
-        // provider tables records exactly what it always did.
-        price_book: Some(match found.provider {
-            Some(p) => format!("{}@{p}", book.id),
-            None => book.id.clone(),
-        }),
+        price_book: Some(attribution),
         is_estimated: true,
     })
 }
@@ -544,176 +918,89 @@ pub fn accumulate(a: &mut Option<Cost>, b: &Cost) -> bool {
     }
 }
 
+/// The built-in book as JSON, written by `mcpd prices refresh`.
+///
+/// Data rather than code, so a refresh is a diff of the rates that moved and
+/// never an edit to a function. Do not edit it by hand: run `make prices`.
+pub const BUILTIN_JSON: &str = include_str!("../prices/builtin.json");
+
 /// The rates mcpd ships with, so `docker run` produces real cost figures with
 /// no configuration.
 ///
-/// Deliberately small. It covers the three vendors whose models agent
-/// frameworks emit most, at their first-party list prices, and nothing else. An
-/// operator who cares about accuracy supplies their own book. The book carries
-/// an `as_of` date because rates move and a released binary does not: without
-/// it, a rate that is right and a rate that is two model generations stale look
-/// the same.
+/// Every major provider's list prices, with cache, long-context and
+/// service-tier rates where the provider publishes them, as they stood on the
+/// book's `as_of` date. These are list prices: an operator with negotiated
+/// rates loads their own book over this one with `--price-book`.
 ///
-/// Two rules for editing this table. Write a published rate as a literal rather
-/// than deriving it, so it can be read straight off a pricing page. And never
-/// add a model id a provider does not serve: an id that resolves to another
-/// model's rates reads as coverage and bills as a guess.
-///
-/// The `as_of` stamp below records a check against a third-party model
-/// catalogue, not against each vendor's own pricing page. Re-check it at the
-/// vendors before a release and move the date then.
+/// # Panics
+/// Never in a released build: `the_builtin_book_parses_and_checks` fails the
+/// test suite if the embedded JSON does not load.
 #[must_use]
 pub fn builtin_book() -> PriceBook {
-    let mut models = HashMap::new();
-    let mut add = |name: &str, rates: ModelRates| {
-        models.insert(name.to_owned(), rates);
-    };
-    // Anthropic publishes three input rates per model: base, a cache read at
-    // 10% of base, and two cache writes, five-minute at 1.25x base and one-hour
-    // at 2x. `compute` falls back from the one-hour rate to the five-minute one,
-    // so omitting `cache_write_1h` does not fail, it under-bills by 37.5% in
-    // silence. Both TTLs are listed on every entry for that reason.
-    add(
-        "claude-opus-4",
-        ModelRates {
-            input: 15.0,
-            output: 75.0,
-            cache_read: Some(1.50),
-            cache_write: Some(18.75),
-            cache_write_1h: Some(30.0),
-            ..Default::default()
-        },
-    );
-    add(
-        "claude-opus-4-1",
-        ModelRates {
-            input: 15.0,
-            output: 75.0,
-            cache_read: Some(1.50),
-            cache_write: Some(18.75),
-            cache_write_1h: Some(30.0),
-            ..Default::default()
-        },
-    );
-    add(
-        "claude-opus-4-5",
-        ModelRates {
-            input: 5.0,
-            output: 25.0,
-            cache_read: Some(0.50),
-            cache_write: Some(6.25),
-            cache_write_1h: Some(10.0),
-            ..Default::default()
-        },
-    );
-    add(
-        "claude-sonnet-4",
-        ModelRates {
-            input: 3.0,
-            output: 15.0,
-            cache_read: Some(0.30),
-            cache_write: Some(3.75),
-            cache_write_1h: Some(6.0),
-            ..Default::default()
-        },
-    );
-    add(
-        "claude-sonnet-4-5",
-        ModelRates {
-            input: 3.0,
-            output: 15.0,
-            cache_read: Some(0.30),
-            cache_write: Some(3.75),
-            cache_write_1h: Some(6.0),
-            ..Default::default()
-        },
-    );
-    // There was never a `claude-haiku-4`. The id sat here at Claude 3.5 Haiku's
-    // rates, so the book looked like it covered a generation it did not, while
-    // the id Anthropic serves resolved to nothing at all.
-    add(
-        "claude-haiku-4-5",
-        ModelRates {
-            input: 1.0,
-            output: 5.0,
-            cache_read: Some(0.10),
-            cache_write: Some(1.25),
-            cache_write_1h: Some(2.0),
-            ..Default::default()
-        },
-    );
-    add(
-        "claude-3-5-haiku",
-        ModelRates {
-            input: 0.80,
-            output: 4.0,
-            cache_read: Some(0.08),
-            cache_write: Some(1.0),
-            cache_write_1h: Some(1.60),
-            ..Default::default()
-        },
-    );
-    // OpenAI charges nothing to write to its prompt cache, so there is no cache
-    // write rate to record. A cache write reported against one of these models
-    // therefore bills at the plain input rate, which is what it costs.
-    let openai = |input: f64, output: f64, cache_read: f64| ModelRates {
-        input,
-        output,
-        cache_read: Some(cache_read),
-        ..Default::default()
-    };
-    add("gpt-4o", openai(2.50, 10.0, 1.25));
-    add("gpt-4o-mini", openai(0.15, 0.60, 0.075));
-    add("gpt-4.1", openai(2.0, 8.0, 0.50));
-    add("gpt-4.1-mini", openai(0.40, 1.60, 0.10));
-    add("o3", openai(2.0, 8.0, 0.50));
-    add("o4-mini", openai(1.10, 4.40, 0.275));
-    // Google. `cache_read` here is the implicit cache rate, 25% of base input,
-    // which is what a caller gets without asking. Google's explicit context
-    // cache is cheaper again, 10% of base, and `InputTokenDetails.cache_read`
-    // is one field that cannot say which of the two happened. The implicit rate
-    // is the conservative choice: it is what an uninstructed caller pays.
-    add(
-        "gemini-2.5-pro",
-        ModelRates { input: 1.25, output: 10.0, cache_read: Some(0.31), ..Default::default() },
-    );
-    // Gemini 2.5 Flash prices audio input above text, at 1.00 against 0.30.
-    // Gemini 2.5 Pro does not: audio there follows the text rate, which is why
-    // only this entry carries `audio_input`.
-    add(
-        "gemini-2.5-flash",
-        ModelRates {
-            input: 0.30,
-            output: 2.50,
-            cache_read: Some(0.075),
-            audio_input: Some(1.0),
-            ..Default::default()
-        },
-    );
-    // Embeddings produce no output tokens, so the output rate is a real zero
-    // rather than an unknown.
-    add("text-embedding-3-small", ModelRates { input: 0.02, output: 0.0, ..Default::default() });
-    add("text-embedding-3-large", ModelRates { input: 0.13, output: 0.0, ..Default::default() });
-
-    PriceBook {
-        id: "builtin".to_owned(),
-        currency: "USD".to_owned(),
-        as_of: Some("2026-08-28".to_owned()),
-        models,
-        // No provider-qualified rates. Every model above is published at the
-        // same rate by each provider that serves it, at the date stamped
-        // beside them, so a provider table here would only restate the entry
-        // below it. An entry that repeats the fallback is worse than no entry:
-        // it reads as a checked provider-specific rate and is not one. The
-        // mechanism is in `lookup_with_provider` for the operator whose rates
-        // do differ, and for the day a vendor's do.
-        providers: HashMap::new(),
-    }
+    static BOOK: std::sync::OnceLock<PriceBook> = std::sync::OnceLock::new();
+    BOOK.get_or_init(|| {
+        PriceBook::from_json(BUILTIN_JSON).expect("prices/builtin.json is checked by a test")
+    })
+    .clone()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_builtin_book_parses_and_checks() {
+        let book = PriceBook::from_json(BUILTIN_JSON).unwrap();
+        assert_eq!(book.id, "builtin");
+        // Coverage the docs promise: every major vendor and the big clouds.
+        for model in ["gpt-4o", "claude-sonnet-4-5", "gemini-2.5-pro", "mistral-large-latest"] {
+            assert!(book.lookup(model).is_some(), "{model} is not priced");
+        }
+        for provider in ["bedrock", "vertex_ai", "az.ai.openai", "groq", "openrouter"] {
+            assert!(book.providers.contains_key(provider), "no {provider} table");
+        }
+        assert!(book.models.values().any(|r| !r.tiers.is_empty()), "no tiered model");
+    }
+
+    #[test]
+    fn a_book_with_a_negative_rate_or_unsorted_tiers_is_refused() {
+        let neg = r#"{"id":"x","models":{"m":{"input":-1,"output":1}}}"#;
+        assert!(PriceBook::from_json(neg).unwrap_err().contains("models.m"));
+        let tiers = r#"{"id":"x","models":{"m":{"input":1,"output":1,"tiers":[
+            {"above_input_tokens":200000,"input":2,"output":2},
+            {"above_input_tokens":100000,"input":3,"output":3}]}}}"#;
+        assert!(PriceBook::from_json(tiers).unwrap_err().contains("out of order"));
+        let cur = r#"{"id":"x","currency":"dollars"}"#;
+        assert!(PriceBook::from_json(cur).unwrap_err().contains("ISO 4217"));
+        let ext = r#"{"id":"x","extends":"other"}"#;
+        assert!(PriceBook::from_json(ext).unwrap_err().contains("builtin"));
+    }
+
+    #[test]
+    fn an_extending_book_keeps_what_it_does_not_name() {
+        let mut mine = PriceBook::from_json(
+            r#"{"id":"acme","extends":"builtin","models":{"gpt-4o":{"input":1,"output":2}}}"#,
+        )
+        .unwrap();
+        mine.extend(builtin_book());
+        assert_eq!(mine.lookup("gpt-4o").unwrap().input, 1.0);
+        assert!(mine.lookup("claude-sonnet-4-5").is_some());
+        let c = compute(&mine, "gpt-4o", &usage(1_000_000, 0)).unwrap();
+        assert_eq!(c.price_book.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn version_tags_and_dotted_versions_resolve() {
+        assert_eq!(strip_version_tag("claude-x@20250929"), "claude-x");
+        assert_eq!(
+            strip_version_tag("anthropic.claude-x-20250929-v1:0"),
+            "anthropic.claude-x-20250929"
+        );
+        assert_eq!(strip_version_tag("model-v2"), "model");
+        assert_eq!(strip_version_tag("model-vision"), "model-vision");
+        assert_eq!(dots_between_digits_to_dashes("claude-sonnet-4.5"), "claude-sonnet-4-5");
+        assert_eq!(dots_between_digits_to_dashes("anthropic.claude"), "anthropic.claude");
+    }
 
     fn usage(input: u64, output: u64) -> TokenUsage {
         TokenUsage {

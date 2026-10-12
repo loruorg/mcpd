@@ -210,7 +210,16 @@ impl<'a> Intake<'a> {
             // later rate change cannot silently rewrite what last month cost.
             if span.cost.is_none() {
                 if let (Some(model), Some(usage)) = (span.model.as_deref(), span.usage.as_ref()) {
-                    span.cost = mcpd_core::cost::compute(self.price_book, model, usage);
+                    // With the provider, because the same model costs
+                    // different money on Bedrock than at its vendor, and with
+                    // the service tier, because a batch call costs half.
+                    let call = mcpd_core::cost::Call {
+                        model,
+                        provider: span.provider.as_deref(),
+                        usage,
+                        service_tier: service_tier(span.attributes.as_ref()),
+                    };
+                    span.cost = mcpd_core::cost::price_call(self.price_book, &call);
                 }
             }
             if span.received_at == OffsetDateTime::UNIX_EPOCH {
@@ -336,6 +345,23 @@ impl Signal for mcpd_core::AspectNote {
 /// its two extremes it does not flip, so there it can be recalled. `tail` defers
 /// at the head and a deferred trace is kept, which is the same answer every
 /// time.
+/// The service tier a model call ran on, from the attributes producers record
+/// it under. The response's value wins over the request's, because `auto`
+/// asks and the response says what was served.
+fn service_tier(attributes: Option<&serde_json::Value>) -> Option<&str> {
+    const KEYS: [&str; 7] = [
+        "gen_ai.response.service_tier",
+        "gen_ai.openai.response.service_tier",
+        "mcpd.service_tier",
+        "llm.service_tier",
+        "gen_ai.request.service_tier",
+        "gen_ai.openai.request.service_tier",
+        "service_tier",
+    ];
+    let map = attributes?.as_object()?;
+    KEYS.iter().find_map(|k| map.get(*k).and_then(serde_json::Value::as_str))
+}
+
 fn recallable(policy: &Policy) -> bool {
     match policy.kind {
         SamplingKind::Always | SamplingKind::Never | SamplingKind::Deterministic => true,

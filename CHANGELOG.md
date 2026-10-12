@@ -237,6 +237,21 @@ rather than every commit.
 
 ### Added
 
+- **Prices for every major provider, and your own price book.** The built-in
+  book now holds list prices for OpenAI, Anthropic, Google, Mistral, xAI,
+  DeepSeek, Cohere, Perplexity, Moonshot, Z.AI, Alibaba and MiniMax, with
+  tables for Bedrock, Vertex AI, Azure, Groq, Together, Fireworks, DeepInfra,
+  Cerebras, OpenRouter and Vercel. Long prompts are priced at the provider's
+  long-context rate, and batch and flex calls at their discount, read from
+  `gen_ai.response.service_tier` and its neighbours. `--price-book` (or
+  `price_book` in the config file) loads a book of your own, alone or over the
+  built-in one with `"extends": "builtin"`. `mcpd prices refresh` writes a book
+  from a public model catalogue, and `mcpd prices show` prints what a model is
+  priced at. `mcpd config` prints a `prices` line.
+- **Span ingest prices with the provider.** A span that names its provider is
+  priced from that provider's table, so a Bedrock or Azure call is billed at
+  the cloud's rate rather than the vendor's. Vertex `@version` tags, Bedrock
+  `-v1:0` suffixes and dotted versions such as `claude-sonnet-4.5` now resolve.
 - **Open sign-up, with `--signup`** (wire contract). Anyone may create an
   account with an email and a password. Each account owns one new project and
   mints its own API keys for it, one scope each; nothing it holds reaches

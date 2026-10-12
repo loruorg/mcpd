@@ -270,6 +270,12 @@ struct Cli {
     /// with `.accounts` before its extension, or `:memory:` when --data is.
     #[arg(long, env = "MCPD_ACCOUNTS_DATA", global = true)]
     accounts_data: Option<String>,
+
+    /// A price book to cost model calls with, as JSON. With
+    /// `"extends": "builtin"` it is laid over the built-in book, so it needs
+    /// only the rates that differ. Write one with `mcpd prices refresh`.
+    #[arg(long, env = "MCPD_PRICE_BOOK", global = true)]
+    price_book: Option<String>,
 }
 
 /// The parts of the configuration that do not fit on a command line.
@@ -321,6 +327,9 @@ struct FileConfig {
     /// already holds.
     #[serde(default)]
     aspects: Option<mcpd_server::aspects::AspectSettings>,
+    /// A price book file. `--price-book` beats it.
+    #[serde(default)]
+    price_book: Option<String>,
 }
 
 /// The knobs the run store's ticks read, as a config file spells them: whole
@@ -557,6 +566,9 @@ enum Command {
     /// Check this deployment and report what is misconfigured. Exits 2 on a
     /// fault, so it can gate a deploy.
     Doctor(doctor::Args),
+    /// Write a price book from a model catalogue, or show what a model is
+    /// priced at.
+    Prices(prices::Args),
 }
 
 #[tokio::main]
@@ -591,6 +603,18 @@ async fn main() -> Result<()> {
         }
         None => FileConfig::default(),
     };
+
+    // The book is read before anything else uses it, so a broken file stops
+    // `mcpd config` and `mcpd doctor` as well as the daemon, with the file
+    // named, rather than pricing with a book the operator did not mean.
+    let price_book_path = cli.price_book.clone().or_else(|| file.price_book.clone());
+    let price_book = match &price_book_path {
+        Some(path) => prices::load(std::path::Path::new(path))?,
+        None => mcpd_core::cost::builtin_book(),
+    };
+    if let Some(Command::Prices(args)) = &cli.command {
+        return prices::run(args, &price_book).await;
+    }
 
     // A ceiling larger than the counter can hold would be clamped without
     // saying so, and the daemon would enforce a number nobody chose. The flag
@@ -783,7 +807,8 @@ async fn main() -> Result<()> {
     config.drop_blank_keys();
 
     if matches!(cli.command, Some(Command::Config)) {
-        for line in config_lines(&cli, &config, &redact_keys) {
+        let prices_line = prices::describe(&price_book, price_book_path.as_deref());
+        for line in config_lines(&cli, &config, &redact_keys, &prices_line) {
             println!("{line}");
         }
         return Ok(());
@@ -865,8 +890,16 @@ async fn main() -> Result<()> {
     // probe, and before AppState, the monitor spawn and the retention timer, so
     // it does not start background work it will never use.
     if let Some(Command::Doctor(args)) = &cli.command {
-        return doctor::run(args, &config, blank_lists, &store, run_store.as_ref(), &cli.listen)
-            .await;
+        return doctor::run(
+            args,
+            &config,
+            blank_lists,
+            &store,
+            run_store.as_ref(),
+            &cli.listen,
+            &price_book,
+        )
+        .await;
     }
 
     // The configuration-only half of that report, on every start.
@@ -931,7 +964,9 @@ async fn main() -> Result<()> {
         r
     };
 
-    let mut state = AppState::new(Arc::clone(&store), config.clone()).with_redactor(redactor);
+    let mut state = AppState::new(Arc::clone(&store), config.clone())
+        .with_redactor(redactor)
+        .with_price_book(price_book);
     if let Some(runs) = run_store.clone() {
         state = state.with_run_store(runs);
     }
@@ -1217,7 +1252,12 @@ fn human_bytes(bytes: usize) -> String {
 /// without a line fails `make check` rather than being impossible to read back.
 /// Nothing secret is printed: keys are counted, passwords are `set` or `unset`,
 /// and every URL goes through `doctor::without_credentials`.
-fn config_lines(cli: &Cli, config: &ServerConfig, redact_keys: &[String]) -> Vec<String> {
+fn config_lines(
+    cli: &Cli,
+    config: &ServerConfig,
+    redact_keys: &[String],
+    prices: &str,
+) -> Vec<String> {
     let mut out = Vec::new();
     let mut row = |label: &str, value: String| out.push(format!("{label:<16}{value}"));
 
@@ -1472,6 +1512,7 @@ fn config_lines(cli: &Cli, config: &ServerConfig, redact_keys: &[String]) -> Vec
             config.max_batch_signals
         ),
     );
+    row("prices", prices.to_owned());
     row(
         "derived",
         match (config.derived_metrics.durations, config.derived_metrics.tokens) {
@@ -1627,6 +1668,7 @@ async fn shutdown_signal() {
 mod demo;
 mod doctor;
 mod mcp;
+mod prices;
 
 #[cfg(test)]
 mod tests {
