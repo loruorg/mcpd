@@ -27,11 +27,16 @@ pub mod identity;
 pub mod ingest;
 pub mod judge;
 pub mod layers;
+pub mod mail;
 pub mod monitor;
+pub mod orgs;
 pub mod pipeline;
 pub mod query;
 pub mod runs;
+pub mod scim;
+pub mod sso;
 pub mod state;
+pub mod totp;
 pub mod ui;
 
 use axum::extract::DefaultBodyLimit;
@@ -64,6 +69,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(ingest_router())
         .merge(api_router(&state.config))
         .merge(ops_router())
+        .merge(scim::router())
         .merge(ui::router());
     layered(routes, state)
 }
@@ -225,7 +231,12 @@ fn api_router(config: &ServerConfig) -> Router<Arc<AppState>> {
         .route("/v1/api/account", get(accounts::get_account))
         .route("/v1/api/account/keys", get(accounts::list_account_keys))
         .route("/v1/api/account/keys", post(accounts::create_account_key))
-        .route("/v1/api/account/keys/{key_id}", delete(accounts::revoke_account_key));
+        .route("/v1/api/account/keys/{key_id}", delete(accounts::revoke_account_key))
+        // The rest of the account lifecycle, organisations and single sign-on,
+        // each assembled in its own module.
+        .merge(accounts::routes())
+        .merge(orgs::routes())
+        .merge(sso::routes());
     match layers::cors_for(&config.cors_origins) {
         Some(cors) => routes.layer(cors),
         None => routes,

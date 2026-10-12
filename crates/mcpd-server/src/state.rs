@@ -137,6 +137,11 @@ pub struct ServerConfig {
     /// the health probes, sign-up and log-in.
     pub signup: bool,
 
+    /// Accounts without open sign-up, and what every account door reads: where
+    /// mail goes, the public address links point at, and the defaults an
+    /// organisation gets. See `crate::accounts`.
+    pub account_settings: crate::accounts::AccountSettings,
+
     /// Where a request came from, for the per-address limits on sign-up and
     /// log-in. The peer address unless a proxy header is configured and the
     /// peer is one of the trusted proxies.
@@ -301,6 +306,50 @@ struct Quota {
     /// window of counting. The alternative to that race is a lock on the ingest
     /// path, which is the thing this is avoiding.
     packed: AtomicU64,
+    /// Signals this counter admitted since it was built, less refunds. Read by
+    /// an organisation's usage, the only place a total is shown.
+    admitted: AtomicU64,
+    /// Signals this counter refused since it was built.
+    refused: AtomicU64,
+}
+
+impl Quota {
+    fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            packed: AtomicU64::new(0),
+            admitted: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+        }
+    }
+}
+
+/// The counter a project is charged to: one the configuration fixed at start,
+/// or an organisation's, which can change while the daemon runs.
+enum SlotRef<'a> {
+    Fixed(&'a Quota),
+    Org(Arc<Quota>),
+}
+
+impl std::ops::Deref for SlotRef<'_> {
+    type Target = Quota;
+    fn deref(&self) -> &Quota {
+        match self {
+            Self::Fixed(q) => q,
+            Self::Org(q) => q,
+        }
+    }
+}
+
+/// Organisation ceilings, by the projects they cover and by organisation.
+///
+/// Built from the account store, never from a request: a project is in here
+/// only because an organisation owns it, so a sender cannot grow this map by
+/// naming projects.
+#[derive(Default)]
+struct OrgSlots {
+    by_project: std::collections::HashMap<String, Arc<Quota>>,
+    by_org: std::collections::HashMap<String, Arc<Quota>>,
 }
 
 /// Per-project ceilings on how many signals may be stored per minute.
@@ -364,6 +413,10 @@ pub struct ProjectQuotas {
     /// window look as though it had not rolled, and the counter would refuse
     /// traffic that is inside its ceiling.
     started: std::time::Instant,
+    /// Organisation ceilings. An organisation's projects share one counter, so
+    /// one tenant's traffic cannot starve another's, and creating projects
+    /// does not multiply a tenant's allowance.
+    orgs: std::sync::RwLock<OrgSlots>,
 }
 
 impl ProjectQuotas {
@@ -372,19 +425,63 @@ impl ProjectQuotas {
     #[must_use]
     pub fn new(limits: std::collections::BTreeMap<String, u32>, unnamed: Option<u32>) -> Self {
         Self {
-            slots: limits
-                .into_iter()
-                .map(|(name, limit)| (name, Quota { limit, packed: AtomicU64::new(0) }))
-                .collect(),
-            unnamed: unnamed.map(|limit| Quota { limit, packed: AtomicU64::new(0) }),
+            slots: limits.into_iter().map(|(name, limit)| (name, Quota::new(limit))).collect(),
+            unnamed: unnamed.map(Quota::new),
             started: std::time::Instant::now(),
+            orgs: std::sync::RwLock::new(OrgSlots::default()),
         }
     }
 
     /// Whether any project has a ceiling at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.slots.is_empty() && self.unnamed.is_none()
+        self.slots.is_empty()
+            && self.unnamed.is_none()
+            && self.orgs.read().map_or(true, |o| o.by_project.is_empty())
+    }
+
+    /// Replace the organisation ceilings: for each organisation, its limit and
+    /// the projects it owns. An organisation whose limit is unchanged keeps
+    /// its counter, so a change elsewhere does not hand every tenant a fresh
+    /// minute.
+    pub fn set_org_ceilings(&self, ceilings: Vec<(String, u32, Vec<String>)>) {
+        let Ok(mut orgs) = self.orgs.write() else { return };
+        let mut next = OrgSlots::default();
+        for (org, limit, projects) in ceilings {
+            let slot = match orgs.by_org.get(&org) {
+                Some(q) if q.limit == limit => Arc::clone(q),
+                Some(q) => {
+                    let fresh = Quota::new(limit);
+                    fresh.packed.store(q.packed.load(Ordering::Relaxed), Ordering::Relaxed);
+                    fresh.admitted.store(q.admitted.load(Ordering::Relaxed), Ordering::Relaxed);
+                    fresh.refused.store(q.refused.load(Ordering::Relaxed), Ordering::Relaxed);
+                    Arc::new(fresh)
+                }
+                None => Arc::new(Quota::new(limit)),
+            };
+            for p in projects {
+                next.by_project.insert(p, Arc::clone(&slot));
+            }
+            next.by_org.insert(org, slot);
+        }
+        *orgs = next;
+    }
+
+    /// An organisation's ceiling, what it admitted in the current window, and
+    /// what it admitted and refused since its counter was built. `None` when
+    /// it has no ceiling.
+    #[must_use]
+    pub fn org_usage(&self, org: &str) -> Option<(u32, u64, u64, u64)> {
+        let orgs = self.orgs.read().ok()?;
+        let q = orgs.by_org.get(org)?;
+        let index = self.elapsed_ms() / QUOTA_WINDOW_MS;
+        let (_, current) = counts_at(q.packed.load(Ordering::Relaxed), index);
+        Some((
+            q.limit,
+            current,
+            q.admitted.load(Ordering::Relaxed),
+            q.refused.load(Ordering::Relaxed),
+        ))
     }
 
     /// Every named ceiling and the project it applies to, in name order.
@@ -421,8 +518,11 @@ impl ProjectQuotas {
     ///
     /// A name the configuration lists has its own; everything else shares the
     /// one built for unnamed projects.
-    fn slot_for(&self, project: &str) -> Option<&Quota> {
-        self.slots.get(project).or(self.unnamed.as_ref())
+    fn slot_for(&self, project: &str) -> Option<SlotRef<'_>> {
+        if let Some(q) = self.orgs.read().ok().and_then(|o| o.by_project.get(project).cloned()) {
+            return Some(SlotRef::Org(q));
+        }
+        self.slots.get(project).or(self.unnamed.as_ref()).map(SlotRef::Fixed)
     }
 
     /// This project's ceiling, or `None` when it has none.
@@ -439,7 +539,8 @@ impl ProjectQuotas {
     /// name you invented a second ago.
     #[must_use]
     pub fn is_shared(&self, project: &str) -> bool {
-        !self.slots.contains_key(project) && self.unnamed.is_some()
+        let org = self.orgs.read().is_ok_and(|o| o.by_project.contains_key(project));
+        !org && !self.slots.contains_key(project) && self.unnamed.is_some()
     }
 
     /// Charge `wanted` signals to `project` and return how many are permitted.
@@ -562,6 +663,7 @@ impl ProjectQuotas {
             let used = current + (prev * (QUOTA_WINDOW_MS - into)) / QUOTA_WINDOW_MS;
             let take = u64::from(wanted).min(u64::from(slot.limit).saturating_sub(used));
             if take == 0 {
+                slot.refused.fetch_add(u64::from(wanted), Ordering::Relaxed);
                 return 0;
             }
             let next = pack(index, prev, (current + take).min(QUOTA_COUNT_MASK));
@@ -573,7 +675,11 @@ impl ProjectQuotas {
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return u32::try_from(take).unwrap_or(u32::MAX),
+                Ok(_) => {
+                    slot.admitted.fetch_add(take, Ordering::Relaxed);
+                    slot.refused.fetch_add(u64::from(wanted) - take, Ordering::Relaxed);
+                    return u32::try_from(take).unwrap_or(u32::MAX);
+                }
                 Err(seen) => observed = seen,
             }
         }
@@ -603,7 +709,12 @@ impl ProjectQuotas {
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return,
+                Ok(_) => {
+                    let _ = slot.admitted.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |a| {
+                        Some(a.saturating_sub(u64::from(amount)))
+                    });
+                    return;
+                }
                 Err(seen) => observed = seen,
             }
         }
@@ -652,6 +763,13 @@ impl ProjectConfig {
 }
 
 impl ServerConfig {
+    /// Whether accounts are on: `--signup`, or `--accounts` without public
+    /// sign-up.
+    #[must_use]
+    pub fn accounts_enabled(&self) -> bool {
+        self.signup || self.account_settings.enabled
+    }
+
     /// Remove every key entry that is empty or only whitespace, from the six
     /// top-level lists and from every project's.
     ///
@@ -736,6 +854,7 @@ impl Default for ServerConfig {
             projects: std::collections::BTreeMap::new(),
             trusted_identity: crate::identity::TrustedIdentity::default(),
             signup: false,
+            account_settings: crate::accounts::AccountSettings::default(),
             client_ip: crate::identity::ClientIp::default(),
             cors_origins: Vec::new(),
             derived_metrics: crate::derive::DerivedMetrics::default(),
@@ -1007,6 +1126,8 @@ pub struct AppState {
     pub accounts: Option<Arc<crate::accounts::AccountStore>>,
     /// The rate limits and the hashing bound on sign-up and log-in.
     pub account_guards: crate::accounts::AccountGuards,
+    /// The mailer and the single sign-on provider cache.
+    pub account_runtime: crate::accounts::AccountRuntime,
 }
 
 impl ServerConfig {
@@ -1071,6 +1192,7 @@ impl AppState {
         let quotas = config.project_quotas();
         let config_monitors = config.monitors.clone();
         let config_slos = config.slos.clone();
+        let account_runtime = crate::accounts::AccountRuntime::new(&config.account_settings);
         Self {
             store,
             config,
@@ -1097,6 +1219,7 @@ impl AppState {
             outbox_gate: tokio::sync::Mutex::new(()),
             accounts: None,
             account_guards: crate::accounts::AccountGuards::default(),
+            account_runtime,
         }
     }
 
@@ -1110,6 +1233,11 @@ impl AppState {
     /// Keep accounts in this store. Only consulted when `config.signup` is on.
     #[must_use]
     pub fn with_account_store(mut self, accounts: Arc<crate::accounts::AccountStore>) -> Self {
+        crate::orgs::sync_quotas_with(
+            &self.quotas,
+            &accounts,
+            self.config.account_settings.org_quota_per_minute,
+        );
         self.accounts = Some(accounts);
         self
     }
