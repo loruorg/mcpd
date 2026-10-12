@@ -294,10 +294,13 @@ instrumentation, never block on the network, and never grow without bound. This
 is contract behaviour B1-B3 and it is not negotiable: an observability library
 that takes down production has done more harm than no observability at all.
 
-**A graphic must be computed from the thing it depicts.** The instruments on
-this site derive their keyframes from the same data they draw: the strip chart's
-nib rides the array the trace is drawn from, and the annunciator's latch is
-folded out of its own readings by the same rule the daemon uses. A hand-written
+**A graphic must be computed from the thing it depicts.** The figures on this
+site derive their frames from the same data they draw: the waterfall's bars
+grow from the spans' real offsets and durations, the monitor's state is folded
+out of its own readings by the same rule the daemon uses, and the sampling
+figure's decisions come from the hash it prints. Every figure runs on
+`animate()` in `web/src/lib/motion.ts`, which pauses it off-screen and skips it
+under reduced motion; its markup is its finished state. A hand-written
 timeline that merely looks right will drift from the behaviour it claims to
 show, and then the documentation is lying in a way no test can catch.
 
@@ -314,7 +317,8 @@ and lose the behaviour that matters.
 
 **The design law applies to every pixel.** The web surfaces follow
 `DESIGN.md` and the direction contract in
-`web/src/layouts/Base.astro`. Use design tokens, never raw hex. No kicker labels
+`web/src/layouts/Base.astro`. Use design tokens, never raw hex, and check every
+change in both the light and the dark theme. No kicker labels
 above headings, no icon-in-a-tinted-tile, no pill badges for metadata, no
 gradient text, no glow. Content is visible by default: nothing is ever gated on
 an animation completing.
