@@ -1,7 +1,7 @@
 ---
 import Doc from '@/layouts/Doc.astro'
 import Command from '@/components/Command.astro'
-import StripChart from '@/components/StripChart.astro'
+import SamplingGate from '@/components/SamplingGate.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const locale = localeOf(Astro.url.pathname)
@@ -9,7 +9,7 @@ const locale = localeOf(Astro.url.pathname)
 
 <Doc
   title="Amostragem"
-  description="As cinco estratégias de amostragem do mcpd, por que a decisão é tomada uma vez na raiz, por que o hash determinístico faz uma frota concordar, e como a amostragem de cauda guarda o que vale ler."
+  description="As cinco estratégias de amostragem do mcpd, por que a decisão é tomada uma vez na raiz, por que o hash determinístico faz uma frota concordar, e como as decisões de cabeça e de cauda diferem."
   lede="Guardar uma fração dos traces, sem guardar uma fração de cada um deles."
   og="docs"
 >
@@ -95,12 +95,10 @@ const locale = localeOf(Astro.url.pathname)
     dúzia de serviços reporta para uma mesma instância.
   </p>
   <p>
-    Das cinco estratégias, o daemon alcança <code>always</code> e
+    O daemon amostra com <code>always</code> ou
     <code>deterministic</code>: <code>--sample</code> e o <code>sample</code>
     de um projeto no arquivo de configuração definem, os dois, a estratégia
-    determinística. <code>never</code>, <code>ratio</code> e <code>tail</code>
-    estão implementadas no tipo de política e não são alcançáveis por uma opção
-    nem pelo arquivo de configuração nesta versão.
+    determinística.
   </p>
 
   <h2>Por que o hash faz uma frota concordar</h2>
@@ -120,7 +118,7 @@ const locale = localeOf(Astro.url.pathname)
     em uma repetição, então um lote reenviado não pode chegar pela metade.
   </p>
   <p>
-    Dois detalhes tornam esse mapeamento honesto. Ele lê os dezesseis caracteres
+    Dois detalhes mantêm esse mapeamento exato. Ele lê os dezesseis caracteres
     hexadecimais <em>finais</em> do id: o OpenTelemetry exige que ids de trace
     sejam aleatórios, mas alguns produtores derivam os bytes iniciais de um
     horário, e um amostrador que os lesse ficaria correlacionado com a hora do
@@ -138,10 +136,10 @@ const locale = localeOf(Astro.url.pathname)
     descarta qualquer que seja a taxa local.
   </p>
   <p>
-    O daemon não faz isso nesta versão. Quando um span chega por OTLP, o daemon
+    O daemon aplica a própria taxa. Quando um span chega por OTLP, o daemon
     guarda o byte de trace-flags dele no atributo <code>mcpd.otlp.flags</code>,
-    mas o amostrador do daemon não o lê. Um daemon com uma taxa aplica essa taxa
-    a todo trace, diga o sinalizador o que disser.
+    e um daemon com uma taxa aplica essa taxa a todo trace, diga o sinalizador o
+    que disser.
   </p>
   <p>
     A alternativa é pior do que parece. Se cada serviço aplicasse a própria
@@ -150,12 +148,11 @@ const locale = localeOf(Astro.url.pathname)
     um conjunto de buracos com o formato de um.
   </p>
 
-  <h2>A amostragem de cauda guarda as execuções que valem a leitura</h2>
+  <h2>Decisões de cabeça e de cauda</h2>
   <p>
-    Um amostrador de cabeça decide antes de saber qualquer coisa. Ele é barato e
-    é cego: a um décimo, ele guarda um décimo das falhas também. Os traces que
-    você de fato abre são os raros, e a raridade é exatamente aquilo em que um
-    amostrador por proporção é pior.
+    Um amostrador de cabeça decide quando o trace começa, só a partir do id do
+    trace. Ele é barato e não segura nada em memória, e a taxa vale por igual:
+    a um décimo, ele guarda um décimo das falhas também.
   </p>
 
   {/* The pen stands 200 units in rather than at the component's default. An
@@ -163,24 +160,19 @@ const locale = localeOf(Astro.url.pathname)
       arm stands at 760, so this chart had never once drawn its pen: the one
       element that makes a recorder a recorder was outside the field at every
       width, including a phone's. */}
-  <StripChart class="not-prose my-8" height={260} pen={200} />
+  <SamplingGate class="not-prose my-8" />
 
   <p>
     É assim que um registro de latência se parece: uma linha de base plana e um
     punhado de excursões. A linha de base é onde está o volume, e as excursões
-    são onde estão as respostas. A amostragem de cauda segura o trace até ele
-    terminar, e então o guarda se qualquer coisa nele deu erro, guarda se ele
-    durou mais que o limiar que você definiu, e caso contrário aplica o mesmo
-    hash determinístico de antes. Guardar os erros vem ligado por padrão, porque
-    os traces de que você mais precisa são os raros, e um amostrador por
-    proporção é o mais propenso a jogá-los fora.
+    são onde estão as respostas. Uma decisão de cauda espera o trace terminar, e
+    então o guarda se qualquer coisa nele deu erro ou se ele durou mais que um
+    limiar, e caso contrário aplica o mesmo hash determinístico.
   </p>
   <p>
-    O custo é o buffer. Um amostrador de cauda precisa segurar em memória todo
-    trace inacabado até conseguir decidir, e é por isso que ele é uma escolha
-    deliberada e não o padrão. Como acima, a estratégia de cauda está
-    implementada no tipo de política e não é alcançável por uma opção
-    nem pelo arquivo de configuração nesta versão; o caminho de ingestão do daemon aplica a decisão de cabeça.
+    O custo de uma decisão de cauda é o buffer: ela precisa segurar em memória
+    todo trace inacabado até conseguir decidir. O caminho de ingestão do daemon
+    toma a decisão de cabeça, então ele não segura nenhum trace.
   </p>
 
   <h2>Saber o que foi descartado</h2>

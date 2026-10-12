@@ -1,7 +1,7 @@
 ---
 import Doc from '@/layouts/Doc.astro'
 import Command from '@/components/Command.astro'
-import StripChart from '@/components/StripChart.astro'
+import SamplingGate from '@/components/SamplingGate.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const locale = localeOf(Astro.url.pathname)
@@ -9,7 +9,7 @@ const locale = localeOf(Astro.url.pathname)
 
 <Doc
   title="Muestreo"
-  description="Las cinco estrategias de muestreo de mcpd, por qué la decisión se toma una vez en la raíz, por qué el hash determinista deja coincidir a una flota y cómo el muestreo de cola guarda lo que importa."
+  description="Las cinco estrategias de muestreo de mcpd, por qué la decisión se toma una vez en la raíz, por qué el hash determinista deja coincidir a una flota y en qué se diferencian las decisiones en cabecera y en cola."
   lede="Conservar una fracción de las trazas, sin conservar una fracción de cada una."
   og="docs"
 >
@@ -96,12 +96,10 @@ const locale = localeOf(Astro.url.pathname)
     de servicios reportan a una misma instancia.
   </p>
   <p>
-    De las cinco estrategias, el daemon alcanza <code>always</code> y
+    El daemon muestrea con <code>always</code> o
     <code>deterministic</code>: <code>--sample</code> y el <code>sample</code>
     de un proyecto en el archivo de configuración fijan ambos la estrategia
-    determinista. <code>never</code>, <code>ratio</code> y <code>tail</code>
-    están implementadas en el tipo de política y no se alcanzan desde una
-    opción ni desde el archivo de configuración en esta compilación.
+    determinista.
   </p>
 
   <h2>Por qué el hash deja que una flota coincida</h2>
@@ -122,7 +120,7 @@ const locale = localeOf(Astro.url.pathname)
     llegar a medias.
   </p>
   <p>
-    Dos detalles hacen honesta esa proyección. Lee los dieciséis caracteres
+    Dos detalles mantienen exacta esa proyección. Lee los dieciséis caracteres
     hexadecimales <em>finales</em> del id: OpenTelemetry exige que los ids de
     traza sean aleatorios, pero algunos productores derivan los bytes iniciales
     de una marca de tiempo, y un muestreador que leyera esos bytes se
@@ -141,10 +139,10 @@ const locale = localeOf(Astro.url.pathname)
     tasa local.
   </p>
   <p>
-    El daemon no hace esto en esta versión. Cuando un span llega por OTLP, el
-    daemon guarda su byte de trace-flags en el atributo
-    <code>mcpd.otlp.flags</code>, pero su muestreador no lo lee. Un daemon con
-    una tasa aplica esa tasa a todas las trazas, diga lo que diga el flag.
+    El daemon aplica su propia tasa. Cuando un span llega por OTLP, el daemon
+    guarda su byte de trace-flags en el atributo <code>mcpd.otlp.flags</code>,
+    y un daemon con una tasa aplica esa tasa a todas las trazas, diga lo que
+    diga el flag.
   </p>
   <p>
     La alternativa es peor de lo que suena. Si cada servicio aplicara su propia
@@ -153,12 +151,12 @@ const locale = localeOf(Astro.url.pathname)
     un conjunto de huecos con la forma de una.
   </p>
 
-  <h2>El muestreo de cola conserva las ejecuciones que vale la pena leer</h2>
+  <h2>Decisiones en cabecera y en cola</h2>
   <p>
-    Un muestreador de cabecera decide antes de saber nada. Sale barato, y es
-    ciego: a una décima parte, conserva también una décima parte de los fallos.
-    Las trazas que de verdad abres son las raras, y la rareza es exactamente lo
-    que peor se le da a un muestreador por proporción.
+    Un muestreador de cabecera decide cuando empieza la traza, solo a partir
+    del id de la traza. Sale barato y no retiene nada en memoria, y la tasa se
+    aplica por igual: a una décima parte, conserva también una décima parte de
+    los fallos.
   </p>
 
   {/* The pen stands 200 units in rather than at the component's default. An
@@ -166,25 +164,19 @@ const locale = localeOf(Astro.url.pathname)
       arm stands at 760, so this chart had never once drawn its pen: the one
       element that makes a recorder a recorder was outside the field at every
       width, including a phone's. */}
-  <StripChart class="not-prose my-8" height={260} pen={200} />
+  <SamplingGate class="not-prose my-8" />
 
   <p>
     Así se ve un registro de latencia: una línea base plana y un puñado de
     picos. En la línea base está el volumen y en los picos están las respuestas.
-    El muestreo de cola retiene la traza hasta que termina, y entonces la
-    conserva si algo dentro dio error, la conserva si tardó más que el umbral
-    que definiste, y en cualquier otro caso aplica el mismo hash determinista de
-    antes. Conservar los errores está activado por defecto, porque las trazas que más
-    necesitas son las raras y un muestreador por proporción es el que más
-    probablemente las tire.
+    Una decisión de cola espera hasta que la traza termina, y entonces la
+    conserva si algo dentro dio error o si tardó más que un umbral, y en
+    cualquier otro caso aplica el mismo hash determinista.
   </p>
   <p>
-    El costo es el búfer. Un muestreador de cola tiene que retener en memoria
-    cada traza sin terminar hasta poder decidir, que es la razón de que sea una
-    elección deliberada y no lo que hay por defecto. Como arriba, la estrategia de
-    cola está implementada en el tipo de política y no se alcanza desde una
-    opción ni desde el archivo de configuración en esta compilación; la ruta de ingesta del daemon aplica la
-    decisión de cabecera.
+    El costo de una decisión de cola es el búfer: tiene que retener en memoria
+    cada traza sin terminar hasta poder decidir. La ruta de ingesta del daemon
+    toma la decisión de cabecera, así que no retiene ninguna traza.
   </p>
 
   <h2>Saber qué se descartó</h2>

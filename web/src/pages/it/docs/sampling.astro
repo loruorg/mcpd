@@ -1,7 +1,7 @@
 ---
 import Doc from '@/layouts/Doc.astro'
 import Command from '@/components/Command.astro'
-import StripChart from '@/components/StripChart.astro'
+import SamplingGate from '@/components/SamplingGate.astro'
 import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
 
 /* I link interni restano scritti come route inglesi e vengono localizzati qui.
@@ -14,7 +14,7 @@ const url = (route: string) =>
 
 <Doc
   title="Campionamento"
-  description="Le cinque strategie di campionamento di mcpd, perché la decisione si prende alla radice, come l’hash deterministico fa accordare una flotta, e che cosa tiene il campionamento di coda."
+  description="Le cinque strategie di campionamento di mcpd, perché la decisione si prende alla radice, come l’hash deterministico fa accordare una flotta, e in che cosa differiscono le decisioni in testa e in coda."
   lede="Tenere una frazione delle tracce, senza tenere una frazione di ognuna."
   og="docs"
 >
@@ -102,13 +102,10 @@ const url = (route: string) =>
     riferiscono a una sola istanza.
   </p>
   <p>
-    Delle cinque strategie, il daemon ne raggiunge due,
-    <code>always</code> e <code>deterministic</code>: <code>--sample</code> e
-    il <code>sample</code> di un progetto nel file di configurazione impostano
-    entrambi la strategia deterministica. <code>never</code>,
-    <code>ratio</code> e <code>tail</code> sono implementate nel tipo della
-    politica e in questa build non si raggiungono né da un’opzione né dal file
-    di configurazione.
+    Il daemon campiona con <code>always</code> o
+    <code>deterministic</code>: <code>--sample</code> e il <code>sample</code>
+    di un progetto nel file di configurazione impostano entrambi la strategia
+    deterministica.
   </p>
 
   <h2>Perché l’hash fa accordare una flotta</h2>
@@ -128,7 +125,7 @@ const url = (route: string) =>
     rigiocato non può arrivare a metà.
   </p>
   <p>
-    Due dettagli rendono onesta quella proiezione. Legge i sedici caratteri
+    Due dettagli tengono precisa quella proiezione. Legge i sedici caratteri
     esadecimali <em>in coda</em> all’id: OpenTelemetry richiede che gli id di
     traccia siano casuali, ma qualche produttore ricava i byte di testa da un
     timestamp, e un campionatore che leggesse quelli si correlerebbe all’ora
@@ -147,11 +144,10 @@ const url = (route: string) =>
     scarta qualunque sia il tasso locale.
   </p>
   <p>
-    Il daemon non lo fa in questa versione. Quando uno span arriva via OTLP, il
+    Il daemon applica il proprio tasso. Quando uno span arriva via OTLP, il
     daemon conserva il suo byte di trace-flags nell’attributo
-    <code>mcpd.otlp.flags</code>, ma il campionatore del daemon non lo legge. Un
-    daemon con un tasso applica quel tasso a ogni traccia, qualunque cosa dica
-    il flag.
+    <code>mcpd.otlp.flags</code>, e un daemon con un tasso applica quel tasso a
+    ogni traccia, qualunque cosa dica il flag.
   </p>
   <p>
     L’alternativa è peggiore di come suona. Se ogni servizio applicasse il
@@ -160,12 +156,11 @@ const url = (route: string) =>
     distribuita. È un insieme di buchi a forma di traccia.
   </p>
 
-  <h2>Il campionamento di coda tiene le esecuzioni che vale la pena leggere</h2>
+  <h2>Decisioni in testa e in coda</h2>
   <p>
-    Un campionatore di testa decide prima di sapere qualunque cosa. Costa poco,
-    ed è cieco: a un decimo, tiene anche un decimo dei fallimenti. Le tracce che
-    apri davvero sono quelle rare, ed è proprio la rarità che un campionatore
-    a rapporto gestisce peggio.
+    Un campionatore di testa decide quando la traccia parte, solo dall’id di
+    traccia. Costa poco e non tiene niente in memoria, e il tasso si applica in
+    modo uniforme: a un decimo, tiene anche un decimo dei fallimenti.
   </p>
 
   {/* Il pennino sta 200 unità più dentro rispetto al valore predefinito del
@@ -174,26 +169,20 @@ const url = (route: string) =>
       aveva mai disegnato il suo pennino: l’unico elemento che fa di un
       registratore un registratore restava fuori campo a ogni larghezza,
       compresa quella di un telefono. */}
-  <StripChart class="not-prose my-8" height={260} pen={200} />
+  <SamplingGate class="not-prose my-8" />
 
   <p>
     Ecco che aspetto ha una registrazione di latenza: una linea di base piatta e
     una manciata di escursioni. Il volume sta nella linea di base e le risposte
-    stanno nelle escursioni. Il campionamento di coda trattiene la traccia
-    finché non finisce, poi la tiene se qualcosa al suo interno è andato in
-    errore, la tiene se è durata più della soglia che hai impostato, e
-    altrimenti applica lo stesso hash deterministico di prima. Tenere gli
-    errori è attivo per impostazione predefinita, perché le tracce di cui hai
-    più bisogno sono quelle rare, ed è proprio quelle che un campionatore a
-    rapporto ha più probabilità di buttare via.
+    stanno nelle escursioni. Una decisione di coda aspetta che la traccia
+    finisca, poi la tiene se qualcosa al suo interno è andato in errore o se è
+    durata più di una soglia, e altrimenti applica lo stesso hash
+    deterministico.
   </p>
   <p>
-    Il costo è il buffering. Un campionatore di coda deve tenere in memoria ogni
-    traccia non finita finché non può decidere, ed è per questo che è una scelta
-    voluta e non il valore predefinito. Come sopra, la strategia di coda è
-    implementata nel tipo della politica e in questa build non è raggiungibile
-    né da un’opzione né dal file di configurazione; il percorso di ingest del daemon applica la
-    decisione di testa.
+    Il costo di una decisione di coda è il buffering: deve tenere in memoria
+    ogni traccia non finita finché non può decidere. Il percorso di ingest del
+    daemon prende la decisione di testa, quindi non trattiene nessuna traccia.
   </p>
 
   <h2>Sapere che cosa è stato scartato</h2>

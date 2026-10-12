@@ -90,11 +90,10 @@ import TerminalCast from '@/components/TerminalCast.astro'
     loses both fields, not only the one whose name looked dangerous.
   </p>
   <p>
-    The limit is worth stating plainly: rules match <strong>key names, not
-    values</strong>. An API key a user pasted into the middle of a prompt,
-    stored under a key called <code>content</code>, is not matched by anything
-    here. Redaction stops the structured capture of credentials and identifiers.
-    It is not a content scanner, and treating it as one will disappoint you.
+    Rules match <strong>key names, not values</strong>. Redaction stops the
+    structured capture of credentials and identifiers, so name the keys that
+    carry them. A value stored under a key such as <code>content</code> is kept
+    as sent.
   </p>
 
   <h2>The four modes</h2>
@@ -187,11 +186,10 @@ import TerminalCast from '@/components/TerminalCast.astro'
   </p>
   <p>
     Read the second half of that cost before you rotate. Erasure by subject
-    matches the stored digest, so every row written under the old key is beyond
-    the reach of a deletion request from the moment the new key is in force.
-    mcpd cannot tell you that this is what happened, because nothing records
-    which key wrote which row. All it can do is refuse to let the resulting zero
-    pass as an answer, and the section on a zero below is that refusal.
+    matches the stored digest, so a deletion request matches rows written under
+    the key in force. Keep the old key if you may need to erase rows written
+    under it. The erasure reply flags a zero that a rotation could explain, as
+    the section on a zero below shows.
   </p>
 
   <h2>Every signal, not only spans</h2>
@@ -457,15 +455,14 @@ import TerminalCast from '@/components/TerminalCast.astro'
     operator can act on.
   </p>
   <p>
-    One case is out of reach entirely, and tenancy is the reason. A case
-    captured into a dataset that belongs to <em>another</em> project is not
-    emptied and is not counted. The call is authorised for one project and touches one project, and
+    Tenancy sets the boundary. A case captured into a dataset that belongs to
+    <em>another</em> project is left as it is and is not counted. The call is authorised for one project and touches one project, and
     an erasure that reached across that boundary would be a way to learn what is
     in a dataset you cannot read. Erase the person from that project too, with a
     key that reaches it.
   </p>
 
-  <h3>What it does not do</h3>
+  <h3>One project per request</h3>
   <p>
     It touches one project. <code>?project=</code> names it and the daemon's
     default project is used when you leave it out. A key that does not reach
@@ -483,9 +480,8 @@ import TerminalCast from '@/components/TerminalCast.astro'
     smaller counts of a second pass rather than an error.
   </p>
   <p>
-    It is not a way to erase a person from your own systems. mcpd deletes what
-    mcpd stored. Anything you forwarded to another OTLP endpoint has to be
-    erased there too, and mcpd does not know what happened to it.
+    mcpd deletes what mcpd stored. Erase the person from your own systems as
+    well, and from any OTLP endpoint you forwarded to.
   </p>
 
   <h3>Keys and the record of it</h3>
@@ -506,14 +502,13 @@ import TerminalCast from '@/components/TerminalCast.astro'
     deleted.
   </p>
 
-  <h2>A zero from an erasure is the value to distrust</h2>
+  <h2>How an erasure reports a zero</h2>
   <p>
     A zero is what an operator repeats to a person as "we hold nothing about
-    you", and it is the one number this endpoint cannot prove. Stored
-    identifiers are hashed with the redaction key, and nothing records which key
-    hashed which row, so a zero can equally mean the key moved after those rows
-    were written. mcpd cannot tell the two apart. What it can do is never hand
-    back a bare zero that reads like the first one.
+    you", so mcpd never hands back a bare one. Stored identifiers are hashed
+    with the redaction key, so a zero can also mean the key moved after those
+    rows were written. Every zero comes with a note that says which readings
+    apply.
   </p>
   <p>
     Here is the same subject, erased under a redaction key that has been rotated
@@ -562,8 +557,8 @@ import TerminalCast from '@/components/TerminalCast.astro'
     the store counts how many of the identifiers it holds are in the opposite
     form to the one this request carried: plaintext rows against a hashed
     request, or the reverse. Those rows were written under a different redaction
-    setting, they may belong to the subject, and this request cannot address
-    them.
+    setting and may belong to the subject. Restore that setting and repeat the
+    request to reach them.
   </p>
 
   <p>
@@ -595,23 +590,22 @@ import TerminalCast from '@/components/TerminalCast.astro'
 
   <p>
     The count is over every identifier the project holds, not over the subject's
-    own rows, so those two may belong to somebody else entirely. That is the
-    most it can say. What it rules out is reading a successful-looking erasure
-    as a complete one.
+    own rows, so those two may belong to somebody else entirely. The count makes
+    sure a successful-looking erasure is never read as a complete one.
   </p>
 
-  <h2>The guarantee is not the same on all three backends</h2>
+  <h2>Deletion timing on each backend</h2>
   <p>
     SQLite and Postgres delete inside the transaction that answered you. When
     the reply arrives the rows are gone, and <code>deletes_pending</code> is
     <code>false</code>.
   </p>
   <p>
-    ClickHouse does not. Deletion there is an asynchronous mutation: the server
-    accepts the statement and applies it in the background, so the reply says
-    what matched rather than what has already left the disk. Those erasures come
-    back with <code>deletes_pending</code> set to <code>true</code>, which is
-    mcpd telling you the weaker of the two guarantees is the one in force. The
+    On ClickHouse, deletion is an asynchronous mutation: the server accepts the
+    statement and applies it in the background, so the reply says what matched
+    rather than what has already left the disk. Those erasures come back with
+    <code>deletes_pending</code> set to <code>true</code>, which tells you the
+    deletion is still being applied. The
     dataset cases are the exception on that backend. They are rewritten under
     their own key rather than mutated, so the emptied case is what any read
     returns from the moment the reply is sent. A mutation would have left the
@@ -625,8 +619,8 @@ import TerminalCast from '@/components/TerminalCast.astro'
 
   <h2>Before the port is reachable</h2>
   <p>
-    Redaction protects the values inside a trace. It does nothing about who can
-    read the trace. mcpd warns at startup when it binds a non-loopback address
+    Redaction protects the values inside a trace. Keys control who can read the
+    trace. mcpd warns at startup when it binds a non-loopback address
     with open ingest or an open read API, because stored prompts and completions
     are then readable by anyone who can reach the port. Set
     <code>--ingest-key</code> and <code>--read-key</code> first, and read

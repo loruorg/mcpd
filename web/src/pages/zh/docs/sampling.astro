@@ -1,7 +1,7 @@
 ---
 import Doc from '@/layouts/Doc.astro'
 import Command from '@/components/Command.astro'
-import StripChart from '@/components/StripChart.astro'
+import SamplingGate from '@/components/SamplingGate.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const code = localeOf(Astro.url.pathname)
@@ -10,7 +10,7 @@ const linkTo = (route: string) => urlFor(route, code)
 
 <Doc
   title="采样"
-  description="mcpd 实现的五种采样策略，这个决定为什么在根部只做一次，确定性哈希为什么能让一支机群意见一致，以及尾部采样怎样把值得读的运行留下来。"
+  description="mcpd 实现的五种采样策略，这个决定为什么在根部只做一次，确定性哈希为什么能让一支机群意见一致，以及头部决定和尾部决定有何不同。"
   lede="只留下一部分 trace，而不是把每一条 trace 都只留下一部分。"
   og="docs"
 >
@@ -88,11 +88,9 @@ const linkTo = (route: string) => urlFor(route, code)
     留在一个地方，当十几个服务都上报到同一个实例时，这正是你想要的。
   </p>
   <p>
-    五种策略里，守护进程能到达的是 <code>always</code> 和
-    <code>deterministic</code>：<code>--sample</code> 和配置文件里某个项目的
-    <code>sample</code>，设置的都是 deterministic 策略。<code>never</code>、
-    <code>ratio</code> 和 <code>tail</code> 在策略类型里已经实现，但在这个构建
-    里，参数和配置文件都到不了它们。
+    守护进程用 <code>always</code> 或 <code>deterministic</code> 采样：
+    <code>--sample</code> 和配置文件里某个项目的 <code>sample</code>，设置的都是
+    deterministic 策略。
   </p>
 
   <h2>哈希为什么能让一支机群意见一致</h2>
@@ -108,7 +106,7 @@ const linkTo = (route: string) => urlFor(route, code)
     时也给出同一个答案，所以一个被重放的批次不会只到达一半。
   </p>
   <p>
-    有两处细节让这个映射是诚实的。它读的是这个 id <em>末尾</em>的十六个十六进制
+    有两处细节让这个映射保持准确。它读的是这个 id <em>末尾</em>的十六个十六进制
     字符：OpenTelemetry 要求 trace id 是随机的，但有些生产方会用时间戳推出开头
     那几个字节，而一个去读那几个字节的采样器，得到的会是和一天中的时刻相关，
     而不是采样。当这个 id 根本不是十六进制时，它会退回到一个带收尾混合的真正哈希，
@@ -123,10 +121,9 @@ const linkTo = (route: string) => urlFor(route, code)
     多少都丢掉它。
   </p>
   <p>
-    这个版本的守护进程不这样做。对经 OTLP 到达的 span，守护进程把它的
-    trace-flags 字节保存在属性 <code>mcpd.otlp.flags</code> 里，但守护进程的
-    采样器不读它。设了比率的守护进程会对每一条 trace 施加这个比率，不管标志
-    怎么说。
+    守护进程施加它自己的比率。对经 OTLP 到达的 span，守护进程把它的
+    trace-flags 字节保存在属性 <code>mcpd.otlp.flags</code> 里，而设了比率的
+    守护进程会对每一条 trace 施加这个比率，不管标志怎么说。
   </p>
   <p>
     另一种做法比听起来更糟。如果每个服务都施加自己的比率，一条穿过四个服务的
@@ -134,30 +131,25 @@ const linkTo = (route: string) => urlFor(route, code)
     那是一组按它的形状排布的窟窿。
   </p>
 
-  <h2>尾部采样把值得读的运行留下来</h2>
+  <h2>头部决定与尾部决定</h2>
   <p>
-    头部采样器在它什么都还不知道的时候就做决定。它便宜，而它是瞎的：在十分之一的
-    比率下，它也只留下十分之一的失败。你真正会打开的那些 trace 是稀有的那些，而
-    稀有恰恰是一个比率采样器最不擅长的。
+    头部采样器在 trace 开始时做决定，只依据 trace id。它便宜，不在内存里留任何
+    东西，而且比率均匀地生效：在十分之一的比率下，它也留下十分之一的失败。
   </p>
 
   {/* 笔停在 200 单位处，而不是组件的默认位置。这里每个桌面尺寸下的正文栏都是
       662px 宽，而默认的笔臂停在 760，所以这张图表从来没有画出过它的笔：让一台
       记录仪之所以是记录仪的那个元件，在每一种宽度下都在画幅之外，手机上也一样。 */}
-  <StripChart class="not-prose my-8" height={260} pen={200} />
+  <SamplingGate class="not-prose my-8" />
 
   <p>
     一份延迟记录就长这样：一条平直的基线，加上少数几次偏离。量在基线那里，答案在
-    偏离那里。尾部采样把 trace 一直留到它结束，然后：里面有任何东西出错就留下它，
-    它跑得比你设的阈值久就留下它，其余情况则施加和前面一样的确定性哈希。留下出错
-    的那些默认是开着的，因为你最需要的那些 trace 就是稀有的那些，而一个比率采样器
-    最可能把它们扔掉。
+    偏离那里。尾部决定要等到 trace 结束，然后：里面有任何东西出错，或者它跑得比
+    某个阈值久，就留下它，其余情况则施加同样的确定性哈希。
   </p>
   <p>
-    代价是缓冲。一个尾部采样器必须把每一条还没结束的 trace 留在内存里，直到它能
-    做决定为止，这正是它是一个有意的选择、而不是默认的原因。和上面说的一样，尾部
-    策略在策略类型里已经实现，但在这个构建里参数和配置文件都到不了它；守护进程的摄取路径
-    施加的是头部决定。
+    尾部决定的代价是缓冲：它必须把每一条还没结束的 trace 留在内存里，直到它能做
+    决定为止。守护进程的摄取路径做的是头部决定，所以它不会扣住任何 trace。
   </p>
 
   <h2>知道什么被丢掉了</h2>

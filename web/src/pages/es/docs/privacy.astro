@@ -97,12 +97,11 @@ const locale = localeOf(Astro.url.pathname)
     pierde los dos campos, no solo aquel cuyo nombre parecía peligroso.
   </p>
   <p>
-    El límite conviene decirlo con claridad: las reglas comparan
-    <strong>nombres de clave, no valores</strong>. Una clave de API que un
-    usuario pegó en mitad de un prompt, almacenada bajo una clave llamada
-    <code>content</code>, no la capta nada de aquí. La ocultación detiene la
-    captura estructurada de credenciales e identificadores. No es un analizador
-    de contenido, y tratarla como tal te va a decepcionar.
+    Las reglas comparan <strong>nombres de clave, no valores</strong>. La
+    ocultación detiene la captura estructurada de credenciales e
+    identificadores, así que nombra las claves que los llevan. Un valor
+    almacenado bajo una clave como <code>content</code> se guarda tal como se
+    envió.
   </p>
 
   <h2>Los cuatro modos</h2>
@@ -197,12 +196,11 @@ const locale = localeOf(Astro.url.pathname)
   </p>
   <p>
     Lee la segunda mitad de ese costo antes de rotar. La supresión por sujeto
-    compara el hash almacenado, así que toda fila escrita bajo la clave vieja
-    queda fuera del alcance de una solicitud de borrado desde el momento en que
-    la clave nueva está en vigor. mcpd no te puede decir que eso es lo que ha
-    pasado, porque nada anota qué clave escribió qué fila. Lo único que puede
-    hacer es negarse a que el cero resultante pase por respuesta, y la sección
-    de más abajo sobre el cero es esa negativa.
+    compara el hash almacenado, así que una solicitud de borrado encuentra las
+    filas escritas bajo la clave en vigor. Conserva la clave vieja si puedes
+    necesitar suprimir filas escritas bajo ella. La respuesta de la supresión
+    señala un cero que una rotación podría explicar, como muestra la sección de
+    más abajo sobre el cero.
   </p>
 
   <h2>Todas las señales, no solo los spans</h2>
@@ -481,15 +479,14 @@ const locale = localeOf(Astro.url.pathname)
     algo sobre lo que un operador puede actuar.
   </p>
   <p>
-    Un caso queda fuera de alcance del todo, y la razón es la tenencia. Un caso
-    capturado en un dataset que pertenece a <em>otro</em> proyecto no se vacía y
-    no se cuenta. La llamada está autorizada para un proyecto y toca un
+    La tenencia fija la frontera. Un caso capturado en un dataset que pertenece
+    a <em>otro</em> proyecto se deja como está y no se cuenta. La llamada está autorizada para un proyecto y toca un
     proyecto, y una supresión que cruzara esa frontera sería una forma de
     averiguar qué hay en un dataset que no puedes leer. Suprime a la persona
     también de ese proyecto, con una clave que llegue a él.
   </p>
 
-  <h3>Qué no hace</h3>
+  <h3>Un proyecto por solicitud</h3>
   <p>
     Toca un solo proyecto. <code>?project=</code> lo nombra y se usa el
     proyecto por defecto del daemon cuando lo omites. Una clave que no llega a
@@ -508,9 +505,8 @@ const locale = localeOf(Astro.url.pathname)
     lugar de un error.
   </p>
   <p>
-    No es una forma de suprimir a una persona de tus propios sistemas. mcpd
-    borra lo que mcpd almacenó. Todo lo que hayas reenviado a otro endpoint OTLP
-    hay que suprimirlo allí también, y mcpd no sabe qué fue de ello.
+    mcpd borra lo que mcpd almacenó. Suprime a la persona también de tus
+    propios sistemas, y de cualquier endpoint OTLP al que hayas reenviado.
   </p>
 
   <h3>Las claves y el registro de todo esto</h3>
@@ -532,15 +528,13 @@ const locale = localeOf(Astro.url.pathname)
     borradas.
   </p>
 
-  <h2>Un cero de una supresión es el valor del que desconfiar</h2>
+  <h2>Cómo informa una supresión de un cero</h2>
   <p>
     Un cero es lo que un operador le repite a una persona como «no tenemos nada
-    tuyo», y es el único número que este endpoint no puede demostrar. A los
-    identificadores almacenados se les aplica un hash con la clave de
-    ocultación, y nada anota qué clave le aplicó el hash a qué fila, así que un
-    cero puede significar igualmente que la clave cambió después de escribir
-    esas filas. mcpd no distingue los dos casos. Lo que sí puede hacer es no
-    devolver jamás un cero pelado que se lea como el primero.
+    tuyo», así que mcpd nunca devuelve un cero pelado. A los identificadores
+    almacenados se les aplica un hash con la clave de ocultación, así que un
+    cero también puede significar que la clave cambió después de escribir esas
+    filas. Cada cero llega con una nota que dice qué lecturas caben.
   </p>
   <p>
     Aquí está el mismo sujeto, suprimido bajo una clave de ocultación que se ha
@@ -591,8 +585,9 @@ const locale = localeOf(Astro.url.pathname)
     <code>sha256:</code>, así que el almacén cuenta cuántos de los
     identificadores que tiene están en la forma contraria a la que llevaba esta
     solicitud: filas en claro contra una solicitud con hash, o al revés. Esas
-    filas se escribieron bajo un ajuste de ocultación distinto, pueden
-    pertenecer al sujeto, y esta solicitud no puede llegar a ellas.
+    filas se escribieron bajo un ajuste de ocultación distinto y pueden
+    pertenecer al sujeto. Restaura ese ajuste y repite la solicitud para
+    llegar a ellas.
   </p>
 
   <p>
@@ -626,22 +621,22 @@ const locale = localeOf(Astro.url.pathname)
   <p>
     El recuento es sobre todos los identificadores que tiene el proyecto, no
     sobre las filas propias del sujeto, así que esos dos pueden pertenecer a
-    otra persona por completo. Es lo máximo que puede decir. Lo que descarta es
-    leer una supresión de aspecto correcto como una supresión completa.
+    otra persona por completo. El recuento garantiza que una supresión de
+    aspecto correcto nunca se lea como una supresión completa.
   </p>
 
-  <h2>La garantía no es la misma en los tres backends</h2>
+  <h2>Cuándo se borra en cada backend</h2>
   <p>
     SQLite y Postgres borran dentro de la transacción que te respondió. Cuando
     llega la respuesta las filas ya no están, y <code>deletes_pending</code> es
     <code>false</code>.
   </p>
   <p>
-    ClickHouse no. Ahí el borrado es una mutación asíncrona: el servidor acepta
-    la sentencia y la aplica en segundo plano, así que la respuesta dice qué
+    En ClickHouse, el borrado es una mutación asíncrona: el servidor acepta la
+    sentencia y la aplica en segundo plano, así que la respuesta dice qué
     coincidió y no qué ha salido ya del disco. Esas supresiones vuelven con
-    <code>deletes_pending</code> puesto a <code>true</code>, que es mcpd
-    diciéndote que la más débil de las dos garantías es la que está en vigor.
+    <code>deletes_pending</code> puesto a <code>true</code>, que te dice que el
+    borrado todavía se está aplicando.
     Los casos de dataset son la excepción en ese backend. Se reescriben bajo su
     propia clave en lugar de mutarse, así que el caso vaciado es lo que devuelve
     cualquier lectura desde el momento en que se envía la respuesta. Una
@@ -655,8 +650,8 @@ const locale = localeOf(Astro.url.pathname)
 
   <h2>Antes de que el puerto sea accesible</h2>
   <p>
-    La ocultación protege los valores dentro de una traza. No hace nada respecto
-    a quién puede leer la traza. mcpd avisa al arrancar cuando se enlaza a una
+    La ocultación protege los valores dentro de una traza. Las claves controlan
+    quién puede leer la traza. mcpd avisa al arrancar cuando se enlaza a una
     dirección que no es de loopback con la ingesta abierta o la API de lectura
     abierta, porque los prompts y las completions almacenados quedan entonces
     legibles para cualquiera que alcance el puerto. Define

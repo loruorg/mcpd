@@ -1,7 +1,7 @@
 ---
 import Doc from '@/layouts/Doc.astro'
 import Command from '@/components/Command.astro'
-import StripChart from '@/components/StripChart.astro'
+import SamplingGate from '@/components/SamplingGate.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const code = localeOf(Astro.url.pathname)
@@ -9,7 +9,7 @@ const code = localeOf(Astro.url.pathname)
 
 <Doc
   title="Échantillonnage"
-  description="Les cinq stratégies d’échantillonnage de mcpd, pourquoi la décision se prend à la racine, pourquoi le hachage déterministe met une flotte d’accord, et ce que garde l’échantillonnage en queue."
+  description="Les cinq stratégies d’échantillonnage de mcpd, pourquoi la décision se prend à la racine, pourquoi le hachage déterministe met une flotte d’accord, et en quoi les décisions en tête et en queue diffèrent."
   lede="Garder une fraction des traces, sans garder une fraction de chacune."
   og="docs"
 >
@@ -96,13 +96,10 @@ const code = localeOf(Astro.url.pathname)
     rapportent dans une même instance.
   </p>
   <p>
-    Sur les cinq stratégies, le daemon atteint <code>always</code> et
+    Le daemon échantillonne avec <code>always</code> ou
     <code>deterministic</code> : <code>--sample</code> et le
     <code>sample</code> d’un projet dans le fichier de configuration règlent
-    tous deux la stratégie déterministe. <code>never</code>,
-    <code>ratio</code> et <code>tail</code> sont implémentées dans le type de
-    politique et ne sont joignables ni par une option ni par le fichier de
-    configuration dans cette version.
+    tous deux la stratégie déterministe.
   </p>
 
   <h2>Pourquoi le hachage met une flotte d’accord</h2>
@@ -123,7 +120,7 @@ const code = localeOf(Astro.url.pathname)
     un lot rejoué ne peut pas arriver à moitié.
   </p>
   <p>
-    Deux détails rendent cette projection honnête. Elle lit les seize
+    Deux détails gardent cette projection exacte. Elle lit les seize
     <em>derniers</em> caractères hexadécimaux de l’identifiant : OpenTelemetry
     exige que les identifiants de trace soient aléatoires, mais certains
     producteurs dérivent les premiers octets d’un horodatage, et un
@@ -143,11 +140,10 @@ const code = localeOf(Astro.url.pathname)
     l’indicateur à zéro la jette quel que soit le taux local.
   </p>
   <p>
-    Le daemon ne le fait pas dans cette version. Quand un span arrive par OTLP,
-    le daemon garde son octet trace-flags dans l’attribut
-    <code>mcpd.otlp.flags</code>, mais son échantillonneur ne le lit pas. Un
-    daemon configuré avec un taux applique ce taux à chaque trace, quoi que dise
-    l’indicateur.
+    Le daemon applique son propre taux. Quand un span arrive par OTLP, le
+    daemon garde son octet trace-flags dans l’attribut
+    <code>mcpd.otlp.flags</code>, et un daemon configuré avec un taux applique
+    ce taux à chaque trace, quoi que dise l’indicateur.
   </p>
   <p>
     L’autre solution est pire qu’elle n’en a l’air. Si chaque service appliquait
@@ -156,12 +152,12 @@ const code = localeOf(Astro.url.pathname)
     distribuée. C’est un ensemble de trous qui en a la forme.
   </p>
 
-  <h2>L’échantillonnage en queue garde les exécutions qui valent la lecture</h2>
+  <h2>Décisions en tête et en queue</h2>
   <p>
-    Un échantillonneur en tête décide avant de rien savoir. Il est bon marché,
-    et il est aveugle : à un dixième, il garde aussi un dixième des échecs. Les
-    traces que vous ouvrez vraiment sont les rares, et la rareté est exactement
-    ce qu’un échantillonneur par ratio traite le plus mal.
+    Un échantillonneur en tête décide au démarrage de la trace, à partir du seul
+    identifiant de trace. Il est bon marché, ne garde rien en mémoire, et le
+    taux s’applique uniformément : à un dixième, il garde aussi un dixième des
+    échecs.
   </p>
 
   {/* The pen stands 200 units in rather than at the component's default. An
@@ -169,27 +165,20 @@ const code = localeOf(Astro.url.pathname)
       arm stands at 760, so this chart had never once drawn its pen: the one
       element that makes a recorder a recorder was outside the field at every
       width, including a phone's. */}
-  <StripChart class="not-prose my-8" height={260} pen={200} />
+  <SamplingGate class="not-prose my-8" />
 
   <p>
     Voilà à quoi ressemble un enregistrement de latence : une ligne de base
     plate et une poignée d’excursions. Le volume est dans la ligne de base et
-    les réponses sont dans les excursions. L’échantillonnage en queue retient la
-    trace jusqu’à sa fin, puis la garde si quoi que ce soit y a échoué, la garde
-    si elle a duré plus longtemps que le seuil que vous avez fixé, et applique
-    sinon le même hachage déterministe que plus haut. Garder les erreurs est
-    actif par défaut, parce que les traces dont vous avez le plus besoin sont
-    les rares, et qu’un échantillonneur par ratio est le plus susceptible de les
-    jeter.
+    les réponses sont dans les excursions. Une décision en queue attend la fin
+    de la trace, puis la garde si quoi que ce soit y a échoué ou si elle a duré
+    plus longtemps qu’un seuil, et applique sinon le même hachage déterministe.
   </p>
   <p>
-    Le coût, c’est la mise en tampon. Un échantillonneur en queue doit garder en
-    mémoire chaque trace inachevée jusqu’à pouvoir décider, ce qui en fait un
-    choix délibéré et non le défaut. Comme plus haut, la stratégie
-    <code>tail</code> est implémentée dans le type de politique et n’est
-    joignable ni par une option ni par le fichier de configuration dans cette
-    version ; le chemin
-    d’ingestion du daemon applique la décision prise en tête.
+    Le coût d’une décision en queue, c’est la mise en tampon : elle doit garder
+    en mémoire chaque trace inachevée jusqu’à pouvoir décider. Le chemin
+    d’ingestion du daemon prend la décision en tête, et ne retient donc aucune
+    trace.
   </p>
 
   <h2>Savoir ce qui a été jeté</h2>

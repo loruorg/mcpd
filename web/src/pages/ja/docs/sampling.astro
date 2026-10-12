@@ -1,7 +1,7 @@
 ---
 import Doc from '@/layouts/Doc.astro'
 import Command from '@/components/Command.astro'
-import StripChart from '@/components/StripChart.astro'
+import SamplingGate from '@/components/SamplingGate.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const code = localeOf(Astro.url.pathname)
@@ -10,7 +10,7 @@ const linkTo = (route: string) => urlFor(route, code)
 
 <Doc
   title="サンプリング"
-  description="mcpd が実装する 5 つのサンプリング戦略、判断をルートで一度だけ行う理由、決定的ハッシュで多数のインスタンスの判断がそろう理由、そしてテールサンプリングが読む価値のある実行を残す仕組み。"
+  description="mcpd が実装する 5 つのサンプリング戦略、判断をルートで一度だけ行う理由、決定的ハッシュで多数のインスタンスの判断がそろう理由、そしてヘッド側とテール側の判断の違い。"
   lede="残すのはトレースの一部です。1 本のトレースの一部ではありません。"
   og="docs"
 >
@@ -95,12 +95,10 @@ const linkTo = (route: string) => urlFor(route, code)
     でしょう。
   </p>
   <p>
-    5 つの戦略のうち、デーモンから届くのは <code>always</code> と
-    <code>deterministic</code> です。<code>--sample</code> と、設定ファイルの
+    デーモンは <code>always</code> または <code>deterministic</code> で
+    サンプリングします。<code>--sample</code> と、設定ファイルの
     プロジェクトの <code>sample</code> は、どちらも deterministic 戦略を設定
-    します。<code>never</code>、<code>ratio</code>、<code>tail</code> は
-    ポリシーの型の中に実装されていますが、このビルドではフラグからも設定
-    ファイルからも届きません。
+    します。
   </p>
 
   <h2>ハッシュで多数のインスタンスの判断がそろう理由</h2>
@@ -118,7 +116,7 @@ const linkTo = (route: string) => urlFor(route, code)
     再送されたバッチが半分だけ届くこともありません。
   </p>
   <p>
-    この写像を正直なものにしている細部が、2 つあります。1 つは、id の
+    この写像を正確に保つ細部が、2 つあります。1 つは、id の
     <em>末尾</em> 16 桁の 16 進を読むことです。OpenTelemetry はトレース id が
     乱数であることを求めていますが、先頭のバイトをタイムスタンプから作る生成側
     もあり、そこを読むサンプラーは、サンプリングではなく時刻との相関を取って
@@ -136,9 +134,9 @@ const linkTo = (route: string) => urlFor(route, code)
     残され、フラグが下りていればローカルの割合に関係なく捨てられます。
   </p>
   <p>
-    このビルドのデーモンはこれを行いません。OTLP で届いたスパンについて、
+    デーモンは自分の割合を適用します。OTLP で届いたスパンについて、
     デーモンはその trace-flags バイトを属性 <code>mcpd.otlp.flags</code> に
-    残しますが、デーモンのサンプラーはそれを読みません。割合を設定したデーモンは、
+    残し、割合を設定したデーモンは、
     フラグが何を示していても、すべてのトレースにその割合を適用します。
   </p>
   <p>
@@ -148,12 +146,11 @@ const linkTo = (route: string) => urlFor(route, code)
     の形をした穴の集まりです。
   </p>
 
-  <h2>テールサンプリングは、読む価値のある実行を残します</h2>
+  <h2>ヘッド側とテール側の判断</h2>
   <p>
-    ヘッドサンプラーは、何も分からないうちに判断します。安上がりですが、目が
-    見えていません。10 分の 1 なら、失敗も 10 分の 1 しか残しません。あなたが実際に
-    開くトレースはめったに起きないほうであり、めったに起きないものこそ、割合に
-    よるサンプラーが最も苦手とするものです。
+    ヘッドサンプラーは、トレースが始まるときに、トレース id だけから判断します。
+    安上がりでメモリーに何も保持せず、割合は均等に効きます。10 分の 1 なら、
+    失敗も 10 分の 1 を残します。
   </p>
 
   {/* The pen stands 200 units in rather than at the component's default. An
@@ -161,23 +158,20 @@ const linkTo = (route: string) => urlFor(route, code)
       arm stands at 760, so this chart had never once drawn its pen: the one
       element that makes a recorder a recorder was outside the field at every
       width, including a phone's. */}
-  <StripChart class="not-prose my-8" height={260} pen={200} />
+  <SamplingGate class="not-prose my-8" />
 
   <p>
     レイテンシの記録は、こういう見た目になります。平らな基準線と、いくつかの
     逸脱です。量があるのは基準線のほうで、答えがあるのは逸脱のほうです。テール
-    サンプリングはトレースが終わるまで保持し、その中で何かがエラーになって
-    いれば残し、あなたが設定したしきい値より長く走っていれば残し、それ以外には
-    先ほどと同じ決定的ハッシュを適用します。エラーを残す動作は既定で有効です。
-    いちばん必要になるトレースはめったに起きないものであり、割合によるサンプラー
-    は、それをいちばん捨てやすいからです。
+    側の判断はトレースが終わるまで待ち、その中で何かがエラーになっているか、
+    しきい値より長く走っていれば残し、それ以外には同じ決定的ハッシュを
+    適用します。
   </p>
   <p>
-    代価はバッファリングです。テールサンプラーは、判断できるようになるまで、
-    終わっていないトレースをすべてメモリーに保持しなければなりません。だから
-    これは既定ではなく、意図して選ぶものです。上に書いたとおり、テール戦略は
-    ポリシーの型の中に実装されており、このビルドではフラグからも設定ファイル
-    からも届きません。デーモンの取り込み経路が適用するのは、ヘッドの判断です。
+    テール側の判断の代価はバッファリングです。判断できるようになるまで、
+    終わっていないトレースをすべてメモリーに保持しなければなりません。
+    デーモンの取り込み経路はヘッド側の判断を下すので、トレースを何も
+    保持しません。
   </p>
 
   <h2>何が捨てられたかを知る</h2>
