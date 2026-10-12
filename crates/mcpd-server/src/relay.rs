@@ -202,6 +202,23 @@ pub struct RelayState {
     born: std::time::Instant,
 }
 
+impl std::fmt::Debug for RelayState {
+    /// The upstreams without credentials and the spool's size; never a key.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayState")
+            .field(
+                "upstreams",
+                &self
+                    .upstreams
+                    .iter()
+                    .map(|u| crate::forward::config::shown_url(&u.url))
+                    .collect::<Vec<_>>(),
+            )
+            .field("spool_entries", &self.spool.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl RelayState {
     /// Open the spool and get ready to serve.
     ///
@@ -265,7 +282,6 @@ impl RelayState {
     }
 
     /// Whether the relay should take traffic, and if not, why.
-    #[must_use]
     pub fn readiness(&self) -> Result<Option<String>, String> {
         let fill = self.fill();
         let reachable = self.upstreams.iter().any(Upstream::reachable);
@@ -351,7 +367,8 @@ impl RelayState {
             "gauge",
             &self.spool.oldest_age_seconds().unwrap_or(0).to_string(),
         );
-        let families: [(&str, &str, &str, &dyn Fn(&Upstream) -> String); 3] = [
+        type Family<'a> = (&'a str, &'a str, &'a str, &'a dyn Fn(&Upstream) -> String);
+        let families: [Family<'_>; 3] = [
             ("mcpd_relay_delivered_total", "Requests an upstream accepted.", "counter", &|u| {
                 n(&u.delivered)
             }),
@@ -752,7 +769,7 @@ mod tests {
     fn a_relay_with_no_upstream_or_a_bad_one_is_refused() {
         assert!(RelayState::new(RelayConfig::default()).is_err());
         let bad = RelayConfig { upstreams: vec!["not a url".into()], ..RelayConfig::default() };
-        let err = RelayState::new(bad).err().expect("refused");
+        let err = RelayState::new(bad).expect_err("refused");
         assert!(err.contains("--upstream"), "{err}");
     }
 

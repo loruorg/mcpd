@@ -491,6 +491,21 @@ pub struct Resolved {
     pub max_value_bytes: usize,
 }
 
+impl std::fmt::Debug for Resolved {
+    /// Header names only, and the base URL without credentials: a header
+    /// value is how the destination authenticates.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Resolved")
+            .field("name", &self.name)
+            .field("vendor", &self.vendor)
+            .field("base", &shown_url(&self.base))
+            .field("protocol", &self.protocol)
+            .field("headers", &self.headers.iter().map(|(k, _)| k).collect::<Vec<_>>())
+            .field("signals", &self.signals)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Resolved {
     /// The URL one signal is posted to.
     #[must_use]
@@ -1173,13 +1188,13 @@ mod tests {
     #[test]
     fn a_missing_variable_is_named_and_its_value_never_appears() {
         let d = dest(json!({ "vendor": "honeycomb", "api_key": "${NOPE}" }));
-        let err = resolve(&d, &env).err().expect("refused");
+        let err = resolve(&d, &env).expect_err("refused");
         assert!(err.contains("NOPE") && err.contains("not set"), "{err}");
     }
 
     #[test]
     fn a_vendor_without_its_key_says_which_field_and_what_it_is() {
-        let err = resolve(&dest(json!({ "vendor": "datadog" })), &env).err().expect("refused");
+        let err = resolve(&dest(json!({ "vendor": "datadog" })), &env).expect_err("refused");
         assert!(err.contains("api_key") && err.contains("Datadog API key"), "{err}");
     }
 
@@ -1238,7 +1253,7 @@ mod tests {
         let d = dest(json!({
             "vendor": "langsmith", "api_key": "k", "signals": { "metrics": true }
         }));
-        let err = resolve(&d, &env).err().expect("refused");
+        let err = resolve(&d, &env).expect_err("refused");
         assert!(err.contains("metrics") && err.contains("traces"), "{err}");
     }
 
@@ -1257,7 +1272,7 @@ mod tests {
     #[test]
     fn an_unknown_field_in_an_entry_is_named_with_its_index() {
         let v = json!([{ "vendor": "otlp", "endpoint": "http://a" }, { "vendr": "x" }]);
-        let err = parse_block(&v).err().expect("refused");
+        let err = parse_block(&v).expect_err("refused");
         assert!(err.starts_with("forward[1]") && err.contains("vendr"), "{err}");
     }
 
