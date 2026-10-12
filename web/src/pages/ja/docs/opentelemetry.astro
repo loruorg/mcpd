@@ -9,7 +9,8 @@ const locale = localeOf(Astro.url.pathname)
 
 const exporterEnv = `# ベース URL。/v1/traces はエクスポーターが自分で足します。
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+# http/protobuf、http/json、grpc のどれもこの 1 つのポートで使えます。
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 
 # 任意。ペイロードが大きいなら gzip で送ります。
 export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
@@ -45,18 +46,76 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
 }'
 
 # {"partialSuccess":{"rejectedSpans":0,"errorMessage":""}}`
+
+const grpcEnv = `# 同じポートで gRPC。パスは不要です。サービス名はエクスポーターが自分で付けます。
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
+
+# mcpd を --ingest-key 付きで動かしているときだけ。gRPC のメタデータのキーは小文字です。
+export OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer YOUR_INGEST_KEY"`
+
+const collectorYaml = `# すべてを gRPC で mcpd に転送する OpenTelemetry Collector。
+receivers:
+  otlp:
+    protocols: { grpc: {}, http: {} }
+
+exporters:
+  otlp:
+    endpoint: mcpd.internal:4317
+    compression: gzip
+    tls:
+      insecure: true # mcpd は平文で提供します。TLS は手前で終端してください
+    headers:
+      authorization: Bearer \${env:MCPD_INGEST_KEY}
+
+service:
+  pipelines:
+    traces: { receivers: [otlp], exporters: [otlp] }
+    logs: { receivers: [otlp], exporters: [otlp] }
+    metrics: { receivers: [otlp], exporters: [otlp] }`
+
+const zipkinEnv = `# Zipkin の形式でエクスポートする OpenTelemetry SDK。
+export OTEL_TRACES_EXPORTER=zipkin
+export OTEL_EXPORTER_ZIPKIN_ENDPOINT=http://localhost:4317/api/v2/spans
+
+# Zipkin のレポーターも同じ URL をエンドポイントに取ります。たとえば
+#   URLConnectionSender.create("http://localhost:4317/api/v2/spans")`
+
+const zipkinPost = `curl -X POST http://localhost:4317/api/v2/spans \\
+  -H 'content-type: application/json' \\
+  -d '[{
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "id": "00f067aa0ba902b7",
+  "kind": "CLIENT",
+  "name": "chat gpt-4o",
+  "timestamp": 1700000000000000,
+  "duration": 1500000,
+  "localEndpoint": { "serviceName": "checkout-agent" },
+  "tags": { "gen_ai.system": "openai", "gen_ai.request.model": "gpt-4o" }
+}]'
+
+# HTTP 202 {"accepted":1,"rejected":0,"duplicate":0}`
+
+const jaegerEnv = `# Thrift を HTTP で送る Jaeger クライアントライブラリ。
+export JAEGER_ENDPOINT=http://localhost:4317/api/traces
+
+# jaeger-agent など、Jaeger の gRPC コレクター API を話すもの。
+jaeger-agent --reporter.grpc.host-port=localhost:4317`
 ---
 
 <Doc
   title="OpenTelemetry"
-  description="mcpd は /v1/traces、/v1/logs、/v1/metrics で OTLP/JSON を受け取り、OpenTelemetry の gen_ai.* と OpenInference の llm.* の両方のセマンティック規約を読みます。mcpd 固有のコードは要りません。"
-  lede="エージェントがすでに OpenTelemetry を出しているなら、mcpd はエンドポイントの変更だけです。このページで OTLP の経路をすべて説明します。3 つのエンドポイント、エンコーディング、そして mcpd が読む属性のすべてです。"
+  description="mcpd は HTTP と gRPC の OTLP、Zipkin v2、Jaeger を 1 つのポートで受け取り、OpenTelemetry の gen_ai.* と OpenInference の llm.* の両方のセマンティック規約を読みます。mcpd 固有のコードは要りません。"
+  lede="エージェントがすでに OpenTelemetry、Zipkin、Jaeger のいずれかを出しているなら、mcpd はエンドポイントの変更だけです。このページで経路をすべて説明します。エンドポイント、エンコーディング、そして mcpd が読む属性のすべてです。"
   og="docs"
 >
-  <h2>3 つのエンドポイント</h2>
+  <h2>エンドポイント</h2>
   <p>
-    mcpd は OTLP の HTTP エンドポイントを、クエリ API やインターフェースと同じポートで提供します。
+    mcpd は HTTP と gRPC の OTLP、Zipkin、Jaeger を、クエリ API やインターフェースと同じポートで提供します。
     手前に立てるコレクターも、2 つ目のコンテナも、受信専用の別ポートもありません。
+    このポートは HTTP/1.1 と平文の HTTP/2 を並べて受け付け、gRPC の呼び出しは HTTP/2 のリクエストなので、
+    1 つのアドレスで下のすべてのプロトコルを提供します。
   </p>
 
   <div class="scroll-x">
@@ -84,14 +143,45 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
           <td><code>ExportMetricsServiceRequest</code></td>
           <td><code>partialSuccess.rejectedDataPoints</code></td>
         </tr>
+        <tr>
+          <td>gRPC <code>TraceService/Export</code></td>
+          <td><code>ExportTraceServiceRequest</code></td>
+          <td><code>partial_success.rejected_spans</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>LogsService/Export</code></td>
+          <td><code>ExportLogsServiceRequest</code></td>
+          <td><code>partial_success.rejected_log_records</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>MetricsService/Export</code></td>
+          <td><code>ExportMetricsServiceRequest</code></td>
+          <td><code>partial_success.rejected_data_points</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /api/v2/spans</code></td>
+          <td>Zipkin v2 のスパン、JSON または proto3</td>
+          <td><code>accepted</code> と <code>rejected</code> を持つ <code>202</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /api/traces</code></td>
+          <td>Thrift バイナリの Jaeger バッチ</td>
+          <td><code>accepted</code> と <code>rejected</code> を持つ <code>202</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>jaeger.api_v2.CollectorService/PostSpans</code></td>
+          <td><code>PostSpansRequest</code></td>
+          <td><code>PostSpansResponse</code></td>
+        </tr>
       </tbody>
     </table>
   </div>
 
   <p>
-    成功したエクスポートはいずれも、件数を持つ OTLP 自身の <code>partialSuccess</code> の形で答えます。
+    成功した OTLP のエクスポートはいずれも、OTLP 自身の <code>partialSuccess</code> の形で答えます。
+    何かが拒否されたときは、その件数と理由を持ちます。
     コレクターが何かを落としたことを送信側に伝える方法がこれであり、エクスポーターはこれを読みます。
-    空の本文を返せば、送信側は得ていない成功を報告できてしまいます。
+    答えはエクスポートが届いたときのエンコーディングで返ります。protobuf には protobuf、JSON には JSON です。
   </p>
 
   <h2>エクスポーターの設定</h2>
@@ -112,30 +202,63 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
     エクスポーターがそこにシグナルごとのパスを足します。パスまで含めた完全な URL を
     与えたい場合は、代わりに <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code> を設定してください。
     次に、OpenTelemetry では慣例としてポート 4317 が gRPC、4318 が HTTP です。
-    mcpd はすべてを 1 つのポートで提供するため、HTTP を 4317 で提供します。
-    そのため既定のポートのままのエクスポーターは 4318 に送り、何も届きません。
-    ポートは明示してください。
+    mcpd はすべてを 1 つのポートで提供するため、その両方を 4317 で提供します。
+    <code>grpc</code> に設定したエクスポーターは既定のポートで mcpd に届きます。
+    既定のポートのままの HTTP エクスポーターは 4318 に送るので、ポートは明示してください。
   </p>
 
-  <h2>トレースの 2 つのエンコーディング</h2>
+  <h2>gRPC の OTLP</h2>
   <p>
-    <code>/v1/traces</code> は <code>content-type</code> ヘッダーを読み、
-    どちらのエンコーディングも受け取ります。<code>protobuf</code> を含むなら OTLP/protobuf、
-    それ以外なら OTLP/JSON です。protobuf は OpenTelemetry の既定なので、
-    手を加えていない SDK を mcpd に向けるだけで、設定を一切せずにトレースが届きます。
-  </p>
-  <p>
-    <code>/v1/logs</code> と <code>/v1/metrics</code> は JSON だけを受け取ります。
-    そこに protobuf の本文を送ると <code>body is not valid JSON</code> として拒否されます。
-    3 つのシグナルすべてを送るなら、プロトコルを全体に一度だけ設定してください。
+    OTLP の 3 つのコレクターサービスを同じポートで提供します。
+    <code>opentelemetry.proto.collector.trace.v1.TraceService</code>、
+    <code>logs.v1.LogsService</code>、<code>metrics.v1.MetricsService</code> です。
+    エクスポーターのプロトコルを <code>grpc</code> にし、エンドポイントはそのままにしてください。
   </p>
 
-  <Command
+  <CodeSwitcher
     class="not-prose my-6"
-    title="すべてのシグナルを json で"
-    command="export OTEL_EXPORTER_OTLP_PROTOCOL=http/json"
+    title="grpc エクスポーター"
+    samples={[{ lang: 'curl', label: '環境変数', shiki: 'bash', code: grpcEnv }]}
   />
 
+  <p>
+    gRPC の呼び出しは、対応する HTTP の入り口とまったく同じ経路を通ります。同じキーの確認、
+    アカウントのキーに対する同じプロジェクト、同じ上限、サンプリング、秘匿化、コスト計算、
+    そして再送されたエクスポートの同じ認識です。キーは呼び出しのメタデータに
+    <code>authorization: Bearer</code> として、または <code>x-mcpd-key</code> として入れます。
+    拒否された呼び出しは、エクスポーターが対処できる gRPC ステータスで終わります。
+    キーがない、または不明なら <code>UNAUTHENTICATED</code>、
+    取り込みのスコープを持たないキーなら <code>PERMISSION_DENIED</code>、
+    デコードできないメッセージなら <code>INVALID_ARGUMENT</code>、
+    上限を超えたら <code>RESOURCE_EXHAUSTED</code>、
+    ストアが書き込みを受けられないときは <code>UNAVAILABLE</code> で、これはエクスポーターが再試行します。
+    mcpd が提供しないメソッドは <code>UNIMPLEMENTED</code> を返します。
+  </p>
+  <p>
+    メッセージは gzip で圧縮してもかまいません（<code>grpc-encoding: gzip</code>）。
+    リスナーは平文の HTTP/2 を話します。gRPC を TLS で提供するには、プロキシで TLS を終端し、
+    HTTP/2 で mcpd に転送してください。gRPC は HTTP/1.1 の上では動かないので、
+    プロキシはデーモンまでの区間でも HTTP/2 を保つ必要があります。
+  </p>
+  <p>
+    OpenTelemetry Collector は、その OTLP エクスポーターで mcpd に転送します。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="コレクター"
+    samples={[{ lang: 'curl', label: 'YAML', shiki: 'yaml', code: collectorYaml }]}
+  />
+
+  <h2>すべてのシグナルで 2 つのエンコーディング</h2>
+  <p>
+    <code>/v1/traces</code>、<code>/v1/logs</code>、<code>/v1/metrics</code> は
+    <code>content-type</code> ヘッダーを読み、どちらのエンコーディングも受け取ります。
+    <code>protobuf</code> を含むなら OTLP/protobuf、それ以外なら OTLP/JSON です。
+    protobuf は OpenTelemetry の既定なので、手を加えていない SDK を mcpd に向けるだけで
+    3 つのシグナルすべてを送り、設定を一切せずに届きます。同じエクスポートは、
+    どちらのエンコーディングでも同じレコードを保存します。再送を認識するための ID まで同じです。
+  </p>
   <p>
     <code>content-type</code> がまったく送られてこない場合、mcpd は
     <code>application/json</code> と見なします。
@@ -152,18 +275,115 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
   <p>
     1 つのリクエストに 2 つの上限がかかります。本文の上限は 32 MiB で、届いたものを測るので、
     gzip をかければその分の余地が生まれます。バッチの上限はシグナル 10,000 件で、
-    どの取り込み口でもデコード後に数えます。<code>/v1/traces</code> ではスパン、
+    どの取り込み口でもデコード後に数えます。<code>/v1/traces</code>、<code>/api/v2/spans</code>、
+    <code>/api/traces</code> とそれらの gRPC サービスではスパン、
     <code>/v1/logs</code> ではレコード、<code>/v1/metrics</code> ではデータポイント、
-    <code>/v1/ingest</code> ではリクエストに入っているものすべてです。これを超えるバッチは
+    <code>/v1/ingest</code> ではリクエストに入っているものすべてです。gzip の本文やメッセージは、
+    展開した後にも本文の上限がかかります。これを超えるバッチは
     両方の数値を挙げて <code>413 payload_too_large</code> で拒否されます。どちらの上限も設定項目で、
     <code>--max-body-bytes</code> と <code>--max-batch-signals</code> として
     <a href={urlFor('/docs/configuration', locale)} class="link">設定</a>で説明しています。
   </p>
 
+  <h2>Zipkin</h2>
+  <p>
+    <code>POST /api/v2/spans</code> は Zipkin の v2 スパンのエンドポイントです。スパンの JSON 配列、
+    または <code>content-type</code> が <code>protobuf</code> を含むときは proto3 の
+    <code>ListOfSpans</code> を、gzip エンコードの有無を問わず受け取り、<code>202</code> で答えます。
+    Zipkin のレポーターや、OpenTelemetry SDK の Zipkin エクスポーターをここに向けてください。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="zipkin エクスポーター"
+    samples={[{ lang: 'curl', label: '環境変数', shiki: 'bash', code: zipkinEnv }]}
+  />
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="生の Zipkin JSON"
+    samples={[{ lang: 'curl', label: 'シェル', shiki: 'bash', code: zipkinPost }]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Zipkin のフィールド</th>
+          <th>変換先</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>localEndpoint.serviceName</code></td><td>サービス、リソースの <code>service.name</code></td></tr>
+        <tr><td><code>tags</code></td><td>スパンの属性。そのため <code>gen_ai.*</code> と <code>llm.*</code> のタグは OTLP と同じように読まれます</td></tr>
+        <tr><td><code>kind</code></td><td>小文字にした <code>span.kind</code> 属性</td></tr>
+        <tr><td><code>annotations</code></td><td>スパンのイベント。それぞれ値で名前が付きます</td></tr>
+        <tr><td><code>remoteEndpoint</code></td><td><code>peer.service</code>、<code>network.peer.address</code>、<code>network.peer.port</code></td></tr>
+        <tr><td><code>error</code> タグ、または <code>otel.status_code</code></td><td>ステータス。タグの値がメッセージになります</td></tr>
+        <tr><td><code>timestamp</code>、<code>duration</code></td><td>開始と終了。duration のないスパンは終了していません</td></tr>
+        <tr><td><code>debug</code></td><td>サンプリングのビット。サンプラーはそのトレースを残します</td></tr>
+        <tr><td><code>parentId</code></td><td>親</td></tr>
+        <tr><td><code>shared</code></td><td>サーバー側の半分。クライアント側の半分と並べて残します</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    64 ビットのトレース ID は先頭をゼロで埋めて 128 ビットにします。これは OpenTelemetry が
+    同じトレースに与える ID です。共有されたサーバー側のスパンはクライアントのスパン ID を再利用します。
+    mcpd はスパンを ID で識別するので、サーバー側の半分は共有された ID から導いた ID で保存し、
+    それを親にします。両方の半分が残ります。再送されたスパンは同じ行に入ります。
+  </p>
+
+  <h2>Jaeger</h2>
+  <p>
+    Jaeger のコレクターの入り口を 2 つ提供します。1 つは <code>POST /api/traces</code> で、
+    Thrift のバイナリプロトコル（<code>application/x-thrift</code>）の <code>jaeger.Batch</code> を
+    1 つ受け取り、<code>202</code> で答えます。もう 1 つは gRPC サービスの
+    <code>jaeger.api_v2.CollectorService/PostSpans</code> です。どちらもスパンを同じように対応付けます。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="jaeger"
+    samples={[{ lang: 'curl', label: '環境変数', shiki: 'bash', code: jaegerEnv }]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Jaeger のフィールド</th>
+          <th>変換先</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>プロセスの <code>serviceName</code></td><td>サービス、リソースの <code>service.name</code></td></tr>
+        <tr><td>プロセスのタグ</td><td>リソースの属性</td></tr>
+        <tr><td>スパンのタグ</td><td>スパンの属性。型は Jaeger が付けたとおり</td></tr>
+        <tr><td>ログ</td><td>スパンのイベント。<code>event</code> フィールドで名前が付きます</td></tr>
+        <tr><td><code>parentSpanId</code>、または同じトレース内の最初の <code>CHILD_OF</code></td><td>親</td></tr>
+        <tr><td>それ以外のすべての参照</td><td>種類が <code>child_of</code> または <code>follows_from</code> のスパンリンク</td></tr>
+        <tr><td><code>error</code> タグ、または <code>otel.status_code</code></td><td>ステータス</td></tr>
+        <tr><td>sampled または debug のフラグ</td><td>サンプリングのビット</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>スパンリンク</h2>
+  <p>
+    リンクは、あるスパンが、同じトレースまたは別のトレースの別のスパンと、子ではない形で関係していることを示します。
+    mcpd はすべての入り口からリンクを残します。どちらのエンコーディング、どちらのトランスポートでも
+    OTLP のスパンの <code>links</code>、ネイティブのスパンの <code>links</code>、そして Jaeger のスパンの
+    親ではない参照です。リンクの種類は <code>mcpd.link.kind</code> 属性から、または
+    Jaeger の参照の変換先である <code>opentracing.ref_type</code> から取ります。
+    すべてのリンクはスパンと一緒に保存され、トレースと一緒に返ります。
+  </p>
+
   <h2>届いてから保存されるまでに起きること</h2>
   <p>
-    OTLP のスパンとネイティブのスパンは同じ経路を通ります。パイプラインを共有している目的がそれです。
-    下の順序が、2 つの入り口の間でずれることはありません。
+    OTLP のスパン、Zipkin や Jaeger のスパン、ネイティブのスパンは同じ経路を通ります。
+    パイプラインを共有している目的がそれです。下の順序が、入り口の間でずれることはありません。
   </p>
 
   <PipelineDiagram class="not-prose my-8" />
@@ -485,7 +705,8 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
     どちらかを開けたままループバック以外のアドレスにバインドしたとき、起動時に警告を記録します。
     <a href={urlFor('/docs/configuration', locale)} class="link">設定</a>でこれらを指定し、
     キーは <code>Authorization: Bearer</code> として送ってください。上の
-    <code>OTEL_EXPORTER_OTLP_HEADERS</code> がしているのがそれです。
+    <code>OTEL_EXPORTER_OTLP_HEADERS</code> がしているのがそれです。このページのどの入り口も、
+    gRPC のメタデータを含め、同じようにキーを読みます。
   </p>
 
   <Command

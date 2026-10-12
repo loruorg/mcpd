@@ -9,7 +9,8 @@ const locale = localeOf(Astro.url.pathname)
 
 const exporterEnv = `# The base URL. Your exporter appends /v1/traces itself.
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+# http/protobuf, http/json and grpc all work on this one port.
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 
 # Optional. Send gzip if your payloads are large.
 export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
@@ -45,19 +46,77 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
 }'
 
 # {"partialSuccess":{"rejectedSpans":0,"errorMessage":""}}`
+
+const grpcEnv = `# gRPC on the same port. No path: the exporter names the service itself.
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
+
+# Only when mcpd runs with --ingest-key. gRPC metadata keys are lowercase.
+export OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer YOUR_INGEST_KEY"`
+
+const collectorYaml = `# An OpenTelemetry Collector that forwards everything to mcpd over gRPC.
+receivers:
+  otlp:
+    protocols: { grpc: {}, http: {} }
+
+exporters:
+  otlp:
+    endpoint: mcpd.internal:4317
+    compression: gzip
+    tls:
+      insecure: true # mcpd serves cleartext; terminate TLS in front of it
+    headers:
+      authorization: Bearer \${env:MCPD_INGEST_KEY}
+
+service:
+  pipelines:
+    traces: { receivers: [otlp], exporters: [otlp] }
+    logs: { receivers: [otlp], exporters: [otlp] }
+    metrics: { receivers: [otlp], exporters: [otlp] }`
+
+const zipkinEnv = `# An OpenTelemetry SDK, exporting in Zipkin's format.
+export OTEL_TRACES_EXPORTER=zipkin
+export OTEL_EXPORTER_ZIPKIN_ENDPOINT=http://localhost:4317/api/v2/spans
+
+# A Zipkin reporter takes the same URL as its endpoint, for example
+#   URLConnectionSender.create("http://localhost:4317/api/v2/spans")`
+
+const zipkinPost = `curl -X POST http://localhost:4317/api/v2/spans \\
+  -H 'content-type: application/json' \\
+  -d '[{
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "id": "00f067aa0ba902b7",
+  "kind": "CLIENT",
+  "name": "chat gpt-4o",
+  "timestamp": 1700000000000000,
+  "duration": 1500000,
+  "localEndpoint": { "serviceName": "checkout-agent" },
+  "tags": { "gen_ai.system": "openai", "gen_ai.request.model": "gpt-4o" }
+}]'
+
+# HTTP 202 {"accepted":1,"rejected":0,"duplicate":0}`
+
+const jaegerEnv = `# A Jaeger client library, sending Thrift over HTTP.
+export JAEGER_ENDPOINT=http://localhost:4317/api/traces
+
+# Anything that speaks Jaeger's gRPC collector API, such as jaeger-agent.
+jaeger-agent --reporter.grpc.host-port=localhost:4317`
 ---
 
 <Doc
   title="OpenTelemetry"
-  description="mcpd는 /v1/traces, /v1/logs, /v1/metrics에서 OTLP/JSON을 받고, OpenTelemetry의 gen_ai.* 규약과 OpenInference의 llm.* 규약을 모두 읽습니다. mcpd 전용 코드는 필요 없습니다."
-  lede="에이전트가 이미 OpenTelemetry를 내보내고 있다면, mcpd는 엔드포인트를 바꾸는 일입니다. 이 페이지는 OTLP 경로 전체입니다. 엔드포인트 셋, 인코딩, 그리고 mcpd가 읽는 모든 속성입니다."
+  description="mcpd는 한 포트에서 HTTP와 gRPC를 통한 OTLP, Zipkin v2, Jaeger를 받고, OpenTelemetry의 gen_ai.* 규약과 OpenInference의 llm.* 규약을 모두 읽습니다. mcpd 전용 코드는 필요 없습니다."
+  lede="에이전트가 이미 OpenTelemetry, Zipkin, Jaeger를 내보내고 있다면, mcpd는 엔드포인트를 바꾸는 일입니다. 이 페이지는 경로 전체입니다. 엔드포인트, 인코딩, 그리고 mcpd가 읽는 모든 속성입니다."
   og="docs"
 >
-  <h2>엔드포인트 셋</h2>
+  <h2>엔드포인트</h2>
   <p>
-    mcpd는 질의 API와 인터페이스를 내주는 바로 그 포트에서 OTLP HTTP
-    엔드포인트도 내줍니다. 앞에 세워 둘 컬렉터도, 두 번째 컨테이너도, 따로 쓰는
-    수신 포트도 없습니다.
+    mcpd는 질의 API와 인터페이스를 내주는 바로 그 포트에서 HTTP와 gRPC를 통한
+    OTLP, Zipkin, Jaeger도 내줍니다. 앞에 세워 둘 컬렉터도, 두 번째 컨테이너도,
+    따로 쓰는 수신 포트도 없습니다. 이 포트는 HTTP/1.1과 평문 HTTP/2를 나란히
+    받고, gRPC 호출은 HTTP/2 요청이므로, 주소 하나가 아래의 모든 프로토콜을
+    내줍니다.
   </p>
 
   <div class="scroll-x">
@@ -85,15 +144,46 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
           <td><code>ExportMetricsServiceRequest</code></td>
           <td><code>partialSuccess.rejectedDataPoints</code></td>
         </tr>
+        <tr>
+          <td>gRPC <code>TraceService/Export</code></td>
+          <td><code>ExportTraceServiceRequest</code></td>
+          <td><code>partial_success.rejected_spans</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>LogsService/Export</code></td>
+          <td><code>ExportLogsServiceRequest</code></td>
+          <td><code>partial_success.rejected_log_records</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>MetricsService/Export</code></td>
+          <td><code>ExportMetricsServiceRequest</code></td>
+          <td><code>partial_success.rejected_data_points</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /api/v2/spans</code></td>
+          <td>Zipkin v2 스팬, JSON 또는 proto3</td>
+          <td><code>accepted</code>와 <code>rejected</code>를 담은 <code>202</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /api/traces</code></td>
+          <td>Thrift 바이너리로 된 Jaeger 배치</td>
+          <td><code>accepted</code>와 <code>rejected</code>를 담은 <code>202</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>jaeger.api_v2.CollectorService/PostSpans</code></td>
+          <td><code>PostSpansRequest</code></td>
+          <td><code>PostSpansResponse</code></td>
+        </tr>
       </tbody>
     </table>
   </div>
 
   <p>
-    성공한 내보내기는 모두 개수를 실은 OTLP 자신의 <code>partialSuccess</code>
-    모양으로 답합니다. 컬렉터가 무언가를 버렸다고 보낸 쪽에 알리는 방식이 그것이고,
-    익스포터는 그 값을 읽습니다. 빈 본문을 돌려주면 보낸 쪽은 얻지 못한 성공을
-    성공으로 보고하게 됩니다.
+    성공한 OTLP 내보내기는 모두 OTLP 자신의 <code>partialSuccess</code> 모양으로
+    답합니다. 무언가가 거절되었으면 그 개수와 이유를 싣습니다. 컬렉터가 무언가를
+    버렸다고 보낸 쪽에 알리는 방식이 그것이고, 익스포터는 그 값을 읽습니다. 답은
+    내보내기가 도착한 인코딩으로 옵니다. protobuf에는 protobuf로, JSON에는
+    JSON으로 답합니다.
   </p>
 
   <h2>익스포터를 이쪽으로 향하게 하기</h2>
@@ -114,29 +204,64 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
     시그널 경로를 덧붙입니다. 경로까지 포함해 전체 URL을 주고 싶다면
     <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code>를 대신 쓰십시오. 둘째,
     OpenTelemetry에서 4317번 포트는 관례상 gRPC 포트이고 4318번이 HTTP
-    포트입니다. mcpd는 모든 것을 한 포트에서 내주기 때문에 4317에서 HTTP를
-    받습니다. 그래서 기본 포트를 그대로 둔 익스포터는 4318로 보내고, 아무것도
-    도착하지 않습니다. 포트를 명시하십시오.
+    포트입니다. mcpd는 모든 것을 한 포트에서 내주기 때문에 4317에서 둘 다
+    받습니다. <code>grpc</code>로 설정한 익스포터는 기본 포트에서 mcpd를 찾고,
+    기본 포트를 그대로 둔 HTTP 익스포터는 4318로 보내므로 포트를 명시하십시오.
   </p>
 
-  <h2>트레이스는 두 인코딩 모두</h2>
+  <h2>gRPC를 통한 OTLP</h2>
   <p>
-    <code>/v1/traces</code>는 <code>content-type</code> 헤더를 읽고 두 인코딩을
-    모두 받습니다. <code>protobuf</code>가 들어 있으면 OTLP/protobuf이고, 그렇지
-    않으면 OTLP/JSON입니다. protobuf가 OpenTelemetry의 기본값이므로, 손대지 않은
-    SDK를 mcpd로 향하게 하면 아무 설정 없이도 트레이스가 도착합니다.
-  </p>
-  <p>
-    <code>/v1/logs</code>와 <code>/v1/metrics</code>는 JSON만 받습니다. 거기로 온
-    protobuf 본문은 <code>body is not valid JSON</code>으로 거절됩니다. 세 시그널을
-    모두 보낸다면 프로토콜을 전역으로 한 번 정하십시오.
+    OTLP 컬렉터 서비스 셋이 같은 포트에서 제공됩니다.
+    <code>opentelemetry.proto.collector.trace.v1.TraceService</code>,
+    <code>logs.v1.LogsService</code>, <code>metrics.v1.MetricsService</code>입니다.
+    익스포터의 프로토콜을 <code>grpc</code>로 정하고 엔드포인트는 그대로 두십시오.
   </p>
 
-  <Command
+  <CodeSwitcher
     class="not-prose my-6"
-    title="모든 시그널을 json으로"
-    command="export OTEL_EXPORTER_OTLP_PROTOCOL=http/json"
+    title="grpc 익스포터"
+    samples={[{ lang: 'curl', label: '환경 변수', shiki: 'bash', code: grpcEnv }]}
   />
+
+  <p>
+    gRPC 호출은 짝이 되는 HTTP 문과 똑같은 길을 갑니다. 같은 키 검사, 계정 키에
+    대한 같은 프로젝트, 같은 상한, 샘플링, 가림 처리, 비용 산정, 그리고 다시 보낸
+    내보내기를 알아보는 방식도 같습니다. 키는 호출의 메타데이터에
+    <code>authorization: Bearer</code>로, 또는 <code>x-mcpd-key</code>로 넣습니다.
+    거절된 호출은 익스포터가 그에 따라 움직이는 gRPC 상태로 끝납니다. 키가 없거나
+    알 수 없으면 <code>UNAUTHENTICATED</code>, 수집 범위가 없는 키는
+    <code>PERMISSION_DENIED</code>, 디코딩되지 않는 메시지는
+    <code>INVALID_ARGUMENT</code>, 한계를 넘으면 <code>RESOURCE_EXHAUSTED</code>,
+    저장소가 쓰기를 받지 못하면 <code>UNAVAILABLE</code>이며, 익스포터는 이것을
+    다시 시도합니다. mcpd가 제공하지 않는 메서드는 <code>UNIMPLEMENTED</code>로
+    답합니다.
+  </p>
+  <p>
+    메시지는 gzip으로 압축될 수 있습니다(<code>grpc-encoding: gzip</code>). 리스너는
+    평문 HTTP/2를 씁니다. TLS 위에서 gRPC를 제공하려면 프록시에서 TLS를 종료하고
+    HTTP/2로 mcpd에 넘기십시오. gRPC는 HTTP/1.1 위에서 돌지 않으므로, 프록시는
+    데몬까지의 구간에서도 HTTP/2를 유지해야 합니다.
+  </p>
+  <p>
+    OpenTelemetry Collector는 자신의 OTLP 익스포터로 mcpd에 넘깁니다.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="컬렉터"
+    samples={[{ lang: 'curl', label: 'YAML', shiki: 'yaml', code: collectorYaml }]}
+  />
+
+  <h2>모든 시그널은 두 인코딩 모두</h2>
+  <p>
+    <code>/v1/traces</code>, <code>/v1/logs</code>, <code>/v1/metrics</code>는
+    <code>content-type</code> 헤더를 읽고 두 인코딩을 모두 받습니다.
+    <code>protobuf</code>가 들어 있으면 OTLP/protobuf이고, 그렇지 않으면
+    OTLP/JSON입니다. protobuf가 OpenTelemetry의 기본값이므로, 손대지 않은 SDK를
+    mcpd로 향하게 하면 세 시그널을 모두 보내고 아무 설정 없이도 도착합니다. 같은
+    내보내기는 어느 인코딩으로 오든 같은 레코드를 저장하며, 다시 보낸 것을
+    알아보는 id까지 같습니다.
+  </p>
 
   <p>
     <code>content-type</code>이 아예 오지 않으면 mcpd는
@@ -154,9 +279,11 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
   <p>
     한 요청에 한계 두 개가 걸립니다. 본문 한계는 32 MiB이고 도착한 것을 기준으로
     재므로, gzip이 여유를 만들어 줍니다. 배치 한계는 시그널 10,000개이며 모든 수집
-    문에서 디코딩한 뒤에 셉니다. <code>/v1/traces</code>의 스팬,
+    문에서 디코딩한 뒤에 셉니다. <code>/v1/traces</code>,
+    <code>/api/v2/spans</code>, <code>/api/traces</code>와 그 gRPC 서비스의 스팬,
     <code>/v1/logs</code>의 레코드, <code>/v1/metrics</code>의 데이터 포인트,
-    그리고 <code>/v1/ingest</code>의 요청에 들어 있는 전부입니다. 더 큰 배치는 두
+    그리고 <code>/v1/ingest</code>의 요청에 들어 있는 전부입니다. gzip 본문이나
+    메시지는 풀린 뒤에도 본문 한계를 적용받습니다. 더 큰 배치는 두
     숫자를 함께 짚으며 <code>413 payload_too_large</code>로 거절됩니다. 두 한계 다
     설정 항목입니다. <code>--max-body-bytes</code>와
     <code>--max-batch-signals</code>이며
@@ -164,10 +291,110 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
     적혀 있습니다.
   </p>
 
+  <h2>Zipkin</h2>
+  <p>
+    <code>POST /api/v2/spans</code>는 Zipkin의 v2 스팬 엔드포인트입니다. 스팬의
+    JSON 배열을 받거나, <code>content-type</code>에 <code>protobuf</code>가 들어
+    있으면 proto3 <code>ListOfSpans</code>를 받습니다. gzip 인코딩이든 아니든
+    받고, <code>202</code>로 답합니다. Zipkin 리포터나 OpenTelemetry SDK의 Zipkin
+    익스포터를 이쪽으로 향하게 하십시오.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="zipkin 익스포터"
+    samples={[{ lang: 'curl', label: '환경 변수', shiki: 'bash', code: zipkinEnv }]}
+  />
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="Zipkin JSON 원본"
+    samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: zipkinPost }]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Zipkin 필드</th>
+          <th>바뀌는 것</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>localEndpoint.serviceName</code></td><td>서비스, 리소스 <code>service.name</code></td></tr>
+        <tr><td><code>tags</code></td><td>스팬 속성. 그래서 <code>gen_ai.*</code>와 <code>llm.*</code> 태그는 OTLP에서처럼 읽힙니다</td></tr>
+        <tr><td><code>kind</code></td><td>소문자로 된 <code>span.kind</code> 속성</td></tr>
+        <tr><td><code>annotations</code></td><td>스팬 이벤트. 각각 그 값으로 이름이 붙습니다</td></tr>
+        <tr><td><code>remoteEndpoint</code></td><td><code>peer.service</code>, <code>network.peer.address</code>, <code>network.peer.port</code></td></tr>
+        <tr><td><code>error</code> 태그, 또는 <code>otel.status_code</code></td><td>상태. 태그의 값이 메시지가 됩니다</td></tr>
+        <tr><td><code>timestamp</code>, <code>duration</code></td><td>시작과 끝. duration이 없는 스팬은 끝나지 않은 것입니다</td></tr>
+        <tr><td><code>debug</code></td><td>샘플링 비트. 그래서 샘플러가 트레이스를 남깁니다</td></tr>
+        <tr><td><code>parentId</code></td><td>부모</td></tr>
+        <tr><td><code>shared</code></td><td>서버 쪽 절반. 클라이언트 쪽 절반 곁에 남습니다</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    64비트 트레이스 id는 앞에 0을 채워 128비트로 만듭니다. OpenTelemetry가 같은
+    트레이스에 주는 id가 그것입니다. 공유된 서버 스팬은 클라이언트의 스팬 id를
+    다시 씁니다. mcpd는 스팬을 id로 구분하므로, 서버 쪽 절반은 공유된 id에서
+    파생한 id로 저장되고 그 id를 부모로 삼으며, 두 절반이 모두 남습니다. 다시 보낸
+    스팬은 같은 행에 들어갑니다.
+  </p>
+
+  <h2>Jaeger</h2>
+  <p>
+    Jaeger 컬렉터 문 두 개가 제공됩니다. Thrift 바이너리 프로토콜
+    (<code>application/x-thrift</code>)로 된 <code>jaeger.Batch</code> 하나를 받고
+    <code>202</code>로 답하는 <code>POST /api/traces</code>, 그리고 gRPC 서비스
+    <code>jaeger.api_v2.CollectorService/PostSpans</code>입니다. 둘 다 스팬을 같은
+    방식으로 매핑합니다.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="jaeger"
+    samples={[{ lang: 'curl', label: '환경 변수', shiki: 'bash', code: jaegerEnv }]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Jaeger 필드</th>
+          <th>바뀌는 것</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>프로세스 <code>serviceName</code></td><td>서비스, 리소스 <code>service.name</code></td></tr>
+        <tr><td>프로세스 태그</td><td>리소스 속성</td></tr>
+        <tr><td>스팬 태그</td><td>스팬 속성. Jaeger가 정한 타입 그대로입니다</td></tr>
+        <tr><td>로그</td><td>스팬 이벤트. <code>event</code> 필드로 이름이 붙습니다</td></tr>
+        <tr><td><code>parentSpanId</code>, 또는 같은 트레이스 안의 첫 <code>CHILD_OF</code></td><td>부모</td></tr>
+        <tr><td>그 밖의 모든 참조</td><td><code>child_of</code> 또는 <code>follows_from</code> 종류의 스팬 링크</td></tr>
+        <tr><td><code>error</code> 태그, 또는 <code>otel.status_code</code></td><td>상태</td></tr>
+        <tr><td>sampled 또는 debug 플래그</td><td>샘플링 비트</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>스팬 링크</h2>
+  <p>
+    링크는 한 스팬이 이 트레이스나 다른 트레이스의 다른 스팬과, 그 자식이 아니면서
+    관련되어 있다는 것을 말합니다. mcpd는 모든 문에서 링크를 남깁니다. 어느
+    인코딩이든 어느 전송이든 OTLP 스팬의 <code>links</code>, 네이티브 스팬의
+    <code>links</code>, 그리고 Jaeger 스팬의 참조 중 부모가 아닌 것입니다. 링크의
+    종류는 <code>mcpd.link.kind</code> 속성에서, 또는 Jaeger 참조가 바뀌어 되는
+    <code>opentracing.ref_type</code>에서 옵니다. 모든 링크는 스팬과 함께 저장되고
+    트레이스와 함께 돌아옵니다.
+  </p>
+
   <h2>도착한 뒤 저장되기까지</h2>
   <p>
-    OTLP 스팬과 네이티브 스팬은 같은 길을 갑니다. 파이프라인을 공유하는 이유가
-    그것입니다. 아래의 순서가 두 문 사이에서 어긋날 수 없습니다.
+    OTLP 스팬, Zipkin이나 Jaeger 스팬, 네이티브 스팬은 같은 길을 갑니다.
+    파이프라인을 공유하는 이유가 그것입니다. 아래의 순서가 문 사이에서 어긋날 수
+    없습니다.
   </p>
 
   <PipelineDiagram class="not-prose my-8" />
@@ -500,7 +727,8 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
     남깁니다.
     <a href={urlFor('/docs/configuration', locale)} class="link">설정</a>으로 키를
     두고, <code>Authorization: Bearer</code>로 보내십시오. 위의
-    <code>OTEL_EXPORTER_OTLP_HEADERS</code>가 하는 일이 그것입니다.
+    <code>OTEL_EXPORTER_OTLP_HEADERS</code>가 하는 일이 그것입니다. 이 페이지의
+    모든 문은 gRPC 메타데이터를 포함해 같은 방식으로 키를 읽습니다.
   </p>
 
   <Command
