@@ -8,14 +8,15 @@ import { localeOf, urlFor } from '@/lib/i18n'
 const code = localeOf(Astro.url.pathname)
 const linkTo = (route: string) => urlFor(route, code)
 
-const exporterEnv = `# The base URL. Your exporter appends /v1/traces itself.
+const exporterEnv = `# 基础 URL。/v1/traces 由导出器自己接上。
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+# http/protobuf、http/json 和 grpc 都能用这一个端口。
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 
-# Optional. Send gzip if your payloads are large.
+# 可选。载荷大时用 gzip 发。
 export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
 
-# Only when mcpd runs with --ingest-key.
+# 仅当 mcpd 带 --ingest-key 运行时需要。
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer YOUR_INGEST_KEY"`
 
 const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
@@ -46,18 +47,76 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
 }'
 
 # {"partialSuccess":{"rejectedSpans":0,"errorMessage":""}}`
+
+const grpcEnv = `# 同一个端口上的 gRPC。不写路径：服务名由导出器自己给出。
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
+
+# 仅当 mcpd 带 --ingest-key 运行时需要。gRPC 元数据的键是小写的。
+export OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer YOUR_INGEST_KEY"`
+
+const collectorYaml = `# 一个通过 gRPC 把所有东西转发给 mcpd 的 OpenTelemetry Collector。
+receivers:
+  otlp:
+    protocols: { grpc: {}, http: {} }
+
+exporters:
+  otlp:
+    endpoint: mcpd.internal:4317
+    compression: gzip
+    tls:
+      insecure: true # mcpd 提供明文服务；在它前面终止 TLS
+    headers:
+      authorization: Bearer \${env:MCPD_INGEST_KEY}
+
+service:
+  pipelines:
+    traces: { receivers: [otlp], exporters: [otlp] }
+    logs: { receivers: [otlp], exporters: [otlp] }
+    metrics: { receivers: [otlp], exporters: [otlp] }`
+
+const zipkinEnv = `# 一个按 Zipkin 格式导出的 OpenTelemetry SDK。
+export OTEL_TRACES_EXPORTER=zipkin
+export OTEL_EXPORTER_ZIPKIN_ENDPOINT=http://localhost:4317/api/v2/spans
+
+# Zipkin reporter 也用同一个 URL 作为端点，例如
+#   URLConnectionSender.create("http://localhost:4317/api/v2/spans")`
+
+const zipkinPost = `curl -X POST http://localhost:4317/api/v2/spans \\
+  -H 'content-type: application/json' \\
+  -d '[{
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "id": "00f067aa0ba902b7",
+  "kind": "CLIENT",
+  "name": "chat gpt-4o",
+  "timestamp": 1700000000000000,
+  "duration": 1500000,
+  "localEndpoint": { "serviceName": "checkout-agent" },
+  "tags": { "gen_ai.system": "openai", "gen_ai.request.model": "gpt-4o" }
+}]'
+
+# HTTP 202 {"accepted":1,"rejected":0,"duplicate":0}`
+
+const jaegerEnv = `# 一个通过 HTTP 发送 Thrift 的 Jaeger 客户端库。
+export JAEGER_ENDPOINT=http://localhost:4317/api/traces
+
+# 任何会说 Jaeger gRPC collector API 的东西，比如 jaeger-agent。
+jaeger-agent --reporter.grpc.host-port=localhost:4317`
 ---
 
 <Doc
   title="OpenTelemetry"
-  description="mcpd 在 /v1/traces、/v1/logs 和 /v1/metrics 上接受 OTLP/JSON，并同时读 OpenTelemetry 的 gen_ai.* 与 OpenInference 的 llm.* 语义约定。不需要写 mcpd 专有的代码。"
-  lede="如果你的智能体已经在发 OpenTelemetry，那么接上 mcpd 只是换一个端点。这一页讲完整条 OTLP 路径：三个端点、编码方式，以及 mcpd 读的每一个属性。"
+  description="mcpd 在一个端口上接受走 HTTP 和 gRPC 的 OTLP、Zipkin v2 和 Jaeger，并同时读 OpenTelemetry 的 gen_ai.* 与 OpenInference 的 llm.* 语义约定。不需要写 mcpd 专有的代码。"
+  lede="如果你的智能体已经在发 OpenTelemetry、Zipkin 或 Jaeger，那么接上 mcpd 只是换一个端点。这一页讲完整条路径：各个端点、各种编码，以及 mcpd 读的每一个属性。"
   og="docs"
 >
-  <h2>三个端点</h2>
+  <h2>端点</h2>
   <p>
-    mcpd 把 OTLP 的 HTTP 端点放在和它的查询 API、它的界面同一个端口上。前面不用
-    再跑一个 collector，不用第二个容器，也没有单独的接收端口。
+    mcpd 把走 HTTP 和走 gRPC 的 OTLP、Zipkin 和 Jaeger 都放在和它的查询 API、
+    它的界面同一个端口上。前面不用再跑一个 collector，不用第二个容器，也没有
+    单独的接收端口。这个端口同时接受 HTTP/1.1 和明文 HTTP/2，而一次 gRPC 调用
+    就是一个 HTTP/2 请求，所以一个地址就能服务下面的每一种协议。
   </p>
 
   <div class="scroll-x">
@@ -85,14 +144,45 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
           <td><code>ExportMetricsServiceRequest</code></td>
           <td><code>partialSuccess.rejectedDataPoints</code></td>
         </tr>
+        <tr>
+          <td>gRPC <code>TraceService/Export</code></td>
+          <td><code>ExportTraceServiceRequest</code></td>
+          <td><code>partial_success.rejected_spans</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>LogsService/Export</code></td>
+          <td><code>ExportLogsServiceRequest</code></td>
+          <td><code>partial_success.rejected_log_records</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>MetricsService/Export</code></td>
+          <td><code>ExportMetricsServiceRequest</code></td>
+          <td><code>partial_success.rejected_data_points</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /api/v2/spans</code></td>
+          <td>Zipkin v2 span，JSON 或 proto3</td>
+          <td><code>202</code>，带 <code>accepted</code> 和 <code>rejected</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /api/traces</code></td>
+          <td>一个 Thrift 二进制格式的 Jaeger 批次</td>
+          <td><code>202</code>，带 <code>accepted</code> 和 <code>rejected</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>jaeger.api_v2.CollectorService/PostSpans</code></td>
+          <td><code>PostSpansRequest</code></td>
+          <td><code>PostSpansResponse</code></td>
+        </tr>
       </tbody>
     </table>
   </div>
 
   <p>
-    每一次成功的导出，答复都用 OTLP 自己的 <code>partialSuccess</code> 形状，
-    里面带一个计数。collector 就是这样告诉发送方它丢掉了东西的，而导出器会读它。
-    返回一个空的响应体，会让发送方报出一次它其实没有得到的成功。
+    每一次成功的 OTLP 导出，答复都用 OTLP 自己的 <code>partialSuccess</code>
+    形状。有东西被拒时，它带上计数和原因。collector 就是这样告诉发送方它丢掉了
+    东西的，而导出器会读它。答复用导出到来时的编码：protobuf 来就回 protobuf，
+    JSON 来就回 JSON。
   </p>
 
   <h2>把一个导出器指过来</h2>
@@ -111,29 +201,60 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
     <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> 是一个基础 URL，导出器会自己把信号
     的路径接在后面。如果你想给出包含路径的完整 URL，那就改设
     <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code>。第二，在 OpenTelemetry 的
-    惯例里 4317 是 gRPC 端口，4318 才是 HTTP 端口。mcpd 在 4317 上服务 HTTP，
-    因为它把所有东西都放在一个端口上，所以一个还停在默认端口上的导出器会发往
-    4318，而你什么也收不到。把端口明确写出来。
+    惯例里 4317 是 gRPC 端口，4318 才是 HTTP 端口。mcpd 在 4317 上两种都服务，
+    因为它把所有东西都放在一个端口上。设成 <code>grpc</code> 的导出器在默认端口
+    上就能找到它；一个还停在默认端口上的 HTTP 导出器会发往 4318，所以把端口写出来。
   </p>
 
-  <h2>trace 的两种编码都收</h2>
+  <h2>走 gRPC 的 OTLP</h2>
   <p>
-    <code>/v1/traces</code> 会读 <code>content-type</code> 头，两种编码都接受：
-    头里含 <code>protobuf</code> 时按 OTLP/protobuf 读，否则按 OTLP/JSON 读。
-    protobuf 是 OpenTelemetry 的默认值，所以一个没改过的 SDK 指向 mcpd 时，
-    发出的 trace 不用任何配置就能落下来。
-  </p>
-  <p>
-    <code>/v1/logs</code> 和 <code>/v1/metrics</code> 只接受 JSON。在这两个地方
-    发一个 protobuf 的请求体，会被以 <code>body is not valid JSON</code> 拒掉。
-    如果三种信号你都要发，那就一次性把协议全局设好：
+    三个 OTLP collector 服务都在同一个端口上：
+    <code>opentelemetry.proto.collector.trace.v1.TraceService</code>、
+    <code>logs.v1.LogsService</code> 和 <code>metrics.v1.MetricsService</code>。
+    把导出器的协议设成 <code>grpc</code>，端点保持不变：
   </p>
 
-  <Command
+  <CodeSwitcher
     class="not-prose my-6"
-    title="所有信号都用 json"
-    command="export OTEL_EXPORTER_OTLP_PROTOCOL=http/json"
+    title="grpc 导出器"
+    samples={[{ lang: 'curl', label: '环境变量', shiki: 'bash', code: grpcEnv }]}
   />
+
+  <p>
+    一次 gRPC 调用走的正是对应 HTTP 入口的那条路：同样的密钥检查，账户密钥对应
+    同样的项目，同样的上限、采样、脱敏和成本核算，也同样能认出一次重发的导出。
+    密钥放在调用的元数据里，写成 <code>authorization: Bearer</code>，或者
+    <code>x-mcpd-key</code>。被拒的调用以导出器会据此行动的 gRPC 状态结束：
+    密钥缺失或未知是 <code>UNAUTHENTICATED</code>，密钥没有摄取权限是
+    <code>PERMISSION_DENIED</code>，消息解码不了是
+    <code>INVALID_ARGUMENT</code>，超过限制是 <code>RESOURCE_EXHAUSTED</code>，
+    存储接不下这次写入是 <code>UNAVAILABLE</code>，导出器会重试它。mcpd 不服务的
+    方法答复 <code>UNIMPLEMENTED</code>。
+  </p>
+  <p>
+    消息可以用 gzip 压缩（<code>grpc-encoding: gzip</code>）。监听器说的是明文
+    HTTP/2。要通过 TLS 提供 gRPC，就在一个代理上终止 TLS，再把 HTTP/2 转发给
+    mcpd；代理到守护进程的这一跳必须保持 HTTP/2，因为 gRPC 不在 HTTP/1.1 上跑。
+  </p>
+  <p>
+    OpenTelemetry Collector 用它的 OTLP 导出器转发给 mcpd：
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="collector"
+    samples={[{ lang: 'curl', label: 'YAML', shiki: 'yaml', code: collectorYaml }]}
+  />
+
+  <h2>每种信号的两种编码都收</h2>
+  <p>
+    <code>/v1/traces</code>、<code>/v1/logs</code> 和 <code>/v1/metrics</code>
+    会读 <code>content-type</code> 头，两种编码都接受：头里含
+    <code>protobuf</code> 时按 OTLP/protobuf 读，否则按 OTLP/JSON 读。protobuf
+    是 OpenTelemetry 的默认值，所以一个没改过的 SDK 指向 mcpd 时，三种信号都能
+    发出，不用任何配置就能落下来。同一次导出用哪种编码，存下的记录都一样，连
+    用来认出重发的 id 也一样。
+  </p>
 
   <p>
     完全没有发 <code>content-type</code> 时，mcpd 按
@@ -151,18 +272,115 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
   <p>
     一个请求上有两条限制。请求体的上限是 32 MiB，按到达时的字节数量，所以
     gzip 能给你换出余地。批次的上限是 10,000 个信号，在每一道摄取入口后按解码后
-    的数量算：<code>/v1/traces</code> 上是 span，<code>/v1/logs</code> 上是记录，
-    <code>/v1/metrics</code> 上是数据点，<code>/v1/ingest</code> 上是请求里的
-    全部东西。更大的批次会被 <code>413 payload_too_large</code> 拒掉，并把两个
+    的数量算：<code>/v1/traces</code>、<code>/api/v2/spans</code>、
+    <code>/api/traces</code> 以及它们的 gRPC 服务上是 span，<code>/v1/logs</code>
+    上是记录，<code>/v1/metrics</code> 上是数据点，<code>/v1/ingest</code> 上是
+    请求里的全部东西。gzip 的请求体或消息在解压之后也要守住请求体的上限。更大的批次会被 <code>413 payload_too_large</code> 拒掉，并把两个
     数字都说出来。两条限制都是可设置的：<code>--max-body-bytes</code> 和
     <code>--max-batch-signals</code>，见
     <a href={linkTo('/docs/configuration')} class="link">配置</a>。
   </p>
 
+  <h2>Zipkin</h2>
+  <p>
+    <code>POST /api/v2/spans</code> 是 Zipkin 的 v2 span 端点。它接受一个 span 的
+    JSON 数组，或者在 <code>content-type</code> 含 <code>protobuf</code> 时接受一个
+    proto3 <code>ListOfSpans</code>，gzip 编码与否都行，答复 <code>202</code>。
+    把一个 Zipkin reporter 或者 OpenTelemetry SDK 的 Zipkin 导出器指过来：
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="zipkin 导出器"
+    samples={[{ lang: 'curl', label: '环境变量', shiki: 'bash', code: zipkinEnv }]}
+  />
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="原始的 Zipkin JSON"
+    samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: zipkinPost }]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Zipkin 字段</th>
+          <th>变成</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>localEndpoint.serviceName</code></td><td>服务，即资源上的 <code>service.name</code></td></tr>
+        <tr><td><code>tags</code></td><td>span 属性，所以 <code>gen_ai.*</code> 和 <code>llm.*</code> 标签和在 OTLP 上一样被读</td></tr>
+        <tr><td><code>kind</code></td><td><code>span.kind</code> 属性，小写</td></tr>
+        <tr><td><code>annotations</code></td><td>span 事件，每个以它的值命名</td></tr>
+        <tr><td><code>remoteEndpoint</code></td><td><code>peer.service</code>、<code>network.peer.address</code>、<code>network.peer.port</code></td></tr>
+        <tr><td><code>error</code> 标签，或 <code>otel.status_code</code></td><td>状态，标签的值作为消息</td></tr>
+        <tr><td><code>timestamp</code>、<code>duration</code></td><td>开始和结束；没有 duration 的 span 还没有结束</td></tr>
+        <tr><td><code>debug</code></td><td>采样位，所以采样器会留下这条 trace</td></tr>
+        <tr><td><code>parentId</code></td><td>父 span</td></tr>
+        <tr><td><code>shared</code></td><td>服务端那一半，和它的客户端那一半放在一起保留</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    64 位的 trace id 会用前导零补到 128 位，这正是 OpenTelemetry 给同一条 trace
+    的 id。一个 shared 的服务端 span 复用它客户端的 span id；mcpd 按 id 给 span
+    定键，所以服务端那一半存在一个由共享 id 派生出来的 id 下，并以共享的那个为
+    父 span，两半都会保留。一个重发的 span 落在同一行上。
+  </p>
+
+  <h2>Jaeger</h2>
+  <p>
+    服务两道 Jaeger collector 入口：<code>POST /api/traces</code>，接受一个用
+    Thrift 二进制协议（<code>application/x-thrift</code>）编码的
+    <code>jaeger.Batch</code>，答复 <code>202</code>；以及 gRPC 服务
+    <code>jaeger.api_v2.CollectorService/PostSpans</code>。两者映射 span 的方式相同。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="jaeger"
+    samples={[{ lang: 'curl', label: '环境变量', shiki: 'bash', code: jaegerEnv }]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Jaeger 字段</th>
+          <th>变成</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>进程的 <code>serviceName</code></td><td>服务，即资源上的 <code>service.name</code></td></tr>
+        <tr><td>进程标签</td><td>资源属性</td></tr>
+        <tr><td>span 标签</td><td>span 属性，类型照 Jaeger 给的类型</td></tr>
+        <tr><td>日志</td><td>span 事件，以 <code>event</code> 字段命名</td></tr>
+        <tr><td><code>parentSpanId</code>，或同一条 trace 里第一个 <code>CHILD_OF</code></td><td>父 span</td></tr>
+        <tr><td>其他每一个引用</td><td>一个 span link，类型为 <code>child_of</code> 或 <code>follows_from</code></td></tr>
+        <tr><td><code>error</code> 标签，或 <code>otel.status_code</code></td><td>状态</td></tr>
+        <tr><td>sampled 或 debug 标志</td><td>采样位</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Span link</h2>
+  <p>
+    一个 link 表示一个 span 和另一个 span 有关系，这个 span 可以在本条 trace 里，
+    也可以在另一条里，但它不是后者的子 span。mcpd 从每一道入口保留 link：OTLP
+    span 的 <code>links</code>，无论哪种编码、哪种传输；原生 span 的
+    <code>links</code>；以及 Jaeger span 里不是父 span 的那些引用。link 的类型
+    取自它的 <code>mcpd.link.kind</code> 属性，或者取自
+    <code>opentracing.ref_type</code>，Jaeger 的引用就会变成这个。每一个 link 都和
+    span 一起存下，并随 trace 一起返回。
+  </p>
+
   <h2>从到达到存下之间发生了什么</h2>
   <p>
-    一个 OTLP span 和一个原生 span 走同一条路。这正是共用这条流水线的意义：
-    下面这个顺序不可能在两道门之间发生偏移。
+    一个 OTLP span、一个 Zipkin 或 Jaeger span 和一个原生 span 走同一条路。这正是
+    共用这条流水线的意义：下面这个顺序不可能在各道门之间发生偏移。
   </p>
 
   <PipelineDiagram class="not-prose my-8" />
@@ -481,7 +699,8 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
     非回环地址、而这两个里有任何一个还开着时，它会在启动时打一条警告。用
     <a href={linkTo('/docs/configuration')} class="link">配置</a>把它们设上，然后
     把密钥作为 <code>Authorization: Bearer</code> 发过来，上面的
-    <code>OTEL_EXPORTER_OTLP_HEADERS</code> 做的就是这件事。
+    <code>OTEL_EXPORTER_OTLP_HEADERS</code> 做的就是这件事。这一页上的每一道入口都
+    以同样的方式读密钥，gRPC 元数据也一样。
   </p>
 
   <Command
