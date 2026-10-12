@@ -135,6 +135,56 @@ volumes:
           <td>the <code>--data</code> path with <code>.accounts</code> before its extension</td>
         </tr>
         <tr>
+          <td><code>--accounts</code></td>
+          <td><code>MCPD_ACCOUNTS</code></td>
+          <td>off: accounts only with <code>--signup</code></td>
+        </tr>
+        <tr>
+          <td><code>--public-url</code></td>
+          <td><code>MCPD_PUBLIC_URL</code></td>
+          <td><code>http://localhost:4317</code></td>
+        </tr>
+        <tr>
+          <td><code>--smtp-host</code></td>
+          <td><code>MCPD_SMTP_HOST</code></td>
+          <td>none: links go to the log</td>
+        </tr>
+        <tr>
+          <td><code>--smtp-port</code></td>
+          <td><code>MCPD_SMTP_PORT</code></td>
+          <td>587, 465 or 25, by <code>--smtp-tls</code></td>
+        </tr>
+        <tr>
+          <td><code>--smtp-user</code></td>
+          <td><code>MCPD_SMTP_USER</code></td>
+          <td>none</td>
+        </tr>
+        <tr>
+          <td><code>--smtp-password</code></td>
+          <td><code>MCPD_SMTP_PASSWORD</code></td>
+          <td>none</td>
+        </tr>
+        <tr>
+          <td><code>--smtp-from</code></td>
+          <td><code>MCPD_SMTP_FROM</code></td>
+          <td>none; required with <code>--smtp-host</code></td>
+        </tr>
+        <tr>
+          <td><code>--smtp-tls</code></td>
+          <td><code>MCPD_SMTP_TLS</code></td>
+          <td><code>starttls</code></td>
+        </tr>
+        <tr>
+          <td><code>--org-quota-per-minute</code></td>
+          <td><code>MCPD_ORG_QUOTA_PER_MINUTE</code></td>
+          <td>60000 with <code>--signup</code>, else none</td>
+        </tr>
+        <tr>
+          <td><code>--org-retention-days</code></td>
+          <td><code>MCPD_ORG_RETENTION_DAYS</code></td>
+          <td><code>--retention-days</code></td>
+        </tr>
+        <tr>
           <td><code>--sample</code></td>
           <td><code>MCPD_SAMPLE</code></td>
           <td>unset: keep every trace</td>
@@ -1173,11 +1223,15 @@ volumes:
   <p>
     <code>--signup</code> lets anyone create an account, from the interface or
     with <code>POST /v1/api/account/signup</code>. This is how the hosted mcpd
-    runs. Each account gets a new project with a random name, and makes its own
-    API keys for it, one scope per key. A session from logging in can do
-    everything in that project; a key can do what its scope says. Neither
-    reaches any other project, and a span an account key sends is stored in the
-    account's project whatever project the span names.
+    runs. Sign-up answers the same way whether or not the address is in use and
+    mails a link; opening it confirms the address and logs in. Each account gets
+    an organisation of its own with a project with a random name, and makes its
+    own API keys, one scope per key. A session can do what the account's role
+    allows on each project of its organisations; a key can do what its scope
+    says on its one project. Neither reaches a project of an organisation the
+    account does not belong to, and a span an account key sends is stored in the
+    key's project whatever project the span names. See
+    <a href="/docs/accounts">accounts and organisations</a>.
   </p>
   <p>
     Turning it on changes one rule for everybody: a request with no key is
@@ -1189,8 +1243,7 @@ volumes:
     Accounts live in their own SQLite file, set with
     <code>--accounts-data</code>, whatever stores the signals. The file holds
     argon2id password hashes and SHA-256 digests of tokens and keys, never the
-    secrets. Back it up with the rest of the volume. There is no email
-    verification.
+    secrets. Back it up with the rest of the volume.
   </p>
   <p>
     Sign-up is limited to 5 per hour and log-in to 20 attempts per 15 minutes
@@ -1219,6 +1272,75 @@ volumes:
     interface is served from another origin than the daemon.
   </p>
 
+
+  <h2 id="accounts">Accounts without sign-up</h2>
+  <p>
+    <code>--accounts</code> turns on the same accounts, organisations, roles,
+    single sign-on and SCIM without public sign-up, for a deployment on your
+    own cluster. People arrive by invitation, by single sign-on or by SCIM, and
+    configured keys keep working beside them. As with <code>--signup</code>, a
+    request with no credential is refused.
+  </p>
+  <p>
+    Mail goes through <code>--smtp-host</code>, with <code>--smtp-from</code>,
+    <code>--smtp-port</code>, <code>--smtp-user</code>,
+    <code>--smtp-password</code> and <code>--smtp-tls</code>. With no SMTP
+    server the links are written to the log at info level, except with
+    <code>--signup</code> on a public address, where sign-up, password reset,
+    address changes and invitations answer 503 and the daemon warns at start.
+    Links and the single sign-on redirect start at <code>--public-url</code>.
+  </p>
+  <p>
+    <code>--org-quota-per-minute</code> is the signals-per-minute ceiling an
+    organisation shares across its projects, and the most it may set for
+    itself. <code>--org-retention-days</code> is how long its projects keep
+    data, and the longest it may choose.
+  </p>
+  <p>
+    The <code>accounts</code> block of the config file holds
+    <code>allow_org_creation</code>, <code>allow_private_issuers</code> and
+    <code>orgs</code>. Each entry of <code>orgs</code> declares an organisation
+    by <code>slug</code>, with a <code>name</code>, its <code>owners</code> by
+    email, existing <code>projects</code> it owns,
+    <code>quota_per_minute</code>, <code>retention_days</code>,
+    <code>group_roles</code>, <code>scim_token_env</code> and
+    <code>sso</code>. The <code>sso</code> block takes <code>provider</code>
+    (<code>oidc</code> or <code>github</code>), <code>issuer</code>,
+    <code>client_id</code>, <code>client_secret_env</code>,
+    <code>domains</code>, <code>enforce</code>, <code>default_role</code> and
+    <code>groups_claim</code>. Secrets are read from the environment variables
+    the file names, never from the file.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="single sign-on and roles on your own cluster"
+    command={`mcpd serve --accounts --config-file mcpd.json \\
+  --public-url https://mcpd.example.com \\
+  --smtp-host smtp.example.com --smtp-from no-reply@example.com`}
+  />
+
+  <pre><code class="language-json">{`{
+  "accounts": {
+    "orgs": [{
+      "slug": "acme",
+      "name": "Acme",
+      "owners": ["ana@acme.com"],
+      "projects": ["default"],
+      "sso": {
+        "issuer": "https://login.microsoftonline.com/TENANT/v2.0",
+        "client_id": "CLIENT_ID",
+        "client_secret_env": "MCPD_OIDC_CLIENT_SECRET",
+        "domains": ["acme.com"],
+        "enforce": true,
+        "default_role": "member",
+        "groups_claim": "groups"
+      },
+      "group_roles": { "mcpd-admins": "admin", "mcpd-viewers": "viewer" },
+      "scim_token_env": "MCPD_SCIM_TOKEN"
+    }]
+  }
+}`}</code></pre>
 
   <h2>One project cannot spend the whole daemon</h2>
   <p>

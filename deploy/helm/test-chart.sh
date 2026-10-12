@@ -227,8 +227,20 @@ has 'name: MCPD_CLIENT_IP_HEADER'
 has 'name: MCPD_TRUSTED_PROXY_CIDRS'
 lacks 'name: MCPD_TRUSTED_IDENTITY_HEADER'
 
+render "accounts with mail and single sign-on" "${KEYS[@]}" \
+  --set accounts.enabled=true --set accounts.publicUrl=https://mcpd.example.com \
+  --set smtp.host=smtp.example.com --set smtp.from=no-reply@example.com \
+  --set smtp.password=s3cret --set oidc.clientSecret=abc
+has 'name: MCPD_ACCOUNTS'
+has 'name: MCPD_SMTP_HOST'
+has 'key: smtp-password'
+has 'name: OIDC_CLIENT_SECRET'
+lacks 'name: MCPD_SIGNUP'
+
 echo
 echo "refuses"
+
+refuse "smtp with no from address" "smtp.from" "${KEYS[@]}" --set smtp.host=smtp.example.com
 
 refuse "no keys" "keys.ingest is required"
 refuse "no read key" "keys.read is required" --set keys.ingest=a
