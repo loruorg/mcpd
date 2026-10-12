@@ -248,7 +248,7 @@ async fn serve(
 }
 
 /// `opentelemetry.proto.collector.trace.v1.TraceService/Export`
-pub async fn otlp_traces(
+pub async fn export_traces(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Body,
@@ -258,7 +258,7 @@ pub async fn otlp_traces(
 }
 
 /// `opentelemetry.proto.collector.logs.v1.LogsService/Export`
-pub async fn otlp_logs(
+pub async fn export_logs(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Body,
@@ -268,7 +268,7 @@ pub async fn otlp_logs(
 }
 
 /// `opentelemetry.proto.collector.metrics.v1.MetricsService/Export`
-pub async fn otlp_metrics(
+pub async fn export_metrics(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Body,
@@ -278,7 +278,7 @@ pub async fn otlp_metrics(
 }
 
 /// `jaeger.api_v2.CollectorService/PostSpans`
-pub async fn jaeger_post_spans(
+pub async fn post_spans(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Body,

@@ -126,14 +126,14 @@ fn ingest_router() -> Router<Arc<AppState>> {
         .route("/api/traces", post(ingest::jaeger_traces))
         .route(
             "/opentelemetry.proto.collector.trace.v1.TraceService/Export",
-            post(grpc::otlp_traces),
+            post(grpc::export_traces),
         )
-        .route("/opentelemetry.proto.collector.logs.v1.LogsService/Export", post(grpc::otlp_logs))
+        .route("/opentelemetry.proto.collector.logs.v1.LogsService/Export", post(grpc::export_logs))
         .route(
             "/opentelemetry.proto.collector.metrics.v1.MetricsService/Export",
-            post(grpc::otlp_metrics),
+            post(grpc::export_metrics),
         )
-        .route("/jaeger.api_v2.CollectorService/PostSpans", post(grpc::jaeger_post_spans))
+        .route("/jaeger.api_v2.CollectorService/PostSpans", post(grpc::post_spans))
 }
 
 /// The query API under `/v1/api`, with its origin policy.

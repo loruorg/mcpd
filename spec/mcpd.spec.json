@@ -5490,7 +5490,7 @@
       "method": "POST",
       "path": "/v1/traces",
       "summary": "Receive OpenTelemetry traces",
-      "doc": "The standard OTLP/HTTP trace endpoint. Accepts protobuf (`application/x-protobuf`) and JSON (`application/json`), gzip-encoded or uncompressed. Point any OpenTelemetry SDK here and mcpd will record its spans, mapping GenAI and OpenInference semantic conventions onto mcpd's own model. This is the endpoint that makes mcpd framework-agnostic: nothing about it requires an mcpd SDK.",
+      "doc": "The standard OTLP/HTTP trace endpoint. Accepts protobuf (`application/x-protobuf`) and JSON (`application/json`), gzip-encoded or uncompressed, and answers in the encoding it was sent. Point any OpenTelemetry SDK here and mcpd will record its spans, mapping GenAI and OpenInference semantic conventions onto mcpd's own model. Span links and span events are kept. This is the endpoint that makes mcpd framework-agnostic: nothing about it requires an mcpd SDK. The same port also serves OTLP over gRPC.",
       "request": {
         "type": "otlp.ExportTraceServiceRequest"
       },
@@ -5505,7 +5505,7 @@
       "method": "POST",
       "path": "/v1/logs",
       "summary": "Receive OpenTelemetry logs",
-      "doc": "The standard OTLP/HTTP log endpoint. Records correlate to spans automatically through their trace and span ids.",
+      "doc": "The standard OTLP/HTTP log endpoint. Accepts protobuf (`application/x-protobuf`) and JSON (`application/json`), gzip-encoded or uncompressed, and answers in the encoding it was sent. Records correlate to spans automatically through their trace and span ids, and a resent export is recognised and stored once.",
       "request": {
         "type": "otlp.ExportLogsServiceRequest"
       },
@@ -5520,7 +5520,7 @@
       "method": "POST",
       "path": "/v1/metrics",
       "summary": "Receive OpenTelemetry metrics",
-      "doc": "The standard OTLP/HTTP metric endpoint, including exemplars, which mcpd turns into links back to the exact span that produced a data point.",
+      "doc": "The standard OTLP/HTTP metric endpoint. Accepts protobuf (`application/x-protobuf`) and JSON (`application/json`), gzip-encoded or uncompressed, and answers in the encoding it was sent. Exemplars are kept, and mcpd turns them into links back to the exact span that produced a data point. A resent export is recognised and stored once.",
       "request": {
         "type": "otlp.ExportMetricsServiceRequest"
       },
@@ -5541,6 +5541,98 @@
       },
       "response": {
         "type": "IngestResult"
+      },
+      "auth": "ingest"
+    },
+    {
+      "id": "ingest_otlp_grpc_traces",
+      "tag": "Ingest",
+      "method": "POST",
+      "path": "/opentelemetry.proto.collector.trace.v1.TraceService/Export",
+      "summary": "Receive OpenTelemetry traces over gRPC",
+      "doc": "The OTLP/gRPC trace service, on the same port as everything else. The listener takes cleartext HTTP/2 beside HTTP/1.1, so an exporter set to `grpc` needs only this daemon's address. Send the key as `authorization: Bearer <key>` metadata. Messages may be gzip-compressed. Every span takes the same road as one sent to `POST /v1/traces`.",
+      "request": {
+        "type": "otlp.ExportTraceServiceRequest"
+      },
+      "response": {
+        "type": "otlp.ExportTraceServiceResponse"
+      },
+      "auth": "ingest"
+    },
+    {
+      "id": "ingest_otlp_grpc_logs",
+      "tag": "Ingest",
+      "method": "POST",
+      "path": "/opentelemetry.proto.collector.logs.v1.LogsService/Export",
+      "summary": "Receive OpenTelemetry logs over gRPC",
+      "doc": "The OTLP/gRPC logs service, on the same port as everything else. Send the key as `authorization: Bearer <key>` metadata. Messages may be gzip-compressed. Every record takes the same road as one sent to `POST /v1/logs`.",
+      "request": {
+        "type": "otlp.ExportLogsServiceRequest"
+      },
+      "response": {
+        "type": "otlp.ExportLogsServiceResponse"
+      },
+      "auth": "ingest"
+    },
+    {
+      "id": "ingest_otlp_grpc_metrics",
+      "tag": "Ingest",
+      "method": "POST",
+      "path": "/opentelemetry.proto.collector.metrics.v1.MetricsService/Export",
+      "summary": "Receive OpenTelemetry metrics over gRPC",
+      "doc": "The OTLP/gRPC metrics service, on the same port as everything else. Send the key as `authorization: Bearer <key>` metadata. Messages may be gzip-compressed. Every data point takes the same road as one sent to `POST /v1/metrics`.",
+      "request": {
+        "type": "otlp.ExportMetricsServiceRequest"
+      },
+      "response": {
+        "type": "otlp.ExportMetricsServiceResponse"
+      },
+      "auth": "ingest"
+    },
+    {
+      "id": "ingest_zipkin_spans",
+      "tag": "Ingest",
+      "method": "POST",
+      "path": "/api/v2/spans",
+      "summary": "Receive Zipkin spans",
+      "doc": "The Zipkin v2 span endpoint. Accepts a JSON array of spans (`application/json`) or a proto3 `ListOfSpans` (`application/x-protobuf`), gzip-encoded or uncompressed, so a Zipkin reporter needs only this daemon's address. `localEndpoint.serviceName` becomes the service, tags become attributes, `kind` becomes the `span.kind` attribute, annotations become span events, and the `error` tag sets the status. A shared server span is stored under an id derived from the one it shares, parented to it, so both halves are kept. Answers `202` with the counts.",
+      "request": {
+        "type": "zipkin.ListOfSpans"
+      },
+      "response": {
+        "type": "IngestResult"
+      },
+      "status": 202,
+      "auth": "ingest"
+    },
+    {
+      "id": "ingest_jaeger_traces",
+      "tag": "Ingest",
+      "method": "POST",
+      "path": "/api/traces",
+      "summary": "Receive Jaeger spans",
+      "doc": "The Jaeger collector's HTTP endpoint. Takes one `jaeger.Batch` in Thrift's binary protocol (`application/x-thrift`), gzip-encoded or uncompressed. The process becomes the service and its tags the resource, span tags become attributes, logs become span events, and references become the parent and span links: the first `CHILD_OF` in the same trace is the parent, and every other reference is a link whose kind is `child_of` or `follows_from`. Answers `202` with the counts.",
+      "request": {
+        "type": "jaeger.Batch"
+      },
+      "response": {
+        "type": "IngestResult"
+      },
+      "status": 202,
+      "auth": "ingest"
+    },
+    {
+      "id": "ingest_jaeger_grpc",
+      "tag": "Ingest",
+      "method": "POST",
+      "path": "/jaeger.api_v2.CollectorService/PostSpans",
+      "summary": "Receive Jaeger spans over gRPC",
+      "doc": "The Jaeger collector's gRPC service, on the same port as everything else. Send the key as `authorization: Bearer <key>` metadata. Messages may be gzip-compressed. Spans are mapped exactly as `POST /api/traces` maps them.",
+      "request": {
+        "type": "jaeger.PostSpansRequest"
+      },
+      "response": {
+        "type": "jaeger.PostSpansResponse"
       },
       "auth": "ingest"
     },
