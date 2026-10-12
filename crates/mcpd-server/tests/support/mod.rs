@@ -99,7 +99,13 @@ async fn receive(
     };
     let grpc = headers.get("content-type").is_some_and(|v| v == "application/grpc");
     let mut s = script.lock().expect("the script lock");
-    let (status, retry_after) = s.answers.pop_front().unwrap_or((200, None));
+    // A GET is a readiness probe and is answered 200 without spending the
+    // script, which is written for the requests that carry data.
+    let (status, retry_after) = if method == Method::GET {
+        (200, None)
+    } else {
+        s.answers.pop_front().unwrap_or((200, None))
+    };
     s.seen.push(Seen {
         method,
         path: uri.path_and_query().map_or_else(|| uri.path().to_owned(), |p| p.to_string()),
@@ -138,12 +144,13 @@ impl Mock {
         Self { url: format!("http://{addr}"), script: shared }
     }
 
-    /// Every request so far.
+    /// Every request so far, readiness probes left out.
     pub fn seen(&self) -> Vec<Seen> {
-        self.script.lock().expect("the script lock").seen.clone()
+        let s = self.script.lock().expect("the script lock");
+        s.seen.iter().filter(|r| r.method != Method::GET).cloned().collect()
     }
 
-    /// The requests answered 2xx.
+    /// The requests answered 2xx, probes left out.
     pub fn accepted(&self) -> Vec<Seen> {
         self.seen().into_iter().filter(|s| (200..300).contains(&s.status)).collect()
     }
