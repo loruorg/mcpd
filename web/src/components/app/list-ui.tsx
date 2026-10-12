@@ -102,7 +102,7 @@ export function Menu({
           className="panel-raised z-50 max-h-[min(22rem,70vh)] min-w-[11rem] overflow-y-auto py-1"
           style={{
             background: 'var(--color-panel-3)',
-            boxShadow: '0 2px 5px rgba(25, 26, 21, 0.16)',
+            boxShadow: 'var(--shadow-float)',
           }}
         >
           {items.length === 0 && empty && (

@@ -71,11 +71,11 @@ export function ColumnDialog({
       </Dialog.Trigger>
       <Dialog.Portal>
         {/* An honest scrim: the panel's own ink, no blur. */}
-        <Dialog.Overlay className="fixed inset-0 z-50" style={{ background: 'rgba(25, 26, 21, 0.38)' }} />
+        <Dialog.Overlay className="fixed inset-0 z-50" style={{ background: 'var(--scrim)' }} />
         <Dialog.Content
           aria-describedby="mcpd-columns-note"
           className="panel-raised fixed left-1/2 top-1/2 z-50 grid max-h-[min(42rem,calc(100vh-3rem))] w-[min(36rem,calc(100vw-1.5rem))] -translate-x-1/2 -translate-y-1/2 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden"
-          style={{ background: 'var(--color-panel-2)', boxShadow: '0 3px 8px rgba(25, 26, 21, 0.18)' }}
+          style={{ background: 'var(--color-panel-2)', boxShadow: 'var(--shadow-float)' }}
         >
           <header className="flex items-baseline gap-4 border-b border-scribe-2 px-5 py-3.5">
             <Dialog.Title className="display text-[1.0625rem]">Columns</Dialog.Title>

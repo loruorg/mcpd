@@ -374,7 +374,7 @@ export function RowMenu({
           // cast tight and downward from a single light, so the sheet reads as
           // lifted off the rows rather than painted on them. Tinted to the ink
           // rather than to black.
-          style={{ background: 'var(--color-panel-3)', boxShadow: '0 2px 5px rgba(25, 26, 21, 0.16)' }}
+          style={{ background: 'var(--color-panel-3)', boxShadow: 'var(--shadow-float)' }}
         >
           {items.map((it) => (
             <DropdownMenu.Item
