@@ -1822,7 +1822,7 @@ pub async fn create_account_key(
     });
     if !allowed {
         return Err(ApiError::Forbidden(format!(
-            "your role on the project {project:?} does not allow a {} key",
+            "your role on the project {project:?} does not allow the {} scope",
             scope.as_str()
         )));
     }

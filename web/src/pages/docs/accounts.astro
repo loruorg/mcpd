@@ -1,0 +1,177 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+---
+
+<Doc
+  title="Accounts and organisations"
+  description="Accounts, organisations, roles, single sign-on with any OpenID Connect provider, SCIM provisioning, two-step log-in and per-organisation quotas, on the hosted mcpd and on your own cluster."
+  lede="People log in, belong to organisations, and reach projects through a role."
+  og="docs"
+>
+  <h2>Two ways to turn it on</h2>
+  <p>
+    <code>--signup</code> lets anyone create an account. This is how the hosted
+    mcpd at mcpd.sh runs. <code>--accounts</code> turns on the same accounts,
+    organisations, roles, single sign-on and SCIM without public sign-up, so a
+    deployment on your own cluster lets people in by invitation, by single
+    sign-on or by SCIM. In both, configured keys keep working beside accounts,
+    and a request with no credential is refused.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="your own cluster, with single sign-on from the config file"
+    command={`mcpd serve --accounts --config-file mcpd.json \\
+  --public-url https://mcpd.example.com \\
+  --smtp-host smtp.example.com --smtp-from no-reply@example.com`}
+  />
+
+  <h2>Organisations and roles</h2>
+  <p>
+    Every account project belongs to an organisation. An account made by
+    sign-up gets an organisation of its own with one project in it. An
+    organisation can own up to 100 projects, and members join it by
+    invitation. Each member has one role, and the role maps onto the six key
+    scopes on every project the organisation owns:
+  </p>
+  <table>
+    <thead>
+      <tr><th>Role</th><th>Scopes</th><th>Manages the organisation</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>viewer</code></td><td><code>read</code></td><td>no</td></tr>
+      <tr><td><code>member</code></td><td><code>ingest</code>, <code>read</code>, <code>write</code>, <code>execute</code>, <code>worker</code></td><td>no</td></tr>
+      <tr><td><code>admin</code></td><td>all six</td><td>members below owner, projects, keys, SSO, SCIM</td></tr>
+      <tr><td><code>owner</code></td><td>all six</td><td>everything, including owners, quotas and deleting it</td></tr>
+    </tbody>
+  </table>
+  <p>
+    A project role replaces a viewer's or member's role on one project:
+    <code>none</code>, <code>viewer</code>, <code>member</code> or
+    <code>admin</code>. Admins and owners keep their reach on every project.
+  </p>
+  <p>
+    A session carries the scopes the account's role allows on each project of
+    its organisations. An API key carries one scope on one project, and works
+    only while the role of the account that made it still allows that scope,
+    so demoting or removing a member disarms their keys at once. Nothing an
+    account holds reaches a project of an organisation it does not belong to.
+    An organisation id that is not yours answers 404, so the answer does not
+    say which organisations exist.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="inviting a viewer"
+    lines={[
+      { cmd: 'curl -s -X POST $MCPD/v1/api/orgs/org_7c1e08b53a9f/invites -H "Authorization: Bearer $SESSION" -d \'{"email":"kim@example.com","role":"viewer"}\'' },
+      { out: '{"id":"inv_3f9c2e1b","email":"kim@example.com","role":"viewer",...}', tone: 'ok' },
+      { cmd: 'curl -s -X POST $MCPD/v1/api/account/keys -H "Authorization: Bearer $KIM" -d \'{"scope":"ingest","project":"prj_a3f9c2e1b7d4"}\'' },
+      { out: '{"error":"forbidden","message":"your role on the project \\"prj_a3f9c2e1b7d4\\" does not allow the ingest scope"}', tone: 'warn' },
+    ]}
+  />
+
+  <h2>The account lifecycle</h2>
+  <p>
+    Sign-up answers the same way whether or not the address is in use, and
+    mails a link: for a new account it confirms the address and logs in; for an
+    address in use it says so and offers a reset. Password reset works the same
+    way. An address is confirmed before the account can log in. An account can
+    change its password, which ends its other sessions, and its address, which
+    changes when a link sent to the new address is opened. It can list its
+    sessions and end any of them, and delete itself: every organisation it is
+    the only member of goes with it, and the stored signals and runs of those
+    organisations' projects are erased.
+  </p>
+  <p>
+    Two-step log-in uses an authenticator app. Setting it up returns a secret
+    and a QR code, confirming a code turns it on and returns ten single-use
+    recovery codes, and from then on log-in, password reset and account
+    deletion need a code. A code used once is refused if sent again.
+  </p>
+  <p>
+    Mail goes through the SMTP server in <code>--smtp-host</code>. With none,
+    links are written to the daemon's log at info level, which is what a laptop
+    or a closed cluster needs. With <code>--signup</code> on a public address
+    and no SMTP server, the doors that need mail answer 503 and the daemon
+    warns at start, because a link in a log is one the operator could use.
+  </p>
+
+  <h2>Single sign-on</h2>
+  <p>
+    An organisation can log its members in with any OpenID Connect provider:
+    Google, Microsoft Entra ID, Okta, Auth0 or your own. GitHub works through
+    an OAuth app. An admin sets the issuer, client id and client secret under
+    the organisation's SSO settings, and registers the redirect URL shown there
+    with the provider. On your own cluster the same settings go in the config
+    file, with the secret read from an environment variable.
+  </p>
+  <p>
+    The flow is the authorization code flow with PKCE, a one-time
+    <code>state</code> and a <code>nonce</code>, and a secret the starting
+    browser keeps, so a login link cannot be handed to somebody else. The ID
+    token's signature is checked against the provider's published keys, with
+    its issuer, audience, expiry and nonce.
+  </p>
+  <p>
+    An organisation claims email domains. "Log in with SSO" finds the
+    organisation by the address's domain, and a new account is created only for
+    an address in a claimed domain. A person is found by their identity at the
+    provider, and an existing account is never taken over: an account that is
+    not a member must be invited and accept first. A single sign-on session
+    reaches that organisation's projects only, and lasts 24 hours. With
+    enforcement on, members whose address is in a claimed domain cannot log in
+    with a password, and turning it on ends their password sessions.
+  </p>
+  <p>
+    On the hosted mcpd an admin can claim the domain of their own confirmed
+    address. A domain belongs to one organisation.
+  </p>
+
+  <h2>Groups and SCIM</h2>
+  <p>
+    Group roles map identity provider groups onto roles. With a groups claim
+    set, single sign-on gives a member the highest role among their groups,
+    or the default role when none maps. A group never grants
+    <code>owner</code>, and an owner keeps their role.
+  </p>
+  <p>
+    SCIM 2.0 lets your identity provider create, change and remove users and
+    groups. Create a SCIM token under the organisation's SSO settings and give
+    your provider the base URL shown with it. The service answers
+    <code>/scim/v2/Users</code>, <code>/scim/v2/Groups</code>,
+    <code>/scim/v2/ServiceProviderConfig</code>, <code>/scim/v2/Schemas</code>
+    and <code>/scim/v2/ResourceTypes</code>, with filtering on
+    <code>userName</code>, <code>externalId</code>, <code>emails.value</code>
+    and <code>displayName</code>, and PATCH.
+  </p>
+  <ul>
+    <li>A user in a claimed domain with no account gets one, which the organisation manages.</li>
+    <li>A user whose address already has an account is sent an invitation, and becomes a member when the account accepts it.</li>
+    <li><code>active: false</code> ends the membership, the account's keys on the organisation's projects and its sessions. An account the organisation manages is deactivated.</li>
+    <li>Deleting a user deprovisions it the same way, and deletes an account the organisation manages.</li>
+  </ul>
+
+  <h2>Quotas and usage</h2>
+  <p>
+    An organisation's projects share one ceiling on signals per minute, so one
+    tenant cannot starve the others and adding projects does not add
+    allowance. <code>--org-quota-per-minute</code> sets the ceiling an
+    organisation gets and the most it may set; with <code>--signup</code> it is
+    60000. <code>--org-retention-days</code> sets how long its projects keep
+    data, and an owner may choose a shorter window. The usage panel shows the
+    ceiling, what was stored in the current minute, and what was stored and
+    refused since the daemon started.
+  </p>
+
+  <h2>The audit log</h2>
+  <p>
+    Every change to membership, roles, projects, keys, single sign-on and SCIM
+    is written to the audit log against the organisation's id, with the acting
+    account's email, whether it was allowed or refused. Admins and owners read
+    it in the interface or with <code>GET /v1/api/orgs/{'{org_id}'}/audit</code>.
+    See <a href="/docs/security">security</a> for every action.
+  </p>
+</Doc>

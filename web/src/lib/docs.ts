@@ -69,6 +69,7 @@ export const DOCS: DocSection[] = [
     entries: [
       { href: '/deploy', title: 'Docker and Kubernetes', blurb: 'Compose file, manifests, Helm chart, and what to set before exposing it.' },
       { href: '/docs/configuration', title: 'Configuration', blurb: 'Every flag and environment variable.' },
+      { href: '/docs/accounts', title: 'Accounts and organisations', blurb: 'Roles, single sign-on, SCIM, two-step log-in and quotas.' },
       { href: '/docs/operations', title: 'Running it', blurb: 'Probes, metrics, backups, upgrades and scale.' },
       { href: '/docs/forwarding', title: 'Forwarding', blurb: 'Copy every span on to another OTLP endpoint. Nothing is trapped here.' },
       { href: '/docs/security', title: 'Security', blurb: 'What is stored, what leaves the machine, and what mcpd does not do.' },

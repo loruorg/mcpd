@@ -366,6 +366,16 @@ const TITLES: Record<string, Row> = {
     tr: 'Yapılandırma',
     pt: 'Configuração',
   },
+  '/docs/accounts': {
+    fr: 'Comptes et organisations',
+    es: 'Cuentas y organizaciones',
+    zh: '账户与组织',
+    ja: 'アカウントと組織',
+    ko: '계정과 조직',
+    it: 'Account e organizzazioni',
+    tr: 'Hesaplar ve kuruluşlar',
+    pt: 'Contas e organizações',
+  },
   '/docs/operations': {
     fr: 'Exploitation',
     es: 'Operación',
