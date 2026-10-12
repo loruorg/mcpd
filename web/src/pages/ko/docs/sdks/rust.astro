@@ -1,0 +1,348 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+const guard = `let run = mcpd.trace("support agent");
+{
+    let step = run.child_of("retrieve", SpanKind::Retrieval);
+    step.set_input("order 5512");
+    // Whatever this step does. The span ends at the closing brace, and it ends
+    // on an early return, on a ? and on a panic as well.
+}
+run.end();`
+
+const taskLocal = `// Opening a span does not make it current. scope() does.
+let run = mcpd.trace("support agent");
+run.scope(async {
+    lookup(&mcpd).await;
+})
+.await;
+run.end();
+
+async fn lookup(mcpd: &Mcpd) {
+    // No parent was threaded into this function, and this still nests under
+    // the run, because the task-local carries it.
+    let step = mcpd.span("lookup_order", SpanKind::ToolCall);
+    step.set_output(serde_json::json!({ "status": "shipped" }));
+}`
+
+const propagation = `// Outbound: put the header on the request.
+let header = span.traceparent();
+
+// Inbound: continue the caller's trace instead of starting a new one. An
+// absent or malformed header starts a fresh trace rather than failing.
+let run = mcpd.trace_from("charge card", inbound_header, SpanKind::AgentRun);`
+
+const payload = `generation.set_model("claude-sonnet-4", "anthropic");
+generation.set_usage(TokenUsage {
+    input_tokens: Some(412),
+    output_tokens: Some(96),
+    ..TokenUsage::default()
+});
+// Or, when the breakdown does not matter:
+generation.set_tokens(412, 96);
+
+// A message is required. "Something failed" is not actionable.
+tool.set_error("sms gateway timed out after 5s");
+
+// Or record the error you are already holding, which reads its message and kind.
+tool.record_error(&err);`
+
+const shutdown = `#[tokio::main]
+async fn main() {
+    let mcpd = Mcpd::new();
+
+    // ... the run ...
+
+    // Ignoring this is a reasonable default: an observability failure is not
+    // an application failure. Logging it costs one line.
+    if let Err(e) = mcpd.shutdown().await {
+        eprintln!("mcpd could not export: {e}");
+    }
+}`
+---
+
+<Doc
+  title="Rust"
+  description="Rust를 위한 mcpd SDK. 드롭될 때 끝나는 RAII 스팬 가드, 컨텍스트를 나르는 tokio 태스크 로컬, 그리고 오류를 돌려주지도 패닉을 일으키지도 않는 계측입니다."
+  lede="스팬은 드롭될 때 끝나는 가드입니다. 그래서 이른 반환이나 오류가 스팬을 열어 둔 채 남길 수 없습니다. 컨텍스트는 tokio 태스크 로컬에 실려 다닙니다."
+  og="docs"
+>
+  <h2>설치</h2>
+  <p>
+    SDK는 백그라운드 tokio 태스크에서 내보내므로, 런타임이 있으리라 기대합니다. 런타임
+    없이도 돌아가지만 그때는 <code>flush()</code>를 호출하기 전까지 아무것도 보내지
+    않습니다. 동기 도구에는 그것이 맞는 동작이지만, 오래 사는 서비스가 원하는 동작은
+    아닙니다.
+  </p>
+
+  <Command
+    command="cargo add mcpd-sdk"
+    primaryLabel="SDK"
+    secondary={[{ label: '크레이트에 런타임이 없다면', command: 'cargo add tokio --features macros,rt-multi-thread' }]}
+  />
+
+  <h2>클라이언트 만들기</h2>
+  <p>
+    프로세스마다 클라이언트 하나입니다. <code>Mcpd::new()</code>는 환경 변수를 읽고,
+    아무것도 설정하지 않아도 로컬 mcpd와 대화합니다. 생성은 절대 실패하지 않습니다.
+    mcpd가 쓸 수 없는 설정이면 클라이언트를 끄고 그 이유를 로그로 남깁니다. 관측 가능성
+    호출은 프로그램이 오류를 받아 처리해야 할 대상이 아니기 때문입니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="init" title="연결" />
+
+  <p><code>Config::from_env()</code> 뒤에 빌더에서 정한 것은 환경 변수를 이깁니다.</p>
+
+  <table>
+    <thead>
+      <tr><th>필드</th><th>환경 변수</th><th>기본값</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>api_key</code></td><td><code>MCPD_API_KEY</code></td><td>없음</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>없음</td></tr>
+      <tr><td><code>service_name</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>없음</td></tr>
+      <tr><td><code>service_version</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>없음</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>batch_size</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flush_interval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2s</code></td></tr>
+      <tr><td><code>max_queue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10s</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capture_payloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>log_level</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    파싱되지 않는 설정은 경고와 함께 건너뛰고 기본값을 씁니다. 배포 환경 변수의 오타가
+    프로그램을 멈춰 세워서는 안 되기 때문입니다. <code>enabled = false</code>는 모든
+    호출을 아무 일도 하지 않는 호출로 만들면서도 올바른 객체는 그대로 돌려줍니다. id는
+    여전히 제대로 된 형태이고 <code>traceparent</code>도 그대로 전파되므로, 테스트가
+    시험 대상 코드를 건드리지 않고 mcpd를 끌 수 있습니다.
+  </p>
+
+  <h2>실행 기록하기</h2>
+  <p>
+    <code>Span</code>은 RAII 가드입니다. 드롭될 때 끝나며, 그것이 Rust에서 범위를 가진
+    형태입니다. 블록이든, 스코프든, 함수의 끝이든 마찬가지입니다. <code>end()</code>를
+    직접 호출해도 같은 일을 합니다. 가드가 있는 이유는 이른 반환이나 패닉이 스팬을 열린
+    채, 끝나지 않은 채로 남기지 못하게 하기 위해서입니다.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="스팬은 가드입니다"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: guard }]}
+  />
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="trace" title="실행 기록하기" />
+
+  <h2>컨텍스트</h2>
+  <p>
+    프로세스 안에서 컨텍스트는 tokio 태스크 로컬에 실려 다닙니다. 스팬을 들고 있다고 해서
+    그것이 현재 스팬이 되지는 않습니다. <code>Span::scope</code>는 future에 대해,
+    <code>Span::sync_scope</code>는 클로저에 대해 태스크 로컬을 설정합니다. 그 안에서는
+    <code>Mcpd::span</code>이 진행 중인 실행에 붙으므로, 몇 겹 아래에 있는 헬퍼도 부모를
+    건네받지 않고 제대로 중첩됩니다. 이미 부모를 들고 있을 때는
+    <code>Span::child_of</code>가 명시적인 대안입니다.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="태스크 로컬"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: taskLocal }]}
+  />
+
+  <p>
+    프로세스 사이에서 컨텍스트는 W3C <code>traceparent</code> 헤더에 실려 갑니다. 샘플링
+    플래그가 함께 실려 가므로, 트레이스를 남기고 있는지에 대해 트레이스의 양쪽 절반이 같은
+    답을 냅니다.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="서비스 경계를 넘어"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: propagation }]}
+  />
+
+  <h2>모델, 사용량, 오류</h2>
+  <p>
+    mcpd가 수집 시점에 값을 매기는 대상이 토큰 수이므로, 트레이스에 적힌 비용이 곧
+    청구받은 비용입니다. 오류를 기록하면 같은 동작으로 스팬의 상태도 <code>error</code>가
+    되므로 둘이 어긋날 수 없고, 메시지는 선택이 아니라 반드시 넘겨야 하는 인자입니다.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="스팬이 싣는 것"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: payload }]}
+  />
+
+  <p>
+    나머지 세터는 <code>set_input</code>, <code>set_output</code>,
+    <code>set_attributes</code>, <code>set_metadata</code>,
+    <code>set_tags</code>, <code>set_entity</code>, <code>set_session</code>,
+    <code>set_user</code>, <code>set_status</code>,
+    <code>set_error_detail</code>입니다. 모두 <code>&amp;self</code>를 받으므로, 스팬은
+    그것을 빌려 간 곳 어디에서든 채울 수 있습니다.
+  </p>
+
+  <h2>페이로드, 싱크, 끝난 스팬</h2>
+  <p>
+    <code>Config::with_capture_payloads(false)</code>는 프롬프트와 컴플리션을 프로세스
+    안에 붙들어 둡니다. 스팬은 시각과 상태와 사용량과 모델과 상관 정보와 오류를 그대로
+    싣고, <code>input</code>과 <code>output</code>은 큐에 닿기 전에 버려집니다. 스팬
+    하나는 <code>span.capture_payloads(..)</code>로 자기 몫에 대해 클라이언트의 설정을
+    어느 방향으로든 덮어씁니다.
+  </p>
+  <p>
+    익스포터는 모든 배치를 클라이언트의 싱크에 넘깁니다. 기본값은 HTTP 전송 계층입니다.
+    <code>Config::with_sink</code>는 <code>RecordingSink</code>나
+    <code>ConsoleSink</code>를 받습니다. 앞의 것은 배치를 메모리에 들고 있어서 테스트가
+    서버 없이 무엇이 기록되었는지 검증하게 하고, 뒤의 것은 시그널마다 JSON 한 줄을
+    출력합니다. 실패한 싱크는 실패한 내보내기이며, 한 주기에 한 번 보고될 뿐 예외로
+    올라오지 않습니다. <code>mcpd.stats()</code>는 <code>queued</code>,
+    <code>dropped</code>, <code>capacity</code>, <code>exported</code>,
+    <code>failed</code>, <code>rejected</code>를 답합니다.
+  </p>
+  <p>
+    <code>mcpd.record(span)</code>은 이미 끝난 스팬을, 어댑터나 가져오기가 들고 있는
+    그대로 id와 부모와 시작과 끝까지 함께 큐에 넣습니다. 부모가 다시 매겨지지도, 시각이
+    다시 매겨지지도, 샘플링이 다시 결정되지도 않습니다. 형식이 깨진 레코드는 버려지고
+    <code>rejected</code>로 셉니다. <code>span.set_external_parent</code>는 mcpd가 아닌
+    트레이싱 시스템의 부모를 상관 정보로만 실어 나릅니다.
+  </p>
+
+  <h2>지속성 실행</h2>
+  <p>
+    같은 클라이언트가 데몬의 지속성 실행도 다룹니다. <code>Workflow::new</code>는 정의를
+    만들고 단계 본문을 async 클로저로 들고 있습니다. <code>Worker</code>는 그 정의를
+    등록하고, 리스를 롱 폴링으로 기다렸다가 태스크 위에서 하나씩 처리합니다.
+    <code>start_run</code>, <code>watch_run</code>, <code>publish_event</code>와 나머지는
+    실행 표면을 하나씩 그대로 옮겨 놓은 것입니다. 본문은 단계의 예산 안에서 다시
+    시도되도록 <code>StepFailure::retryable</code>을 돌려주고,
+    <code>StepContext</code>를 통해 자기 단계 아래에 스팬을 기록합니다. 그렇게 연 모든
+    스팬과 그 아래에 중첩된 모든 스팬은 끝날 때 자기 사용량을 그 단계에 더합니다. 그래서
+    데몬은 본문이 토큰을 손으로 합산하지 않아도 트레이스가 보여 주는 그대로 값을
+    매깁니다. <code>set_usage</code>가 명시적인 덮어쓰기입니다. 빌더의
+    <code>on_lease</code>, <code>on_step_start</code>, <code>on_step_end</code>,
+    <code>on_conflict</code> 훅과 <code>worker.stats()</code>가 워커를 안쪽에서 들여다볼
+    수 있게 합니다.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['rust']} example="workflow" region="workflow" title="워크플로 하나" />
+  <p>
+    각 구성 요소가 무엇을 하는지, 리스 프로토콜, 실행 API는
+    <a href={linkTo('/docs/workflows')} class="link">워크플로</a>,
+    <a href={linkTo('/docs/workers')} class="link">워커</a>,
+    <a href={linkTo('/docs/runs')} class="link">실행</a>에 있습니다.
+  </p>
+
+  <h2>점수와 피드백</h2>
+  <p>
+    <code>Scale</code>은 선택이 아니라 반드시 넘겨야 하는 인자입니다. 범위를 밝히지 않은
+    맨 0.9는 무엇과도 비교할 수 없고, 누군가 차트를 읽고 있을 때쯤이면 그것이 무슨
+    뜻이었는지 물어보기에는 이미 늦습니다. 흔히 쓰는 것은 0.0에서 1.0까지인
+    <code>Scale::UNIT</code>입니다. 피드백은 사람의 판단이고 점수와 떼어 둡니다. 둘은
+    서로 다른 질문에 답하는 것이라 함께 평균 내서는 안 되기 때문입니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="score" title="점수와 피드백" />
+
+  <h2>플러시와 종료</h2>
+  <p>
+    기록은 메모리 안의 큐에 덧붙이고 바로 돌아옵니다. <code>flush()</code>는 큐에 있는
+    것을 보내고, <code>shutdown()</code>은 플러시하고 워커를 멈추며 두 번 호출해도
+    안전합니다. 둘 다 await할 수 있고, 마지막 내보내기 실패를 돌려주므로 로그로 남길 수
+    있습니다.
+  </p>
+  <p>
+    짧게 사는 프로세스는 둘 중 하나를 반드시 호출해야 합니다. 종료하지 않고 끝나는
+    바이너리는 스팬을 메모리에 그대로 둔 채 끝납니다. 서버리스 함수에서는 런타임이
+    핸들러가 돌아오는 순간 프로세스를 얼리므로, 백그라운드 태스크에 다시 차례가 오지
+    않습니다.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="종료하기"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: shutdown }]}
+  />
+
+  <p>
+    플러시가 실패해 잃은 시그널은 큐에 다시 넣지 않습니다. 전송 계층이 이미 재시도한
+    뒤이고, 실패할 때마다 스스로를 다시 채우는 큐야말로 장애를 메모리 부족으로 인한 강제
+    종료로 바꿔 놓는 방식이기 때문입니다.
+  </p>
+
+  <h2>믿어도 되는 것</h2>
+  <p>
+    데몬을 멈춘 상태에서도 예제는 끝까지 돌고, 하지 못한 일을 출력하고, 0으로
+    종료합니다.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="데몬이 돌고 있지 않을 때"
+    lines={[
+      { cmd: 'cargo run -p mcpd-sdk --example quickstart' },
+      { out: '    Finished `dev` profile [unoptimized + debuginfo]' },
+      { out: '     Running `target/debug/examples/quickstart`' },
+      { out: 'mcpd could not export: export failed: mcpd could not be reached', tone: 'warn' },
+      { out: 'could not read the trace back: mcpd could not be reached', tone: 'warn' },
+      { cmd: 'echo $?' },
+      { out: '0', tone: 'ok' },
+    ]}
+  />
+
+  <ul>
+    <li>
+      어떤 계측 호출도 오류를 돌려주거나 패닉을 일으키지 않습니다. 닿지 않는 mcpd,
+      직렬화 실패, 가득 찬 큐는 플러시 주기에 많아야 한 번 <code>tracing</code>으로 로그를
+      남기고 삼킵니다. 관측 가능성이 관측 대상을 무너뜨리는 일은 절대 없어야 합니다.
+    </li>
+    <li>
+      기록은 절대 블로킹하지 않습니다. 내보내기는 백그라운드 tokio 태스크에서 일어나므로,
+      에이전트의 지연 시간이 mcpd가 빠른지, 살아 있는지에 달리지 않습니다.
+    </li>
+    <li>
+      큐의 상한은 <code>max_queue</code>입니다. 가득 차면 가장 오래된 시그널부터 버리고
+      <code>mcpd.stats().dropped</code>가 그 수를 셉니다. 가장 오래된 것을 버리는 쪽이
+      메모리 부족으로 인한 강제 종료보다 작은 실패입니다.
+    </li>
+    <li>
+      1.0 미만의 샘플링은 무작위가 아니라 트레이스 id에 대해 결정론적입니다. 그래서 한
+      무리의 모든 프로세스가 같은 트레이스에 대해 같은 결정을 내리고, 서비스 경계를 넘는
+      트레이스가 절반만 기록되는 일이 없습니다.
+    </li>
+    <li>
+      스팬은 시작할 때 내보내고 끝날 때 갱신하므로, 도중에 죽은 실행도 그대로 읽을 수
+      있습니다.
+    </li>
+  </ul>
+
+  <h2>다시 읽기</h2>
+  <p>
+    읽기도 같은 클라이언트로 합니다. 모든 메서드는 HTTP 엔드포인트 하나를 그대로 옮긴
+    것이고 생성된 타입을 돌려줍니다. 그 타입들은 명세에서 <code>mcpd-core</code>를 거쳐
+    나오고 <code>mcpd_sdk::model</code>로 다시 내보내집니다. 읽기는
+    <code>Result</code>를 돌려줍니다. await 해 놓고 답을 얻지 못한 쿼리는 알려야 할
+    소식이기 때문입니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="query" title="검색과 분석" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">실행 찾기</a>가 필터 전체를
+    다룹니다. <a href={linkTo('/docs/reference/data-model')} class="link">데이터 모델</a>은
+    이 타입들이 싣는 모든 필드를 나열합니다.
+  </p>
+</Doc>

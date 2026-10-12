@@ -1,0 +1,350 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+
+const scoped = `ctx, span := m.Start(ctx, "retrieve_docs", mcpd.WithSpanKind(mcpd.SpanKindRetrieval))
+defer span.End()
+
+// Everything that takes this ctx from here down becomes a child of the span,
+// and End is idempotent, so a defer and an explicit call cannot disagree about
+// the duration.`
+
+const nesting = `func handle(ctx context.Context, m *mcpd.Client, q string) string {
+    ctx, run := m.Start(ctx, "support_agent", mcpd.WithSpanKind(mcpd.SpanKindAgentRun))
+    defer run.End()
+
+    // draft is handed the ctx, not the span. That is the whole mechanism.
+    return draft(ctx, m, q)
+}
+
+func draft(ctx context.Context, m *mcpd.Client, q string) string {
+    _, span := m.Start(ctx, "draft_answer", mcpd.WithSpanKind(mcpd.SpanKindModelGeneration))
+    defer span.End()
+    return "..."
+}`
+
+const propagation = `// Outbound: write the active trace context onto the request.
+req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+mcpd.Inject(ctx, req.Header)
+
+// Inbound: read it back and continue the same trace.
+func handler(w http.ResponseWriter, r *http.Request) {
+    ctx, span := m.Start(mcpd.Extract(r.Context(), r.Header), "handle_request")
+    defer span.End()
+}`
+
+const payload = `span.SetModel("gpt-4o-mini", "openai")
+span.SetTokens(812, 96)
+
+// Or the full breakdown, so a cached prompt is priced as a cached prompt.
+span.SetUsage(mcpd.TokenUsage{
+    InputTokens:  ptr(uint64(812)),
+    OutputTokens: ptr(uint64(96)),
+    InputDetails: &mcpd.InputTokenDetails{CacheRead: ptr(uint64(640))},
+})
+
+// RecordError takes an error, so a recorded failure always has a message.
+span.RecordError(err,
+    mcpd.ErrorKind("SMTPTemporaryFailure"),
+    mcpd.ErrorRetryable(true),
+    mcpd.ErrorStack(mcpd.Stack()),
+)`
+
+const serverless = `func Handler(ctx context.Context, event Event) (Response, error) {
+    ctx, run := m.Start(ctx, "answer")
+    answer := agent(ctx, event.Body)
+    run.SetOutput(answer)
+    run.End()
+
+    // The batch is still in memory here. The runtime freezes this process the
+    // moment the handler returns, and the worker goroutine never runs again.
+    if err := m.Flush(ctx); err != nil {
+        log.Printf("mcpd flush: %v", err)
+    }
+    return Response{Body: answer}, nil
+}`
+---
+
+<Doc
+  title="Go"
+  description="El SDK de mcpd para Go: context.Context en todas partes, solo la biblioteca estándar, e instrumentación que no devuelve errores y se puede llamar sobre un cliente nil."
+  lede="context.Context lleva el span activo, igual que cualquier otra biblioteca de Go. Sin dependencias de terceros, y ninguna llamada de registro que pueda fallar."
+  og="docs"
+>
+  <h2>Instalación</h2>
+  <p>
+    Go 1.21 o posterior. No hay dependencias de terceros: el transporte es
+    <code>net/http</code> y <code>compress/gzip</code> de la biblioteca
+    estándar, así que añadir mcpd no añade nada más a tu grafo de módulos.
+  </p>
+
+  <Command command="go get github.com/mcpd/mcpd/sdks/go" />
+
+  <h2>Construir el cliente</h2>
+  <p>
+    Un cliente por proceso. Cada ajuste tiene una opción y una variable de
+    entorno, así que el mismo código corre en desarrollo y en producción sin
+    ninguna edición. <code>mcpd.New()</code> sin ninguna opción funciona contra
+    un daemon local.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="init" title="conectar" />
+
+  <p>El código gana al entorno, y el entorno gana al valor por defecto.</p>
+
+  <table>
+    <thead>
+      <tr><th>Opción</th><th>Entorno</th><th>Por defecto</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>WithEndpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>WithAPIKey</code></td><td><code>MCPD_API_KEY</code></td><td>ninguno</td></tr>
+      <tr><td><code>WithProject</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>WithEnvironment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>ninguno</td></tr>
+      <tr><td><code>WithService</code></td><td><code>MCPD_SERVICE_NAME</code>, <code>MCPD_SERVICE_VERSION</code></td><td>ninguno</td></tr>
+      <tr><td><code>WithSampleRate</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>WithBatchSize</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>WithFlushInterval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2s</code></td></tr>
+      <tr><td><code>WithMaxQueue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>WithTimeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10s</code></td></tr>
+      <tr><td><code>WithEnabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>WithCapturePayloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>WithLogLevel</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>WithEnabled(false)</code> convierte el registro en una operación vacía
+    que sigue devolviendo spans e ids válidos, así que una prueba puede
+    desactivar mcpd sin cambiar un punto de llamada. Los métodos de lectura
+    siguen funcionando, porque apagar la instrumentación no debería convertir en
+    silencio una consulta en una respuesta vacía.
+  </p>
+
+  <p>
+    <code>WithCapturePayloads(false)</code> mantiene los prompts y las
+    completions dentro del proceso: los spans siguen llevando sus tiempos, su
+    estado, su uso, su modelo, su correlación y sus errores, y
+    <code>input</code> y <code>output</code> se descartan antes de llegar a la
+    cola. Un span puede decir lo contrario para sí mismo con
+    <code>WithSpanCapturePayloads</code>, en cualquiera de los dos sentidos.
+  </p>
+
+  <p>
+    <code>WithSink</code> cambia adónde van los lotes. Un
+    <code>RecordingSink</code> los guarda en memoria, así que una prueba
+    comprueba lo que registró la instrumentación sin servidor; un
+    <code>ConsoleSink</code> escribe una línea JSON por señal. Un sink que falla
+    se cuenta en <code>Stats()</code> y nunca llega al código que registró las
+    señales. <code>Record</code> encola un span que ya terminó, con sus ids y
+    sus tiempos, tal cual; uno mal formado se rechaza y se cuenta, nunca se
+    devuelve como error. <code>WithExternalParent</code> lleva el padre de otro
+    sistema de trazas solo para correlacionar.
+  </p>
+
+  <h2>Registrar una ejecución</h2>
+  <p>
+    <code>Start</code> devuelve un contexto nuevo y un span, y
+    <code>defer span.End()</code> lo cierra. Ese par es la forma con ámbito en
+    Go: el defer se ejecuta en un retorno temprano y en un panic, así que ningún
+    camino de control en el que no pensaste puede dejar un span abierto.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="la forma con ámbito"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: scoped }]}
+  />
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="trace" title="registrar una ejecución" />
+
+  <h2>Contexto</h2>
+  <p>
+    <code>Start</code> crea un hijo del span que haya en el contexto, y una raíz
+    cuando no hay ninguno. <code>Trace</code> siempre inicia una raíz, y
+    <code>span.Child(ctx, name)</code> inicia un hijo de un span concreto cuando
+    no lo llevas en un contexto. Aquí nada inventa un segundo mecanismo de
+    propagación: el padre está en el <code>ctx</code> que ya venías pasando.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="anidamiento"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: nesting }]}
+  />
+
+  <p>
+    A través de un límite de servicio, <code>Inject</code> escribe un
+    <code>traceparent</code> de W3C en las cabeceras salientes y
+    <code>Extract</code> lee uno de las cabeceras entrantes hacia un contexto.
+    Las cabeceras que no lo traen se devuelven sin cambios, así que una cabecera
+    ilegible inicia una traza nueva en vez de hacer fallar la solicitud que la
+    traía. Se hereda la decisión de muestreo de aguas arriba, para que las dos
+    mitades de una traza coincidan.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="a través de un límite de servicio"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: propagation }]}
+  />
+
+  <h2>Modelo, uso y errores</h2>
+  <p>
+    mcpd calcula el precio a partir de los recuentos de tokens en la ingesta,
+    así que el costo que ves en la traza es el costo que te facturaron.
+    <code>RecordError</code> recibe un <code>error</code> en vez de una cadena,
+    que es lo que garantiza que un fallo registrado lleve un mensaje. Después
+    <code>End</code> registra <code>error</code> como estado en lugar de
+    <code>ok</code>.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="qué lleva un span"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: payload }]}
+  />
+
+  <p>
+    Los demás métodos del span son <code>SetInput</code>,
+    <code>SetOutput</code>, <code>SetMetadata</code>,
+    <code>SetAttributes</code>, <code>SetTags</code>, <code>SetStatus</code>,
+    <code>SetSession</code>, <code>SetThread</code>, <code>SetUser</code>,
+    <code>Event</code> y <code>EndWithStatus</code>. Los mismos campos se pueden
+    asignar cuando el span empieza, a través de las opciones
+    <code>With...</code>.
+  </p>
+
+  <h2>Ejecuciones duraderas</h2>
+  <p>
+    El mismo cliente sirve las ejecuciones duraderas del daemon.
+    <code>NewWorkflow</code> construye la definición y guarda los cuerpos de los
+    pasos; un <code>Worker</code> la registra, hace long polling para obtener
+    leases y atiende cada uno en una goroutine, y <code>StartRun</code>,
+    <code>WatchRun</code>, <code>PublishEvent</code> y el resto reflejan la
+    superficie de ejecuciones una a una. Un cuerpo devuelve
+    <code>mcpd.Retryable(err, wait)</code> para que se reintente dentro del
+    presupuesto del paso, y un span iniciado desde el <code>ctx</code> del
+    handler cae bajo su paso en la traza de la ejecución. Lo que gastó un span
+    así es el uso del paso: los recuentos se suman según terminan los spans,
+    gana el último modelo visto, y <code>SetUsage</code> anula los campos que
+    asigna. Al worker se le puede vigilar desde dentro con
+    <code>WorkerOnLease</code>, <code>WorkerOnStepStart</code>,
+    <code>WorkerOnStepEnd</code>, <code>WorkerOnConflict</code> y
+    <code>worker.Stats()</code>.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['go']} example="workflow" region="workflow" title="un workflow" />
+  <p>
+    Qué hace cada construcción, el protocolo de leases y la API de ejecuciones
+    están en <a href={urlFor('/docs/workflows', locale)} class="link">Workflows</a>,
+    <a href={urlFor('/docs/workers', locale)} class="link">Workers</a> y
+    <a href={urlFor('/docs/runs', locale)} class="link">Ejecuciones</a>.
+  </p>
+
+  <h2>Puntuaciones y feedback</h2>
+  <p>
+    <code>Score</code> recibe <code>min</code> y <code>max</code> como
+    argumentos posicionales normales, así que la escala no se puede omitir. Un
+    0.86 suelto no significa nada hasta que sabes el rango en el que está. El
+    feedback es el juicio de una persona y se mantiene aparte de una puntuación,
+    porque los dos responden preguntas distintas y nunca se deben promediar
+    juntos.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="score" title="puntuación y feedback" />
+
+  <p>
+    Pasa <code>mcpd.TraceTarget(id)</code> o <code>mcpd.SpanTarget(id, spanID)</code>
+    para nombrar lo que se está juzgando, o un <code>mcpd.Target&#123;&#125;</code> vacío
+    para usar el span que haya en el contexto.
+  </p>
+
+  <h2>Las cinco señales, un solo juego de ids</h2>
+  <p>
+    <code>Log</code>, <code>Metric</code>, <code>Score</code> y
+    <code>Feedback</code> reciben todos el contexto, así que las cinco señales
+    llevan los mismos ids de traza y de span. Eso es lo que permite que un pico
+    en un gráfico abra la ejecución que lo causó.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>Flush y apagado</h2>
+  <p>
+    <code>Start</code> y <code>End</code> añaden a una cola en memoria y
+    vuelven; una goroutine en segundo plano agrupa y envía.
+    <code>Flush(ctx)</code> envía lo que está en la cola sin detener nada.
+    <code>Shutdown(ctx)</code> hace flush, detiene el worker y es idempotente, y
+    por eso <code>defer m.Shutdown(ctx)</code> junto a <code>New</code> es la
+    costumbre correcta.
+  </p>
+  <p>
+    En una función serverless el runtime congela el proceso en cuanto el handler
+    devuelve, y la goroutine del worker no vuelve a correr, así que se pierde el
+    lote que seguía en la cola. Haz flush antes de devolver.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="un handler serverless"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: serverless }]}
+  />
+
+  <h2>Con qué puedes contar</h2>
+  <ul>
+    <li>
+      Ningún método que registre algo devuelve un error ni hace panic, tampoco
+      sobre un cliente nil. Una exportación fallida se anota como mucho una vez
+      por intervalo de flush y se descarta. La observabilidad nunca debe tumbar
+      aquello que observa.
+    </li>
+    <li>
+      Registrar no bloquea, así que la latencia de tu agente nunca depende de
+      que mcpd sea rápido, ni de que esté en pie.
+    </li>
+    <li>
+      La memoria está acotada. La cola guarda <code>WithMaxQueue</code> señales;
+      a partir de ahí se descartan las más antiguas y se cuentan, visibles en
+      <code>Stats()</code> junto a lo que se exportó, lo que se abandonó y lo
+      que <code>Record</code> rechazó. Un búfer sin límite convierte una caída
+      de red en una muerte por falta de memoria.
+    </li>
+    <li>
+      La decisión de muestreo se toma una vez, en la raíz, calculando un hash
+      del id de traza, y la hereda cada hijo. Por eso todos los procesos de una
+      flota toman la misma decisión sobre la misma traza.
+    </li>
+    <li>
+      Un span sin terminar también se exporta. Los spans largos salen cuando
+      empiezan y se actualizan cuando terminan, así que una ejecución que se cae
+      a mitad de vuelo es visible. Un span que termina antes del siguiente flush
+      se envía una sola vez, ya terminado.
+    </li>
+    <li>
+      Un valor que no se puede codificar se descarta y se anota en vez de hacer
+      fallar tu llamada, porque un error de serialización en un payload no debe
+      aparecer como un fallo de tu agente.
+    </li>
+  </ul>
+
+  <h2>Volver a leerlo</h2>
+  <p>
+    Los métodos de lectura reflejan la API HTTP y devuelven los tipos generados.
+    Son los únicos métodos que devuelven errores, porque quien llama está
+    esperando una respuesta.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="query" title="buscar y analizar" />
+
+  <p>
+    <a href={urlFor('/docs/searching', locale)} class="link">Encontrar una ejecución</a>
+    cubre los filtros por completo.
+    <a href={urlFor('/docs/reference/data-model', locale)} class="link">El modelo de datos</a>
+    lista todos los campos que llevan estos tipos.
+  </p>
+</Doc>

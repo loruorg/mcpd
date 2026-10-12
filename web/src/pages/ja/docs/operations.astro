@@ -1,0 +1,701 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+/* 英語のルートを、この言語で組み直します。 */
+const code = localeOf(Astro.url.pathname)
+const to = (route: string) => urlFor(route, code)
+
+const probeYaml = `livenessProbe:
+  httpGet: { path: /healthz, port: 4317 }
+  periodSeconds: 10
+readinessProbe:
+  httpGet: { path: /readyz, port: 4317 }
+  periodSeconds: 5
+
+# SIGTERM は処理されるので、処理中の取り込みが終わるまでの時間を与えます。
+terminationGracePeriodSeconds: 30`
+
+const scrape = `scrape_configs:
+  - job_name: mcpd
+    static_configs:
+      - targets: ['mcpd:4317']`
+---
+
+<Doc
+  title="運用"
+  description="本番での mcpd の運用。liveness と readiness のプローブ、書き出す Prometheus メトリクス、正常な停止、SQLite ファイルのバックアップ、アップグレード、そして 1 台のインスタンスの限界。"
+  lede="mcpd は 1 つのファイルを抱えた 1 つのプロセスです。そのおかげで運用の大半は短く済み、そのぶん数少ない大事な点は正確に知っておく価値があります。"
+  og="docs"
+>
+  <h2>ポートにあるもの</h2>
+  <p>
+    1 つのアドレスがすべてを提供します。<code>/v1/traces</code>、
+    <code>/v1/logs</code>、<code>/v1/metrics</code> での OTLP 取り込み、
+    <code>/v1/ingest</code> でのネイティブ取り込み、<code>/v1/api</code> の下の
+    クエリ API、<code>/</code> の運用者向けインターフェース、そして下に挙げる
+    3 つの運用エンドポイントです。設定すべきサイドカーもリバースプロキシも
+    ありません。デプロイが 1 行に収まる理由の大半はここにあります。
+  </p>
+  <p>
+    インターフェースはバイナリに組み込まれているので、静的ファイルサーバー
+    も 2 つ目のボリュームマウントも要りません。取り込みは大きなボディの上限を
+    持ち、CORS はありません。クエリ API は CORS を持つので、別のオリジンから
+    配信されたインターフェースでも読めます。
+  </p>
+
+  <h2>/healthz と /readyz は同じ問いではありません</h2>
+  <p>
+    この 2 つが分かれているのは、答えの先にある結果が違うからです。両方を同じ
+    ハンドラーにつなぐのは、再起動ループを作るよくあるやり方です。
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>エンドポイント</th>
+          <th>ストレージに触れるか</th>
+          <th>答えるもの</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>GET /healthz</code></td>
+          <td>いいえ</td>
+          <td>プロセスが応答している間は常に <code>200</code></td>
+        </tr>
+        <tr>
+          <td><code>GET /readyz</code></td>
+          <td>はい、各ストアに 1 回の読み取り</td>
+          <td>シグナルのストアと実行のストアが答えれば <code>200</code>、どちらかが答えなければ <code>503</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    <code>/healthz</code> は liveness です。意図的にストレージには一切触れ
+    ません。遅いデータベースやロックされたデータベースのせいでプロセスが
+    落とされて再起動されてはいけないからです。再起動してもディスクは直り
+    ませんし、再起動ループのぶんだけ処理中のバッチも失います。
+  </p>
+  <p>
+    <code>/readyz</code> は readiness です。読み取り用の接続に対して単純な
+    クエリを 1 つ投げるので、提供できないインスタンスにはトラフィックが
+    送られなくなります。ストレージに届かないときは <code>503</code> を返し、
+    <code>status</code> は <code>degraded</code>、<code>detail</code> には
+    何が失敗したかが入ります。素のステータスコードだけを見て、そこから
+    手探りで調べる必要はありません。
+  </p>
+  <p>
+    どちらの本文も同じ項目を持ちます。<code>status</code>、
+    <code>version</code>、<code>spec_version</code>、
+    <code>uptime_seconds</code>、<code>storage</code>、そして異常があるときの
+    <code>detail</code> です。<code>spec_version</code> はこのビルドが実装
+    しているデータモデルのバージョンで、クライアントが理解できないサーバーと
+    話すのを断れるようにするための値です。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="正常なインスタンスを叩く"
+    lines={[
+      { cmd: 'curl -s localhost:4317/healthz' },
+      { out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0",' },
+      { out: ' "uptime_seconds":86400,"storage":"sqlite"}', tone: 'ok' },
+      { cmd: 'curl -s -o /dev/null -w "%{http_code}\\n" localhost:4317/readyz' },
+      { out: '200', tone: 'ok' },
+      { cmd: 'curl -s localhost:4317/metrics | head -4' },
+      { out: '# HELP mcpd_signals_accepted_total Signals written to storage.' },
+      { out: '# TYPE mcpd_signals_accepted_total counter' },
+      { out: 'mcpd_signals_accepted_total 184203' },
+      { out: '# HELP mcpd_signals_rejected_total Signals refused, with a reason returned to the sender.' },
+    ]}
+  />
+
+  <p>
+    どちらのプローブにもキーは要りません。<code>/metrics</code> も同じです。
+    自分のネットワークでそれが許されないなら、ingress の側で制限してください。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="kubernetes"
+    samples={[{ lang: 'curl', label: 'Pod の spec', shiki: 'yaml', code: probeYaml }]}
+  />
+
+  <h2>メトリクス</h2>
+  <p>
+    mcpd は自分自身のカウンターを <code>/metrics</code> に Prometheus の
+    テキスト形式で書き出します。フィーチャーフラグの後ろには置いていません。
+    観測できない可観測性ツールは負債だからです。
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>メトリクス</th>
+          <th>種類</th>
+          <th>意味</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>mcpd_signals_accepted_total</code></td>
+          <td>counter</td>
+          <td>ストレージに書かれたシグナル</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_signals_rejected_total</code></td>
+          <td>counter</td>
+          <td>拒否したシグナル。理由は送信側に返されます</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_batches_duplicate_total</code></td>
+          <td>counter</td>
+          <td>再送と判定して飛ばしたバッチ</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_traces_sampled_out_total</code></td>
+          <td>counter</td>
+          <td>サンプリングポリシーが捨てたトレース</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_signals_over_quota_total</code></td>
+          <td>counter</td>
+          <td>プロジェクトの毎分の上限を超えて拒否したシグナル</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_signals_unbounded_total</code></td>
+          <td>counter</td>
+          <td>
+            どの上限も及ばないプロジェクトのまま、上限の判定を通過した
+            シグナル
+          </td>
+        </tr>
+        <tr>
+          <td><code>mcpd_ingest_requests_total</code></td>
+          <td>counter</td>
+          <td>処理した取り込みリクエスト</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_query_requests_total</code></td>
+          <td>counter</td>
+          <td>処理したクエリリクエスト</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_request_errors_total</code></td>
+          <td>counter</td>
+          <td>サーバーエラーで失敗したリクエスト</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_audit_write_failures_total</code></td>
+          <td>counter</td>
+          <td>
+            書けなかった監査行。その行が説明するリクエスト自体は成功して
+            います
+          </td>
+        </tr>
+        <tr>
+          <td><code>mcpd_uptime_seconds</code></td>
+          <td>gauge</td>
+          <td>このプロセスが起動してからの秒数</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    どのカウンターもプロセスの生存期間ぶんで、再起動するとゼロに戻ります。
+    水準ではなく変化率でアラートを組んでください。見る価値がとくに高いのは
+    2 つです。<code>mcpd_signals_rejected_total</code> は送信側に「だめだ」と
+    言い続けていて、相手はおそらく返事を読んでいないという意味です。
+    <code>mcpd_request_errors_total</code> は定義上 mcpd 自身の落ち度です。
+    4xx は呼び出し側の落ち度で、こちらには数えられません。
+  </p>
+  <p>
+    <code>mcpd_traces_sampled_out_total</code> が増えるのは障害ではありません。
+    自分の実行が見当たらないと誰かが言い出したとき、インターフェースの
+    抜けを説明する数字です。
+  </p>
+  <p>
+    <code>mcpd_signals_over_quota_total</code> は、シグナルが着地しない
+    もう 1 つの理由に対する同じ形の数字です。プロジェクトが毎分の上限に
+    達した、という理由です。この拒否は
+    <code>mcpd_signals_rejected_total</code> にも数えられるので、上限で
+    絞られているフリートと、不正なデータを送っているフリートを見分けるには
+    こちらを見てください。上限が何を覆うかは
+    <a href={to('/docs/configuration')} class="link">設定</a>にあります。
+  </p>
+  <p>
+    <code>mcpd_signals_unbounded_total</code> は逆向きの数字です。名指しした
+    プロジェクトにどの上限も及ばなかったために保存されたシグナルの数です。
+    <code>projects</code> の下だけに書かれた上限は、そこに書かれた
+    プロジェクトしか縛りません。それ以外の名前を送る送信元は、上限の横を
+    素通りします。これらのシグナルは拒否ではなく計数にとどめてあります。
+    誰も書いていないプロジェクトを拒否すると、設定を変えずにアップグレード
+    したデプロイのデータを落としてしまうからです。ゼロでなければ、
+    プロジェクトごとの上限の横にトップレベルの
+    <code>--quota-per-minute</code> を置いてください。
+  </p>
+  <p>
+    上限は、行が入りうるすべての入口を覆います。4 つの取り込み
+    エンドポイント、単一レコードのスコアとフィードバックのエンドポイント、
+    そして <code>POST /v1/api/score</code> です。最後のものはスコアを計算
+    したうえで、保存する前に同じカウンターに課金します。そこで上限に
+    収まらなかったぶんは、上限を越えて書かれるのではなく、レスポンスの
+    <code>skipped</code> リストにスコアごとに報告されます。
+  </p>
+  <p>
+    <code>mcpd_audit_write_failures_total</code> は、書けなかった監査行を
+    数えます。その行が説明していたリクエストは成功し、データも返っています。
+    そこが要点で、監査の書き込みが、それが説明する読み取りを失敗させること
+    はありません。したがってゼロでないということは、保存済みペイロードの
+    読み取りが起きたのに監査ログがそれを説明できない、ということです。
+    可用性の指標ではなく、完全性の指標として扱ってください。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="prometheus"
+    samples={[{ lang: 'curl', label: 'prometheus.yml', shiki: 'yaml', code: scrape }]}
+  />
+
+  <h2>停止</h2>
+  <p>
+    mcpd は <code>SIGTERM</code> と <code>SIGINT</code> を処理します。
+    どちらでも、新しい接続の受け付けをやめ、処理中のリクエストを終わらせて
+    からプロセスを終了します。
+  </p>
+  <p>
+    とくに <code>SIGTERM</code> を処理していることが、オーケストレーターの
+    下でこれを成り立たせています。Kubernetes は <code>SIGTERM</code> を送り、
+    猶予期間を待ってから <code>SIGKILL</code> します。<code>SIGINT</code>
+    しか待っていないコンテナは、停止されるのではなく殺され、トランザクション
+    の途中だったバッチは失われます。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="きれいな停止"
+    lines={[
+      { out: 'mcpd 0.1.0 listening on http://0.0.0.0:4317' },
+      { out: '  storage     sqlite at /data/mcpd.db' },
+      { out: 'retention removed 12480 rows older than 30 days', tone: 'note' },
+      { out: 'received termination signal', tone: 'warn' },
+      { out: 'shutting down', tone: 'ok' },
+    ]}
+  />
+
+  <p>
+    終了時に mcpd が救えないのは、送信側のキューにまだ残っているものです。
+    SDK はスパンをメモリーに保持してワーカーで送り出すので、
+    <code>shutdown()</code> を呼ばずに終了したプロセスは、まだ送っていない
+    ぶんを失います。これはデーモンではなく、エージェント側で正しく行う停止
+    処理です。
+  </p>
+
+  <h2>バックアップ</h2>
+  <p>
+    ストアの全体は <code>--data</code> にある 1 つの SQLite ファイルです。
+    WAL モードで動くので、ディスク上には <code>mcpd.db</code> と並んで
+    <code>mcpd.db-wal</code> と <code>mcpd.db-shm</code> があります。
+    プロセスが動いている間に <code>.db</code> だけをコピーすると、
+    先行書き込みログに残っているものがすべて欠けたファイルになります。
+  </p>
+  <p>
+    バックアップは SQLite 経由で取ってください。mcpd が書き続けている間も、
+    一貫したスナップショットを読み出します。
+  </p>
+
+  <Command
+    class="my-6"
+    label="ホットバックアップ"
+    command={`sqlite3 /data/mcpd.db ".backup '/backup/mcpd-$(date +%F).db'"`}
+  />
+
+  <p>
+    先にプロセスを止めて 3 つのファイルをすべてコピーする方法も同じくらい
+    正しく、イメージの中に <code>sqlite3</code> のバイナリが要りません。
+    このビルドに <code>mcpd backup</code> というサブコマンドはなく、定期
+    バックアップの仕組みもありません。これはあなたのスナップショット基盤の
+    仕事であり、そうでないふりをすれば、半端な仕組みが重要な経路に居座る
+    ことになります。
+  </p>
+  <p>
+    保持期間の処理は行を削除しますが、ファイルは小さくなりません。SQLite は
+    解放したページを保持して再利用するので、大きな削除の後もディスク使用量は
+    減らずに横ばいになります。容量を本当に取り戻したいなら、止めた
+    インスタンスに対して <code>VACUUM</code> を実行してください。
+  </p>
+
+  <h3>リストア</h3>
+  <p>
+    バックアップを戻す手順は 4 つで、先行書き込みログがあるために順序が重要
+    です。
+  </p>
+  <ol>
+    <li>
+      デーモンを止めます。動いているプロセスの下でのリストアは、同じ
+      ファイルに対する 2 人目の書き手になります。
+    </li>
+    <li><code>--data</code> のファイルにバックアップを上書きします。</li>
+    <li>
+      その横の <code>-wal</code> と <code>-shm</code> のファイルを削除します。
+      これらは置き換えた側のデータベースのものであり、残しておくと、戻した
+      ほうのデータベースに再生されてしまいます。
+    </li>
+    <li>
+      デーモンを起動し、戻したファイルを読んでいることを確認します。
+      <code>/readyz</code> が 200 を返し、そのプロジェクトのトレース一覧に
+      バックアップが持っていた実行が返ってきます。
+    </li>
+  </ol>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="デモ用ストアに対して実行したリストア"
+    lines={[
+      { cmd: 'kill $(cat mcpd.pid) && cp /backup/mcpd-2026-09-01.db /data/mcpd.db' },
+      { cmd: 'rm -f /data/mcpd.db-wal /data/mcpd.db-shm' },
+      { cmd: 'mcpd --data /data/mcpd.db &' },
+      { cmd: 'curl -s -o /dev/null -w "%{http_code}\\n" localhost:4317/readyz' },
+      { out: '200', tone: 'ok' },
+      { cmd: 'curl -s "localhost:4317/v1/api/traces?project=default&limit=500" | jq ".traces | length"' },
+      { out: '2', tone: 'ok' },
+    ]}
+  />
+
+  <h2>アップグレード</h2>
+  <p>
+    バイナリかイメージのタグを差し替えて、また起動するだけです。スキーマは
+    毎回起動時に適用され、最新のファイルに対して実行しても何も変わらない
+    ように書かれています。適用されたバージョンは同じファイルの中の
+    <code>schema_version</code> テーブルに記録され、このビルドはバージョン
+    2 です。
+  </p>
+  <p>
+    覚えておくことが 2 つあります。前へ進めるだけで、戻さないこと。古い
+    バイナリが新しいファイルを読める保証はないので、先にバックアップを
+    取ってください。もう 1 つは、SDK のバージョンを固定しているなら、
+    アップグレード後に <code>/healthz</code> の <code>spec_version</code> を
+    確認することです。クライアントが突き合わせるのはその数字だからです。
+  </p>
+
+  <h2>1 台のインスタンスの限界</h2>
+  <p>
+    ここは正直に書くほうが、測っていない数字を出すより役に立ちます。
+    スループットの数値は公開しません。自信をもって示せるものが存在しない
+    からです。
+  </p>
+  <ul>
+    <li>
+      <strong>書き手は 1 つ。</strong>SQLite のストアは、ミューテックスの
+      後ろに書き込み接続を 1 つ、読み取り接続を 4 つ持ちます。WAL モードなの
+      でダッシュボードのクエリが取り込みを止めることはなく、そこが本当に
+      困る失敗なのですが、書き込みはすべてその 1 つの接続で直列化されます。
+    </li>
+    <li>
+      <strong>ファイル 1 つにインスタンス 1 つ。</strong>同じファイルを指した
+      mcpd のプロセスが 2 つある状態は、サポートされたデプロイではありません。
+      水平にスケールするサービスとしてではなく、ボリュームを付けた 1 台の
+      レプリカとして動かしてください。
+    </li>
+    <li>
+      <strong>上の 2 つはどちらも組み込みストアの制限です。</strong>
+      ClickHouse では当てはまらなくなります。ClickHouse は組み込み済みで、
+      下で扱います。
+    </li>
+    <li>
+      <strong>ペイロードは大きくなります。</strong>プロンプトと出力は
+      バイトではなくキロバイトの単位で、そこが mcpd を動かす価値そのものです。
+      ストレージはスパン数よりもテキスト量ではるかに速く増えるので、
+      毎秒スパン数のような数字ではなく、自分のペイロードで測ってください。
+    </li>
+    <li>
+      <strong>保持期間が覆うのは、書き留めたプロジェクトだけです。</strong>
+      1 時間ごとの処理は、<code>projects</code> ブロックのすべての
+      プロジェクトから削除します。<code>retention_days</code> を持つ
+      プロジェクトはその値で、持たないプロジェクトはグローバルの値で削除
+      され、<code>--project</code> が名指しするプロジェクトも対象です。
+      送信元が勝手に作ったプロジェクトがどちらにも現れなければ、期間を
+      持たず、一度も削除されません。保持期間をプライバシーの手段として
+      当てにする前に、知っておく価値があります。
+    </li>
+  </ul>
+  <p>
+    流量がインスタンスの手に余ってきたときの手段を、代償の小さい順に
+    挙げます。ファイルの大きさを抑える <code>--retention-days</code>、
+    流入を抑える <code>--sample</code>（決定的なので、残すと決めたトレースは
+    まるごと残ります）、そして書き手が 1 つという制限とレプリカが 1 台と
+    いう制限を同時に外す ClickHouse への移行です。
+    <a href={to('/docs/sampling')} class="link">サンプリング</a>、および
+    <a href={to('/docs/privacy')} class="link">秘匿化と保持期間</a>を
+    参照してください。
+  </p>
+
+  <h2>すでに Postgres を運用している場合</h2>
+  <p>
+    mcpd に Postgres の接続文字列を渡すと、組み込みファイルではなくそちらに
+    保存します。スキーマは起動時に作られます。
+  </p>
+
+  <Command
+    class="my-6"
+    title="Postgres に保存する"
+    command="mcpd serve --postgres-url postgres://mcpd:$PGPASSWORD@db:5432/mcpd"
+  />
+
+  <p>
+    これで ClickHouse と同じ 2 つの制限が外れます。書き込みが 1 つの接続を
+    通らなくなるので、mcpd は 1 つのサービスの後ろで複数のレプリカとして
+    動きます。しかも、たいていのチームがすでに運用し、バックアップし、
+    監視しているデータベースの上でそうできます。
+  </p>
+  <p>
+    マイグレーションは Postgres のアドバイザリーロックを取り、スキーマが
+    すでに最新なら丸ごと飛ばされます。だから複数のレプリカが同時に起動して
+    も安全ですし、ローリングデプロイが、他のレプリカが書き込んでいる
+    テーブルに排他ロックを取ることもありません。
+  </p>
+  <p>
+    全文検索は GIN インデックスを張った生成列の <code>tsvector</code> を
+    使い、構成は <code>simple</code> です。小文字化して語の境界で区切ります
+    が、語幹処理はしません。プロンプトを、打ち込んだそのままのトークンで
+    検索したときに期待どおりに動きます。
+  </p>
+  <p>
+    保持期間が数十億スパンで測られるようになったら、Postgres ではなく
+    ClickHouse を選んでください。それより下なら、すでに運用している
+    データベースのほうが良い答えです。
+  </p>
+
+  <h2>ファイルでは形が合わなくなったときの ClickHouse</h2>
+  <p>
+    mcpd に ClickHouse の HTTP エンドポイントを渡すと、組み込みファイルでは
+    なくそちらに保存します。スキーマは起動時に作られるので、手で適用する
+    ものはありません。
+  </p>
+
+  <Command
+    class="my-6"
+    title="ClickHouse に保存する"
+    command={`mcpd serve \\
+  --clickhouse-url http://clickhouse:8123 \\
+  --clickhouse-database mcpd \\
+  --clickhouse-user default --clickhouse-password $CH_PASSWORD`}
+  />
+
+  <p>
+    上に挙げた制約が両方とも一度に外れます。書き込みが 1 つの接続を通らなく
+    なるので、mcpd は 1 つのサービスの後ろで複数のレプリカとして動き、
+    スパンは、このデータが実際に持つ形に合わせて作られた
+    <code>MergeTree</code> に着地します。読み取りよりはるかに書き込みが多く、
+    時間範囲を走査するクエリが来る、という形です。
+  </p>
+  <p>
+    保持期間が、ノート PC のディスクではなく本番トラフィックの数か月で
+    測られるようになったら選んでください。それより小さいうちは、組み込み
+    ファイルのほうが動かすのも速く、バックアップも速く、運用するものが 1 つ
+    少なくて済みます。つらくなるまではファイルのままで構いません。
+  </p>
+  <p>
+    トレースは <code>ReplacingMergeTree</code> です。トレースの集約は
+    スパンが届くたびに計算し直され、最後の書き込みが正しいものだからです。
+    順序が入れ替わって届いたスパン、再送されたスパン、その場で更新された
+    スパンは、重複を積み上げるのではなく正しい答えに収束します。
+  </p>
+  <p>
+    ここでは他の 2 つのバックエンドより弱くなる保証が 1 つあり、それは
+    あなたが証明を求められるかもしれない保証です。ClickHouse での削除は
+    非同期のミューテーションなので、消去のリクエストは受理され、そのあとで
+    適用されます。SQLite と Postgres は、応答したトランザクションの中で
+    削除します。どちらが起きたかは <code>deletes_pending</code> で返答に
+    書かれます。
+    <a href={to('/docs/privacy')} class="link">秘匿化と保持期間</a>を
+    参照してください。
+  </p>
+
+  <h2>デプロイの点検</h2>
+  <p>
+    <code>mcpd doctor</code> は設定とストアを読み、何がおかしいかを、それを
+    直すフラグの名前とともに報告します。これがあるのは、実際に痛い目に
+    あわせる失敗が静かなものだからです。何も落ちず、何週間もあとで気付く
+    のです。
+  </p>
+
+  <Command
+    class="my-6"
+    title="ストア以外には何も接続せずにデプロイを点検する"
+    command="mcpd doctor --data /data/mcpd.db --offline"
+    primaryLabel="オフライン"
+    secondary={[
+      { label: '書き込みなし', command: 'mcpd doctor --data /data/mcpd.db --offline --read-only' },
+      { label: 'より長い期間', command: 'mcpd doctor --data /data/mcpd.db --window-days 30' },
+    ]}
+  />
+
+  <p>
+    3 つのフラグはこのコマンド専用です。<code>--offline</code> はストア以外
+    には何も接続しないので、転送先は点検したことにはならず、飛ばしたと報告
+    されます。<code>--read-only</code> は何も書かないので、ストレージの点検は
+    ストアが読めることを示すだけで、書けることは示さず、そのように報告します。
+    <code>--window-days</code> は、活動、時刻、価格表の点検が何日ぶんの履歴を
+    読むかで、指定しなければ 7 日、1 から 36525 の間です。それ以外に受け取る
+    のはデーモン自身の設定なので、あなたが起動するはずの呼び出しをそのまま
+    採点します。
+  </p>
+  <p>
+    12 のグループがこの順に採点され、レポートの最後に各レベルの件数が
+    出ます。
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>グループ</th><th>採点する内容</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>storage</code></td>
+          <td>ストアが ping に答えること、そして試験用のスパンが書き込み、読み取り、削除を通り抜けること</td>
+        </tr>
+        <tr>
+          <td><code>runs</code></td>
+          <td>実行ストアが答えること、保持している定義のバージョン数と実行中の実行の数、そして他の人が届くアドレスで実行まわりにキーが必要かどうか。読み取りのみで、doctor がステップを取得したり期限を発火させたりすることはありません</td>
+        </tr>
+        <tr>
+          <td><code>keys</code></td>
+          <td>すべてのスコープと、その継承関係を明示します。管理キーが設定されておらず、そのためどの読み取りキーでも削除できてしまう状態が、ドキュメントの中ではなく画面に出ます</td>
+        </tr>
+        <tr>
+          <td><code>identity</code></td>
+          <td>監査の主体ヘッダーと、それを設定してよい範囲が信じられるほど狭いかどうか</td>
+        </tr>
+        <tr>
+          <td><code>projects</code></td>
+          <td>設定されたプロジェクトと、実行を持つプロジェクトの突き合わせ。スパンを一度も受け取っていないプロジェクトは、ほぼ必ず名前の打ち間違いです</td>
+        </tr>
+        <tr>
+          <td><code>retention</code></td>
+          <td>各プロジェクトのデータがどこまで遡るか、そしてそれをいつか削除するものがあるかどうか</td>
+        </tr>
+        <tr>
+          <td><code>limits</code></td>
+          <td>プロジェクトごとの取り込み上限と、サンプリングの割合</td>
+        </tr>
+        <tr>
+          <td><code>forwarding</code></td>
+          <td>転送先を、スパンの入っていない OTLP バッチを POST して確かめます</td>
+        </tr>
+        <tr>
+          <td><code>judge</code></td>
+          <td>ジャッジのブロックを、設定としてのみ確認します</td>
+        </tr>
+        <tr>
+          <td><code>monitors</code></td>
+          <td>モニターと目標、およびそれらが読むシグナル</td>
+        </tr>
+        <tr>
+          <td><code>clock</code></td>
+          <td>各プロジェクトの履歴の両端にある実行を、このマシンの時計と突き合わせます。時計が遅れている送信元の実行は、正直な実行すべての下に並んでしまい、最新のものを並べたページには決して現れないからです</td>
+        </tr>
+        <tr>
+          <td><code>pricing</code></td>
+          <td>最近のモデルのスパンを価格表と突き合わせ、どこからも価格を付けられないモデルを名指しします</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    <code>identity</code> と <code>limits</code> は最も新しく加わった 2 つで、
+    どちらも同じ理由で採点されていませんでした。どちらも落ちないのです。
+    主体の無い監査ログは、何が行われたかは記録しますが、誰が行ったかは
+    決して記録しません。0.0 から 1.0 の外にあるサンプリングの割合は
+    <code>--sample</code> では拒否されますが、プロジェクトのブロックでは
+    一度も検査されていなかったので、プロジェクトがそれを持っていても、
+    デーモンはそのまま動いていました。プロジェクトごとに上限を設定し、その横に
+    トップレベルの上限を置かない構成は、誰も書き留めていないすべての
+    プロジェクトを上限なしのままにします。しかもプロジェクト名を選ぶのは
+    送信元です。
+  </p>
+
+  <h3>skipped は ok ではありません</h3>
+  <p>
+    実行されなかった点検は <strong>skipped</strong> と表示され、ok には
+    なりません。この区別こそがこのコマンドの主眼です。指定した設定に
+    存在しないサブシステムは、健康なサブシステムではありません。両者を同じ
+    ように報告すれば、doctor は間違ったファイルを渡されたときにこそ最も
+    自信満々になってしまいます。集計行は飛ばした点検を別に数え、言葉でも
+    そう書くので、14 件の所見のうち 2 件しか確かめていない実行が、健康
+    診断書のようには読めません。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="新しいデプロイに対する実行の終わり方"
+    lines={[
+      { cmd: 'mcpd doctor --data /data/mcpd.db | tail -4' },
+      { out: '2 ok, 9 skipped, 2 warnings, 1 fault', tone: 'warn' },
+      { out: 'A skipped check proved nothing: it was not run, or there was nothing there' },
+      { out: 'to run it against. Only the 2 ok were verified.' },
+      { out: 'A fault is something broken or open. Exiting 2.', tone: 'warn' },
+    ]}
+  />
+
+  <h3>混んでいるストアは壊れたストアではありません</h3>
+  <p>
+    ストレージの試験だけが書き込みロックを必要とします。それより下はすべて
+    読み取りで、読み手が書き手の後ろで待つことはありません。試験の書き込みが
+    そのロックの取り合いに負けた場合は <strong>skipped</strong> と報告
+    されます。試行は 3 回で、3 回ともロックを待って諦めたときは、書き込みを
+    確認できなかったことと、その理由がレポートに出ます。
+  </p>
+  <p>
+    これが重要なのは、組み込みストアの書き手が 1 つで、本番の取り込みを
+    受けているデプロイはそのロックをほぼ絶えず握っているからです。競合を
+    障害として報告していたころは、デプロイが健康で忙しいときにかぎって
+    このコマンドがデプロイを止めていました。この試験が捕まえるべき失敗は
+    それぞれ自分の名前を名乗り、そのどれも「locked」とは言いません。
+    読み取り専用のマウント、いっぱいのディスク、<code>INSERT</code> の無い
+    ロールは今も障害ですし、壊れたロックも障害です。それは「locking
+    protocol」と名乗り、実際の損傷です。
+  </p>
+
+  <h3>終了コード</h3>
+  <p>
+    障害があれば非ゼロで終了するので、デプロイの門番にできます。警告は障害
+    ではありません。ゼロで終了し、人が読むことを期待します。1 つだけ、警告
+    ではなく障害として扱う構成があり、これはパイプラインに組み込む前に
+    知っておく価値があります。ループバックでないアドレスで読み取りスコープ
+    が開いている構成です。これはポートに届く誰にでも、保存されたプロンプトを
+    すべて渡します。同じアドレスで取り込みスコープが開いているのは警告の
+    ままです。ごみの行は保持期間が消してくれますが、漏れたものは取り返せ
+    ないからです。インターネット全体を含む信頼アドレス範囲も、同じ理由で
+    同じ扱いです。どのアドレスからでもヘッダーを設定でき、名乗ったとおりの
+    人物として記録されてしまいます。
+  </p>
+
+  <h2>外から届くようにする前に確認する設定</h2>
+  <p>
+    ループバックでないアドレスにバインドしたとき、mcpd は、届くべきでない
+    相手に開いている面ごとに起動時の警告をログに出し、それぞれの警告は設定
+    すべきフラグの名前を示します。起動を拒否するのではなく警告するのは、拒否
+    すると何も無い状態から最初のトレースまでの道が断たれてしまうからです。
+    それでもこれは、実在する穴についての警告です。読み取り API が開いていれば、
+    ポートに届く誰にでも、保存されたプロンプトをすべて渡すことになります。
+  </p>
+
+  <Command
+    class="my-6"
+    command="mcpd --data /data/mcpd.db --ingest-key $INGEST_KEY --read-key $READ_KEY --execute-key $EXECUTE_KEY --worker-key $WORKER_KEY --admin-key $ADMIN_KEY --retention-days 30"
+  />
+
+  <p>
+    最後の 3 つのキーが無いと、ingest キーと read キーは実行の面にも届き、
+    read キーは削除もできます。各キーの詳細と、設定できるそれ以外のすべては
+    <a href={to('/docs/configuration')} class="link">設定</a>にあります。
+  </p>
+</Doc>

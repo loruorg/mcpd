@@ -1,0 +1,67 @@
+# The pull request title has to read like the commit it will become.
+#
+# Why this exists: pull requests here are squash-merged, so the title becomes
+# the commit subject on main verbatim. Every commit on main so far is already
+# a conventional commit, in lower case, with no full stop. That history is
+# what a release note is written from and what
+# `git log --oneline` has to stay readable as. Checking the title at the point
+# it is written is cheaper than fixing the subject at the point it is merged.
+#
+# The type list is the conventional-commit set. The history so far uses four
+# of them: feat, fix, docs and chore.
+name: pr-title
+
+# pull_request_target so the check also runs on a pull request from a fork.
+# It reads the title from the event payload; there is no checkout and no code
+# from the pull request runs, so the privileged context is not exposed.
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  conventional-commit:
+    name: conventional commit title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # Reading the pull request. The action fails the job to report a bad
+      # title; it does not write a comment, so it needs nothing more.
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            build
+            chore
+            ci
+            docs
+            feat
+            fix
+            perf
+            refactor
+            revert
+            style
+            test
+          # A scope is optional. `feat(gui):` is in the history and reads well,
+          # but most changes here cross crates and inventing a scope for them
+          # would be noise.
+          requireScope: false
+          # Two rules, both matching the existing history:
+          #   (?![A-Z][a-z])  no sentence case. `OTLP protobuf ingest` passes,
+          #                   because the capitals are an acronym; `Add ingest`
+          #                   does not.
+          #   [^.\s]$         no trailing full stop, and no trailing space.
+          subjectPattern: ^(?![A-Z][a-z])[\s\S]*[^.\s]$
+          subjectPatternError: >-
+            The subject "{subject}" of pull request title "{title}" is not in
+            the house style. Start it in lower case, unless the first word is
+            an acronym, and do not end it with a full stop. Run
+            `git log --oneline` for examples.

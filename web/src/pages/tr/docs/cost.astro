@@ -1,0 +1,471 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import Command from '@/components/Command.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+
+/* Written here rather than read from an example program: these are queries a
+   reader runs against their own daemon, not code CI can execute. */
+const breakdown = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# Geçen hafta para nereye gitti, modele göre.
+curl -s --get http://localhost:4317/v1/api/analytics/cost \\
+  --data-urlencode 'from=-7d' \\
+  --data-urlencode 'group_by=model'
+
+# Aynı hafta, günlük seri olarak; hangi gün değiştiğini görebilirsiniz.
+curl -s --get http://localhost:4317/v1/api/analytics/cost \\
+  --data-urlencode 'from=-7d' \\
+  --data-urlencode 'group_by=model' \\
+  --data-urlencode 'bucket=1d'
+`,
+  },
+  {
+    lang: 'typescript' as const,
+    label: 'TypeScript',
+    shiki: 'typescript',
+    code: `import { Mcpd } from '@mcpd/sdk'
+
+const mcpd = new Mcpd()
+
+const spend = await mcpd.analyticsCost({
+  from: '-7d',
+  to: '-0s',
+  groupBy: 'model',
+  bucket: '1d',
+})
+
+console.log(\`\${spend.currency} \${spend.totalCost.toFixed(4)} over the window\`)
+for (const group of spend.groups) {
+  console.log(group.key, group.totalCost, group.inputTokens, group.outputTokens)
+}`,
+  },
+  {
+    lang: 'python' as const,
+    label: 'Python',
+    shiki: 'python',
+    code: `from mcpd import Mcpd
+
+mcpd = Mcpd()
+
+spend = mcpd.analytics_cost("-7d", "-0s", group_by="model", bucket="1d")
+
+print(f"{spend.currency} {spend.total_cost:.4f} over the window")
+for group in spend.groups:
+    print(group.key, group.total_cost, group.input_tokens, group.output_tokens)`,
+  },
+]
+
+const response = [
+  {
+    lang: 'curl' as const,
+    label: 'CostBreakdown',
+    shiki: 'json',
+    code: `{
+  "from": "2026-08-20T09:00:00Z",
+  "to": "2026-08-27T09:00:00Z",
+  "currency": "USD",
+  "total_cost": 12.418264,
+  "groups": [
+    {
+      "key": "claude-sonnet-4",
+      "count": 1841,
+      "error_count": 12,
+      "total_cost": 9.612055,
+      "input_tokens": 2903118,
+      "output_tokens": 214477,
+      "latency": { "mean": 1840.2, "max": 24193.0 }
+    },
+    {
+      "key": "gpt-4o-mini",
+      "count": 6204,
+      "error_count": 3,
+      "total_cost": 2.806209,
+      "input_tokens": 9114882,
+      "output_tokens": 388310,
+      "latency": { "mean": 612.4, "max": 8801.0 }
+    }
+  ]
+}`,
+  },
+]
+---
+
+<Doc
+  title="Maliyet muhasebesi"
+  description="mcpd token sayılarını nasıl maliyete çevirir: geçmiş yeniden yazılamasın diye alımda fiyatlanır, önbellek token'ları ayrı ücretlenir, bilinmeyen modeller bedava değil fiyatsız kalır."
+  lede="Bir maliyet değeri, ancak nereden geldiğini söyleyebiliyorsanız işe yarar. Burada bir token sayısı ile ekrandaki sayı arasındaki her adım var."
+  og="docs"
+>
+  <h2>Bir kez, alımda fiyatlanır</h2>
+  <p>
+    Bir span, bir model kimliği ve bir token sayısı taşıyarak geldiğinde mcpd o
+    modeli bir fiyat kitabında arar, çağrının maliyetini hesaplar ve sonucu
+    span'in üzerinde saklar. Okuma sırasında hiçbir şey yeniden hesaplanmaz.
+  </p>
+  <p>
+    Bu sayfadaki önemli karar budur. Fiyatlar değişir. Maliyet, sorgu anında o
+    gün yüklü olan kitaptan türetilseydi, gelecek ay yapılan bir indirim geçen
+    ayın maliyetini sessizce yeniden yazardı ve birine bildirdiğiniz sayı,
+    kontrol etmeye gittiklerinde orada olmazdı. Alımda fiyatlamak, değeri
+    çağrının yapıldığı anda geçerli olan oranlara sabitler. Saklanan her maliyet
+    ayrıca onu üreten kitabın kimliğini de kaydeder, yani bir değer arkasındaki
+    oranlara kadar izlenebilir.
+  </p>
+  <p>
+    Zaten bir maliyet taşıyan bir span geldiği gibi bırakılır. Sağlayıcınız size
+    gerçek bir değer veriyorsa ve siz onu kaydediyorsanız, mcpd sizinkini korur
+    ve üzerine fiyat yazmaz. <code>is_estimated</code> bayrağı ikisini ayırır:
+    mcpd'nin bir kitaptan türettiği her şey tahmini olarak işaretlenir, çünkü
+    öyledir.
+  </p>
+
+  <h2>Oranlar milyon token başınadır</h2>
+  <p>
+    Bir fiyat kitabındaki her oran, milyon token başına para birimidir; her
+    sağlayıcı da fiyatlarını böyle yayımlar. Bir fiyat sayfasından kopyalanan
+    oran kitaba olduğu gibi girer, gecenin üçünde yanlış yapılacak bir bölme
+    olmadan. Tek bir sayaç için aritmetik
+    <code>tokens × rate ÷ 1,000,000</code> şeklindedir.
+  </p>
+
+  <h2>Maliyet çalıştırmada değil, adımda durur</h2>
+  <p>
+    Her model çağrısı kendi değerini taşır. Bir çalıştırmanın toplamı
+    span'lerinin toplamıdır ve mcpd, bir sayacı artırmak yerine span'lerden biri
+    her geldiğinde bu toplamı span'lerden yeniden hesaplar. Span'ler sırasız gelir,
+    yeniden denenir ve yerinde güncellenir; artan bir toplam bu üçünün altında da
+    kayar. Altındaki satırlarla uyuşmayan bir başlık sayısı, sayfadaki diğer her
+    sayıya olan güveni yok eder.
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>
+    Yukarıdaki üç model çağrısı $0.00015, $0.00018 ve $0.00021 olarak
+    fiyatlanmıştır. Başlıktaki çalıştırma toplamı bunların toplamıdır, başka bir
+    şey değil: araç çağrıları, bellek araması ve koruma kontrolü hiç token
+    tüketmedi, yani maliyet taşımaz ve toplama katkı vermezler.
+  </p>
+
+  <h2>Sayaçlar</h2>
+  <p>
+    Bir model çağrısı tek bir token sayısı değildir. Sağlayıcılar birkaç sayacı
+    farklı oranlarla faturalar ve bir fiyat kitabı her biri için bir oran verir.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Oran</th><th>Neye uygulanır</th><th>Kitap onu atladığında</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>input</code></td>
+        <td>Sıradan girdi token'ları.</td>
+        <td>Zorunlu.</td>
+      </tr>
+      <tr>
+        <td><code>output</code></td>
+        <td>Sıradan yanıt token'ları.</td>
+        <td>Zorunlu.</td>
+      </tr>
+      <tr>
+        <td><code>cache_read</code></td>
+        <td>Bir prompt önbelleğinden sunulan token'lar.</td>
+        <td><code>input</code> oranından ücretlenir.</td>
+      </tr>
+      <tr>
+        <td><code>cache_write</code></td>
+        <td>Bir prompt önbelleğine yazılan token'lar.</td>
+        <td><code>input</code> oranından ücretlenir.</td>
+      </tr>
+      <tr>
+        <td><code>cache_write_5m</code></td>
+        <td>Sağlayıcının TTL'leri ayrı fiyatladığı yerde, beş dakikalık önbelleğe yazmalar.</td>
+        <td>Önce <code>cache_write</code>, sonra <code>input</code> oranına düşer.</td>
+      </tr>
+      <tr>
+        <td><code>cache_write_1h</code></td>
+        <td>Bir saatlik önbelleğe yazmalar.</td>
+        <td>Önce <code>cache_write</code>, sonra <code>input</code> oranına düşer.</td>
+      </tr>
+      <tr>
+        <td><code>audio_input</code></td>
+        <td>Ses girdi token'ları.</td>
+        <td><code>input</code> oranından ücretlenir.</td>
+      </tr>
+      <tr>
+        <td><code>audio_output</code></td>
+        <td>Ses çıktı token'ları.</td>
+        <td><code>output</code> oranından ücretlenir.</td>
+      </tr>
+      <tr>
+        <td><code>reasoning</code></td>
+        <td>Bir sağlayıcının ayrı faturaladığı yerde, gizli akıl yürütme token'ları.</td>
+        <td>
+          Geri düşme yok. Sağlayıcı ayrıca ayrı bir <code>text</code> sayısı
+          bildirmediyse, büyük sağlayıcıların faturaladığı gibi çıktı toplamının
+          parçası olarak <code>output</code> oranından ücretlenirler. Aşağıya
+          bakın.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Önbellekten gelen token bir kez ücretlenir</h2>
+  <p>
+    Bir faturayı olduğundan büyük göstermenin klasik yolu, önbellekten gelen bir
+    token'ı iki kez ücretlendirmektir: bir kez önbellek oranından, bir kez de
+    zaten içinde bulunduğu bildirilmiş girdi toplamının parçası olarak. Bu
+    yüzden bir sağlayıcı bir dağılım bildirdiğinde o dağılım kazanır. mcpd her
+    sayacı kendi oranıyla fiyatlar ve yalnızca kalanı düz girdi oranından
+    ücretlendirir.
+  </p>
+  <p>
+    Bir milyon girdi token'ı bildiren ve bunların dokuz yüz bini önbellekten
+    okunmuş bir <code>claude-sonnet-4</code> çağrısı, yerleşik kitaba göre şöyle
+    fiyatlanır:
+  </p>
+  <ul>
+    <li>900.000 önbellek okuması, milyon başına $0.30 üzerinden $0.27 eder.</li>
+    <li>Kalan 100.000 girdi token'ı, milyon başına $3.00 üzerinden $0.30 eder.</li>
+    <li>
+      Bildirilen toplamın tek başına üreteceği $3.00 yerine $0.57 girdi maliyeti.
+    </li>
+  </ul>
+  <p>
+    Bir sağlayıcı açık bir <code>text</code> sayısı verdiğinde, o sayı doğrudan
+    kalan olarak kullanılır. Vermediğinde kalan, bildirilen toplamdan sayaçlanmış
+    her alanın çıkarılmasıdır.
+  </p>
+  <p>
+    Bu, adı konmaya değer tek bir boşluk bırakır. Kitabın oranını tutmadığı bir
+    sayaç yalnızca kalanın parçası olarak ücretlenir, yani sağlayıcı ayrıca bir
+    <code>text</code> sayısı gönderdiyse hiç ücretlenmez. Kitabınız akıl yürütme
+    token'larına kendi oranını vermediğinde onlar buradadır ve bir oran
+    tanımlamak bunu düzeltir. Görüntü token'ları her zaman buradadır, çünkü bir
+    kitabın verebileceği bir görüntü oranı yoktur; yani ağır çok kipli bir iş
+    yükünde değeri kesin değil, düşük okuyun.
+  </p>
+
+  <h2>Bilinmeyen bir modelin maliyeti yoktur, sıfır maliyeti değil</h2>
+  <p>
+    Kitap model için hiçbir oran tutmuyorsa, mcpd span'i hiç maliyet alanı
+    olmadan saklar. Sıfır saklamaz.
+  </p>
+  <p>
+    Sıfır bir iddiadır: bu çağrı bedavaydı. Yokluk bir itiraftır: bu çağrının ne
+    tuttuğunu bilmiyoruz. İkisi farklı kararlara götürür ve ikincisini birincisi
+    diye bildiren bir araç bir fatura hakkında yalan söylüyordur. Aynı kural okuma
+    yolundan da geçer: span'leri hiçbir toplam vermeyen bir çalıştırma, sıfır
+    maliyetle değil maliyet değeri olmadan döner, yani boş bir maliyet sütunu
+    <em>fiyatlanmadı</em> demektir, hiçbir zaman <em>bedava</em> değil.
+  </p>
+  <p>
+    Pratik sonucu içselleştirmeye değer: kitapta olmayan bir model her toplamda
+    da yoktur. Harcaması <code>/v1/api/analytics/cost</code> içinde görünmez ve
+    çalıştırmaları pozitif her <code>min_cost</code> süzgeci tarafından dışarıda
+    bırakılır. Fazla düşük görünen haftalık bir toplam genellikle sakin bir hafta
+    değil, çözülmeyen bir model kimliğidir.
+  </p>
+
+  <h2>Bir model kimliğini çözmek</h2>
+  <p>
+    Bir span'deki kimlik, istemcinizin gönderdiği şeydir ve istemciler onu
+    süsler. Bir ağ geçidi sağlayıcısını öne ekler, bir bulut bölgesini öne ekler,
+    bir sağlayıcı bir yayım tarihi iliştirir. Bir kitap çıplak model adlarıyla
+    anahtarlanır, bu yüzden arama sırayla dört şey dener ve ilk isabette durur.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Adım</th><th>Örnek</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Kimliğin kendisi, harf büyüklüğü eşitlenerek</td>
+        <td><code>GPT-4o</code>, <code>gpt-4o</code> kaydını bulur</td>
+      </tr>
+      <tr>
+        <td>Son eğik çizgiden sonraki parça</td>
+        <td><code>openai/gpt-4o</code>, <code>gpt-4o</code> kaydını bulur</td>
+      </tr>
+      <tr>
+        <td>Bir bulut kimliğinin noktalı kuyruğu</td>
+        <td>
+          <code>us.anthropic.claude-sonnet-4</code>,
+          <code>claude-sonnet-4</code> kaydını bulur
+        </td>
+      </tr>
+      <tr>
+        <td>Sondaki tarihi atılmış kimlik, önekiyle veya öneksiz</td>
+        <td>
+          <code>openai/gpt-4o-2024-08-06</code>, <code>gpt-4o</code> kaydını bulur
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Hem <code>-YYYY-MM-DD</code> hem <code>-YYYYMMDD</code> sonekleri tanınır.
+    Dört adımın da tutmaması bir hata değil, olağan bir sonuçtur: yukarıdaki
+    gibi, maliyet yok demektir.
+  </p>
+
+  <h2>Birlikte gelen kitap</h2>
+  <p>
+    mcpd küçük bir yerleşik kitap taşır, böylece <code>docker run</code> hiç
+    yapılandırma olmadan gerçek değerler üretir. Adı <code>builtin</code>'dir,
+    USD üzerinden fiyatlar ve ürettiği her maliyet bu adı kaydeder.
+  </p>
+
+  {/* Transcribed from `builtin_book` in crates/mcpd-core/src/cost.rs. When a
+      rate moves there, it moves here. */}
+  <table>
+    <thead>
+      <tr>
+        <th>Model</th><th>Girdi</th><th>Çıktı</th><th>Önbellek okuma</th><th>Önbelleğe yazma, 5 dk</th><th>Önbelleğe yazma, 1 saat</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><code>claude-opus-4</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
+      <tr><td><code>claude-opus-4-1</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
+      <tr><td><code>claude-opus-4-5</code></td><td>5.00</td><td>25.00</td><td>0.50</td><td>6.25</td><td>10.00</td></tr>
+      <tr><td><code>claude-sonnet-4</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
+      <tr><td><code>claude-sonnet-4-5</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
+      <tr><td><code>claude-haiku-4-5</code></td><td>1.00</td><td>5.00</td><td>0.10</td><td>1.25</td><td>2.00</td></tr>
+      <tr><td><code>claude-3-5-haiku</code></td><td>0.80</td><td>4.00</td><td>0.08</td><td>1.00</td><td>1.60</td></tr>
+      <tr><td><code>gpt-4o</code></td><td>2.50</td><td>10.00</td><td>1.25</td><td>girdi oranından</td><td>girdi oranından</td></tr>
+      <tr><td><code>gpt-4o-mini</code></td><td>0.15</td><td>0.60</td><td>0.075</td><td>girdi oranından</td><td>girdi oranından</td></tr>
+      <tr><td><code>gpt-4.1</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>girdi oranından</td><td>girdi oranından</td></tr>
+      <tr><td><code>gpt-4.1-mini</code></td><td>0.40</td><td>1.60</td><td>0.10</td><td>girdi oranından</td><td>girdi oranından</td></tr>
+      <tr><td><code>o3</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>girdi oranından</td><td>girdi oranından</td></tr>
+      <tr><td><code>o4-mini</code></td><td>1.10</td><td>4.40</td><td>0.275</td><td>girdi oranından</td><td>girdi oranından</td></tr>
+      <tr><td><code>gemini-2.5-pro</code></td><td>1.25</td><td>10.00</td><td>0.31</td><td>girdi oranından</td><td>girdi oranından</td></tr>
+      <tr><td><code>gemini-2.5-flash</code></td><td>0.30</td><td>2.50</td><td>0.075</td><td>girdi oranından</td><td>girdi oranından</td></tr>
+      <tr><td><code>text-embedding-3-small</code></td><td>0.02</td><td>0.00</td><td>girdi oranından</td><td>girdi oranından</td><td>girdi oranından</td></tr>
+      <tr><td><code>text-embedding-3-large</code></td><td>0.13</td><td>0.00</td><td>girdi oranından</td><td>girdi oranından</td><td>girdi oranından</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Milyon token başına USD; kitap, üçüncü taraf bir model kataloğuna karşı en
+    son denetlendiğinde bu durumdaydı ve kitap bunu kendi <code>as_of</code>
+    tarihi olarak kaydeder. Anthropic girdileri iki önbelleğe yazma oranını da
+    taşır, çünkü daemon bir saatlik orandan beş dakikalık orana geri düşer ve uzun
+    olanı atlayan bir kitap sessizce eksik faturalandırırdı. OpenAI kendi
+    önbelleğine yazmak için ücret almaz, bu yüzden oradaki bir önbelleğe yazma
+    girdi oranından faturalanır. <code>gemini-2.5-flash</code> ayrıca 1.00'lik
+    bir ses girdi oranı taşır; diğer her kayıt sesi kendi metin oranından
+    fiyatlar. <code>claude-haiku-4</code> diye bir şey yoktur: Anthropic'in
+    sunduğu kimlik <code>claude-haiku-4-5</code>'tir ve hiçbir şeye çözülmeyen
+    bir kimlik tahmin edilmez, fiyatsız bırakılır.
+  </p>
+  <p>
+    Bunlar yayımlanmış liste fiyatlarıdır, sizin fiyatlarınız değil. Anlaşmalı
+    oranlarınız varsa veya bu tabloda olmayan bir model çalıştırıyorsanız,
+    mcpd'nin size gösterdiği değerler bir tahmindir ve öyle okunmalıdır. Kitap
+    bilerek kısadır: uzun bir kitap daha çok yerde bayatlar ve hak ettiğinden
+    güçlü bir doğruluk izlenimi verir.
+  </p>
+  <p>
+    Kendi kitabınızı vermenin henüz bir komut satırı seçeneği yok. Kitap sunucu
+    durumunun parçasıdır ve bugün onu değiştirmenin yolu, mcpd'yi bir kitaplık
+    olarak gömüp <code>AppState::with_price_book</code> çağrısına bir kitap
+    geçirmektir. Bir kitap; bir kimlik, bir ISO 4217 para birimi ve model
+    kimliğinden oranlara bir eşlemedir ve ürettiği her değer kendi kimliğiyle
+    damgalanır, böylece iki kitap sonradan birbirinden ayrılabilir. Bir projedeki
+    fiyatlar tek bir para birimini paylaşmalıdır; mcpd bir çalıştırmanın
+    span'lerini aritmetik olarak toplar ve para birimleri arasında dönüşüm yapmaz.
+  </p>
+
+  <h2>Parayı geri okumak</h2>
+  <p>
+    <code>GET /v1/api/analytics/cost</code>, bir pencere boyunca paranın nereye
+    gittiğini, hiçbir şeyi bir hesap tablosuna aktarmadan yanıtlar.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    command="curl -s 'http://localhost:4317/v1/api/analytics/cost?from=-7d&group_by=model'"
+  />
+
+  <table>
+    <thead>
+      <tr><th>Parametre</th><th>Anlamı</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>from</code>, <code>to</code></td>
+        <td>
+          Pencere. RFC 3339 veya göreli kısa yazım. Varsayılan olarak şimdi biten
+          son yedi gün.
+        </td>
+      </tr>
+      <tr>
+        <td><code>group_by</code></td>
+        <td>
+          Varsayılan <code>model</code>. Ayrıca <code>provider</code>,
+          <code>entity_name</code>, <code>environment</code>,
+          <code>status</code>, <code>session_id</code>, <code>user_id</code>,
+          <code>service_name</code> veya <code>name</code>.
+        </td>
+      </tr>
+      <tr>
+        <td><code>bucket</code></td>
+        <td>
+          <code>30s</code>, <code>5m</code>, <code>1h</code> veya <code>1d</code>.
+          Yalnızca toplamlar için vermeyin; yanında bir zaman serisi almak için
+          verin.
+        </td>
+      </tr>
+      <tr>
+        <td><code>project</code></td>
+        <td>Hangi projenin okunacağı. Varsayılan, daemon'un varsayılan projesidir.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <CodeSwitcher class="not-prose my-6" samples={breakdown} title="para nereye gitti" />
+
+  <p>
+    Gruplar en büyükten başlayarak, en çok yüz satır olarak döner; kovalara ayrılmış bir
+    seri ise en çok beş bin nokta ile sınırlıdır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={response} title="yanıt" />
+
+  <p>
+    <code>count</code> alanında bir incelik var. <code>model</code>,
+    <code>provider</code> veya <code>entity_name</code> ile gruplamak span'leri
+    okur, yani <code>count</code> bir model çağrısı sayısıdır. Başka bir şeyle
+    gruplamak çalıştırma izdüşümünü okur, yani <code>count</code> bir çalıştırma
+    sayısıdır. İkisi de işe yarar; aynı sayı değildirler ve burada yapılacak en
+    kolay hata birini diğeriyle karşılaştırmaktır.
+  </p>
+  <p>
+    Bu yanıttaki grup başına gecikme yalnızca bir ortalama ve bir en yüksek değer
+    taşır. Yüzdelikler, bunları pencere boyunca hesaplayan
+    <code>GET /v1/api/analytics/summary</code> çağrısından gelir.
+  </p>
+
+  <h2>Sırada nereye gitmeli</h2>
+  <p>
+    Maliyet, bir çalıştırma listesindeki bir sütundur ve bir soruşturma asıl
+    çalıştırma listesinde başlar:
+    <a href={urlFor('/docs/searching', code)} class="link">Çalıştırma bulma</a>
+    sayfası <code>min_cost</code> alanını ve harcamaya göre sıralamayı anlatır.
+    Değerleriniz, payload'lar fiyatlanmadan önce düşürüldüğü için yanlış
+    görünüyorsa, neyin kaydedileceğine karar veren
+    <a href={urlFor('/docs/sampling', code)} class="link">Örnekleme</a> sayfasına
+    bakın. Bu sayfada adı geçen her alan
+    <a href={urlFor('/docs/reference/data-model', code)} class="link">veri modeli</a>
+    sayfasında listelenmiştir.
+  </p>
+</Doc>

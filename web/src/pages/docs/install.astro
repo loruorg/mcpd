@@ -1,0 +1,302 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Unreleased from '@/components/Unreleased.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { Code } from 'astro:components'
+import { panelTheme } from '@/lib/shiki-theme'
+
+/* The compose file is written here rather than read from an example program,
+   because it is configuration for the reader's machine and not code that CI
+   compiles. Every key in it maps to a flag on the daemon. It is shown as one
+   file with no language tabs, because there is only one language it can be. */
+const compose = `services:
+  mcpd:
+    image: ghcr.io/mcpd/mcpd:latest
+    restart: unless-stopped
+    ports:
+      - "4317:4317"
+    volumes:
+      - mcpd-data:/data
+    environment:
+      MCPD_DATA: /data/mcpd.db
+      MCPD_PROJECT: default
+      # Set these before this port is reachable by anything but you.
+      # MCPD_INGEST_KEYS: key-for-your-agents
+      # MCPD_READ_KEYS: key-for-your-team
+      # MCPD_RETENTION_DAYS: 30
+
+volumes:
+  mcpd-data:
+`
+---
+
+<Doc
+  title="Install"
+  description="Every way to install mcpd: the Docker image, a compose file, the Helm chart, a release binary, and a build from source. Then verify it answered on /healthz."
+  lede="mcpd is one binary with storage compiled in, so installing it means putting that binary somewhere and starting it. Pick whichever route below matches how you already run things."
+  og="docs"
+>
+  <h2>Docker</h2>
+  <Unreleased class="not-prose my-6" />
+  <p>
+    The published image is the shortest route in, and the one the rest of the
+    documentation assumes.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    command="docker run -p 4317:4317 -v mcpd-data:/data -e MCPD_DATA=/data/mcpd.db ghcr.io/mcpd/mcpd"
+  />
+
+  <p>
+    The volume matters. mcpd writes a SQLite database at the path
+    <code>MCPD_DATA</code> names, and a container without a volume takes your
+    traces with it when it stops. Naming the path explicitly costs one flag and
+    removes the question of where the file went.
+  </p>
+  <p>
+    Every flag has an environment variable, so anything you can pass on the
+    command line you can also set with <code>-e</code>. Pin a tag rather than
+    tracking <code>latest</code> in anything you care about. The image is built
+    for <code>linux/amd64</code> and <code>linux/arm64</code>, and Docker pulls
+    the one that matches your machine.
+  </p>
+
+  <h2>Docker Compose</h2>
+  <p>
+    The same container, written down. This is the form to use when mcpd sits
+    beside your application on one host.
+  </p>
+
+  <div class="not-prose panel-raised mcpd-yaml my-6 overflow-hidden">
+    <div class="border-b border-scribe-2 bg-panel-1 px-3.5 py-2.5">
+      <span class="legend text-ink-3">compose.yaml</span>
+    </div>
+    <div class="scroll-x bg-well p-4 text-[0.8125rem] leading-[1.65]">
+      <Code code={compose} lang="yaml" theme={panelTheme as any} />
+    </div>
+  </div>
+
+  <p>
+    The three commented keys are the ones to fill in before this reaches a
+    network anyone else is on. With no keys set, ingest and reads are both open,
+    which is correct on your laptop and wrong everywhere else.
+    <a href="/deploy" class="link">Deploy</a> covers what to set and why.
+  </p>
+
+  <h2>Kubernetes</h2>
+  <p>
+    Each release pushes the chart to the same registry as the image, as an OCI
+    artefact, so there is no repository to add first. The chart refuses to
+    install without an ingest key and a read key, so generate both first.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    command="helm install mcpd oci://ghcr.io/mcpd/charts/mcpd -n mcpd --create-namespace --set keys.ingest=$INGEST_KEY --set keys.read=$READ_KEY"
+    secondary={[
+      { label: 'Generate the keys', command: 'export INGEST_KEY=$(openssl rand -hex 32) READ_KEY=$(openssl rand -hex 32)' },
+    ]}
+  />
+
+  <p>
+    mcpd handles <code>SIGTERM</code> and shuts down gracefully, which is what
+    Kubernetes sends. It exposes <code>/healthz</code> for liveness and
+    <code>/readyz</code> for readiness, and the two are deliberately different:
+    liveness never touches storage, so a slow database cannot restart the pod
+    into a loop. Values, probes and the Deployment shape are on
+    <a href="/deploy" class="link">Docker and Kubernetes</a>.
+  </p>
+
+  <h2>A release binary</h2>
+  <p>
+    Each release attaches an archive for Linux on x86_64 and arm64, static and
+    built against musl so there is no libc to match, and for macOS on Apple
+    silicon and Intel. A <code>SHA256SUMS</code> file and a build provenance
+    attestation come with them. Unpack the archive for your machine and run
+    <code>./mcpd</code>; with no arguments it starts the daemon.
+  </p>
+  <p>
+    There is no <code>cargo install mcpd</code>. Nothing is published to
+    crates.io, and a crate built from the registry could not carry the
+    interface, which is built with npm and compiled into the binary. With a Rust
+    toolchain, build from source instead.
+  </p>
+
+  <h2>From source</h2>
+  <p>
+    Clone the repository and run the distribution build. It uses full link-time
+    optimisation and a single codegen unit, which is slower to compile and
+    produces the smaller, faster binary. Go through <code>make</code> rather
+    than <code>cargo</code> directly: the interface is compiled into the binary,
+    and <code>make dist</code> builds it first, which is the step a plain
+    <code>cargo build</code> on a fresh clone has no way to do. That step needs
+    Node and npm on the machine as well as the Rust toolchain.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    command="git clone https://github.com/mcpd/mcpd && cd mcpd && make dist"
+    primaryLabel="Distribution build"
+    secondary={[{ label: 'Faster build', command: 'make build' }]}
+  />
+
+  <p>
+    The binary is written to <code>target/dist/mcpd</code>, or
+    <code>target/release/mcpd</code> if you took the faster route. Use
+    <code>make build</code> while you are working on mcpd itself and
+    <code>make dist</code> for anything you intend to run.
+  </p>
+
+  <h2>Where the data goes</h2>
+  <p>
+    <code>--data</code> is the path to the SQLite file, and it defaults to
+    <code>./mcpd.db</code> in the working directory. Parent directories are
+    created for you.
+  </p>
+  <p>
+    Passing <code>:memory:</code> keeps everything in memory and writes nothing
+    to disk. That is the right choice for a test suite, for a demo on someone
+    else's machine, and for any run whose prompts you would rather not leave
+    behind. The store disappears with the process, which is the point.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="Leave nothing behind"
+    command="mcpd --data :memory:"
+    primaryLabel="In memory"
+    secondary={[
+      { label: 'Seed a sample run', command: 'mcpd demo --data :memory:' },
+      { label: 'Somewhere else', command: 'mcpd --data /var/lib/mcpd/mcpd.db' },
+    ]}
+  />
+
+  <p>
+    <code>mcpd demo</code> fills the store with a realistic failing run and then
+    serves, so the interface has something in it the first time you open it.
+  </p>
+
+  <h2>Check what it will do before you start it</h2>
+  <p>
+    <code>mcpd config</code> prints the configuration this invocation resolves
+    to, then exits. Flags, environment variables and defaults all end up in one
+    listing, so you can see which one won without starting anything.
+  </p>
+
+  {/* Every line the binary prints, with nothing set. `make check` compares the
+      labels with the binary's own output, because this cast once stopped at
+      sixteen lines after the binary had grown to twenty-nine. */}
+  <TerminalCast
+    class="not-prose my-8"
+    title="resolved configuration"
+    lines={[
+      { cmd: 'mcpd config' },
+      { out: 'listen          0.0.0.0:4317' },
+      { out: 'storage         sqlite at ./mcpd.db' },
+      { out: 'config file     none' },
+      { out: 'log format      text' },
+      { out: 'project         default' },
+      { out: 'projects        none' },
+      { out: 'retention       forever' },
+      { out: 'ingest auth     open', tone: 'warn' },
+      { out: 'read auth       open', tone: 'warn' },
+      { out: 'write auth      open', tone: 'warn' },
+      { out: 'admin auth      open', tone: 'warn' },
+      { out: 'execute auth    open', tone: 'warn' },
+      { out: 'worker auth     open', tone: 'warn' },
+      { out: 'signup          off' },
+      { out: 'runs            sqlite at ./mcpd.runs.db' },
+      { out: 'run settings    lease_ttl_ms 30000, reclaim_window_ms 30000, stall_window_ms 300000, idempotency_window_ms 86400000, park_ttl_ms 86400000, max_depth 8, max_step_repeats 16' },
+      { out: 'identity        off' },
+      { out: 'client ip       peer address' },
+      { out: 'sampling        keep everything' },
+      { out: 'quota           unlimited' },
+      { out: 'redaction       on', tone: 'ok' },
+      { out: 'redact key      built in, which is public; set --redact-key', tone: 'warn' },
+      { out: 'cors            same-origin only' },
+      { out: 'timeout         30s per request' },
+      { out: 'limits          32 MiB per request, 10000 signals per batch' },
+      { out: 'derived         duration and token metrics' },
+      { out: 'aspects         off' },
+      { out: 'monitors        none' },
+      { out: 'objectives      none' },
+      { out: 'judge           off' },
+      { out: 'forwarding      off' },
+    ]}
+  />
+
+  <h2>Verify the install</h2>
+  <p>
+    <code>/healthz</code> is the answer to "is it actually running". It never
+    reads from storage, so it stays fast and stays honest about the process
+    rather than the disk.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="verify"
+    lines={[
+      { cmd: 'curl -s localhost:4317/healthz' },
+      {
+        out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0","uptime_seconds":8,"storage":"sqlite"}',
+        tone: 'ok',
+      },
+      { cmd: 'curl -s -o /dev/null -w "%{http_code}\\n" localhost:4317/readyz' },
+      { out: '200', tone: 'ok' },
+    ]}
+  />
+
+  <p>
+    <code>spec_version</code> is the data-model version this build implements. A
+    client can read it and refuse to talk to a server it does not understand,
+    which is better than sending a batch that will be rejected field by field.
+  </p>
+  <p>
+    <code>/readyz</code> is the other half. It pings storage and answers
+    <code>503</code> when the store is not reachable, so a load balancer stops
+    sending reads to an instance that cannot serve them. Use
+    <code>/healthz</code> for liveness and <code>/readyz</code> for readiness,
+    never the same one for both.
+  </p>
+  <p>
+    Then open <a href="http://localhost:4317" class="link" rel="noopener">
+      localhost:4317</a
+    > and you are looking at the interface.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>
+      Send it a trace from your own agent:
+      <a href="/docs/quickstart" class="link">Quickstart</a>.
+    </li>
+    <li>
+      Learn the words the rest of the documentation uses:
+      <a href="/docs/concepts" class="link">Concepts</a>.
+    </li>
+    <li>
+      Every flag and environment variable in one table:
+      <a href="/docs/configuration" class="link">Configuration</a>.
+    </li>
+    <li>
+      Before anyone else can reach the port:
+      <a href="/deploy" class="link">Docker and Kubernetes</a>.
+    </li>
+  </ul>
+</Doc>
+
+<style>
+  /* Shiki emits its own <pre>. Strip its box so the recessed well shows
+     through, and set the data face, exactly as the language switcher does. */
+  .mcpd-yaml :global(pre.astro-code),
+  .mcpd-yaml :global(pre.astro-code code) {
+    font-family: var(--font-data);
+  }
+  .mcpd-yaml :global(pre.astro-code) {
+    background: transparent;
+    margin: 0;
+    padding: 0;
+  }
+</style>

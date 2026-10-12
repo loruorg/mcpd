@@ -1,0 +1,111 @@
+# Everything the cross-language suites need, installed one way.
+#
+# Why this is a composite action: two jobs in ci.yml run suites that drive all
+# seven probes, and each needs the same seven toolchains, the same three SDK
+# builds and the same daemon. Two copies of that list drift, and the copy that
+# drifts reports a language as "no toolchain", which is a skip, and a skip is
+# the one result nobody reads. MCPD_REQUIRE_ALL_LANGUAGES turns that skip into
+# a failure, and this file is what makes it a failure nobody sees.
+#
+# Kotlin is the awkward one. tests/e2e/languages.mjs compiles the probe with
+# kotlinc and runs it against a compiled SDK plus that SDK's runtime jars, and
+# it looks for all three in fixed places (/tmp/kotlinc, /tmp/ktbuild,
+# /tmp/kdeps) unless MCPD_E2E_KOTLIN_* says otherwise. The steps below fill
+# exactly those places, so no environment variable has to be threaded through.
+# Every download is pinned by SHA-256 read from the artefact itself, so a
+# replaced archive fails here rather than running.
+name: conformance setup
+description: The toolchains, SDK builds and daemon the cross-language suites need.
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08-05
+      with:
+        toolchain: stable
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: '22'
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: '3.13'
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: '1.27'
+    - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+      with:
+        otp-version: '27'
+        elixir-version: '1.18'
+    - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    # The compiler version matches the Kotlin Gradle plugin in
+    # sdks/kotlin/build.gradle.kts. The archive unpacks to kotlinc/, which is
+    # why the destination is /tmp and not /tmp/kotlinc.
+    - name: install the Kotlin compiler
+      shell: bash
+      env:
+        KOTLIN_VERSION: '2.4.20'
+        KOTLIN_SHA256: 59e9ca74c7904ef2c122b12114937673ccce68de820a663f0ed66ccf8799e0b7
+      run: |
+        set -euo pipefail
+        curl -sSL -o /tmp/kotlin-compiler.zip \
+          "https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VERSION}/kotlin-compiler-${KOTLIN_VERSION}.zip"
+        echo "${KOTLIN_SHA256}  /tmp/kotlin-compiler.zip" | sha256sum -c
+        unzip -q /tmp/kotlin-compiler.zip -d /tmp
+        echo /tmp/kotlinc/bin >> "$GITHUB_PATH"
+        /tmp/kotlinc/bin/kotlinc -version
+
+    # The two artefacts sdks/kotlin/build.gradle.kts declares, plus the
+    # serialization core that the JSON artefact depends on, at the versions the
+    # build script names. Gradle would resolve these itself; here they are
+    # fetched by hand because the probe is compiled with kotlinc, not Gradle,
+    # and kotlinc wants a classpath of jars. A bump in build.gradle.kts has to
+    # be repeated here, and the SDK compile step below fails if it is not.
+    - name: fetch the Kotlin SDK's runtime jars
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p /tmp/kdeps
+        fetch() {
+          curl -sSL -o "/tmp/kdeps/$2" "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/$1/$2"
+          echo "$3  /tmp/kdeps/$2" | sha256sum -c
+        }
+        fetch kotlinx-serialization-json-jvm/1.11.0 kotlinx-serialization-json-jvm-1.11.0.jar \
+          563a25b4eb5c9128ae9c2479f3d1a5c44dcd176112b91cf03682e906eba5c935
+        fetch kotlinx-serialization-core-jvm/1.11.0 kotlinx-serialization-core-jvm-1.11.0.jar \
+          f4a801c647d4351327cd9e1ac4113e2be9ea37a64ab0abae269c25a52e28f35d
+        fetch kotlinx-coroutines-core-jvm/1.11.0 kotlinx-coroutines-core-jvm-1.11.0.jar \
+          d1d75aa01dffbb4d1c520e67e4c4e7f5f6174718e7cb4632412503f2f0e604fa
+
+    # The serialization compiler plugin ships inside the compiler archive, and
+    # the opt-in mirrors the compilerOptions block in build.gradle.kts.
+    - name: compile the Kotlin SDK
+      shell: bash
+      run: |
+        set -euo pipefail
+        kotlinc \
+          -Xplugin=/tmp/kotlinc/lib/kotlin-serialization-compiler-plugin.jar \
+          -opt-in=kotlinx.serialization.ExperimentalSerializationApi \
+          -cp "$(ls /tmp/kdeps/*.jar | paste -sd:)" \
+          -d /tmp/ktbuild \
+          sdks/kotlin/src/main/kotlin/dev/mcpd/*.kt
+
+    - name: compile the Elixir SDK
+      shell: bash
+      working-directory: sdks/elixir
+      run: mix compile
+
+    - name: build the TypeScript SDK
+      shell: bash
+      working-directory: sdks/typescript
+      run: |
+        npm ci
+        npm run build
+
+    - name: build the daemon
+      shell: bash
+      run: cargo build -p mcpd

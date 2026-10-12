@@ -1,0 +1,662 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Maskeleme ve saklama"
+  description="mcpd'nin bir şey yazmadan önce uyguladığı maskeleme kuralları, dört mod, özetin neden anahtarlı olduğu ve saklanan verinin nasıl süresi dolar ya da talep üzerine silinir."
+  lede="Hiç saklanmayan ve saklanması sona eren şeyler. Maskeleme yazmadan önce çalışır, çünkü sonradan silinen bir sır yine de yazılmıştır."
+  og="docs"
+>
+  <h2>Maskeleme depolamadan önce çalışır</h2>
+  <p>
+    Prompt'lar ve tamamlamalar mcpd'nin tuttuğu en değerli ve en tehlikeli şeydir.
+    Maskeleme, alım hattının üçüncü aşamasıdır ve yazmadan öncedir, yani bir
+    kuralın eşleştiği değer veritabanına hiç ulaşmaz.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    Sıralama işin özüdür. Sonradan temizlenen bir değer yine de diskte, önden
+    yazma günlüğünde ve büyük olasılıkla dün geceki yedekte bulunmuştur. Hiç
+    yazılmamış olmak, sonradan silinmiş olmaktan başka bir güvencedir ve soran
+    birine açıkça söyleyebileceğiniz tek güvence odur.
+  </p>
+  <p>
+    Maskeleme varsayılan olarak açıktır. Sizi ancak yapılandırdıktan sonra koruyan
+    bir araç kimseyi korumaz. <code>--no-redact</code> veya
+    <code>MCPD_NO_REDACT</code> onu kapatır; bu yalnızca yukarı akışta bir şey zaten
+    maskeliyorsa akla yatkındır.
+  </p>
+  <p>
+    Maskeleme, telin daemon tarafındaki ucudur. Diğer ucu SDK'lar tutar:
+    <code>MCPD_CAPTURE_PAYLOADS=false</code> veya kodda
+    <code>capture_payloads</code>, prompt'ları ve tamamlamaları sürecin içinde
+    tutar. Span yine süresi, durumu, kullanımı, modeli, ilişkilendirmesi ve
+    hatalarıyla gelir; <code>input</code> ve <code>output</code> ise kuyruğa
+    alınmadan önce düşürülür, yani ağı hiç geçmezler. Baytları hiç göndermemesi
+    gereken bir ekip bunu ayarlar, hassas bir şey taşımayan bir span da kendisi
+    için yeniden dahil olabilir.
+  </p>
+
+  <h2>Varsayılan kurallar</h2>
+  <p>
+    Bir kural, küçük harfli alt dizelerden ve bir moddan oluşur. Bir anahtar, adı
+    küçük harfe çevrildiğinde bunlardan herhangi birini içeriyorsa eşleşir.
+    <code>X-API-Key</code>, <code>authorization</code> ve
+    <code>customer_email</code> adlarının, her yazım biçimi ve önek
+    sıralanmadan yakalanmasının nedeni, eşleşmenin alt dize üzerinden olmasıdır.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Mod</th><th>Eşleşen anahtar adları</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>mask</code></td>
+        <td>
+          <code>api_key</code>, <code>apikey</code>, <code>api-key</code>,
+          <code>secret</code>, <code>password</code>, <code>passwd</code>,
+          <code>access_token</code>, <code>refresh_token</code>,
+          <code>id_token</code>, <code>bearer</code>,
+          <code>authorization</code>, <code>auth_token</code>,
+          <code>private_key</code>, <code>client_secret</code>,
+          <code>session_token</code>, <code>credential</code>,
+          <code>signature</code>, <code>x-api-key</code>
+        </td>
+      </tr>
+      <tr>
+        <td><code>partial</code></td>
+        <td>
+          <code>email</code>, <code>phone</code>, <code>ssn</code>,
+          <code>credit_card</code>, <code>card_number</code>, <code>iban</code>
+        </td>
+      </tr>
+      <tr>
+        <td><code>hash</code></td>
+        <td><code>user_id</code>, <code>userid</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Eşleşen bir anahtar bir nesne veya dizi tutuyorsa, altındaki her şey de
+    maskelenir. <code>{'{"credential": {"value": "hunter2", "note": "prod"}}'}</code>
+    yalnızca adı tehlikeli görünen alanı değil, iki alanı da kaybeder.
+  </p>
+  <p>
+    Sınırı açıkça söylemekte fayda var: kurallar <strong>değerlerle değil,
+    anahtar adlarıyla</strong> eşleşir. Bir kullanıcının bir prompt'un ortasına
+    yapıştırdığı ve <code>content</code> adlı bir anahtarın altında saklanan bir
+    API anahtarı burada hiçbir şeyle eşleşmez. Maskeleme, kimlik bilgilerinin ve
+    tanımlayıcıların yapılandırılmış biçimde toplanmasını durdurur. Bir içerik
+    tarayıcısı değildir ve onu öyle saymak sizi yanıltır.
+  </p>
+
+  <h2>Dört mod</h2>
+  <table>
+    <thead>
+      <tr><th>Mod</th><th>Değere ne olur</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>drop</code></td>
+        <td>Anahtar tümüyle kaldırılır, hiç gönderilmemiş gibi.</td>
+      </tr>
+      <tr>
+        <td><code>mask</code></td>
+        <td>Değer <code>[redacted]</code> ile değiştirilir.</td>
+      </tr>
+      <tr>
+        <td><code>partial</code></td>
+        <td>
+          İlk iki ve son iki karakter kalır, aralarına üç nokta girer:
+          <code>alice@example.com</code> değeri <code>al…om</code> olur. Zaten
+          bildiğiniz bir değeri tanımaya yeter, kullanmaya yetmez. Altı karakter
+          veya daha kısa bir değer bunun yerine tümüyle maskelenir, çünkü beş
+          karakterin dördünü tutmak değerin çoğunu açık eder.
+        </td>
+      </tr>
+      <tr>
+        <td><code>hash</code></td>
+        <td>
+          Değer, <code>sha256:</code> ve anahtarlı bir SHA-256 özetinin ilk on
+          iki baytı ile, yirmi dört onaltılık karakter olarak değiştirilir.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Yerleşik kurallar dördün üçünü kullanır. Varsayılan olarak hiçbir şey
+    düşürülmez: <code>drop</code>, sizin ekleyeceğiniz ve bir alanın varlığının
+    bile tutmak istediğinizden fazla olduğu bir kural için oradadır.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="geri gelen şey"
+    lines={[
+      { cmd: 'curl -s "$MCPD/v1/api/traces/$TRACE" | jq .spans[0].input' },
+      { out: '{' },
+      { out: '  "question": "Where is my order A-1042?",' },
+      { out: '  "api_key": "[redacted]",', tone: 'note' },
+      { out: '  "email": "al…om",', tone: 'note' },
+      { out: '  "user_id": "sha256:9f2c1b7d4a08e5c3f6b1d0a4"', tone: 'note' },
+      { out: '}' },
+    ]}
+  />
+
+  <h2>Özet neden anahtarlı</h2>
+  <p>
+    Özetleme bir alanı kullanışlı tutar. Tek bir anahtar altında eşit girdiler
+    eşit özetler verir, yani maskelenmiş bir kullanıcı kimliğine göre
+    gruplayabilir, bir hataya kaç farklı kişinin denk geldiğini sayabilir ve
+    birini bir oturum boyunca izleyebilirsiniz; kim olduklarını tutmadan.
+  </p>
+  <p>
+    Anahtarsızken bu özellik bir açıktır. Tanımlayıcılar küçük ve tahmin
+    edilebilir kümelerden gelir; özete ve bu kaynak koda sahip olan biri, biri
+    tutana kadar adayları özetleyebilir. Özeti yalnızca zahmetli değil, geri
+    çözülemez yapan şey anahtardır.
+  </p>
+  <p>
+    Yerleşik anahtar kaynak koddaki bir sabittir, yani herkese açıktır. Bir şeyi
+    özetleyen her dağıtımda kendi anahtarınızı ayarlayın.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="özetleyen ve süresi dolan bir dağıtım"
+    command={'mcpd --redact-key "$MCPD_REDACT_KEY" --retention-days 30'}
+    secondary={[
+      { label: 'ortam değişkeniyle', command: 'MCPD_REDACT_KEY=… MCPD_RETENTION_DAYS=30 mcpd' },
+      { label: 'maskeleme kapalı', command: 'mcpd --no-redact' },
+    ]}
+  />
+
+  <p>
+    Anahtarı döndürmek bağı bilerek koparır. Her özet değişir, yani döndürmeden
+    önce yazılmış satırlar sonra yazılanlarla artık birleştirilemez. Döndürmenin
+    amacı budur ve bedeli de budur. Takvime bakıp alışkanlıktan değil, bağın
+    kopmasını istediğinizde döndürün.
+  </p>
+  <p>
+    Döndürmeden önce bu bedelin ikinci yarısını okuyun. Özneye göre silme,
+    saklanan özetle eşleşir; yani eski anahtarla yazılmış her satır, yeni anahtar
+    yürürlüğe girdiği andan itibaren bir silme talebinin erişemeyeceği yerdedir.
+    mcpd size olanın bu olduğunu söyleyemez, çünkü hangi anahtarın hangi satırı
+    yazdığını hiçbir yer kaydetmez. Yapabildiği tek şey, ortaya çıkan sıfırın bir
+    yanıt yerine geçmesine izin vermemektir ve aşağıdaki sıfır bölümü bu reddin
+    kendisidir.
+  </p>
+
+  <h2>Yalnızca span'ler değil, her sinyal</h2>
+  <p>
+    Bir sır, bir prompt'tan geçtiği kadar kolay bir log satırından da sızar; bu
+    yüzden aynı maskeleyici, girişte altı sinyalin hepsinin üzerinden geçer:
+  </p>
+  <ul>
+    <li>Span'ler: <code>input</code>, <code>output</code>, <code>attributes</code> ve <code>metadata</code>.</li>
+    <li>Loglar: yapılandırılmış <code>fields</code>.</li>
+    <li>Metrikler: <code>labels</code>.</li>
+    <li>Puanlar: <code>metadata</code>.</li>
+    <li>Geri bildirim: <code>metadata</code> ve serbest metin <code>comment</code>.</li>
+    <li>Yön notları: cümlenin kendisi, <code>text</code> alanında.</li>
+  </ul>
+  <p>
+    Bir span'in adı ve bir log kaydının mesajı maskeleyiciden geçirilmez. Bunlar
+    payload değil tanımlayıcıdır ve yeniden yazmak gruplamayı bozardı. Bir span
+    adını bir müşterinin e-posta adresinden kurmayın.
+  </p>
+
+  <h3>Çalıştırma deposu maskelenmez</h3>
+  <p>
+    Kalıcı çalıştırmalar istisnadır ve bu bilerek böyledir. Çalıştırma deposu
+    bir çalıştırmanın girdisini, durum verisini, çıktısını ve
+    ilişkilendirmesini, her adımın girdisini, çıktısını ve hatasını
+    gönderildikleri gibi, <code>user_id</code> özetlenmeden tutar. Bunlar iş
+    akışının çalışma durumudur: sonraki bir adım onları geri okur ve
+    maskeleyicinin yeniden yazdığı bir değer çalıştırmanın yaptığı şeyi
+    değiştirirdi. Bir çalıştırmanın trace deposuna yazdığı span'ler olağan alım
+    yolundan geçer, bu yüzden trace deposu onları diğer her span gibi
+    maskelenmiş ve özetlenmiş olarak tutar. Aşağıdaki bölümlerin anlattığı gibi
+    saklama ve silme çalıştırma deposunu da kapsar ve bir çalıştırmanın API
+    üzerinden her okunuşu denetim günlüğüne kaydedilir.
+  </p>
+
+  <h2>Uzun dizeler ve derin belgeler</h2>
+  <p>
+    Bir kural eşleşse de eşleşmese de her şeye iki sınır uygulanır.
+  </p>
+  <p>
+    128 KiB'den uzun her tek dize kesilir ve sonuna
+    <code>… [N bytes truncated]</code> eklenir, böylece okuyan kişi değerin kısa
+    değil eksik olduğunu bilir. Kesme bir karakter sınırına denk gelir, hiçbir
+    zaman çok baytlı bir kod noktasının içine değil. Kaçak tek bir prompt
+    veritabanınızın boyutunu belirlememelidir.
+  </p>
+  <p>
+    Gezinme 32 derinliğinde durur ve altında kalan her şey
+    <code>[too deeply nested]</code> ile değiştirilir. Açık bir alım portuna
+    ulaşan patolojik veya kendine gönderme yapan bir belge bir CPU'yu meşgul
+    edemez.
+  </p>
+
+  <h2>Saklama</h2>
+  <p>
+    <code>--retention-days</code> veya <code>MCPD_RETENTION_DAYS</code>,
+    verdiğiniz gün sayısından eski sinyalleri siler. Vermezseniz hiçbir şey
+    silinmez. Varsayılan olarak veriyi tutmak doğru yöndür: geçen ayın
+    trace'lerini sessizce atan bir aracı en kötü anda fark edersiniz.
+  </p>
+  <p>
+    Tarama, sorgu anında değil, daemon içinde saatlik bir zamanlayıcıyla çalışır.
+    Bir saklama taraması çok sayıda satır silebilir ve bu iş asla birinin
+    isteğinin içine düşmemelidir. Her tarama tek bir işlemde,
+    <code>received_at</code> değeri kesim noktasından eski olan span'leri,
+    logları, metrikleri ve trace satırlarını, kendi zaman damgası eski olan
+    puanları, geri bildirimleri ve yön notlarını kaldırır, sonra kaç satırın
+    gittiğini loglar. Tam metin dizini girdileri, onları adlandıran satırlar hâlâ
+    dururken önce temizlenir, böylece hiçbir şey öksüz kalmaz.
+  </p>
+  <p>
+    Aynı tarama, aynı pencereyle, çalıştırma deposunu da budar. Kökü kesim
+    noktasından önce sona ermiş her kalıcı çalıştırmayı, alt
+    çalıştırmalarıyla ve onlar için saklanan her şeyle birlikte siler; bunu,
+    çalışırken worker'ları bekletmemek için parti parti yapar. Sona ermemiş bir
+    çalıştırma, ne kadar uzun süredir bekliyor olursa olsun hiçbir zaman
+    silinmez. Tanımlar budanmaz.
+  </p>
+  <p>
+    Tarama, yalnızca varsayılanı değil, <code>--project</code> ile adlandırılan
+    projeyi ve yapılandırma dosyasının <code>projects</code> bloğundaki her
+    projeyi kapsar. Orada kendi <code>retention_days</code> değerini ayarlayan
+    bir proje o değere göre, geri kalanlar daemon'unkine göre süpürülür.
+    İkisinde de olmayan, yalnızca bir gönderenin adlandırdığı bir projenin
+    penceresi yoktur ve hiç budanmaz. Bu, tek bir daemon birkaç ekibe hizmet
+    ettiğinde önemlidir: otuz gün tutmayı kabul etmiş bir ekip, taramanın
+    okuduğu tek ayar başka bir ekibinki olduğu için verisini sessizce tutmaya
+    devam etmez, hiçbir yere yazılmamış bir ekip ise her şeyi tutar.
+  </p>
+
+  <h2>Bir kişiyle ilgili silme talebi</h2>
+  <p>
+    <code>DELETE /v1/api/subjects/{'{user_id}'}</code>, bir kişiyle ilgili bir
+    talebi tek çağrıda yanıtlar. Tanımlayıcıyı, ölçümlemenizin ayarladığı
+    biçimde gönderin. Daemon, alımda uyguladığı özetlemenin aynısını uygular,
+    yani <code>user_id</code> alanını özetleyen bir dağıtımda sizin önceden
+    özetlemeniz gerekmez.
+  </p>
+  <p>
+    Silmenin birimi satır değil, çalıştırmadır. Genelde yalnızca kök span bir
+    <code>user_id</code> taşır, prompt'u ve yanıtı tutanlar ise alt span'lerdir;
+    yani özneyi adlandıran satırları silmek payload'ı yerinde bırakırdı. Bir
+    çalıştırma, trace izdüşümü özneyi adlandırdığında veya span'lerinden herhangi
+    biri adlandırdığında kapsama girer ve o zaman çalıştırmanın tamamı gider:
+  </p>
+  <ul>
+    <li>O çalıştırmanın her span'i, taşıdığı girdiler ve çıktılarla birlikte.</li>
+    <li>Ona bağlı loglar, metrikler, puanlar, geri bildirimler ve yön notları.</li>
+    <li>
+      Bir <code>span_id</code> adlandıran ve <code>trace_id</code> adlandırmayan
+      sinyaller. Öznenin çalıştırmasının tek bir adımına iliştirilmiş bir puana
+      veya log satırına, yalnızca trace kimlikleri üzerinden değil, kapsamdaki
+      çalıştırmaların span kimlikleri üzerinden de erişilir.
+    </li>
+    <li>
+      Bağlanacağı bir çalıştırma olmadan kişiye karşı kaydedilmiş log satırları,
+      kendi <code>user_id</code> alanlarıyla eşleştirilir.
+    </li>
+    <li>
+      Kişinin yazdığı geri bildirim, nereye bağlı olursa olsun <code>author_id</code>
+      ile eşleştirilir. O satır kişinin kendi metnini tutar ve başkasının
+      çalıştırmasına bağlı olabilir; eskiden hayatta kaldığı yer burasıydı.
+    </li>
+    <li>
+      Kapsamdaki bir çalıştırmadan alınmış veri kümesi öğeleri. Bunlar silinmez,
+      boşaltılır. Bundan sonraki ikinci bölüm nedenini anlatır.
+    </li>
+    <li>
+      Kalıcı çalıştırmaları sunan bir daemon'da, ilişkilendirmesi
+      <code>user_id</code> değerini taşıyan ve sona ermiş her çalıştırma, alt
+      çalıştırmalarının tüm ağacıyla ve çalıştırma deposunun onlar için tuttuğu
+      her şeyle birlikte. Eşleşme, çalıştırmayı başlatırken verdiğiniz biçimle
+      yapılır, çünkü çalıştırma deposu onu özetlemeden tutar. O kişinin sona
+      ermemiş bir çalıştırmasına dokunulmaz: onu silmek, parçası olduğu iş
+      akışını bozardı. <code>runs_in_flight</code> içinde sayılır ve
+      <code>note</code> içinde adlandırılır, böylece onu iptal edebilir ya da
+      bitmesine izin verebilir ve isteği yeniden gönderebilirsiniz.
+    </li>
+  </ul>
+  <p>
+    Önce çalıştırma deposu silinir. Bir çalıştırmanın span'leri trace deposuna
+    yazılana kadar onun giden kutusunda bekler; bu yüzden önce çalıştırmaları
+    silmek hâlâ bekleyen her span'i siler, ardından trace deposundaki silme
+    zaten yazılmış olanları kaldırır.
+  </p>
+
+  <h3>Yanıt ne taşır</h3>
+  <p>
+    Sinyal başına bir sayı, çalıştırma deposu için iki sayı ve yanlarında, bir
+    sayının söyleyemediğini söyleyen altı alan: bilerek geride ne bırakıldığı ve
+    küçük bir sayının “bu kişiyle ilgili burada hiçbir şey saklanmıyor” diye
+    okunup okunamayacağı. <code>deleted</code>, altı sinyal sayısının
+    toplamıdır; çalıştırma sayıları ve <code>aspect_notes_erased</code> onun
+    yanında bildirilir, ona eklenmez.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="tek istek, tek kişi"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq' },
+      { out: '{' },
+      { out: '  "project": "checkout",' },
+      { out: '  "traces": 1,', tone: 'note' },
+      { out: '  "spans": 2,', tone: 'note' },
+      { out: '  "logs": 1,', tone: 'note' },
+      { out: '  "metrics": 0,', tone: 'note' },
+      { out: '  "scores": 1,', tone: 'note' },
+      { out: '  "feedback": 1,', tone: 'note' },
+      { out: '  "deleted": 6,' },
+      { out: '  "runs_erased": 1,', tone: 'note' },
+      { out: '  "runs_in_flight": 0,' },
+      { out: '  "dataset_items_erased": 1,', tone: 'warn' },
+      { out: '  "aspect_notes_erased": 0,' },
+      { out: '  "datasets": [' },
+      { out: '    "checkout-regressions"' },
+      { out: '  ],' },
+      { out: '  "deletes_pending": false,' },
+      { out: '  "unmatchable_identifiers": 0,' },
+      { out: '  "note": "1 captured dataset cases were emptied in place rather', tone: 'warn' },
+      { out: '           than deleted, so a regression test is not destroyed', tone: 'warn' },
+      { out: '           without anyone being told. They hold no payload any', tone: 'warn' },
+      { out: '           more."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Alan</th><th>Size ne söyler</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>runs_erased</code></td>
+          <td>
+            Çalıştırma deposundan silinen kalıcı çalıştırmalar, alt çalıştırmalar
+            dahil. <code>deleted</code> içinde sayılmaz. Daemon hiç çalıştırma
+            sunmadığında bulunmaz
+          </td>
+        </tr>
+        <tr>
+          <td><code>runs_in_flight</code></td>
+          <td>
+            Kişinin, sona ermedikleri için bütün olarak bırakılan kalıcı
+            çalıştırmaları. İptal edilecek çalıştırmaları <code>note</code>
+            adlandırır. Daemon hiç çalıştırma sunmadığında bulunmaz
+          </td>
+        </tr>
+        <tr>
+          <td><code>dataset_items_erased</code></td>
+          <td>
+            Yerinde boşaltılan alınmış öğeler. <code>deleted</code> içinde
+            sayılmazlar, çünkü satırlar hâlâ oradadır
+          </td>
+        </tr>
+        <tr>
+          <td><code>aspect_notes_erased</code></td>
+          <td>
+            Silinen yön notları. <code>deleted</code> içinde sayılmaz; o,
+            üstünde yazılan altı sinyal sayısını toplar
+          </td>
+        </tr>
+        <tr>
+          <td><code>datasets</code></td>
+          <td>O öğelerin hangi veri kümelerinde durduğu, gidip bakabilesiniz diye</td>
+        </tr>
+        <tr>
+          <td><code>deletes_pending</code></td>
+          <td>
+            Arka uç silmeleri yanıttan sonra uyguladığında doğrudur, yani sayılar
+            diskten neyin çıktığını değil neyin eşleştiğini söyler
+          </td>
+        </tr>
+        <tr>
+          <td><code>unmatchable_identifiers</code></td>
+          <td>
+            Bu projede saklanan ve bu isteğin eşleştiremeyeceği bir biçimde olan
+            tanımlayıcılar
+          </td>
+        </tr>
+        <tr>
+          <td><code>note</code></td>
+          <td>
+            Yukarıdaki sayıların neden yanıtın tamamı olmayabileceği. Tamamı
+            olduğunda bulunmaz
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Alınmış öğeler silinmez, boşaltılır</h3>
+  <p>
+    Üretimden alınmış bir veri kümesi öğesi girdinin birebir kopyasını tutar,
+    yani çalıştırmayı silip kopyayı bırakmak kişinin sözlerini veri kümesinde
+    bırakırdı. Öğeyi tümden silmek başka türlü bir zarardır: birileri o çalıştırmayı bir
+    hatanın geri gelmesini engellemek için almıştır ve onların regresyon testini
+    haber vermeden yok etmek mcpd'nin kendi başına vereceği bir karar değildir.
+  </p>
+  <p>
+    Bu yüzden payload'ın üzerine yazılır ve satır yaşamaya devam eder. Öğe,
+    girdisinin ve metadata'sının bulunduğu yerde
+    <code>{'{"erased": true}'}</code> okur, kaynak çalıştırmaya olan bağı
+    temizlenir ve yanıt kaç öğe olduğunu ve hangi veri kümelerini adlandırır.
+    Öğe gözle görülür biçimde boştur ve bu, bir operatörün üzerine
+    gidebileceği bir şeydir.
+  </p>
+  <p>
+    Bir öğe tümüyle erişim dışıdır ve nedeni kiracılıktır. <em>Başka</em> bir
+    projeye ait bir veri kümesine alınmış bir öğe boşaltılmaz ve sayılmaz. Çağrı
+    tek bir proje için yetkilendirilir ve tek bir projeye dokunur; bu sınırı aşan
+    bir silme, okuyamadığınız bir veri kümesinin içinde ne olduğunu öğrenmenin
+    bir yolu olurdu. Kişiyi o projeden de, oraya erişen bir anahtarla
+    silin.
+  </p>
+
+  <h3>Yapmadıkları</h3>
+  <p>
+    Tek bir projeye dokunur. <code>?project=</code> onu adlandırır ve siz
+    vermediğinizde daemon'un varsayılan projesi kullanılır. O projeye erişemeyen
+    bir anahtar 403 ile reddedilir ve hiçbir şey silinmez. Aynı kişinin,
+    anahtarın açamadığı bir projedeki satırlarına ne dokunulur ne de sayılır,
+    yani bir sayı öznenin başka bir yerde var olduğunu asla açık edemez. Bir
+    kişiyi birkaç projeden silmek, her birine erişen bir anahtarla proje başına
+    bir çağrıdır.
+  </p>
+  <p>
+    Hakkında hiçbir şey saklanmayan bir özne 404 değil, sıfırlar taşıyan bir
+    200'dür. İstediğiniz durum zaten geçerlidir ve bir 404, kimsenin sormaya
+    hakkı olmayan bir soruyu yanıtlardı: o kişinin bu anahtarın görebildiği bir
+    yerde var olup olmadığını. Bir zaman aşımından sonra tekrarın güvenli
+    olmasının nedeni de budur. İkinci çağrı bir hata değil, ikinci bir taramanın
+    daha küçük sayılarını bildirir.
+  </p>
+  <p>
+    Bu, bir kişiyi kendi sistemlerinizden silmenin yolu değildir. mcpd,
+    mcpd'nin sakladığını siler. Başka bir OTLP endpoint'ine ilettiğiniz her
+    şeyin orada da silinmesi gerekir ve mcpd ona ne olduğunu bilmez.
+  </p>
+
+  <h3>Anahtarlar ve bunun kaydı</h3>
+  <p>
+    Anahtarlar yapılandırıldığında silme bir admin anahtarı ister; admin anahtarı
+    ayarlanmamışsa read anahtarlarına geri düşer, böylece mevcut bir dağıtım
+    sahip olduğu erişimi korur. Eylem, proje ve isteyen anahtarın özetiyle
+    birlikte denetim günlüğüne yazılır; reddedilmiş bir deneme de aynı şekilde
+    kaydedilir. <code>user_id</code> özetlendiğinde satırın adlandırdığı şey
+    özettir: denetim günlüğü anlattığı veriden uzun yaşar, yani oraya ham
+    tanımlayıcıyı yazmak, kişinin kaldırmanızı istediği adı saklamanın budamadığı
+    bir tabloda bırakırdı.
+  </p>
+  <p>
+    Tek seferde bir çalıştırma seçeneği de duruyor.
+    <code>DELETE /v1/api/traces/{'{trace_id}'}</code> tek bir çalıştırmayı ve ona
+    bağlı her şeyi tek bir işlemde kaldırır ve silinen satır sayısını döndürür.
+  </p>
+
+  <h2>Bir silmeden gelen sıfır, en çok kuşkulanılacak değerdir</h2>
+  <p>
+    Bir sıfır, bir operatörün bir kişiye “sizinle ilgili hiçbir şey tutmuyoruz”
+    diye tekrarladığı şeydir ve bu endpoint'in kanıtlayamadığı tek sayıdır.
+    Saklanan tanımlayıcılar maskeleme anahtarıyla özetlenir ve hangi anahtarın
+    hangi satırı özetlediğini hiçbir yer kaydetmez, yani bir sıfır aynı ölçüde o
+    satırlar yazıldıktan sonra anahtarın değiştiği anlamına da gelebilir. mcpd
+    ikisini birbirinden ayıramaz. Yapabildiği şey, birincisi gibi okunan çıplak
+    bir sıfırı hiçbir zaman geri vermemektir.
+  </p>
+  <p>
+    Aşağıda aynı özne, çalıştırma kaydedildikten sonra döndürülmüş bir maskeleme
+    anahtarı altında siliniyor. Sayıların hepsi sıfır ve satır hâlâ orada:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="bir döndürmeden sonra aynı istek hiçbir şeyle eşleşmiyor"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq "{deleted, unmatchable_identifiers, note}"' },
+      { out: '{' },
+      { out: '  "deleted": 0,', tone: 'warn' },
+      { out: '  "unmatchable_identifiers": 0,' },
+      { out: '  "note": "Nothing matched. Stored identifiers are hashed with', tone: 'warn' },
+      { out: '           the redaction key, so this means no stored identifier', tone: 'warn' },
+      { out: '           hashes to this subject under the key in force now. It', tone: 'warn' },
+      { out: '           does not mean nothing about this person was ever', tone: 'warn' },
+      { out: '           stored: rows written under a different redaction key', tone: 'warn' },
+      { out: '           cannot be matched by this endpoint."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <p>
+    Notun kanıtlayabileceği şey projeye bağlıdır. Projedeki hiçbir şey kimseye
+    atfedilmemişse, bir anahtar değişikliğinin gizleyebileceği bir satır yoktur
+    ve not bunun yerine tam olarak bunu söyler. Aksi halde bir sıfır
+    kanıtlanmamıştır: o satırların yazıldığı maskeleme anahtarını geri getirin
+    ve isteği tekrarlayın.
+  </p>
+  <p>
+    Reddetmek yerine bildirir ve bu bilinçli bir ödünleşimdir. Reddetmek, bir zaman
+    aşımından sonraki tekrarı bozardı; “hiç görülmedi” yanıtını “bir saat önce
+    silindi” yanıtından farklı kılarak endpoint'i, bir kişinin bir proje
+    tarafından bilinip bilinmediğini sormanın yoluna çevirirdi; ve maskeleme ayarı
+    bir kez değişmiş bir dağıtımdaki her silmeyi, doğru biçimde hiçbir şeyle
+    eşleşmeyenler dahil, engellerdi.
+  </p>
+
+  <h3>Bu isteğin eşleştiremeyeceği tanımlayıcılar</h3>
+  <p>
+    Bir döndürme görünmezdir. Tanımlayıcıların <em>hiç</em> özetlenip
+    özetlenmediğine dair bir değişiklik görünmez değildir ve
+    <code>unmatchable_identifiers</code> mcpd'nin görebildiği şeydir. Özetlenmiş
+    bir tanımlayıcı <code>sha256:</code> önekinden tanınır, bu yüzden depo,
+    tuttuğu tanımlayıcılardan kaçının bu isteğin taşıdığının tersi biçimde
+    olduğunu sayar: özetlenmiş bir isteğe karşı düz metin satırlar veya tersi. O
+    satırlar başka bir maskeleme ayarı altında yazılmıştır, özneye ait olabilirler
+    ve bu istek onlara erişemez.
+  </p>
+
+  <p>
+    Sayım yalnızca sıfırda değil, her silmede çalışır ve aşağıdaki yanıt bunun
+    nedenidir. Bu projeye önce maskeleme açıkken, sonra kapalıyken yazıldı. İstek
+    daha yeni satırlarla eşleşti ve onları sildi; daha eski iki tanımlayıcı ise
+    özetlenmiş, yani bu istek onlara hiçbir zaman erişemezdi.
+    <code>deleted</code> ile duran bir sayım, eksiksiz bir yanıt gibi okunurdu:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="kısmi bir silme, asıl yakalanması gereken durum"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq "{deleted, unmatchable_identifiers, note}"' },
+      { out: '{' },
+      { out: '  "deleted": 2,' },
+      { out: '  "unmatchable_identifiers": 2,', tone: 'warn' },
+      { out: '  "note": "2 stored identifiers in this project are in a form', tone: 'warn' },
+      { out: '           this request could not match, so rows written under a', tone: 'warn' },
+      { out: '           different redaction setting were not searched and rows', tone: 'warn' },
+      { out: '           about this person may remain. Restore the redaction', tone: 'warn' },
+      { out: '           setting those rows were written under and repeat the', tone: 'warn' },
+      { out: '           request."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <p>
+    Sayım, öznenin kendi satırları üzerinde değil, projenin tuttuğu her
+    tanımlayıcı üzerindedir, yani o iki tanımlayıcı bambaşka birine ait olabilir.
+    Söyleyebileceğinin en fazlası budur. Dışladığı şey, başarılı görünen bir
+    silmeyi eksiksiz bir silme diye okumaktır.
+  </p>
+
+  <h2>Güvence üç arka uçta aynı değil</h2>
+  <p>
+    SQLite ve Postgres, size yanıt veren işlemin içinde siler. Yanıt geldiğinde
+    satırlar gitmiştir ve <code>deletes_pending</code> değeri
+    <code>false</code> olur.
+  </p>
+  <p>
+    ClickHouse böyle yapmaz. Orada silme eşzamansız bir mutasyondur: sunucu
+    ifadeyi kabul eder ve arka planda uygular, yani yanıt diskten neyin çıktığını
+    değil neyin eşleştiğini söyler. Bu silmeler <code>deletes_pending</code>
+    değeri <code>true</code> olarak döner ve bu, mcpd'nin size iki güvenceden
+    zayıf olanının yürürlükte olduğunu söylemesidir. Veri kümesi öğeleri o arka
+    uçta istisnadır. Mutasyona uğratılmak yerine kendi anahtarları altında
+    yeniden yazılırlar, yani yanıt gönderildiği andan itibaren her okuma
+    boşaltılmış öğeyi döndürür. Bir mutasyon, tamamlanana kadar eski metni okunabilir
+    bırakırdı.
+  </p>
+  <p>
+    Verinin belirli bir ana kadar gittiğini birine belgelemeniz gerekiyorsa,
+    yazmanız gereken fark budur. ClickHouse'ta yanıt vermeden önce mutasyonun
+    sunucuda tamamlandığını doğrulayın.
+  </p>
+
+  <h2>Port erişilebilir olmadan önce</h2>
+  <p>
+    Maskeleme, bir trace'in içindeki değerleri korur. Trace'i kimin okuyabileceği
+    konusunda hiçbir şey yapmaz. mcpd, alım açıkken veya okuma API'si açıkken
+    loopback dışı bir adrese bağlandığında başlangıçta uyarır, çünkü saklanan
+    prompt'lar ve tamamlamalar o zaman porta erişebilen herkesçe okunabilir. Önce
+    <code>--ingest-key</code> ve <code>--read-key</code> ayarlayın ve
+    <a href={urlFor('/deploy', code)} class="link">Docker ve Kubernetes</a>
+    sayfasını okuyun.
+  </p>
+
+  <h2>Sırada</h2>
+  <ul>
+    <li>
+      Baştan daha azını tutmak:
+      <a href={urlFor('/docs/sampling', code)} class="link">Örnekleme</a>.
+    </li>
+    <li>
+      Her seçenek ve ortam değişkeni:
+      <a href={urlFor('/docs/configuration', code)} class="link">Yapılandırma</a>.
+    </li>
+    <li>
+      Yoklamalar, yedekler ve yükseltmeler:
+      <a href={urlFor('/docs/operations', code)} class="link">İşletme</a>.
+    </li>
+  </ul>
+</Doc>

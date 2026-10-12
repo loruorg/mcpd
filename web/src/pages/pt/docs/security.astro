@@ -1,0 +1,610 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Segurança"
+  description="O que um mcpd implantado armazena, o que sai da máquina e sob qual configuração, como funcionam chaves, escopos e a separação por projeto, os limites da ocultação e os controles que o mcpd não tem."
+  lede="Uma página para responder a uma auditoria. O que fica guardado, o que é enviado para fora, quem pode ler e os controles que o mcpd não tem."
+  og="docs"
+>
+  <p>
+    Tudo o que vem abaixo foi tirado do código do próprio daemon e de
+    <code>spec/mcpd.spec.json</code>, que é de onde a API é gerada. Onde um
+    controle não existe, esta página diz isso, em vez de deixar a lacuna para
+    você descobrir em um questionário.
+  </p>
+
+  <h2>O que o mcpd armazena</h2>
+  <p>
+    O mcpd armazena o texto das conversas do seu agente. É para isso que ele
+    serve, e uma auditoria deveria começar por aí. Um span do tipo
+    <code>model_generation</code> carrega <code>input</code> e
+    <code>output</code>: o prompt exato enviado ao modelo e o texto exato que
+    voltou. Para a maioria das pessoas, esse é o dado mais sensível que elas
+    têm.
+  </p>
+  <p>Nos seis sinais, os campos de texto livre que ficam armazenados são:</p>
+  <table>
+    <thead>
+      <tr><th>Sinal</th><th>Conteúdo que ele guarda</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Spans</td>
+        <td><code>input</code>, <code>output</code>, <code>attributes</code>, <code>metadata</code> e a mensagem de erro</td>
+      </tr>
+      <tr><td>Logs</td><td>a mensagem e os <code>fields</code> estruturados</td></tr>
+      <tr><td>Métricas</td><td><code>labels</code></td></tr>
+      <tr><td>Notas</td><td><code>reason</code> e <code>metadata</code></td></tr>
+      <tr><td>Feedback</td><td>o <code>comment</code> de texto livre e <code>metadata</code></td></tr>
+      <tr><td>Notas de aspecto</td><td>a frase, em <code>text</code></td></tr>
+    </tbody>
+  </table>
+  <p>
+    Junto do payload, cada sinal carrega campos de correlação que ligam uma
+    execução ao resto do seu sistema: projeto, ambiente, nome e versão do
+    serviço, sessão, thread, usuário, recurso, execução, requisição, experimento
+    e release. O <code>user_id</code> passa por hash na entrada, a menos que
+    você desligue a ocultação. Os demais são armazenados como chegaram, então
+    trate qualquer um deles como um campo capaz de identificar uma pessoa, caso
+    você coloque uma identidade dentro dele.
+  </p>
+  <p>
+    A contagem de tokens e um valor de custo são calculados na ingestão e
+    guardados com a execução. Nada sobre a chamada ao modelo é consultado em um
+    provedor.
+  </p>
+
+  <h3>Onde isso é gravado</h3>
+  <p>
+    Um backend, escolhido na inicialização. O padrão é um arquivo SQLite
+    embutido em <code>./mcpd.db</code>, definido com <code>--data</code>. O
+    índice de busca em texto completo fica no mesmo arquivo, então o
+    armazenamento é um arquivo só para fazer backup e um arquivo só para
+    proteger. Com <code>--postgres-url</code> ou <code>--clickhouse-url</code>
+    os dados passam a ficar em um banco que você mesmo opera.
+  </p>
+  <p>
+    As execuções duráveis, quando estão ligadas, vivem em um segundo arquivo
+    SQLite ao lado do primeiro, seja qual for o armazenamento de traces. Ele
+    guarda a entrada, o estado, a saída e a correlação de toda execução, e a
+    entrada, a saída e o erro de toda etapa, exatamente como foram enviados:
+    sem ocultação, com o <code>user_id</code> sem hash, porque uma etapa
+    posterior os lê de volta e um valor reescrito mudaria o que a execução faz.
+    Os spans que uma execução escreve no armazenamento de traces são ocultados
+    como qualquer outro. Proteja o arquivo de execuções como você protege o
+    armazenamento de traces, ou mais. Tanto a retenção quanto o apagamento por
+    titular alcançam esse arquivo, para as execuções que terminaram; veja
+    <a href={urlFor('/docs/runs#storage', locale)} class="link">Execuções</a>.
+  </p>
+  <p>
+    O mcpd não criptografa o que grava. Criptografia em repouso é
+    responsabilidade do volume no armazenamento embutido, e do banco de dados
+    nos outros dois.
+  </p>
+
+  <h2>O que sai da máquina</h2>
+  <p>
+    Com a configuração padrão, nada. O daemon faz requisições de saída em
+    exatamente quatro lugares, e todos eles ficam desligados até você
+    configurá-los. Não há verificação de atualização, relatório de uso nem
+    telemetria de espécie alguma.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Destino</th><th>O que é enviado</th><th>Desligado, a menos que</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Backend de armazenamento</td>
+        <td>Tudo o que o mcpd armazena, pela sua própria conexão.</td>
+        <td>Você defina <code>--postgres-url</code> ou <code>--clickhouse-url</code>. O armazenamento padrão é um arquivo local e não precisa de rede nenhuma.</td>
+      </tr>
+      <tr>
+        <td>Encaminhamento</td>
+        <td>
+          Todo span armazenado, reemitido como OTLP JSON para
+          <code>&#123;endpoint&#125;/v1/traces</code>. Isso inclui o payload:
+          <code>input</code> e <code>output</code> saem como os atributos
+          <code>input.value</code> e <code>output.value</code>, cada um limitado
+          a 32 KiB. Valores já ocultados continuam ocultados, e um
+          <code>user_id</code> com hash é encaminhado como o hash.
+        </td>
+        <td>Você defina <code>--forward-endpoint</code>, ou um bloco <code>forward</code> no arquivo de configuração.</td>
+      </tr>
+      <tr>
+        <td>Webhooks de monitores e de objetivos</td>
+        <td>
+          Um corpo JSON fixo: o id e o nome do monitor ou do objetivo, o
+          projeto, a condição, o que ele observa, o limiar, a leitura, a
+          quantidade de amostras, uma linha de detalhe e um horário. Não há
+          texto de prompt nem de resposta nele.
+        </td>
+        <td>Um monitor ou um objetivo no arquivo de configuração indique um <code>webhook</code>.</td>
+      </tr>
+      <tr>
+        <td>Modelo juiz</td>
+        <td>
+          O critério, mais a pergunta da execução e a resposta dela, cada uma
+          truncada em 4.000 caracteres, enviadas por POST para
+          <code>&#123;endpoint&#125;/chat/completions</code>. Esse é o único
+          caminho que manda texto de prompt e de resposta armazenados para um
+          provedor de modelos.
+        </td>
+        <td>Um bloco <code>judge</code> no arquivo de configuração indique um endpoint, um modelo e ao menos um critério, e quem chama peça esse avaliador pelo nome.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    A interface que o binário serve em <code>/</code> está compilada dentro
+    dele. As fontes, os estilos e os scripts vêm da mesma origem, e ela não faz
+    nenhuma requisição a terceiros.
+  </p>
+
+  <h2>Chaves e escopos</h2>
+  <p>
+    A autenticação é por chaves de API. Não há conta, sessão nem login. A chave
+    é apresentada como <code>Authorization: Bearer …</code> ou no cabeçalho
+    <code>X-Mcpd-Key</code>, e os dois lados passam por SHA-256 antes de serem
+    comparados, de modo que nem o tamanho da chave configurada nem a posição do
+    primeiro caractere errado podem ser observados pelo tempo de resposta.
+  </p>
+  <p>São seis escopos, na ordem do alcance que concedem:</p>
+  <table>
+    <thead>
+      <tr><th>Escopo</th><th>O que ele permite</th><th>Por que é um escopo próprio</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ingest</code></td>
+        <td>Gravar sinais. Não ler nada.</td>
+        <td>Essa chave vive em todo contêiner que emite um span, inclusive nos que rodam código de terceiros. Ela não pode também abrir todo prompt armazenado.</td>
+      </tr>
+      <tr>
+        <td><code>read</code></td>
+        <td>Ler sinais armazenados.</td>
+        <td>É na leitura que estão os prompts.</td>
+      </tr>
+      <tr>
+        <td><code>write</code></td>
+        <td>Alterar dados armazenados: notas, feedback, datasets, experimentos e reconhecimentos.</td>
+        <td>Vários desses handlers leem um payload no caminho. Capturar uma execução de produção em um dataset lê o input e o output daquela execução, o que é mais do que emitir um span.</td>
+      </tr>
+      <tr>
+        <td><code>execute</code></td>
+        <td>Iniciar, cancelar e sinalizar execuções, e publicar eventos para elas.</td>
+        <td>Iniciar uma execução gasta dinheiro e alcança os seus sistemas. Uma chave que pode registrar uma nota não deveria também poder disparar trabalho.</td>
+      </tr>
+      <tr>
+        <td><code>worker</code></td>
+        <td>Reivindicar etapas e informar o que aconteceu com elas.</td>
+        <td>É a chave dentro do processo que roda os corpos das etapas. Uma reivindicação devolve o input da etapa e o output de cada etapa anterior, então ela lê payloads, e não deveria também poder iniciar execuções nem mudar dados armazenados.</td>
+      </tr>
+      <tr>
+        <td><code>admin</code></td>
+        <td>Destruir dados e ler o log de auditoria.</td>
+        <td>Apagar não é ler.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Qual escopo cada endpoint exige está declarado por endpoint na
+    especificação e publicado na referência gerada da
+    <a href={urlFor('/docs/reference/api', locale)} class="link">API HTTP</a>,
+    de forma que existe uma resposta para "o que este endpoint precisa", e não
+    uma por documento.
+  </p>
+
+  <h3>O recuo, e o que ele significa para uma chave que você já tem</h3>
+  <p>
+    Uma lista <code>write</code> não definida recua para a lista
+    <code>ingest</code>, e uma lista <code>admin</code> não definida recua para
+    a lista <code>read</code>. Listas <code>execute</code> e
+    <code>worker</code> não definidas recuam para a lista <code>write</code>, e
+    portanto para a lista <code>ingest</code> quando essa também não está
+    definida. É isso que impede que uma atualização revogue o acesso em toda
+    implantação configurada antes de os escopos mais estreitos existirem. Uma
+    chave de administração também vale para <code>execute</code> e
+    <code>worker</code>, para que um operador possa conduzir uma execução à
+    mão. Juntas, essas regras significam que, em um daemon com apenas uma chave
+    de ingestão e uma chave de leitura:
+  </p>
+  <ul>
+    <li>a chave de ingestão também anexa notas e feedback, inicia execuções e reivindica etapas, e</li>
+    <li>a chave de leitura também apaga traces e, pelo recuo de administração, inicia execuções e reivindica etapas.</li>
+  </ul>
+  <p>
+    Ou seja, uma chave de leitura é uma chave de exclusão até você definir
+    <code>--admin-key</code>, e as duas chaves alcançam a superfície de
+    execuções até você definir <code>--execute-key</code>,
+    <code>--worker-key</code> e <code>--admin-key</code>. É assim que você deve
+    entregar as chaves. Nada se estreita sozinho. Cada escopo tem uma opção,
+    <code>--ingest-key</code>, <code>--read-key</code>,
+    <code>--write-key</code>, <code>--admin-key</code>,
+    <code>--execute-key</code> e <code>--worker-key</code>, e cada uma recebe
+    uma lista; todas elas também podem ser definidas por projeto no arquivo de
+    configuração.
+  </p>
+
+  <h3>Sem chave nenhuma, todos os escopos ficam abertos</h3>
+  <p>
+    Esse padrão é deliberado: uma primeira execução em um notebook não pode exigir
+    uma credencial. Ele é também a coisa mais perigosa em uma instância
+    exposta, então, quando o daemon se liga a um endereço fora do loopback, ele
+    registra na inicialização um aviso para cada superfície aberta a quem não
+    deveria alcançá-la. Cada aviso nomeia a superfície e as opções que a
+    fecham. Rode <code>mcpd config</code> antes de expor uma porta: ele imprime
+    a configuração para a qual uma invocação resolve e então termina. Ele traz
+    uma linha por escopo, e nomeia a lista para a qual um escopo recuou, então
+    <code>admin auth      key required (read keys)</code> avisa que as chaves de
+    leitura ainda podem apagar.
+    <a href={urlFor('/deploy', locale)} class="link">Docker e Kubernetes</a>
+    mostra a saída.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="fechado antes de estar acessível"
+    command={'mcpd --ingest-key "$INGEST" --read-key "$READ"'}
+    primaryLabel="Opções"
+    secondary={[
+      { label: 'Os seis escopos', command: 'mcpd --ingest-key "$I" --read-key "$R" --write-key "$W" --execute-key "$E" --worker-key "$K" --admin-key "$A"' },
+      { label: 'Como ambiente', command: 'MCPD_INGEST_KEYS=… MCPD_READ_KEYS=… mcpd' },
+      { label: 'Conferir antes', command: 'mcpd config' },
+    ]}
+  />
+
+  <h3>Um projeto é uma fronteira de isolamento</h3>
+  <p>
+    Uma chave configurada no nível superior concede todo projeto. Uma chave
+    listada, em vez disso, sob um projeto nomeado no bloco
+    <code>projects</code> do arquivo de configuração concede aquele projeto e
+    nenhum outro, e cada projeto mantém a sua própria lista por escopo. Uma
+    mesma chave pode aparecer sob vários projetos, que é como um time de
+    plataforma mantém uma chave que cobre o que ele opera sem ficar com o
+    servidor inteiro.
+  </p>
+  <p>No caminho de gravação, a verificação é por sinal, não por requisição:</p>
+  <ul>
+    <li>
+      Um lote pode citar vários projetos. Sinais que citam um projeto que a
+      chave não alcança são descartados e informados na resposta como
+      rejeitados, com o motivo, então uma frota apontada para o projeto errado
+      é descoberta a partir da resposta que ela já lê. O resto do lote é
+      armazenado.
+    </li>
+  </ul>
+  <p>
+    No caminho de leitura, todo endpoint que cita um projeto confere esse
+    projeto contra o que a chave alcança: traces, spans, logs, métricas,
+    notas, feedback, análises, datasets, experimentos e o log de auditoria.
+    Os itens dentro de um dataset são endereçados pelo id do dataset, e o daemon
+    procura de qual projeto aquele dataset é e confere a chave contra ele, de
+    modo que uma chave que não abre o projeto não lê os casos capturados dele.
+    Um id que não existe é recusado do mesmo jeito que um id que a chave não
+    alcança, então o endpoint não serve para testar quais ids existem. Três endpoints não recebem projeto e ficam acessíveis a qualquer chave
+    com o escopo de leitura, sejam quais forem os projetos a que ela está
+    limitada: a lista de projetos, o catálogo de avaliadores e o conjunto de
+    capacidades do armazenamento (<code>GET /v1/api/capabilities</code>). A
+    lista de projetos é filtrada pelo alcance da chave, então uma chave
+    limitada a um projeto só vê os projetos que ela alcança. Em uma instância
+    compartilhada, nomes de projeto costumam ser nomes de times ou de
+    clientes. O estado dos monitores e o estado dos objetivos estiveram nessa
+    lista até serem filtrados pelo alcance de projeto da chave, o que sempre
+    deveria ter sido o caso: um monitor nomeia o projeto que vigia e carrega o
+    webhook para onde envia.
+    A API nomeia só o host desse webhook, porque a URL de um webhook muitas vezes é a própria credencial.
+  </p>
+
+  <h3>Uma recusa diz qual dos dois problemas ela é</h3>
+  <p>
+    Uma chave ausente ou desconhecida é 401, e uma chave reconhecida que este
+    endpoint ou este projeto não admite é 403. A separação é operacional: um 401
+    manda você procurar um erro de digitação na credencial, e um 403 diz que a
+    credencial está certa e a permissão é que está errada.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="quatro recusas"
+    lines={[
+      { cmd: 'curl -sw "%{http_code} " "$MCPD/v1/api/traces?project=acme"' },
+      { out: '401  this endpoint needs an API key; send it as `Authorization: Bearer <key>`', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $TYPO"' },
+      { out: '401  that key is not one this daemon knows', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $INGEST"' },
+      { out: '403  that key is not valid for reading', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $BILLING_READ"' },
+      { out: '403  that key does not reach the project "acme"', tone: 'warn' },
+    ]}
+  />
+
+  <p>
+    Essa última mensagem é a mesma, exista o projeto ou não. Confirmar quais
+    nomes de projeto são reais é um vazamento pequeno, e em um daemon
+    compartilhado esses nomes são os nomes dos seus clientes.
+  </p>
+
+  <h3>O log de auditoria</h3>
+  <p>
+    Devolver um payload armazenado para fora do mcpd é registrado, e toda
+    exclusão também, então a pergunta "quem leu esta execução" tem resposta. Uma
+    linha carrega quando, qual chave, qual ação, qual projeto, qual trace ou
+    dataset ela citou, e se a requisição foi atendida ou recusada. O
+    <code>GET /v1/api/audit</code> lê o log de volta, do mais novo para o mais
+    antigo, e exige o escopo <code>admin</code>.
+  </p>
+  <p>
+    Dezoito ações são registradas: <code>get_trace</code>, <code>list_spans</code>,
+    <code>list_logs</code>, <code>list_feedback</code>,
+    <code>list_dataset_items</code>, <code>capture_into_dataset</code>,
+    <code>read_trace_aspect_notes</code>, <code>get_theme</code>, <code>get_theme_flow</code>, <code>list_theme_history</code>, <code>list_theme_examples</code>,
+    <code>delete_trace</code>, <code>erase_subject</code>, e cinco sobre
+    execuções duráveis: <code>list_runs</code>, <code>get_run</code>,
+    <code>list_run_events</code>, <code>get_step_cause</code> e
+    <code>cancel_run</code>. A fronteira é o payload, não a requisição. Listar
+    traces devolve uma projeção de nomes, tempos, contagem de tokens e custo,
+    sem nenhum prompt ou resposta dentro, então isso não é registrado; abrir um
+    desses traces é, porque é ali que está o texto. Listar execuções duráveis é
+    registrado, porque toda execução na lista carrega a entrada, a saída e o
+    estado dela como foram enviados. Uma leitura recusada de uma execução é
+    registrada sob o projeto dono da execução.
+  </p>
+  <p>
+    As chamadas de worker não são registradas: reivindicar uma etapa, declarar
+    que ela começou, o heartbeat, o complete e o fail. Um lease carrega, sim, a
+    entrada da etapa e as saídas das etapas anteriores, mas o laço do worker
+    reivindica muitas vezes por minuto, e uma linha por reivindicação
+    enterraria as leituras que uma pessoa fez. Trate a chave
+    <code>worker</code> como uma chave que lê todo payload das execuções que
+    ela serve. Iniciar uma execução também não é registrado; reenviar uma chave
+    de idempotência ainda guardada responde com a execução que aquela chave
+    iniciou, então trate a chave <code>execute</code> como uma chave capaz de
+    ler as execuções que ela inicia.
+  </p>
+  <p>Cinco propriedades que um auditor deveria conhecer:</p>
+  <ul>
+    <li>
+      <strong>A chave nunca é escrita no log.</strong> O principal é um resumo
+      SHA-256 truncado da chave, o que distingue uma chave de outra sem guardar
+      um verificador dela. Uma requisição sem chave em um daemon aberto é
+      registrada como <code>anonymous</code>.
+    </li>
+    <li>
+      <strong>A pessoa vem do seu ingress, ou não vem.</strong> O mcpd não tem
+      contas de usuário, então, por conta própria, uma linha atribui uma ação a
+      uma chave e não a um ser humano. O campo <code>subject</code> carrega uma
+      identidade quando <code>--trusted-identity-header</code> e
+      <code>--trusted-proxy-cidr</code> estão os dois definidos, e fica vazio
+      caso contrário, que é o padrão. O mcpd nunca estabelece essa identidade
+      por si mesmo; ele registra o que um endereço indicado por você afirmou.
+    </li>
+    <li>
+      <strong>Uma recusa também é registrada.</strong> A linha é gravada antes
+      de o 403 ser devolvido, porque uma tentativa recusada no projeto de outro
+      time é exatamente a linha para a qual um log de auditoria existe. Ler o
+      log não é registrado: ele cresceria sem que payload algum fosse lido, e a
+      linha não diria nada que quem tem a chave admin já não saiba.
+    </li>
+    <li>
+      <strong>Ele registra qual chave e, opcionalmente, quem.</strong> A chave é
+      guardada como um resumo truncado, nunca a chave em si, então o log não é
+      um lugar onde credenciais se acumulam. Isso responde "uma chave admin
+      apagou isto" e não "qual pessoa apagou", porque o mcpd não tem provedor de
+      identidade. Se você quer a segunda resposta, dê a
+      ele o cabeçalho que o seu ingress já define e os endereços autorizados a
+      defini-lo: <code>--trusted-identity-header x-forwarded-user</code> com
+      <code>--trusted-proxy-cidr 10.42.0.0/16</code>. As duas metades são
+      obrigatórias. Um cabeçalho é um texto que qualquer um que alcance a porta
+      pode enviar, então o mcpd só o lê a partir de um endereço indicado por
+      você; uma requisição vinda de qualquer outro lugar é atendida
+      normalmente e a linha dela não carrega sujeito, que é a resposta honesta
+      em vez de um palpite. Sem nenhuma das duas opções, nenhum sujeito é
+      registrado, e esse é o padrão.
+    </li>
+    <li>
+      <strong>A retenção não o corta.</strong> A passagem de retenção remove
+      spans, logs, métricas, traces, notas, feedback, notas de aspecto e
+      execuções duráveis terminadas. Ela deixa o log de auditoria em paz, porque um log que expirasse junto com os
+      dados que ele descreve não poderia dizer quem leu os dados apagados.
+    </li>
+    <li>
+      <strong>Ele nunca faz falhar a requisição que descreve.</strong> Uma linha
+      que não pode ser gravada é anotada no log e contada como
+      <code>mcpd_audit_write_failures_total</code> em <code>/metrics</code>, e a
+      leitura mesmo assim retorna. Um log de auditoria capaz de derrubar o
+      caminho de leitura é um risco pior do que aquele que ele evita, então
+      acompanhe esse contador em vez de contar com requisições falhando.
+    </li>
+  </ul>
+
+  <h3>O que nenhuma chave cobre</h3>
+  <ul>
+    <li>
+      <strong>A interface.</strong> A marcação em <code>/</code> é servida a
+      qualquer um que alcance a porta. Os dados por trás dela não: toda
+      requisição que ela faz passa pela API de consulta e encontra as mesmas
+      chaves. Não existe tela de login dentro do daemon.
+    </li>
+    <li>
+      <strong>As sondas e o <code>/metrics</code>.</strong> Sem autenticação, de
+      propósito, porque um kubelet e um coletor não conseguem carregar uma
+      chave. Eles informam status, versão, tempo no ar, o nome do backend de
+      armazenamento e contadores, nunca payloads.
+    </li>
+    <li>
+      <strong>Origem.</strong> A API de consulta e as sondas respondem com
+      <code>Access-Control-Allow-Origin: *</code>, então uma página de navegador
+      em qualquer origem pode chamá-las. O mcpd não usa cookies nem credenciais
+      implícitas, então essa página ainda precisa ter uma chave: uma política de
+      origem permissiva não entrega uma chave a ninguém.
+    </li>
+  </ul>
+
+  <h2>O que a ocultação faz, e o que ela não consegue fazer</h2>
+  <p>
+    A ocultação vem ligada por padrão e roda antes da gravação, como terceiro
+    estágio do pipeline de entrada. Um valor que uma regra casa nunca chega ao
+    banco de dados, o que é uma garantia diferente de um valor apagado depois, e
+    a diferença é justamente a que um auditor pergunta. O que ela não consegue
+    fazer é manter os bytes fora da rede: eles já a atravessaram quando a regra
+    roda. Para isso, os SDKs trazem <code>MCPD_CAPTURE_PAYLOADS=false</code>,
+    que descarta <code>input</code> e <code>output</code> antes de um span
+    entrar na fila e deixa todo o resto dele.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    Uma regra é um conjunto de trechos em minúsculas mais um modo. Uma chave
+    casa quando o nome dela, em minúsculas, contém um desses trechos. Os valores
+    casados são mascarados, mascarados em parte, recebem um hash com
+    chave, ou são descartados. Quando uma chave casada contém um objeto, tudo o que
+    está dentro dele também é ocultado, sejam quais forem os nomes dos campos
+    filhos, e um segredo enviado como número JSON é tratado igual a um enviado
+    como texto. A tabela completa de regras está em
+    <a href={urlFor('/docs/privacy', locale)} class="link">Ocultação e retenção</a>.
+  </p>
+  <p>
+    Agora o limite, que uma auditoria vai perguntar e que nenhuma configuração
+    remove. <strong>As regras casam nomes de campo, não o formato de um
+    valor.</strong> Uma chave de API que alguém colou no meio de uma frase, e
+    que chega em um campo chamado <code>content</code> ou
+    <code>question</code>, não é casada por nada no pipeline. O nome do campo é
+    inocente, então o valor é armazenado por inteiro.
+  </p>
+  <p>A ocultação, portanto, impede uma coisa específica:</p>
+  <ul>
+    <li>Ela impede a captura estruturada de credenciais e identificadores, em que a credencial chega num campo com o nome daquilo que ela é.</li>
+    <li>Ela não varre texto livre, e não é um classificador de conteúdo.</li>
+    <li>Ela não detecta um segredo pelo formato nem pela entropia.</li>
+    <li>Ela não toca no nome de um span nem na mensagem de um registro de log. Esses são identificadores usados para agrupar, e não payloads, e reescrevê-los quebraria o agrupamento. Não monte o nome de um span com o e-mail de um cliente.</li>
+    <li>Ela não toca no armazenamento de execuções. Os payloads de uma execução durável são o estado de trabalho dela e ficam guardados como foram enviados; só os spans que uma execução escreve no armazenamento de traces são ocultados.</li>
+  </ul>
+  <p>
+    Um controle atua, sim, sobre o formato, e ele é detecção depois do fato
+    em vez de prevenção: o avaliador embutido <code>no_leaked_secret</code> penaliza
+    uma execução cuja <em>resposta</em> carrega um token com cara de credencial,
+    por prefixo conhecido ou por uma sequência longa de letras e números com
+    maiúsculas e minúsculas. Ele pontua uma execução que já está armazenada. Ele
+    não remove nada, não lê o prompt, e só roda quando você pede. Encare-o como
+    um jeito de descobrir que isso aconteceu, não como uma segunda linha de
+    ocultação.
+  </p>
+  <p>
+    Dois limites valem, independentemente de alguma regra ter casado. Qualquer
+    texto único maior que 128 KiB é truncado em um limite de caractere, com um marcador, e a
+    varredura para em uma profundidade de 32. Os dois existem para que um único
+    documento descontrolado não decida o tamanho do seu banco de dados nem
+    prenda uma CPU.
+  </p>
+  <p>
+    O <code>--no-redact</code> desliga o pipeline inteiro, o que só faz sentido
+    quando algo antes dele já oculta. Onde a ocultação aplica hash a um
+    identificador, defina <code>--redact-key</code>: a chave embutida é uma
+    constante em código publicado, e identificadores vêm de espaços pequenos,
+    então um hash sem chave pode ser revertido testando candidatos.
+  </p>
+
+  <h2>Retenção e apagamento</h2>
+  <p>
+    O <code>--retention-days</code> apaga sinais mais antigos que essa
+    quantidade de dias. Omita a opção e nada é apagado, que é o padrão certo:
+    uma ferramenta que descartasse em silêncio os traces do mês passado seria
+    descoberta no pior momento possível.
+  </p>
+  <p>
+    A passagem roda em um temporizador de hora em hora dentro do daemon, nunca
+    dentro da requisição de alguém. Ela cobre todo projeto citado no bloco
+    <code>projects</code>, cada um com o seu próprio <code>retention_days</code>
+    quando ele define um, e com o valor global quando não define, mais o projeto
+    padrão. Um projeto sem janela em lugar nenhum não é cortado.
+  </p>
+  <p>
+    Para um pedido sobre uma pessoa, o
+    <code>DELETE /v1/api/subjects/{'{user_id}'}?project=…</code> remove toda
+    execução registrada em nome dessa pessoa no projeto, com os spans, logs,
+    métricas, notas e feedback ligados a elas, e responde com uma contagem
+    por sinal. O identificador passa pelo mesmo hash, com a mesma chave, antes
+    de ser comparado, então o pedido funciona contra identificadores com hash
+    sem que você mesmo aplique hash em nada, e a resposta diz quantos
+    identificadores armazenados estavam em um formato que o pedido não
+    conseguiu casar. Para remover uma execução em vez de uma pessoa, o
+    <code>DELETE /v1/api/traces/{'{trace_id}'}</code> remove essa execução e
+    tudo o que está ligado a ela em uma única transação. Os dois exigem o escopo
+    <code>admin</code> e os dois vão para o log de auditoria.
+    <a href={urlFor('/docs/privacy', locale)} class="link">Ocultação e retenção</a>
+    percorre o pedido de apagamento e o que ele consegue e não consegue
+    prometer.
+  </p>
+
+  <h2>O que o mcpd não faz</h2>
+  <p>
+    Nada do que vem abaixo existe nesta versão. Está listado porque uma
+    auditoria que descobre esses pontos depois é um desfecho pior do que uma
+    auditoria que os lê aqui.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Não existe no mcpd</th><th>O que fazer no lugar</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Terminação TLS.</strong> O mcpd fala HTTP puro. Prompts e respostas atravessam esse enlace por inteiro.</td>
+        <td>Termine o TLS no seu ingress ou na sua malha de serviço, e mantenha a porta do daemon fora de qualquer rede não confiável.</td>
+      </tr>
+      <tr>
+        <td><strong>SSO.</strong> Nenhuma integração com provedor de identidade, sem OIDC, sem SAML, sem tela de login.</td>
+        <td>Coloque a interface atrás do proxy de identidade que você já opera. A identidade de uma pessoa é aquilo que esse proxy estabelece.</td>
+      </tr>
+      <tr>
+        <td><strong>SCIM.</strong> Nenhum provisionamento de usuários ou de grupos, porque o mcpd não tem o conceito de conta de usuário.</td>
+        <td>Provisione no proxy. Dentro do mcpd a unidade é uma chave, adicionada a uma lista ou removida dela.</td>
+      </tr>
+      <tr>
+        <td><strong>Papéis além dos seis escopos.</strong> A autorização é um escopo e uma lista de projetos. Não há papel por endpoint nem grupo.</td>
+        <td>Separe por chave e por projeto. Se uma distinção importa, faça dela um projeto.</td>
+      </tr>
+      <tr>
+        <td><strong>Estabelecer quem é a pessoa.</strong> O log de auditoria consegue registrar um sujeito, mas o mcpd nunca descobre quem é quem chama. Ele registra o que o seu ingress afirmou, e só a partir de um endereço indicado por você.</td>
+        <td>Defina <code>--trusted-identity-header</code> e <code>--trusted-proxy-cidr</code> para que o cabeçalho que o seu proxy já define chegue à linha de auditoria. Sem eles, uma linha atribui uma ação a uma chave, e emitir uma chave por time estreita o que o resumo aponta.</td>
+      </tr>
+      <tr>
+        <td><strong>Ciclo de vida de chaves.</strong> Chaves são listas lidas na inicialização. Não há expiração, calendário de rotação nem cota por chave. O teto que existe é por projeto: <code>--quota-per-minute</code> limita quantos sinais um projeto pode armazenar em um minuto, seja qual for a chave que os enviou.</td>
+        <td>Configure várias chaves, uma por time ou por frota, para que revogar uma seja uma edição mais um reinício, em vez de reimplantar tudo o que emite um span. Faça de uma frota o seu próprio projeto se ela precisa do próprio teto.</td>
+      </tr>
+      <tr>
+        <td><strong>Criptografia em repouso.</strong> O mcpd grava arquivos comuns ou linhas comuns.</td>
+        <td>Criptografe o volume, ou use um banco de dados que faça isso.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Como relatar algo</h2>
+  <p>
+    Suspeitas de vulnerabilidade vão para <strong>hi@mcpd.sh</strong> com
+    "Security" no assunto, não para uma issue pública. O
+    <code>SECURITY.md</code> do repositório diz qual é o escopo e o que um bom
+    relato contém. Uma instância sem autenticação que alguém escolheu expor é um
+    padrão documentado, não um achado. Qualquer coisa que passe por uma chave
+    que <em>estava</em> configurada, por uma regra de ocultação configurada, ou
+    atravesse a fronteira de um projeto, é um achado.
+  </p>
+
+  <h2>A seguir</h2>
+  <ul>
+    <li>A tabela de regras, os quatro modos e o hash com chave: <a href={urlFor('/docs/privacy', locale)} class="link">Ocultação e retenção</a>.</li>
+    <li>O que definir antes de uma porta ficar acessível: <a href={urlFor('/deploy', locale)} class="link">Docker e Kubernetes</a>.</li>
+    <li>Cada opção e variável de ambiente: <a href={urlFor('/docs/configuration', locale)} class="link">Configuração</a>.</li>
+    <li>Alcançar uma instância implantada a partir de código ou de um agente: <a href={urlFor('/docs/integrating', locale)} class="link">Integração</a>.</li>
+  </ul>
+</Doc>

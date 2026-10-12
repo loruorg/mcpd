@@ -1,0 +1,263 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Mastra'dan geçiş"
+  description="mcpd, Mastra'nın gözlemlenebilirliğinden nasıl ayrılır: OpenTelemetry'yi dışa aktarmaz, alır; yalnızca span'leri değil altı sinyali de maskeler; örneklemesi deterministiktir. Bir de yapmadıkları."
+  lede="mcpd, Mastra'nın gözlemlenebilirliğine ve kalıcı iş akışlarına ücretsiz, kendi barındırdığınız bir seçenektir. Bu sayfa nerede önde, nerede geride olduğunu ve nasıl geçileceğini anlatır."
+  og="docs"
+>
+  <h2>Bu nedir</h2>
+  <p>
+    Mastra bir ajan framework'üdür: ajanlar, iş akışları, bellek, RAG ve
+    gözlemlenebilirlik, tek bir TypeScript bağımlılığında. mcpd ise kodunuzun
+    yanındaki bir daemon'dur: bir iş akışını adımları arasında tutar ve her
+    adımı kaydeder; modelleri, prompt'ları ve araçları size bırakır. Ajanınızın
+    çevresini saran bir framework değildir ve öyle olmamak üzere yazılmıştır.
+  </p>
+  <p>
+    Bundan sonrasının çoğuna bu fark karar verir. Mastra'nın
+    gözlemlenebilirliği ajanınızı bilir, çünkü onun içindedir. mcpd ajanınızı,
+    ajanınız OpenTelemetry yaydığı için bilir; bu da ajanınızın çevresindeki
+    servisler ve hiçbir zaman TypeScript ile yazılmamış ajanlar için de
+    çalıştığı anlamına gelir.
+  </p>
+
+  <h2>Önemli olan farklar</h2>
+
+  <h3>İş akışının gövdeleri, hangi dilde olursa olsun sizin sürecinizde kalır</h3>
+  <p>
+    İkisi de kalıcı iş akışları çalıştırır. Mastra'nın adımları, Mastra
+    sürecinin içinde duran, kendi deposu üzerinden askıya alınıp devam ettirilen
+    TypeScript fonksiyonlarıdır. mcpd'nin tanımı ise daemon'un tuttuğu veridir;
+    adım gövdeleri sizin sürecinizin tuttuğu koddur ve altı SDK'nın konuştuğu,
+    her dilin konuşabileceği bir HTTP protokolü üzerinden teker teker
+    kiralanarak alınır. Daemon hiçbir zaman bir model, bir prompt ya da bir
+    kimlik bilgisi görmez ve bir gövde, tanım değişmeden değişebilir.
+  </p>
+  <p>
+    Daemon'un tuttuğu şey, hayatta kalması gereken kısımdır: imleç, günlük,
+    yeniden deneme bütçesi, zamanlayıcılar ve gelmesi bir hafta sürebilecek bir
+    olayın beklenmesi. Bir çalıştırma, onu başlatan süreçten ve son adımına
+    hizmet eden worker'dan uzun yaşar. Bakınız
+    <a href={urlFor('/docs/workflows', locale)} class="link">İş akışları</a>.
+  </p>
+
+  <h3>OpenTelemetry'yi tek bir framework'ten dışa aktarmaz, alır</h3>
+  <p>
+    Bütün tez budur. Mastra'nın gözlemlenebilirliği bir Mastra uygulamasının
+    içinden dışa aktarır, yani görebildiği şey o uygulamanın yazıldığı dilde
+    yaptığı şeydir. mcpd ise collector'ın kendisidir: uygulamanızda hiçbir mcpd
+    kodu olmadan, herhangi bir dildeki herhangi bir OpenTelemetry SDK'sından
+    OTLP alır ve ajanın çevresindeki servisleri de ajanın kendisi kadar rahat
+    kaydeder.
+  </p>
+  <p>
+    Ayrıca OTLP yayar, yani mcpd kurmanız gereken bir hattın sonunda değil,
+    zaten sahip olduğunuz bir hattın ortasında durabilir. Bakınız
+    <a href={urlFor('/docs/forwarding', locale)} class="link">İletme</a>.
+  </p>
+
+  <h3>Maskeleme altı sinyalin hepsini kapsar</h3>
+  <p>
+    Mastra'nın <code>SensitiveDataFilter</code> bileşeni bir span işleyicisidir.
+    Yalnızca span'ler üzerinde çalışır, başka hiçbir şeyde çalışmaz; yani yapılı
+    bir loga geçirilen bir anahtar ya da bir puanın gerekçesinde veya bir geri
+    bildirimde alıntılanan bir sır, her exporter'a maskelenmeden ulaşır.
+  </p>
+  <p>
+    mcpd span'leri, logları, metrik etiketlerini, puanları, geri bildirimleri ve
+    yön notlarını maskeler; varsayılan olarak açıktır, hiçbir şey yazılmadan
+    ve hiçbir şey iletilmeden önce çalışır.
+  </p>
+  <p>
+    Anahtar eşleşmesi de tam ad yerine alt dize üzerinden olur, yani
+    <code>awsSecretAccessKey</code> ve <code>X-API-Key</code>,
+    <code>secret</code> ve <code>x-api-key</code> kurallarıyla yakalanır. Adın
+    tamamının eşleşmesini isteyen bir kural kümesi ikisini de kaçırır.
+  </p>
+  <p>
+    Sınırı açıkça söyleyelim: maskeleme, bir alanın adına bakarak eşleşir,
+    içeriğinin biçimine bakarak değil. Bir prompt'un ortasına ya da zararsız bir
+    anahtar altında saklanan bir adrese yapıştırılmış bir token'ı iki araç da
+    kaldırmaz. Maskeleme, kazara sızdırdığınız şeyi azaltır. Bir güvence değildir.
+  </p>
+  <p>
+    mcpd'nin bu durum için eklediği şey bir filtre değil, bir puanlayıcıdır.
+    Yerleşik <code>no_leaked_secret</code>, bir çalıştırmanın yanıtını okur ve bir
+    kimlik bilgisinin biçimine göre eşleşir; böylece bir tamamlamaya karışan bir
+    anahtar en azından size bildirilir. Bakınız
+    <a href={urlFor('/docs/testing', locale)} class="link">Regresyon testi</a>.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <h3>Örnekleme deterministiktir</h3>
+  <p>
+    Mastra'nın oranlı örneklemesi <code>Math.random()</code> çağırır. Bu yüzden
+    bir yük dengeleyicinin arkasındaki her kopya aynı trace hakkında farklı
+    karar verir ve iki servisi kesen bir çalıştırma biri tarafından saklanıp
+    diğeri tarafından düşürülebilir.
+  </p>
+  <p>
+    mcpd trace kimliğinin özetini alır, yani her kopya hiçbir eşgüdüm olmadan aynı
+    yanıta varır ve saklanan bir trace bütün olarak saklanır. Daemon'un
+    seçenekleri iki stratejiye ulaşır: her şeyi sakla ve bu deterministik oran.
+    Oran ne derse desin her hatayı saklayacak olan bir kuyruk stratejisi politika
+    türünde mevcuttur ama bu sürümde komut satırından erişilemez. Bakınız
+    <a href={urlFor('/docs/sampling', locale)} class="link">Örnekleme</a>.
+  </p>
+
+  <h2>Gerisi, kısaca</h2>
+  <table>
+    <thead>
+      <tr><th>Alan</th><th>mcpd ne yapar</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Dağıtım</td>
+        <td>Deposu ve arayüzü içine derlenmiş tek bir statik ikili dosya. Node yok, sidecar yok.</td>
+      </tr>
+      <tr>
+        <td>Depolama</td>
+        <td>Dizüstü için SQLite, ekip için Postgres ya da ClickHouse. Üçü de CI'da gerçek bir sunucuya karşı test edilir.</td>
+      </tr>
+      <tr>
+        <td>Arama</td>
+        <td>Saklanan her prompt ve tamamlama üzerinde tam metin.</td>
+      </tr>
+      <tr>
+        <td>Metrikler</td>
+        <td>Alımda toplanır; kesin kuantiller ve çalıştırmaya geri götüren exemplar'larla.</td>
+      </tr>
+      <tr>
+        <td>Maliyet</td>
+        <td>Alımda fiyatlanır ve saklanır. Önbellekten okunan token'lar kendi oranından hesaplanır. Bilinmeyen bir model, ücretsiz diye bildirilmek yerine fiyatsız bırakılır.</td>
+      </tr>
+      <tr>
+        <td>SDK'lar</td>
+        <td>TypeScript, Python, Rust, Go, Kotlin ve Elixir; tek bir spesifikasyondan üretilir, bu yüzden ayrışamazlar. Her biri bir iş akışı kurucusu ve bir worker taşır.</td>
+      </tr>
+      <tr>
+        <td>İş akışları</td>
+        <td>Daemon'un tuttuğu dokuz yapı: adımlar, ajan turları, uykular, olay beklemeleri, paralel dallar, foreach, sınırlı döngüler ve alt çalıştırmalar. Yeniden denemeler, etkiler ve sınırlar adım başınadır. Bir uyumluluk takımı, aynı çalıştırmayı altı dilin hepsinden sunar.</td>
+      </tr>
+      <tr>
+        <td>Değerlendirme</td>
+        <td>On üç deterministik puanlayıcı, ayrıca OpenAI biçiminde her endpoint'e karşı model notlu puanlama. Üretim çalıştırmalarından yakalanan veri kümeleri ve örneklem boyutunu bildiren deney karşılaştırması.</td>
+      </tr>
+      <tr>
+        <td>Lisans</td>
+        <td>Apache-2.0. Hesapsız kendiniz barındırın ya da mcpd.sh üzerinde ücretsiz kullanın.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>mcpd'nin geride olduğu yerler</h2>
+  <p>
+    Bunlar keşfetmenize bırakılmak yerine burada söyleniyor, çünkü yalnızca
+    kazanılan yerleri sıralayan bir karşılaştırma reklamdır.
+  </p>
+  <ul>
+    <li>
+      <strong>Kodunuzun çevresini saran bir framework değil.</strong> Mastra
+      size tek bir bağımlılıkta ajanlar, bellek, RAG ve bir model yönlendiricisi verir.
+      mcpd kalıcı çalıştırmayı ve onun kaydını verir; modelleri, prompt'ları ve
+      araçları kodunuza bırakır. Her şeyi yapan tek bir bağımlılık istiyorsanız,
+      o tek bağımlılık Mastra'dır.
+    </li>
+    <li>
+      <strong>Adıyla anılan sağlayıcı exporter'ları yok.</strong> Mastra Langfuse,
+      LangSmith, Braintrust, Arize, Datadog ve başkaları için adıyla
+      bütünleşmeler sunar. mcpd OTLP iletir; bu, tek bir uygulamayla
+      bunların çoğuna ulaşır. Ama yalnızca kendi protokolünü konuşan bir hedef
+      erişim dışındadır.
+    </li>
+    <li>
+      <strong>SSO, SCIM ya da RBAC yok.</strong> Kimlik doğrulama, altı API
+      anahtarı kapsamı ve anahtar başına bir proje listesinden ibarettir. Zaten
+      çalıştırdığınız kimlik proxy'sinin arkasına koyun.
+    </li>
+  </ul>
+
+
+  <h2>Geçiş</h2>
+  <p>
+    Ajanınız zaten OpenTelemetry yayıyorsa bu iki ortam değişkeni demektir. mcpd,
+    her OpenTelemetry SDK'sının konuşmayı zaten bildiği endpoint'lerde HTTP
+    üzerinden OTLP konuşur. Trace'ler JSON ya da protobuf olabilir; loglar ve
+    metrikler JSON olmalıdır.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="mevcut bir OpenTelemetry kurulumunu mcpd'ye yöneltin"
+    command={`export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json`}
+  />
+
+  <p>
+    Protokol satırı önemlidir. 4317 portu alışılageldiği üzere gRPC'dir ve mcpd
+    orada HTTP konuşur; yani gRPC varsayılanında bırakılmış bir SDK doğru porta
+    bağlanır ve başarısız olur.
+    <a href={urlFor('/docs/opentelemetry', locale)} class="link">OpenTelemetry</a>
+    sayfası bunu ve geri kalan ayarları anlatır.
+  </p>
+
+  <p>
+    İkisini iki hafta boyunca birlikte çalıştırın. mcpd sakladığı span'leri daha
+    önce kullandığınız yere iletir; böylece ikisini, geri alamayacağınız bir
+    geçiş üzerinden değil aynı trace'ler üzerinden karşılaştırabilirsiniz.
+    Yalnızca span'leri iletir: loglar, metrikler, puanlar, geri bildirimler ve
+    yön notları mcpd'de kalır.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="karar verene kadar eski hedefi koruyun"
+    command="mcpd serve --forward-endpoint https://your-existing-collector"
+  />
+
+  <p>
+    Ajanınız henüz OpenTelemetry yaymıyorsa
+    <a href={urlFor('/docs/quickstart', locale)} class="link">Hızlı başlangıç</a>
+    ile başlayın ya da kenar çubuğundaki Ölçümleme altından dilinizi seçin.
+  </p>
+
+  <h2>Bu karşılaştırma nasıl yapıldı</h2>
+  <p>
+    Bu sayfadaki Mastra ifadeleri, Ağustos 2026'da kaynağının okunmasına
+    dayanır; belgelerine ya da bir kıyaslama çalıştırmasına değil. Burada
+    hiçbir başarım sayısı yok, çünkü arkasında duracağımız hiçbir ölçüm
+    yapmadık.
+  </p>
+  <p>
+    Mastra etkin biçimde geliştiriliyor ve bunların herhangi biri doğru olmaktan
+    çıkabilir. Güncelliğini yitirmiş bir şey bulursanız bu sayfada bir hata var
+    demektir:
+    <a href="https://github.com/mcpd/mcpd/issues" class="link">bir issue açın</a>,
+    düzeltilecektir.
+  </p>
+
+  <h2>Sırada</h2>
+  <ul>
+    <li>
+      Mevcut bir collector'ı mcpd'ye yöneltmek:
+      <a href={urlFor('/docs/opentelemetry', locale)} class="link">OpenTelemetry</a>.
+    </li>
+    <li>
+      Bir şey saklanmadan önce neler kaldırılır:
+      <a href={urlFor('/docs/privacy', locale)} class="link">Maskeleme ve saklama</a>.
+    </li>
+    <li>
+      Bir ekip için çalıştırmak:
+      <a href={urlFor('/deploy', locale)} class="link">Docker ve Kubernetes</a>.
+    </li>
+  </ul>
+</Doc>

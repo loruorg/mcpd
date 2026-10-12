@@ -1,0 +1,496 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+
+const exporterEnv = `# ベース URL。/v1/traces はエクスポーターが自分で足します。
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+
+# 任意。ペイロードが大きいなら gzip で送ります。
+export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
+
+# mcpd を --ingest-key 付きで動かしているときだけ。
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer YOUR_INGEST_KEY"`
+
+const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
+  -H 'content-type: application/json' \\
+  -d '{
+  "resourceSpans": [{
+    "resource": { "attributes": [
+      { "key": "service.name", "value": { "stringValue": "checkout-agent" } }
+    ]},
+    "scopeSpans": [{
+      "spans": [{
+        "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "spanId": "00f067aa0ba902b7",
+        "name": "chat gpt-4o",
+        "startTimeUnixNano": "1700000000000000000",
+        "endTimeUnixNano": "1700000001500000000",
+        "status": { "code": 1 },
+        "attributes": [
+          { "key": "gen_ai.system", "value": { "stringValue": "openai" } },
+          { "key": "gen_ai.request.model", "value": { "stringValue": "gpt-4o" } },
+          { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+          { "key": "gen_ai.usage.input_tokens", "value": { "intValue": "1200" } },
+          { "key": "gen_ai.usage.output_tokens", "value": { "intValue": "350" } }
+        ]
+      }]
+    }]
+  }]
+}'
+
+# {"partialSuccess":{"rejectedSpans":0,"errorMessage":""}}`
+---
+
+<Doc
+  title="OpenTelemetry"
+  description="mcpd は /v1/traces、/v1/logs、/v1/metrics で OTLP/JSON を受け取り、OpenTelemetry の gen_ai.* と OpenInference の llm.* の両方のセマンティック規約を読みます。mcpd 固有のコードは要りません。"
+  lede="エージェントがすでに OpenTelemetry を出しているなら、mcpd はエンドポイントの変更だけです。このページで OTLP の経路をすべて説明します。3 つのエンドポイント、エンコーディング、そして mcpd が読む属性のすべてです。"
+  og="docs"
+>
+  <h2>3 つのエンドポイント</h2>
+  <p>
+    mcpd は OTLP の HTTP エンドポイントを、クエリ API やインターフェースと同じポートで提供します。
+    手前に立てるコレクターも、2 つ目のコンテナも、受信専用の別ポートもありません。
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>エンドポイント</th>
+          <th>受け取るもの</th>
+          <th>返すもの</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>POST /v1/traces</code></td>
+          <td><code>ExportTraceServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedSpans</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/logs</code></td>
+          <td><code>ExportLogsServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedLogRecords</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/metrics</code></td>
+          <td><code>ExportMetricsServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedDataPoints</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    成功したエクスポートはいずれも、件数を持つ OTLP 自身の <code>partialSuccess</code> の形で答えます。
+    コレクターが何かを落としたことを送信側に伝える方法がこれであり、エクスポーターはこれを読みます。
+    空の本文を返せば、送信側は得ていない成功を報告できてしまいます。
+  </p>
+
+  <h2>エクスポーターの設定</h2>
+  <p>
+    必要なのは環境変数 2 つだけです。エージェントを動かすプロセスの環境に設定してください。
+    ほかに変えるものはありません。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="エクスポーター"
+    samples={[{ lang: 'curl', label: '環境変数', shiki: 'bash', code: exporterEnv }]}
+  />
+
+  <p>
+    何も届かない原因を追う前に、知っておく価値のある点が 2 つあります。まず、
+    <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> はベース URL であり、
+    エクスポーターがそこにシグナルごとのパスを足します。パスまで含めた完全な URL を
+    与えたい場合は、代わりに <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code> を設定してください。
+    次に、OpenTelemetry では慣例としてポート 4317 が gRPC、4318 が HTTP です。
+    mcpd はすべてを 1 つのポートで提供するため、HTTP を 4317 で提供します。
+    そのため既定のポートのままのエクスポーターは 4318 に送り、何も届きません。
+    ポートは明示してください。
+  </p>
+
+  <h2>トレースの 2 つのエンコーディング</h2>
+  <p>
+    <code>/v1/traces</code> は <code>content-type</code> ヘッダーを読み、
+    どちらのエンコーディングも受け取ります。<code>protobuf</code> を含むなら OTLP/protobuf、
+    それ以外なら OTLP/JSON です。protobuf は OpenTelemetry の既定なので、
+    手を加えていない SDK を mcpd に向けるだけで、設定を一切せずにトレースが届きます。
+  </p>
+  <p>
+    <code>/v1/logs</code> と <code>/v1/metrics</code> は JSON だけを受け取ります。
+    そこに protobuf の本文を送ると <code>body is not valid JSON</code> として拒否されます。
+    3 つのシグナルすべてを送るなら、プロトコルを全体に一度だけ設定してください。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="すべてのシグナルを json で"
+    command="export OTEL_EXPORTER_OTLP_PROTOCOL=http/json"
+  />
+
+  <p>
+    <code>content-type</code> がまったく送られてこない場合、mcpd は
+    <code>application/json</code> と見なします。
+  </p>
+
+  <h2>圧縮とサイズ</h2>
+  <p>
+    リクエストの本文は <code>content-encoding: gzip</code> でも、<code>identity</code> でも、
+    エンコーディングのヘッダーなしでも届いてかまいません。それ以外は名前を挙げて拒否されます。
+    <code>content-encoding "br" is not supported; use gzip or send the
+    body uncompressed</code> のように返ります。レスポンスはコンテントネゴシエーションで
+    圧縮されるので、遅い回線越しに大きなトレースを読み出す場合も圧縮されます。
+  </p>
+  <p>
+    1 つのリクエストに 2 つの上限がかかります。本文の上限は 32 MiB で、届いたものを測るので、
+    gzip をかければその分の余地が生まれます。バッチの上限はシグナル 10,000 件で、
+    どの取り込み口でもデコード後に数えます。<code>/v1/traces</code> ではスパン、
+    <code>/v1/logs</code> ではレコード、<code>/v1/metrics</code> ではデータポイント、
+    <code>/v1/ingest</code> ではリクエストに入っているものすべてです。これを超えるバッチは
+    両方の数値を挙げて <code>413 payload_too_large</code> で拒否されます。どちらの上限も設定項目で、
+    <code>--max-body-bytes</code> と <code>--max-batch-signals</code> として
+    <a href={urlFor('/docs/configuration', locale)} class="link">設定</a>で説明しています。
+  </p>
+
+  <h2>届いてから保存されるまでに起きること</h2>
+  <p>
+    OTLP のスパンとネイティブのスパンは同じ経路を通ります。パイプラインを共有している目的がそれです。
+    下の順序が、2 つの入り口の間でずれることはありません。
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    OTLP のスパンにそもそもコストの数値が付くのは、取り込み時に値付けするからです。mcpd は
+    届いたその時点で、このサーバーが動いている価格表を使って値を付けます。そのため後から料金を
+    変えても、先月のコストが黙って書き換わることはありません。
+    <a href={urlFor('/docs/cost', locale)} class="link">コスト集計</a>を参照してください。
+  </p>
+
+  <h2>両方のセマンティック規約</h2>
+  <p>
+    AI のスパンには、競合する 2 組の属性名が使われています。OpenTelemetry 自身の
+    <code>gen_ai.*</code> と、OpenInference の <code>llm.*</code> および
+    <code>openinference.span.kind</code> です。mcpd はその両方を読み、さらに自身の
+    <code>mcpd.*</code> も読みます。名前を付け替える必要はありません。
+  </p>
+  <p>
+    下の各行は順に読まれ、最初に一致したものが採られます。どの行にも挙がっていない属性も残ります。
+    平坦化した属性のマップ全体がスパンに保存されるので、対応付けられなかったことで
+    送ったものが失われることはありません。
+  </p>
+
+  <h3>モデル、ペイロード、使用量</h3>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>mcpd のフィールド</th>
+          <th>読む元、この順で</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>model</code></td>
+          <td><code>gen_ai.request.model</code>, <code>gen_ai.response.model</code>, <code>llm.model_name</code>, <code>mcpd.model</code></td>
+        </tr>
+        <tr>
+          <td><code>provider</code></td>
+          <td><code>gen_ai.system</code>, <code>llm.provider</code>, <code>mcpd.provider</code></td>
+        </tr>
+        <tr>
+          <td><code>input</code></td>
+          <td><code>input.value</code>, <code>gen_ai.prompt</code>, <code>mcpd.input</code></td>
+        </tr>
+        <tr>
+          <td><code>output</code></td>
+          <td><code>output.value</code>, <code>gen_ai.completion</code>, <code>mcpd.output</code></td>
+        </tr>
+        <tr>
+          <td><code>entity_name</code></td>
+          <td><code>gen_ai.agent.name</code>, <code>mcpd.entity.name</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.input_tokens</code></td>
+          <td><code>gen_ai.usage.input_tokens</code>, <code>gen_ai.usage.prompt_tokens</code>, <code>llm.token_count.prompt</code>, <code>mcpd.usage.input_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.output_tokens</code></td>
+          <td><code>gen_ai.usage.output_tokens</code>, <code>gen_ai.usage.completion_tokens</code>, <code>llm.token_count.completion</code>, <code>mcpd.usage.output_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.total_tokens</code></td>
+          <td><code>llm.token_count.total</code>, <code>gen_ai.usage.total_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.cache_read</code></td>
+          <td><code>gen_ai.usage.cache_read_input_tokens</code>, <code>llm.token_count.prompt_details.cache_read</code>, <code>mcpd.usage.cache_read_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.cache_write</code></td>
+          <td><code>gen_ai.usage.cache_creation_input_tokens</code>, <code>llm.token_count.prompt_details.cache_write</code>, <code>mcpd.usage.cache_write_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.audio</code></td>
+          <td><code>llm.token_count.prompt_details.audio</code></td>
+        </tr>
+        <tr>
+          <td><code>output_details.reasoning</code></td>
+          <td><code>llm.token_count.completion_details.reasoning</code>, <code>gen_ai.usage.reasoning_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>output_details.audio</code></td>
+          <td><code>llm.token_count.completion_details.audio</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    3 つのトークン数のいずれも持たないスパンには、ゼロで埋めた使用量オブジェクトではなく、
+    使用量オブジェクトそのものが付きません。入力トークンがゼロであることと、
+    入力トークンが分からないことは別の事実であり、後者のつもりで前者を使って組んだコストの集計は、
+    誰も気づかない形で間違っています。
+  </p>
+
+  <h3>相関</h3>
+  <p>
+    あるユーザーの実行や、あるセッションの実行を問い合わせられるのは、相関のフィールドがあるからです。
+    まずスパンの属性を読み、次にリソースの属性を読みます。
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>mcpd のフィールド</th>
+          <th>読む元、この順で</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>project</code></td>
+          <td>スパンの <code>mcpd.project</code>、次にリソースのもの、次にデーモンの <code>--project</code></td>
+        </tr>
+        <tr>
+          <td><code>environment</code></td>
+          <td><code>mcpd.environment</code>、リソースの <code>deployment.environment.name</code>、リソースの <code>deployment.environment</code></td>
+        </tr>
+        <tr>
+          <td><code>service_name</code></td>
+          <td>リソースの <code>service.name</code></td>
+        </tr>
+        <tr>
+          <td><code>service_version</code></td>
+          <td>リソースの <code>service.version</code></td>
+        </tr>
+        <tr>
+          <td><code>session_id</code></td>
+          <td><code>gen_ai.conversation.id</code>, <code>session.id</code>, <code>mcpd.session_id</code></td>
+        </tr>
+        <tr>
+          <td><code>thread_id</code></td>
+          <td><code>mcpd.thread_id</code>, <code>thread.id</code></td>
+        </tr>
+        <tr>
+          <td><code>user_id</code></td>
+          <td><code>user.id</code>, <code>enduser.id</code>, <code>mcpd.user_id</code></td>
+        </tr>
+        <tr>
+          <td><code>request_id</code></td>
+          <td><code>mcpd.request_id</code>, <code>http.request.id</code></td>
+        </tr>
+        <tr>
+          <td><code>release</code></td>
+          <td><code>mcpd.release</code>、リソースの <code>service.version</code></td>
+        </tr>
+        <tr>
+          <td><code>run_id</code>, <code>resource_id</code>, <code>experiment_id</code></td>
+          <td><code>mcpd.run_id</code>, <code>mcpd.resource_id</code>, <code>mcpd.experiment_id</code></td>
+        </tr>
+        <tr>
+          <td><code>tags</code></td>
+          <td><code>mcpd.tags</code>、文字列の配列として</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>ステータスとエラー</h3>
+  <p>
+    OTLP のステータスコード <code>1</code> は <code>ok</code> に、<code>2</code> は
+    <code>error</code> になります。ステータスが未設定でも終了時刻があるスパンは
+    <code>ok</code> として記録されます。文句を言わずに終わったスパンは、実際に問題なく終わったからです。
+    ステータスが未設定で終了時刻もない場合は <code>unset</code> のままです。
+    そのスパンはまだ動いており、mcpd は結末を勝手に決めずにそのまま保存します。
+  </p>
+  <p>
+    エラーのスパンでは、メッセージは <code>status.message</code>、次に
+    <code>exception.message</code> から取られ、どちらもなければ文字列
+    <code>unspecified error</code> がそのまま使われます。エラーの種類は
+    <code>exception.type</code> から、スタックは <code>exception.stacktrace</code> から取られます。
+    エラーのスパンは必ずメッセージを持ちます。本文のない「何かが失敗した」では、手の打ちようがないからです。
+  </p>
+
+  <h3>スパンの種別</h3>
+  <p>
+    種別は、ウォーターフォールでスパンがどう描かれるかを決めます。mcpd は具体的なものから順に推論し、
+    最後は常に安全な <code>generic</code> に落とします。スパンに誤った種別を付けるのは、
+    種別を付けないことより悪いことです。
+  </p>
+  <ol>
+    <li><code>mcpd.span.kind</code>。mcpd が知っている種別を指している場合。</li>
+    <li><code>openinference.span.kind</code>。</li>
+    <li><code>gen_ai.operation.name</code>。</li>
+    <li>ある種別のスパンだけが持つ属性の有無。</li>
+  </ol>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>属性の値</th>
+          <th>mcpd の種別</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>openinference.span.kind=LLM</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>openinference.span.kind=CHAIN</code></td><td><code>workflow_run</code></td></tr>
+        <tr><td><code>openinference.span.kind=TOOL</code></td><td><code>tool_call</code></td></tr>
+        <tr><td><code>openinference.span.kind=AGENT</code></td><td><code>agent_run</code></td></tr>
+        <tr><td><code>openinference.span.kind=RETRIEVER</code></td><td><code>retrieval</code></td></tr>
+        <tr><td><code>openinference.span.kind=EMBEDDING</code></td><td><code>rag_embedding</code></td></tr>
+        <tr><td><code>openinference.span.kind=RERANKER</code></td><td><code>rag_action</code></td></tr>
+        <tr><td><code>openinference.span.kind=GUARDRAIL</code></td><td><code>guardrail</code></td></tr>
+        <tr><td><code>openinference.span.kind=EVALUATOR</code></td><td><code>scorer_run</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=chat</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=text_completion</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=generate_content</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=embeddings</code></td><td><code>rag_embedding</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=execute_tool</code></td><td><code>tool_call</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=invoke_agent</code></td><td><code>agent_run</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=create_agent</code></td><td><code>agent_run</code></td></tr>
+        <tr><td><code>gen_ai.system</code>, <code>llm.model_name</code>, <code>llm.provider</code> のいずれかがある</td><td><code>model_generation</code></td></tr>
+        <tr><td><code>mcp.tool.name</code> がある</td><td><code>mcp_tool_call</code></td></tr>
+        <tr><td><code>http.request.method</code> または <code>http.method</code> がある</td><td><code>http_request</code></td></tr>
+        <tr><td>それ以外</td><td><code>generic</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    <code>openinference.span.kind</code> や <code>gen_ai.operation.name</code> に
+    mcpd の知らない種別が入っていても、拒否はされず <code>generic</code> に落ちます。
+    種別の一覧は<a href={urlFor('/docs/reference/data-model', locale)} class="link">データモデル</a>にあります。
+  </p>
+
+  <h2>ログとメトリクス</h2>
+  <p>
+    ログのレコードは、仕様が定めるとおり深刻度の番号で対応付けられます。1 から 4 は trace、
+    5 から 8 は debug、9 から 12 は info、13 から 16 は warn、17 から 20 は error、
+    それより上はすべて fatal です。深刻度の番号がない場合、そのレコードは info として扱われます。
+    メッセージは <code>body.stringValue</code> から、ロガー名はスコープ名から取られ、
+    <code>traceId</code> と <code>spanId</code> は妥当であれば保持されます。
+    ログの行を、それを出したスパンの隣に置いているのがこれです。
+  </p>
+  <p>
+    メトリクスでは、sum はカウンターに、gauge はゲージになります。ヒストグラムは、
+    バケットの境界を保ったまま合計と件数で記録されます。mcpd は、事前に集計された
+    ヒストグラムから正確な分位数を復元できるふりはしません。エグゼンプラーは保持されます。
+    チャート上のスパイクから、それを起こした実行を開けるのはこれのおかげです。
+    多くのツールはこれを捨てます。
+  </p>
+
+  <h2>id と W3C traceparent</h2>
+  <p>
+    mcpd は OpenTelemetry の識別子の形をそのまま使います。トレース id は 128 ビットで
+    小文字の 16 進 32 文字、スパン id は 64 ビットで 16 文字です。変換層が要らないのは、
+    ワイヤ上の形式を同一に保っているからです。すべてゼロの id は「トレースなし」を意味するものとして予約されており、
+    mcpd が自分で生成する id も含め、どこに現れても拒否されます。
+  </p>
+  <p>
+    OTLP/JSON は id のフィールドに 16 進を定めていますが、base64 を出す SDK がいくつかあります。
+    mcpd は両方を受け取り、16 進で保存します。id が欠けている、長さが違う、
+    あるいはすべてゼロであるスパンは飛ばされ、バッチの残りはそのまま書き込まれます。
+    1 つの不正なスパンのために 1 万件の正しいスパンを拒否するコレクターは、人が止めるコレクターだからです。
+  </p>
+  <p>
+    タイムスタンプは Unix エポックからのナノ秒です。2<sup>53</sup> を超えるため、
+    OTLP/JSON はこれを文字列として送り、mcpd も文字列として解釈します。浮動小数点として読むと
+    精度が落ち、実際には同時に始まったスパンがマイクロ秒ずれて始まったように見える形で表面化します。
+    <code>endTimeUnixNano</code> が <code>0</code> または無い場合、そのスパンは終わっていません。
+  </p>
+  <p>
+    <code>traceparent</code> ヘッダーは <code>version-traceid-parentid-flags</code> です。
+    mcpd は仕様が定める規則で解釈します。バージョン <code>ff</code> は拒否、バージョン
+    <code>00</code> はちょうど 4 つのフィールドを持たなければならず、以降のバージョンは
+    それより多くを持ってもよく、id は妥当性を満たさなければならず、フラグのバイトのビット 0 が
+    サンプリング済みフラグです。ヘッダーの形が壊れていることは、リクエストを拒否する理由には決してなりません。
+    mcpd は代わりに新しいトレースを始めます。
+  </p>
+  <p>
+    これが効いてくる場面はこうです。mcpd の SDK は届いた <code>traceparent</code> を読み、
+    外向きの呼び出しにも付けるので、トレースはサービスの境界を越えて残ります。OTLP の
+    エンドポイントは id をペイロードから取ります。エクスポーターがすでにスパンに入れているからです。
+    mcpd で計装していないサービスからトレースが始まる場合は、その <code>traceparent</code> を
+    渡してください。両側が 1 つのトレース id の下に収まります。
+  </p>
+
+  <h2>リクエストを丸ごと 1 つ</h2>
+  <p>
+    ここまでのどれにも SDK は要りません。これはターミナルにそのまま貼り付けられる、完全で妥当なエクスポートです。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="生の OTLP/JSON"
+    samples={[{ lang: 'curl', label: 'シェル', shiki: 'bash', code: rawPost }]}
+  />
+
+  <h2>OTLP が運べないもの</h2>
+  <p>
+    OTLP はスパン、ログ、メトリクスの形を持っています。機械のスコア、人の低評価、
+    観点ノートの形は持たず、最近のプロバイダーが課金の根拠にするトークンの
+    内訳を表す語彙もありません。
+    それらを送る方法は 2 つあります。
+  </p>
+  <ul>
+    <li>
+      <code>POST /v1/ingest</code>。mcpd のネイティブなバッチ用エンドポイントで、
+      データモデル全体を 1 つのリクエストで運びます。
+    </li>
+    <li>
+      <code>POST /v1/api/scores</code> と <code>POST /v1/api/feedback</code>。
+      すでに OTLP で送ったトレースに紐づけます。
+    </li>
+  </ul>
+  <p>
+    両方を混ぜて使うのは普通のことであり、想定どおりです。すでに動かしている OpenTelemetry の
+    SDK でスパンを送り、評価のジョブからスコアを投げてください。両者はトレース id で結びつきます。
+    <a href={urlFor('/docs/evaluation', locale)} class="link">スコアとフィードバック</a>と
+    <a href={urlFor('/docs/reference/api', locale)} class="link">HTTP API</a> を参照してください。
+  </p>
+
+  <h2>ポートを外に出す前に</h2>
+  <p>
+    <code>--ingest-key</code> を設定していなければ、4317 に届く相手は誰でも書き込めます。
+    <code>--read-key</code> がなければ、保存されたプロンプトをすべて読めます。mcpd は、
+    どちらかを開けたままループバック以外のアドレスにバインドしたとき、起動時に警告を記録します。
+    <a href={urlFor('/docs/configuration', locale)} class="link">設定</a>でこれらを指定し、
+    キーは <code>Authorization: Bearer</code> として送ってください。上の
+    <code>OTEL_EXPORTER_OTLP_HEADERS</code> がしているのがそれです。
+  </p>
+
+  <Command
+    class="my-6"
+    label="キーを設定して起動"
+    command="mcpd --ingest-key $INGEST_KEY --read-key $READ_KEY"
+  />
+</Doc>

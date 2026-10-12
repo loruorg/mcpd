@@ -1,0 +1,186 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import StripChart from '@/components/StripChart.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="采样"
+  description="mcpd 实现的五种采样策略，这个决定为什么在根部只做一次，确定性哈希为什么能让一支机群意见一致，以及尾部采样怎样把值得读的运行留下来。"
+  lede="只留下一部分 trace，而不是把每一条 trace 都只留下一部分。"
+  og="docs"
+>
+  <h2>这个决定在根部只做一次</h2>
+  <p>
+    一条 trace 要么整条留下，要么整条丢掉。这个决定在根 span 开始时做出，并被
+    每一个子 span 继承，所以一次运行绝不会只被记录一半。
+  </p>
+  <p>
+    其余的一切都由这条规则推出来。一条随机缺了 30% 的 span 的 trace，读起来不像是
+    一条被采样过的 trace。它读起来像是你正在观测的那个系统里的一个缺陷：一次好像
+    从没发生过的工具调用，一次没有父级的模型调用，本该有检索的地方却是一个空档。
+    你会为它花掉一个下午，才想明白那个空档是你的可观测性工具，不是你的智能体。
+  </p>
+
+  <h2>默认全都留下</h2>
+  <p>
+    没有配置采样时，策略是 <code>always</code>，而在量级说不行之前，这就是对的
+    默认。采样换走的，是那次你之后会想读的运行。只有在存储或者带宽逼你这么做的
+    时候，才付这个代价。
+  </p>
+
+  <h2>五种策略</h2>
+  <table>
+    <thead>
+      <tr><th>策略</th><th>行为</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>always</code></td>
+        <td>全都留下。默认。</td>
+      </tr>
+      <tr>
+        <td><code>never</code></td>
+        <td>什么也不留。</td>
+      </tr>
+      <tr>
+        <td><code>ratio</code></td>
+        <td>留下固定的一部分，在根部每条 trace 随机抽取一次。</td>
+      </tr>
+      <tr>
+        <td><code>deterministic</code></td>
+        <td>留下固定的一部分，由对 trace id 做哈希来决定。每一个 collector 都得到同一个答案，彼此不需要通信。</td>
+      </tr>
+      <tr>
+        <td><code>tail</code></td>
+        <td>把决定推迟到 trace 结束之后，然后无论比率怎么说，都留下每一次出错和每一次跑得慢的运行。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>设置一个比率</h2>
+  <p>
+    <code>--sample</code>，或者 <code>MCPD_SAMPLE</code>，接受一个 0.0 到 1.0 之间
+    的分数，配置的是确定性策略。超出这个范围的值会让守护进程在启动时停下，并给出
+    一条写明你传了什么的消息。它不做截断，因为一个打错了又悄悄变成 1.0 的比率，
+    要等一个月后由存储账单来发现。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="十条 trace 留一条"
+    command="mcpd --sample 0.1"
+    primaryLabel="作为参数"
+    secondary={[
+      { label: '用环境变量', command: 'MCPD_SAMPLE=0.1 mcpd' },
+      { label: '确认它读到了什么', command: 'mcpd config' },
+    ]}
+  />
+
+  <p>
+    每个 SDK 都读同一个分数，在客户端配置里叫 <code>sample</code>，在环境里叫
+    <code>MCPD_SAMPLE</code>。在客户端采样更便宜：一个没被采到的 span 从不入队，
+    也从不导出，所以它完全不占带宽。在守护进程里采样，代价是那一个来回，但比率
+    留在一个地方，当十几个服务都上报到同一个实例时，这正是你想要的。
+  </p>
+  <p>
+    五种策略里，守护进程能到达的是 <code>always</code> 和
+    <code>deterministic</code>：<code>--sample</code> 和配置文件里某个项目的
+    <code>sample</code>，设置的都是 deterministic 策略。<code>never</code>、
+    <code>ratio</code> 和 <code>tail</code> 在策略类型里已经实现，但在这个构建
+    里，参数和配置文件都到不了它们。
+  </p>
+
+  <h2>哈希为什么能让一支机群意见一致</h2>
+  <p>
+    在一个负载均衡器后面跑好几个 mcpd 实例，同一条 trace 的那些 span 不会全都到达
+    同一个实例。一个每个实例、或者每个 span 抛一次硬币的采样器，会留下一条 trace
+    的一部分而丢掉其余，这正是第一条规则要防的那种失败。
+  </p>
+  <p>
+    确定性策略把 trace id 映射到完整的 64 位范围上，当这个值落在比率所隐含的阈值
+    以下时就留下这条 trace。每个实例都从同一个 id 算出同一个数字，于是它们全都
+    一致，不需要共享状态，不需要协调协议，也没有什么会失去同步。同一个 id 在重试
+    时也给出同一个答案，所以一个被重放的批次不会只到达一半。
+  </p>
+  <p>
+    有两处细节让这个映射是诚实的。它读的是这个 id <em>末尾</em>的十六个十六进制
+    字符：OpenTelemetry 要求 trace id 是随机的，但有些生产方会用时间戳推出开头
+    那几个字节，而一个去读那几个字节的采样器，得到的会是和一天中的时刻相关，
+    而不是采样。当这个 id 根本不是十六进制时，它会退回到一个带收尾混合的真正哈希，
+    而不是退化成全都留下，这样实际得到的比率就贴近你要的那个比率。
+  </p>
+
+  <h2>在 SDK 里，上游的决定说了算</h2>
+  <p>
+    当 SDK 从传入的 W3C <code>traceparent</code> 接着一条 trace 往下走时，它把
+    sampled 标志和 ID 一起继承下来，不再施加自己的比率。这在两个方向上都成立：
+    标志置位时，不管本地比率是多少都留下这条 trace；标志清零时，不管本地比率是
+    多少都丢掉它。
+  </p>
+  <p>
+    这个版本的守护进程不这样做。对经 OTLP 到达的 span，守护进程把它的
+    trace-flags 字节保存在属性 <code>mcpd.otlp.flags</code> 里，但守护进程的
+    采样器不读它。设了比率的守护进程会对每一条 trace 施加这个比率，不管标志
+    怎么说。
+  </p>
+  <p>
+    另一种做法比听起来更糟。如果每个服务都施加自己的比率，一条穿过四个服务的
+    trace 会被其中两个留下、被另外两个丢掉，而你最后拿到的不是一条分布式 trace。
+    那是一组按它的形状排布的窟窿。
+  </p>
+
+  <h2>尾部采样把值得读的运行留下来</h2>
+  <p>
+    头部采样器在它什么都还不知道的时候就做决定。它便宜，而它是瞎的：在十分之一的
+    比率下，它也只留下十分之一的失败。你真正会打开的那些 trace 是稀有的那些，而
+    稀有恰恰是一个比率采样器最不擅长的。
+  </p>
+
+  {/* 笔停在 200 单位处，而不是组件的默认位置。这里每个桌面尺寸下的正文栏都是
+      662px 宽，而默认的笔臂停在 760，所以这张图表从来没有画出过它的笔：让一台
+      记录仪之所以是记录仪的那个元件，在每一种宽度下都在画幅之外，手机上也一样。 */}
+  <StripChart class="not-prose my-8" height={260} pen={200} />
+
+  <p>
+    一份延迟记录就长这样：一条平直的基线，加上少数几次偏离。量在基线那里，答案在
+    偏离那里。尾部采样把 trace 一直留到它结束，然后：里面有任何东西出错就留下它，
+    它跑得比你设的阈值久就留下它，其余情况则施加和前面一样的确定性哈希。留下出错
+    的那些默认是开着的，因为你最需要的那些 trace 就是稀有的那些，而一个比率采样器
+    最可能把它们扔掉。
+  </p>
+  <p>
+    代价是缓冲。一个尾部采样器必须把每一条还没结束的 trace 留在内存里，直到它能
+    做决定为止，这正是它是一个有意的选择、而不是默认的原因。和上面说的一样，尾部
+    策略在策略类型里已经实现，但在这个构建里参数和配置文件都到不了它；守护进程的摄取路径
+    施加的是头部决定。
+  </p>
+
+  <h2>知道什么被丢掉了</h2>
+  <p>
+    采样器丢弃的每一个 span，都会让 <code>mcpd_traces_sampled_out_total</code>
+    加一，它以 Prometheus 文本格式在 <code>/metrics</code> 上导出。请把这个比率
+    写在你团队会看的地方。一条缺失的 trace，配上一个写在文档里的采样率，是一个
+    解释；一条缺失的 trace，什么解释也没有，就是一张工单，而提交它的人通常是你。
+  </p>
+
+  <h2>接下来</h2>
+  <ul>
+    <li>
+      另一条少存一些的路：
+      <a href={linkTo('/docs/privacy')} class="link">脱敏与保留期</a>。
+    </li>
+    <li>
+      每一个参数和环境变量：
+      <a href={linkTo('/docs/configuration')} class="link">配置</a>。
+    </li>
+    <li>
+      读 <code>/metrics</code>，以及守护进程自己其余的那些信号：
+      <a href={linkTo('/docs/operations')} class="link">把它跑起来</a>。
+    </li>
+  </ul>
+</Doc>

@@ -1,0 +1,215 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import StripChart from '@/components/StripChart.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Muestreo"
+  description="Las cinco estrategias de muestreo de mcpd, por qué la decisión se toma una vez en la raíz, por qué el hash determinista deja coincidir a una flota y cómo el muestreo de cola guarda lo que importa."
+  lede="Conservar una fracción de las trazas, sin conservar una fracción de cada una."
+  og="docs"
+>
+  <h2>La decisión se toma una vez, en la raíz</h2>
+  <p>
+    Una traza se conserva o se descarta entera. La decisión se toma cuando
+    arranca el span raíz y la heredan todos sus hijos, así que una ejecución
+    nunca queda registrada a medias.
+  </p>
+  <p>
+    Esta es la regla de la que sale todo lo demás. Una traza a la que le falta
+    un 30% de sus spans al azar no se lee como una traza muestreada. Se lee como
+    un error del sistema que estás observando: una llamada a herramienta que al
+    parecer nunca ocurrió, una llamada al modelo sin padre, un hueco donde
+    debería estar la recuperación. Vas a perder una tarde en ello antes de
+    averiguar que el hueco es tu herramienta de observabilidad y no tu agente.
+  </p>
+
+  <h2>El valor por defecto lo conserva todo</h2>
+  <p>
+    Sin muestreo configurado la política es <code>always</code>, y ese es el
+    valor por defecto correcto hasta que el volumen diga otra cosa. Muestrear
+    es renunciar a la ejecución que vas a querer leer. Paga eso solo cuando te
+    obliguen el almacenamiento o el ancho de banda.
+  </p>
+
+  <h2>Las cinco estrategias</h2>
+  <table>
+    <thead>
+      <tr><th>Estrategia</th><th>Comportamiento</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>always</code></td>
+        <td>Conservarlo todo. Es lo que hay por defecto.</td>
+      </tr>
+      <tr>
+        <td><code>never</code></td>
+        <td>No conservar nada.</td>
+      </tr>
+      <tr>
+        <td><code>ratio</code></td>
+        <td>Conservar una fracción fija, sorteada al azar una vez por traza en la raíz.</td>
+      </tr>
+      <tr>
+        <td><code>deterministic</code></td>
+        <td>Conservar una fracción fija, decidida aplicando un hash al id de la traza. Cada colector llega a la misma respuesta sin hablar con ningún otro.</td>
+      </tr>
+      <tr>
+        <td><code>tail</code></td>
+        <td>Aplazar la decisión hasta que la traza termina, y entonces conservar todos los errores y todas las ejecuciones lentas, diga lo que diga la tasa.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Definir una tasa</h2>
+  <p>
+    <code>--sample</code>, o <code>MCPD_SAMPLE</code>, toma una fracción de 0.0
+    a 1.0 y configura la estrategia determinista. Un valor fuera de ese rango
+    detiene el daemon al arrancar con un mensaje que nombra lo que pasaste. No
+    lo recorta al rango, porque una tasa mal tecleada que se convierte en
+    silencio en 1.0 se descubre un mes después por la factura del
+    almacenamiento.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="conserva una traza de cada diez"
+    command="mcpd --sample 0.1"
+    primaryLabel="Como opción"
+    secondary={[
+      { label: 'como entorno', command: 'MCPD_SAMPLE=0.1 mcpd' },
+      { label: 'confirma qué leyó', command: 'mcpd config' },
+    ]}
+  />
+
+  <p>
+    Todos los SDK leen la misma fracción, como <code>sample</code> en la
+    configuración del cliente o <code>MCPD_SAMPLE</code> en el entorno.
+    Muestrear en el cliente sale más barato: un span que no se muestreó no se
+    encola nunca y no se exporta nunca, así que no cuesta nada de ancho de
+    banda. Muestrear en el daemon te cuesta el viaje de ida y vuelta, pero
+    mantiene la tasa en un solo sitio, que es lo que quieres cuando una docena
+    de servicios reportan a una misma instancia.
+  </p>
+  <p>
+    De las cinco estrategias, el daemon alcanza <code>always</code> y
+    <code>deterministic</code>: <code>--sample</code> y el <code>sample</code>
+    de un proyecto en el archivo de configuración fijan ambos la estrategia
+    determinista. <code>never</code>, <code>ratio</code> y <code>tail</code>
+    están implementadas en el tipo de política y no se alcanzan desde una
+    opción ni desde el archivo de configuración en esta compilación.
+  </p>
+
+  <h2>Por qué el hash deja que una flota coincida</h2>
+  <p>
+    Ejecuta varias instancias de mcpd detrás de un balanceador de carga y los
+    spans de una misma traza no llegan todos a la misma. Un muestreador que
+    lanza una moneda por instancia, o por span, conservaría parte de una traza y
+    descartaría el resto, que es justo el fallo que la primera regla existe para
+    evitar.
+  </p>
+  <p>
+    La estrategia determinista proyecta el id de la traza sobre el rango
+    completo de 64 bits y conserva la traza cuando ese valor cae por debajo del
+    umbral que implica la tasa. Cada instancia calcula el mismo número a partir
+    del mismo id, así que todas coinciden, sin estado compartido, sin protocolo
+    de coordinación y sin nada que se pueda desincronizar. El mismo id da además
+    la misma respuesta en un reintento, así que un lote reenviado no puede
+    llegar a medias.
+  </p>
+  <p>
+    Dos detalles hacen honesta esa proyección. Lee los dieciséis caracteres
+    hexadecimales <em>finales</em> del id: OpenTelemetry exige que los ids de
+    traza sean aleatorios, pero algunos productores derivan los bytes iniciales
+    de una marca de tiempo, y un muestreador que leyera esos bytes se
+    correlacionaría con la hora del día en lugar de muestrear. Cuando el id no
+    es hexadecimal en absoluto, recurre a un hash de verdad con una mezcla final
+    en lugar de degenerar en conservarlo todo, así que la tasa real se mantiene
+    cerca de la tasa que pediste.
+  </p>
+
+  <h2>En los SDKs, una decisión aguas arriba gana</h2>
+  <p>
+    Cuando un SDK continúa una traza a partir de un <code>traceparent</code> de
+    W3C entrante, toma el flag de muestreo junto con los ids y no aplica su
+    propia tasa. Esto vale en los dos sentidos: el flag puesto conserva la traza
+    sea cual sea la tasa local, y el flag quitado la descarta sea cual sea la
+    tasa local.
+  </p>
+  <p>
+    El daemon no hace esto en esta versión. Cuando un span llega por OTLP, el
+    daemon guarda su byte de trace-flags en el atributo
+    <code>mcpd.otlp.flags</code>, pero su muestreador no lo lee. Un daemon con
+    una tasa aplica esa tasa a todas las trazas, diga lo que diga el flag.
+  </p>
+  <p>
+    La alternativa es peor de lo que suena. Si cada servicio aplicara su propia
+    tasa, una traza que cruzara cuatro de ellos la conservarían dos y la
+    descartarían dos, y lo que tendrías al final no es una traza distribuida. Es
+    un conjunto de huecos con la forma de una.
+  </p>
+
+  <h2>El muestreo de cola conserva las ejecuciones que vale la pena leer</h2>
+  <p>
+    Un muestreador de cabecera decide antes de saber nada. Sale barato, y es
+    ciego: a una décima parte, conserva también una décima parte de los fallos.
+    Las trazas que de verdad abres son las raras, y la rareza es exactamente lo
+    que peor se le da a un muestreador por proporción.
+  </p>
+
+  {/* The pen stands 200 units in rather than at the component's default. An
+      article column is 662px wide at every desktop size here, and the default
+      arm stands at 760, so this chart had never once drawn its pen: the one
+      element that makes a recorder a recorder was outside the field at every
+      width, including a phone's. */}
+  <StripChart class="not-prose my-8" height={260} pen={200} />
+
+  <p>
+    Así se ve un registro de latencia: una línea base plana y un puñado de
+    picos. En la línea base está el volumen y en los picos están las respuestas.
+    El muestreo de cola retiene la traza hasta que termina, y entonces la
+    conserva si algo dentro dio error, la conserva si tardó más que el umbral
+    que definiste, y en cualquier otro caso aplica el mismo hash determinista de
+    antes. Conservar los errores está activado por defecto, porque las trazas que más
+    necesitas son las raras y un muestreador por proporción es el que más
+    probablemente las tire.
+  </p>
+  <p>
+    El costo es el búfer. Un muestreador de cola tiene que retener en memoria
+    cada traza sin terminar hasta poder decidir, que es la razón de que sea una
+    elección deliberada y no lo que hay por defecto. Como arriba, la estrategia de
+    cola está implementada en el tipo de política y no se alcanza desde una
+    opción ni desde el archivo de configuración en esta compilación; la ruta de ingesta del daemon aplica la
+    decisión de cabecera.
+  </p>
+
+  <h2>Saber qué se descartó</h2>
+  <p>
+    Cada span que el muestreador descarta incrementa
+    <code>mcpd_traces_sampled_out_total</code>, exportado en
+    <code>/metrics</code> en formato de texto de Prometheus. Anota la tasa en
+    algún sitio que tu equipo lea. Una traza que falta con una tasa de muestreo
+    documentada es una explicación; una traza que falta sin explicación es un
+    ticket de soporte, y quien lo abre sueles ser tú.
+  </p>
+
+  <h2>A continuación</h2>
+  <ul>
+    <li>
+      La otra forma de almacenar menos:
+      <a href={urlFor('/docs/privacy', locale)} class="link">Ocultación y retención</a>.
+    </li>
+    <li>
+      Cada opción y variable de entorno:
+      <a href={urlFor('/docs/configuration', locale)} class="link">Configuración</a>.
+    </li>
+    <li>
+      Leer <code>/metrics</code> y el resto de las señales del propio daemon:
+      <a href={urlFor('/docs/operations', locale)} class="link">Operación</a>.
+    </li>
+  </ul>
+</Doc>

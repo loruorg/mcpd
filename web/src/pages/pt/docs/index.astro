@@ -1,0 +1,216 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import Command from '@/components/Command.astro'
+import Unreleased from '@/components/Unreleased.astro'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* Os links internos continuam escritos como rotas em inglês e são localizados
+   aqui. Uma rota cuja página em português ainda não existe leva para a página
+   em inglês, em vez de para um URL em português sem nada atrás. */
+const code = localeOf(Astro.url.pathname)
+const url = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+---
+
+<Doc
+  title="Visão geral"
+  description="O mcpd é um daemon gratuito e open source para agentes de IA: execuções duráveis mantidas entre as etapas e observabilidade de cada uma. Um processo, armazenamento embutido, OpenTelemetry na entrada."
+  lede="Um processo que você roda ao lado do seu agente, não uma biblioteca em torno da qual o seu agente é construído. Ele segura a execução entre as etapas e registra cada uma. Esta página é o formato da coisa inteira em uma leitura."
+  og="docs"
+>
+  <h2>Um único processo</h2>
+  <p>
+    O mcpd faz duas coisas com um único processo. Ele segura uma execução
+    durável entre as etapas dela: o cursor, as repetições, os temporizadores e
+    as esperas, enquanto o seu próprio código, em qualquer linguagem, faz o
+    trabalho dentro de cada etapa. E ele recebe o que o seu agente fez, guarda, e
+    devolve para você como execuções que dá para ler. É um binário só, com o
+    SQLite ligado dentro dele. Não há banco de dados para subir, não há coletor
+    para rodar ao lado e não há conta em lugar nenhum.
+  </p>
+  <p>
+    O daemon escuta na porta <code>4317</code> e serve cinco coisas a partir
+    dessa única porta:
+  </p>
+  <ul>
+    <li>
+      Ingestão OTLP em <code>/v1/traces</code>, <code>/v1/logs</code> e
+      <code>/v1/metrics</code>, então uma instalação de OpenTelemetry que já
+      existe não precisa de código novo.
+    </li>
+    <li>
+      Ingestão nativa em <code>/v1/ingest</code>, que carrega as partes do modelo
+      para as quais o OTLP não tem lugar, entre elas as notas e o feedback de
+      pessoas.
+    </li>
+    <li>
+      A API de leitura sob <code>/v1/api</code>, que a interface e os SDKs usam,
+      os dois. Não existe uma API privada atrás da que você recebe.
+    </li>
+    <li>
+      A superfície de execução sob <code>/v1/api/runs</code>, <code>/v1/api/events</code>
+      e <code>/v1/api/steps</code>: definições, execuções, os eventos que
+      respondem a uma espera e o protocolo que um worker fala. Veja
+      <a href={url('/docs/workflows')} class="link">Workflows</a>.
+    </li>
+    <li>A interface do operador em <code>/</code>, embutida no binário.</li>
+  </ul>
+  <p>
+    Uma porta só é uma decisão de implantação, e não um atalho. Um coletor, um
+    banco de dados e uma interface são três coisas para rodar, três coisas para
+    atualizar e três lugares entre os quais um trace pode se perder.
+  </p>
+
+  <Command
+    class="not-prose mt-8"
+    label="A instalação inteira, quando houver release"
+    command="docker run -p 4317:4317 ghcr.io/mcpd/mcpd"
+  />
+  <Unreleased class="not-prose mb-8 mt-3" />
+
+  <h2>O que ele deliberadamente não é</h2>
+  <p>
+    Boa parte do valor aqui vem daquilo que o mcpd se recusa a fazer. Cada recusa
+    remove um motivo pelo qual você teria de mudar o seu agente.
+  </p>
+  <ul>
+    <li>
+      <strong>Não é um framework.</strong> O mcpd nunca executa o seu modelo,
+      nunca o escolhe e nunca embrulha o cliente do seu provedor. Ele segura uma
+      execução entre as etapas e deixa tudo que está dentro de uma etapa para o
+      seu código. O seu código chama um modelo do mesmo jeito depois de você
+      adotar o mcpd e antes disso.
+    </li>
+    <li>
+      <strong>Não fica no caminho da requisição.</strong> Ele nunca se coloca
+      entre o seu agente e um provedor. Nada que os seus usuários veem depende de
+      o mcpd estar no ar, porque nada que os seus usuários veem passa por ele.
+    </li>
+    <li>
+      <strong>Não é um serviço.</strong> O daemon não chama nada por padrão. Não
+      há telemetria, nem verificação de licença, nem endpoint de fornecedor. O
+      único tráfego de saída que ele vai fazer é o que você configurar: um
+      <code>--forward-endpoint</code>, o webhook de um monitor ou um modelo juiz.
+      Não defina nenhum deles e os seus prompts nunca saem da máquina em que você
+      o executou.
+    </li>
+    <li>
+      <strong>Não é uma dependência obrigatória.</strong> Se você apagar o mcpd
+      da sua infraestrutura, a única coisa que para é o registro.
+    </li>
+  </ul>
+
+  <h2>Os seis sinais</h2>
+  <p>
+    O mcpd guarda seis tipos de coisa, e guarda os seis juntos. Os spans são o
+    que rodou. Os logs são as linhas que uma execução emitiu. As métricas são
+    números ao longo do tempo. As notas são o julgamento de uma máquina sobre uma
+    execução. O feedback é o de uma pessoa. Uma nota de aspecto é uma frase
+    que um modelo escreveu sobre uma execução já terminada.
+  </p>
+  <p>
+    Mantê-los em um único armazenamento é a razão de tudo. Cada sinal carrega o
+    id de trace e o id de span a que pertence, então a pergunta “o que o modelo
+    disse de verdade na execução de que este cliente reclamou, e quanto ela
+    custou” é uma consulta só, em vez de quatro ferramentas e um horário que você
+    tem de casar no olho.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <p>
+    As notas e o feedback ficam separados de propósito. O 0,8 de um avaliador e o
+    polegar para baixo de uma pessoa medem coisas diferentes, e tirar a média dos
+    dois produz um número que não quer dizer nada.
+  </p>
+
+  <h2>Por que um daemon e não um framework</h2>
+  <p>
+    A observabilidade de framework é boa, e ela chega presa ao framework. Para
+    ser visto, espera-se que um agente tenha sido construído com ele, em geral em
+    uma única linguagem. Essa é uma troca justa para um projeto novo e uma troca
+    impossível para um agente que já existe e já funciona. Os workflows de
+    framework são a mesma troca: duráveis, desde que cada etapa esteja escrita na
+    linguagem do framework e rode dentro do processo dele.
+  </p>
+  <p>
+    Um daemon inverte as duas coisas. O grafo de um workflow é dado que o daemon
+    guarda; os corpos das etapas dele são código que o seu processo guarda,
+    reivindicado um lease por vez através de um protocolo HTTP que qualquer
+    linguagem consegue falar. O daemon nunca vê um modelo, um prompt ou uma
+    credencial. Veja
+    <a href={url('/docs/workflows')} class="link">Workflows</a> e
+    <a href={url('/docs/workers')} class="link">Workers</a>.
+  </p>
+  <p>
+    Um daemon inverte a troca. O mcpd fala OTLP, que é um protocolo e não uma
+    dependência, então ele registra agentes escritos em qualquer linguagem, com
+    qualquer framework, inclusive os que foram escritos antes de o mcpd existir.
+    Se o seu agente já exporta OpenTelemetry, apontar
+    <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> para o mcpd é a integração inteira.
+  </p>
+  <p>
+    Os SDKs existem porque o OTLP não tem vocabulário para um prompt, uma
+    resposta do modelo, uma contagem de tokens ou uma nota, e são esses os campos
+    pelos quais você veio. Usar um deles é uma escolha, não uma condição. Os seis
+    se comportam de forma idêntica: registrar um span acrescenta a uma fila
+    limitada e retorna, o trabalho de rede acontece em um worker de segundo
+    plano, e nada no caminho da instrumentação lança uma exceção. Uma
+    observabilidade capaz de derrubar o sistema que observa é pior do que nenhuma.
+  </p>
+
+  <h2>Um binário, duas implantações</h2>
+  <p>
+    O contêiner que você roda em um notebook é o contêiner que roda como um
+    Deployment no cluster de alguém. Retenção, ocultação, amostragem e chaves
+    de API são opções nesse mesmo binário, não um build diferente e não um nível
+    de licença. Não existe recurso que só exista em uma versão que você não pode
+    ter.
+  </p>
+  <p>
+    Os padrões são feitos para o notebook, o que quer dizer que a ingestão e as
+    leituras ficam abertas quando nenhuma chave está configurada. O mcpd avisa de
+    forma bem visível na inicialização quando está escutando em um endereço que
+    não é de loopback nesse estado. Ele inicia mesmo assim, porque recusar
+    quebraria o caminho de cinco minutos para a pessoa a quem ele se destina, mas
+    o silêncio seria irresponsável.
+  </p>
+
+  <h2>Para onde ir agora</h2>
+  <ul>
+    <li>
+      Rodando agora:
+      <a href={url('/docs/quickstart')} class="link">Início rápido</a> coloca na
+      tela um trace do seu próprio agente, ou
+      <a href={url('/docs/install')} class="link">Instalação</a> cobre todos os
+      caminhos de entrada.
+    </li>
+    <li>
+      Aprendendo o vocabulário:
+      <a href={url('/docs/concepts')} class="link">Conceitos</a> define trace,
+      span, tipo e correlação, que o resto da documentação pressupõe.
+    </li>
+    <li>
+      Segurando uma execução entre as etapas:
+      <a href={url('/docs/workflows')} class="link">Workflows</a>, depois
+      <a href={url('/docs/workers')} class="link">Workers</a> e
+      <a href={url('/docs/runs')} class="link">Execuções</a>.
+    </li>
+    <li>
+      Já tem OpenTelemetry:
+      <a href={url('/docs/opentelemetry')} class="link">o caminho OTLP</a> por
+      inteiro, inclusive o que o mcpd deduz dos atributos padrão.
+    </li>
+    <li>
+      Rodando para outras pessoas:
+      <a href={url('/deploy')} class="link">Docker e Kubernetes</a>, depois
+      <a href={url('/docs/privacy')} class="link">Ocultação e retenção</a>.
+    </li>
+  </ul>
+  <p>
+    O mcpd é licenciado sob a Apache-2.0. O protocolo de entrada, o formato de
+    saída e a licença em volta são todos abertos, então sair custa tão pouco
+    quanto chegar.
+  </p>
+</Doc>

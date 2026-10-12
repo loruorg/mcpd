@@ -1,0 +1,240 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (href: string) => urlFor(href, code)
+---
+
+<Doc
+  title="Elixir"
+  description="Elixir için mcpd SDK'sı: GenServer tabanlı bir worker, süreç sözlüğünden kurulan span ağacı ve hiç bağımlılık yok, çünkü OTP zaten bir JSON kodlayıcı ve bir HTTP istemcisi getiriyor."
+  lede="Worker için bir GenServer, bağlam için sürecin kendisi ve bağımlılık ağacınıza eklenen hiçbir şey."
+  og="docs"
+>
+  <h2>Kurulum</h2>
+  <p>
+    <code>mix.exs</code> dosyasına ekleyin. Yanında hiçbir şey getirmez.
+  </p>
+
+  <pre><code class="language-elixir">{`defp deps do
+  [{:mcpd, "~> 0.1"}]
+end`}</code></pre>
+
+  <p>
+    Bağımlılık listesinin tamamı budur ve bu bilerek böyledir. OTP 27 bir JSON
+    kodlayıcı (<code>:json</code>) ve bir HTTP istemcisi (<code>:inets</code>)
+    getirir, yani işi sisteminizi izlemek olan bir kütüphanenin, sisteminizin
+    derlemesinin değişmesine sebep olması gerekmez. Diğer beş SDK da kendi
+    dillerinde aynı sözü verir.
+  </p>
+
+  <h2>İstemciyi oluşturma</h2>
+  <p>
+    Her seçenek, verilmediğinde kendi ortam değişkenine düşer ve kod üstün
+    gelir. Argümansız <code>Mcpd.start_link()</code>, yerel bir daemon ile
+    konuşur.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="init" title="bağlanma" />
+
+  <p>
+    Denetim ağacınıza koyun; başka herhangi bir worker gibi davranır:
+  </p>
+
+  <pre><code class="language-elixir">{`children = [
+  {Mcpd, project: "support-desk", environment: "production"}
+]
+
+Supervisor.start_link(children, strategy: :one_for_one)`}</code></pre>
+
+  <h2>Bir çalıştırmayı kaydetme</h2>
+  <p>
+    <code>span</code> bir makrodur, yani bir çalıştırma bir bloktur ve değeri de
+    bloğun değeridir.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="trace" title="bir çalıştırmayı kaydetme" />
+
+  <p>
+    Makrolar çağrılabilmek için önce <code>require</code> edilmelidir; bu,
+    buradaki bir tercih değil dilin bir kuralıdır. <code>use Mcpd</code> bunu
+    sizin yerinize yapar:
+  </p>
+
+  <pre><code class="language-elixir">{`defmodule MyAgent do
+  use Mcpd
+
+  def answer(mcpd, question) do
+    Mcpd.span mcpd, "agent", kind: :agent_run, input: question do
+      do_the_work(question)
+    end
+  end
+end`}</code></pre>
+
+  <p>
+    Gövde bir blok değil de zaten bir fonksiyonsa onun yerine
+    <code>Mcpd.with_span/4</code> çağırın. Makrosuz hâliyle aynı şeydir.
+  </p>
+
+  <h2>Ağaç kendi kendine kurulur</h2>
+  <p>
+    Etkin span, süreç sözlüğünde durur; bu bir kestirme yol değil, özellikle
+    Elixir'de doğru olan saklama yeridir. Burada eşzamanlılığın birimi süreçtir,
+    yani aynı anda işlenen iki istek birbirinin span'ini göremez ve ağacı bir
+    arada tutmak için her fonksiyona bir şey geçirmek gerekmez.
+  </p>
+  <p>
+    Üç çağrı derinde başlatılan bir alt span, üstünü kendi başına bulur:
+  </p>
+
+  <pre><code class="language-elixir">{`Mcpd.span mcpd, "agent", kind: :agent_run do
+  plan(mcpd)          # söylenmeden "agent" altında bir alt span açar
+end
+
+defp plan(mcpd) do
+  Mcpd.span mcpd, "plan_answer", kind: :model_generation, model: "gpt-4o" do
+    call_the_model()
+  end
+end`}</code></pre>
+
+  <p>
+    Bilinmesi gereken sonuç şu: <code>Task.async</code> içinde açılan bir span
+    yeni bir trace başlatır, çünkü orası farklı bir süreçtir. Trace'i
+    <code>Mcpd.traceparent/0</code> ve <code>Mcpd.continue/2</code> ile karşıya
+    geçirin; bir HTTP sınırında da aynı ikiliyi kullanırsınız.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>Hiçbir şey bloklamaz, hiçbir şey hata fırlatmaz</h2>
+  <p>
+    Bir span'i kaydetmek, worker'a bir mesaj gönderir ve döner. Ağ işi o
+    worker'da olur, yani ajanınızın gecikmesi mcpd'nin hızlı, ayakta ya da hiç
+    çalışıyor olmasına bağlı değildir.
+  </p>
+  <p>
+    Bir blok içinde fırlatılan hata, span üzerine bir hata olarak kaydedilir ve
+    sonra olduğu gibi yeniden fırlatılır. mcpd'nin işi ne olduğunu görmektir,
+    kodunuzun buna ne yapacağına karar vermek değil.
+  </p>
+  <p>
+    Kuyruk sınırlıdır ve dolduğunda en eski sinyaller atılır. Bu yön bilerek
+    seçilmiştir: daemon'a erişilemediğinde şu an ne olduğunu en yeni sinyaller
+    anlatır ve daemon geri geldiğinde birinin isteyeceği sinyaller de onlardır.
+    <code>Mcpd.stats/1</code> istemcinin ne yaptığını söyler:
+    <code>queued</code>, <code>dropped</code>, <code>capacity</code>,
+    <code>exported</code>, <code>failed</code> ve <code>rejected</code>.
+  </p>
+
+  <p>
+    <code>log_level:</code> ya da <code>MCPD_LOG_LEVEL</code>,
+    <code>Mcpd.log/4</code> için bir alt sınır koyar. Varsayılan olan
+    <code>debug</code> her şeyi tutar. Sınırın altındaki bir satır, kayıt
+    oluşturulmadan önce atılır; yani üretime alınmış bir dağıtımdaki bir debug
+    satırının bedeli tek bir karşılaştırmadır. Bu sınır yalnızca logları
+    kapsar; span'ler, metrikler, puanlar ve geri bildirimler etkilenmez.
+  </p>
+
+  <h2>Payload'ları sürecin içinde tutma</h2>
+  <p>
+    <code>capture_payloads: false</code> ya da
+    <code>MCPD_CAPTURE_PAYLOADS=false</code>, prompt'ları ve tamamlamaları
+    bulundukları yerde tutar. Span'ler yine zamanlaması, durumu, token
+    kullanımı, modeli, ilişkilendirmesi ve hatalarıyla çıkar;
+    <code>input:</code>, <code>output:</code> ve bir bloğun yakalanan değeri
+    kuyruğa varmadan atılır, böylece hassas hiçbir şey kuyruğa girmez ve bir
+    flush sırasında hassas hiçbir şey dışarı çıkmaz. Tek bir span,
+    <code>capture_payloads: true</code> ile kendisi için tersini söyleyebilir.
+  </p>
+
+  <h2>Kaydettiğinizi doğrulama</h2>
+  <p>
+    Sink, boşaltılan bir yığının gittiği yerdir. Varsayılan olan HTTP
+    taşıyıcısıdır; <code>Mcpd.Sink.Recorder</code> her yığını bellekte tutar,
+    böylece bir test ölçümlemenin kaydettiği span'leri, logları, metrikleri,
+    puanları ve geri bildirimleri daemon olmadan geri okur;
+    <code>Mcpd.Sink.Console</code> ise sinyal başına tek bir JSON satırını
+    stderr'e yazar. Kendi sink'iniz <code>Mcpd.Sink</code> davranışını uygular;
+    hata fırlatan bir sink, sayılan ve bildirilen başarısız bir yığındır,
+    çağırana asla fırlatılmaz.
+  </p>
+  <p>
+    <code>Mcpd.record/3</code>, çoktan bitmiş bir span'i verildiği gibi kuyruğa
+    alır: kendi kimlikleri, üstü, başlangıcı ve bitişiyle, üstü ve zamanları
+    değiştirilmeden ve yeniden örneklenmeden. Başka bir izleme sistemi için
+    yazılmış bir adaptörün ya da toplu bir içe aktarmanın elinde olan da budur.
+    Kimlikleri OpenTelemetry biçiminde olmayan bir kayıt reddedilir ve sayılır,
+    hiçbir zaman hata fırlatmaz. Her span'deki
+    <code>external_parent_span_id:</code>, mcpd olmayan bir izleme sisteminden
+    gelen bir üstü yalnızca ilişkilendirme için taşır.
+  </p>
+
+  <h2>Kalıcı çalıştırmalar</h2>
+  <p>
+    Daemon'ın kalıcı çalıştırmalarını da aynı istemci karşılar.
+    <code>Mcpd.Workflow</code> tanımı kurar ve adım gövdelerini üç argümanlı
+    fonksiyonlar olarak saklar; bir <code>Mcpd.StepWorker</code> bu tanımı
+    kaydeder, lease'ler için uzun yoklama yapar ve her birini kendi süreci
+    üzerinde karşılar; <code>Mcpd.start_run/3</code>,
+    <code>Mcpd.watch_run/3</code>, <code>Mcpd.publish_event/4</code> ve
+    diğerleri çalıştırma yüzeyini bire bir yansıtır. Bir gövde, adımın bütçesi
+    içinde yeniden denenmek için <code>class: :retryable</code> ile
+    <code>Mcpd.StepException</code> fırlatır ve
+    <code>Mcpd.StepContext.span/4</code> üzerinden kendi adımının altına span
+    kaydeder. Gövdenin kapattığı her span kendi kullanımını adımınkine ekler ve
+    en son görülen model geçerli olur, böylece daemon trace'in gösterdiğini
+    fiyatlandırır; <code>set_usage/2</code> açık geçersiz kılmadır. Worker
+    üzerinde <code>on_error</code> yanında <code>on_lease</code>,
+    <code>on_step_start</code>, <code>on_step_end</code> ve
+    <code>on_conflict</code> durur; <code>StepWorker.stats/1</code> ise neyi
+    talep ettiğini, tamamladığını, sınıfına göre neyi başarısız kıldığını ve
+    nedenine göre neyi bıraktığını sayar.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} example="workflow" region="workflow" title="bir iş akışı" />
+  <p>
+    Her yapının ne yaptığı, lease protokolü ve çalıştırma API'si şu sayfalarda:
+    <a href={linkTo('/docs/workflows')} class="link">İş akışları</a>,
+    <a href={linkTo('/docs/workers')} class="link">Worker'lar</a> ve
+    <a href={linkTo('/docs/runs')} class="link">Çalıştırmalar</a>.
+  </p>
+
+  <h2>Puanlar ve geri bildirim</h2>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="score" title="puan ve geri bildirim" />
+
+  <h2>Geri okuma</h2>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="query" title="çalıştırmayı okuma" />
+
+  <h2>Kısa ömürlü süreçler flush etmelidir</h2>
+  <p>
+    Hızla çıkan bir betik ya da görev, gönderilmemiş olan her şeyi kaybeder.
+    <code>Mcpd.shutdown/1</code> flush eder, worker'ı durdurur ve iki kez
+    çağrılması güvenlidir.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="örneği yerel bir daemon ile çalıştırma"
+    command={`mcpd serve --data ./mcpd.db
+elixir examples/elixir/quickstart.exs`}
+  />
+
+  <h2>Sonrası</h2>
+  <ul>
+    <li>
+      Bu SDK'nın diğer beşiyle paylaştığı her davranış:
+      <a href="https://github.com/mcpd/mcpd/blob/main/sdks/SDK-CONTRACT.md" class="link">SDK sözleşmesi</a>.
+    </li>
+    <li>
+      Bir span'in neler taşıdığı:
+      <a href={linkTo('/docs/reference/data-model')} class="link">Veri modeli</a>.
+    </li>
+    <li>
+      Sonrasında ilgilendiğiniz çalıştırmayı bulmak:
+      <a href={linkTo('/docs/searching')} class="link">Çalıştırma bulma</a>.
+    </li>
+  </ul>
+</Doc>

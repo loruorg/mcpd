@@ -1,0 +1,320 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+const scoped = `ctx, span := m.Start(ctx, "retrieve_docs", mcpd.WithSpanKind(mcpd.SpanKindRetrieval))
+defer span.End()
+
+// Everything that takes this ctx from here down becomes a child of the span,
+// and End is idempotent, so a defer and an explicit call cannot disagree about
+// the duration.`
+
+const nesting = `func handle(ctx context.Context, m *mcpd.Client, q string) string {
+    ctx, run := m.Start(ctx, "support_agent", mcpd.WithSpanKind(mcpd.SpanKindAgentRun))
+    defer run.End()
+
+    // draft is handed the ctx, not the span. That is the whole mechanism.
+    return draft(ctx, m, q)
+}
+
+func draft(ctx context.Context, m *mcpd.Client, q string) string {
+    _, span := m.Start(ctx, "draft_answer", mcpd.WithSpanKind(mcpd.SpanKindModelGeneration))
+    defer span.End()
+    return "..."
+}`
+
+const propagation = `// Outbound: write the active trace context onto the request.
+req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+mcpd.Inject(ctx, req.Header)
+
+// Inbound: read it back and continue the same trace.
+func handler(w http.ResponseWriter, r *http.Request) {
+    ctx, span := m.Start(mcpd.Extract(r.Context(), r.Header), "handle_request")
+    defer span.End()
+}`
+
+const payload = `span.SetModel("gpt-4o-mini", "openai")
+span.SetTokens(812, 96)
+
+// Or the full breakdown, so a cached prompt is priced as a cached prompt.
+span.SetUsage(mcpd.TokenUsage{
+    InputTokens:  ptr(uint64(812)),
+    OutputTokens: ptr(uint64(96)),
+    InputDetails: &mcpd.InputTokenDetails{CacheRead: ptr(uint64(640))},
+})
+
+// RecordError takes an error, so a recorded failure always has a message.
+span.RecordError(err,
+    mcpd.ErrorKind("SMTPTemporaryFailure"),
+    mcpd.ErrorRetryable(true),
+    mcpd.ErrorStack(mcpd.Stack()),
+)`
+
+const serverless = `func Handler(ctx context.Context, event Event) (Response, error) {
+    ctx, run := m.Start(ctx, "answer")
+    answer := agent(ctx, event.Body)
+    run.SetOutput(answer)
+    run.End()
+
+    // The batch is still in memory here. The runtime freezes this process the
+    // moment the handler returns, and the worker goroutine never runs again.
+    if err := m.Flush(ctx); err != nil {
+        log.Printf("mcpd flush: %v", err)
+    }
+    return Response{Body: answer}, nil
+}`
+---
+
+<Doc
+  title="Go"
+  description="面向 Go 的 mcpd SDK：全程用 context.Context，只用标准库，接入调用不返回错误，在一个 nil 客户端上调用也是安全的。"
+  lede="由 context.Context 携带活动的 span，和其他每一个 Go 库的做法一样。没有第三方依赖，也没有哪个记录调用会失败。"
+  og="docs"
+>
+  <h2>安装</h2>
+  <p>
+    Go 1.21 及以上。没有第三方依赖：传输层用的是标准库里的 <code>net/http</code>
+    和 <code>compress/gzip</code>，所以加上 mcpd 不会往你的模块图里再添别的东西。
+  </p>
+
+  <Command command="go get github.com/mcpd/mcpd/sdks/go" />
+
+  <h2>构造客户端</h2>
+  <p>
+    一个进程一个客户端。每一项设置都有一个选项和一个环境变量，所以同一份代码不用
+    改一个字，就能在开发环境和生产环境里跑。完全不带选项的
+    <code>mcpd.New()</code> 对着一个本地的守护进程就能用。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="init" title="连接" />
+
+  <p>代码优先于环境变量，环境变量优先于默认值。</p>
+
+  <table>
+    <thead>
+      <tr><th>选项</th><th>环境变量</th><th>默认值</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>WithEndpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>WithAPIKey</code></td><td><code>MCPD_API_KEY</code></td><td>无</td></tr>
+      <tr><td><code>WithProject</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>WithEnvironment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>无</td></tr>
+      <tr><td><code>WithService</code></td><td><code>MCPD_SERVICE_NAME</code>、<code>MCPD_SERVICE_VERSION</code></td><td>无</td></tr>
+      <tr><td><code>WithSampleRate</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>WithBatchSize</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>WithFlushInterval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2s</code></td></tr>
+      <tr><td><code>WithMaxQueue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>WithTimeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10s</code></td></tr>
+      <tr><td><code>WithEnabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>WithCapturePayloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>WithLogLevel</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>WithEnabled(false)</code> 把记录变成空操作，但仍然返回合法的 span 和
+    id，所以一个测试不用改任何调用处就能把 mcpd 关掉。读取方法照常工作，因为
+    关掉接入，不应该悄悄把一次查询变成一个空答案。
+  </p>
+
+  <p>
+    <code>WithCapturePayloads(false)</code> 把提示词和补全留在进程里：span 照样
+    带着它的时间、状态、用量、模型、关联信息和错误，而 <code>input</code> 和
+    <code>output</code> 在进入队列之前就被丢掉。单个 span 可以用
+    <code>WithSpanCapturePayloads</code> 说自己不一样，两个方向都可以。
+  </p>
+
+  <p>
+    <code>WithSink</code> 换掉批次去的地方。<code>RecordingSink</code> 把它们留在
+    内存里，于是一个测试不需要服务器就能断言接入代码记下了什么；
+    <code>ConsoleSink</code> 则每个信号写一行 JSON。失败的 sink 会计入
+    <code>Stats()</code>，绝不会传到记录这些信号的那段代码里。
+    <code>Record</code> 把一个已经结束的 span 排进队列，连同 id 和时间，按给的
+    样子来；格式不对的会被拒绝并计数，绝不作为一个错误返回。
+    <code>WithExternalParent</code> 携带的是来自另一套 tracing 系统的父级，
+    只用于关联。
+  </p>
+
+  <h2>记录一次运行</h2>
+  <p>
+    <code>Start</code> 返回一个新的 context 和一个 span，
+    <code>defer span.End()</code> 把它关掉。这一对就是 Go 里带作用域的那种写法：
+    defer 在提前返回时会跑，在 panic 时也会跑，所以一个 span 不会因为某条你没
+    想到的控制流而一直开着。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="带作用域的写法"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: scoped }]}
+  />
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="trace" title="记录一次运行" />
+
+  <h2>上下文</h2>
+  <p>
+    <code>Start</code> 在 context 里那个 span 下面开一个子 span，里面没有时就开
+    一个根。<code>Trace</code> 永远开一个根；当你没有用 context 携带某个 span
+    时，<code>span.Child(ctx, name)</code> 在那个指定的 span 下面开一个子 span。
+    这里没有发明第二套传播机制：父级就在你本来就在传的那个 <code>ctx</code> 里。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="嵌套"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: nesting }]}
+  />
+
+  <p>
+    跨过服务边界时，<code>Inject</code> 把一个 W3C <code>traceparent</code> 写到
+    出去的请求头上，<code>Extract</code> 则从进来的请求头里读一个出来放进
+    context。请求头里没有它时原样返回，所以一个读不出来的头只会开一条新的
+    trace，而不会让携带它的那个请求失败。上游的采样决定会被继承，于是一条 trace
+    的两半是一致的。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="跨过服务边界"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: propagation }]}
+  />
+
+  <h2>模型、用量与错误</h2>
+  <p>
+    mcpd 在摄取时就是按 token 数定价的，所以 trace 上的成本就是你被计费的那个
+    成本。<code>RecordError</code> 收的是一个 <code>error</code>，而不是一个
+    字符串，正是这一点保证了记下来的失败一定带着一条消息。之后 <code>End</code>
+    记的状态就是 <code>error</code>，而不是 <code>ok</code>。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="一个 span 带着什么"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: payload }]}
+  />
+
+  <p>
+    span 其余的方法是 <code>SetInput</code>、<code>SetOutput</code>、
+    <code>SetMetadata</code>、<code>SetAttributes</code>、<code>SetTags</code>、
+    <code>SetStatus</code>、<code>SetSession</code>、<code>SetThread</code>、
+    <code>SetUser</code>、<code>Event</code> 和 <code>EndWithStatus</code>。
+    同样这些字段，也可以在 span 开始时通过那些 <code>With...</code> 选项设置。
+  </p>
+
+  <h2>持久化运行</h2>
+  <p>
+    同一个客户端也服务守护进程的持久化运行。<code>NewWorkflow</code> 构建定义并
+    持有那些步骤主体；一个 <code>Worker</code> 注册它，用长轮询要租约，并在一个
+    goroutine 上逐份服务，而 <code>StartRun</code>、<code>WatchRun</code>、
+    <code>PublishEvent</code> 以及其余的方法与运行接口一一对应。步骤主体返回
+    <code>mcpd.Retryable(err, wait)</code>，表示要在这个步骤的预算内重试；而从
+    处理函数的 <code>ctx</code> 开出来的 span，会落在这次运行的 trace 里它自己
+    那个步骤下面。这样一个 span 花掉的，就是这个步骤的用量：这些计数在 span
+    结束时累加，看到的最后一个模型胜出，而 <code>SetUsage</code> 会覆盖它设置
+    的那些字段。这个 worker 可以从内部观察，用的是 <code>WorkerOnLease</code>、
+    <code>WorkerOnStepStart</code>、<code>WorkerOnStepEnd</code>、
+    <code>WorkerOnConflict</code> 和 <code>worker.Stats()</code>。
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['go']} example="workflow" region="workflow" title="一个工作流" />
+  <p>
+    每种构造做什么、租约协议和运行 API，在
+    <a href={linkTo('/docs/workflows')} class="link">工作流</a>、
+    <a href={linkTo('/docs/workers')} class="link">Worker</a> 和
+    <a href={linkTo('/docs/runs')} class="link">运行</a>这几页上。
+  </p>
+
+  <h2>评分与反馈</h2>
+  <p>
+    <code>Score</code> 把 <code>min</code> 和 <code>max</code> 当作普通的位置
+    参数收下，所以量程漏不掉。一个光秃秃的 0.86，在你知道它所在的范围之前没有
+    任何意义。反馈是人的判断，和评分分开存放，因为这两者回答的是不同的问题，
+    绝不能被平均到一起。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="score" title="评分与反馈" />
+
+  <p>
+    传 <code>mcpd.TraceTarget(id)</code> 或
+    <code>mcpd.SpanTarget(id, spanID)</code> 来指明被评判的是什么，或者传一个
+    空的 <code>mcpd.Target&#123;&#125;</code>，用 context 里的那个 span。
+  </p>
+
+  <h2>五种信号，一套 id</h2>
+  <p>
+    <code>Log</code>、<code>Metric</code>、<code>Score</code> 和
+    <code>Feedback</code> 都收下这个 context，所以五种信号带的是同样的 trace id
+    和 span id。正是这一点，让图上的一个尖峰能打开引起它的那次运行。
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>刷出与关闭</h2>
+  <p>
+    <code>Start</code> 和 <code>End</code> 往内存里的一个队列追加一条然后返回；
+    一个后台 goroutine 负责攒批和发送。<code>Flush(ctx)</code> 把排着队的东西
+    发出去，不停下任何东西。<code>Shutdown(ctx)</code> 先刷出，再停掉 worker，
+    而且是幂等的，这也是为什么在 <code>New</code> 旁边写一句
+    <code>defer m.Shutdown(ctx)</code> 是个好习惯。
+  </p>
+  <p>
+    在一个 serverless 函数里，处理函数一返回，运行时就把进程冻住，worker
+    goroutine 再也不会跑，于是还排在队列里的那个批次就丢了。请在返回之前刷出。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="一个 serverless 处理函数"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: serverless }]}
+  />
+
+  <h2>你可以依赖的东西</h2>
+  <ul>
+    <li>
+      任何记录东西的方法都不返回错误，也不 panic，在一个 nil 客户端上调用也是
+      如此。一次失败的导出，每个刷出间隔最多记一条日志，然后丢掉。可观测性绝不
+      能把它观测的那个东西搞垮。
+    </li>
+    <li>
+      记录不阻塞，所以你的智能体的延迟，从不取决于 mcpd 快不快，或者活没活着。
+    </li>
+    <li>
+      内存有上限。队列最多放 <code>WithMaxQueue</code> 个信号；超过之后最旧的
+      会被丢弃并计数，在 <code>Stats()</code> 里看得到，旁边还有导出了多少、
+      放弃了多少，以及 <code>Record</code> 拒了多少。一个没有上限的缓冲区，会把
+      一次网络故障变成一次内存耗尽被杀。
+    </li>
+    <li>
+      采样决定只在根上做一次，做法是对 trace id 取哈希，然后由每个子级继承。
+      因此一个集群里的每个进程，对同一条 trace 都会做出同样的决定。
+    </li>
+    <li>
+      没结束的 span 一样会导出。长时间运行的 span 在开始时就发出去，在结束时
+      更新，所以一次跑到半路崩掉的运行是看得见的。在下一次刷出之前就结束的
+      span 只发一次，发的是它结束后的样子。
+    </li>
+    <li>
+      编码不了的值会被丢弃并记进日志，而不是让你的调用失败，因为一个载荷里的
+      序列化错误，绝不能冒出来变成你的智能体里的一次失败。
+    </li>
+  </ul>
+
+  <h2>把它读回来</h2>
+  <p>
+    读取方法对应 HTTP API，返回由规范生成的类型。它们是唯一一组会返回错误的
+    方法，因为调用方正等着一个答案。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="query" title="检索与分析" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">查找一次运行</a>把过滤条件
+    讲全了。<a href={linkTo('/docs/reference/data-model')} class="link">数据模型</a>
+    列出了这些类型带的每一个字段。
+  </p>
+</Doc>

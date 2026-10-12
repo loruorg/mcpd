@@ -1,0 +1,627 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+/* 英文路由，按这个语言重新生成。 */
+const code = localeOf(Astro.url.pathname)
+const to = (route: string) => urlFor(route, code)
+
+const probeYaml = `livenessProbe:
+  httpGet: { path: /healthz, port: 4317 }
+  periodSeconds: 10
+readinessProbe:
+  httpGet: { path: /readyz, port: 4317 }
+  periodSeconds: 5
+
+# SIGTERM is handled, so give in-flight ingest time to finish.
+terminationGracePeriodSeconds: 30`
+
+const scrape = `scrape_configs:
+  - job_name: mcpd
+    static_configs:
+      - targets: ['mcpd:4317']`
+---
+
+<Doc
+  title="把它跑起来"
+  description="在生产环境里运维 mcpd：存活探针和就绪探针、它导出的 Prometheus 指标、优雅停机、备份那个 SQLite 文件、升级，以及单个实例到哪里为止。"
+  lede="mcpd 是一个进程，持有一个文件。这让运维它的大部分内容都很短，也让其中少数几件要紧的事值得知道得很准确。"
+  og="docs"
+>
+  <h2>端口上有些什么</h2>
+  <p>
+    一个地址提供全部服务：<code>/v1/traces</code>、<code>/v1/logs</code> 和
+    <code>/v1/metrics</code> 上的 OTLP 摄取，<code>/v1/ingest</code> 上的原生
+    摄取，<code>/v1/api</code> 下的查询 API，<code>/</code> 上的运维界面，以及
+    下面那三个运维端点。没有 sidecar，也没有反向代理要配，这就是部署能写成
+    一行的大部分原因。
+  </p>
+  <p>
+    界面被编译进了二进制文件，所以没有静态文件服务器，也没有第二个卷要挂。摄取
+    带着较大的请求体上限，并且不带 CORS。查询 API 带 CORS，所以从别的来源提供
+    的界面可以读它。
+  </p>
+
+  <h2>/healthz 和 /readyz 问的不是同一个问题</h2>
+  <p>
+    它们分开，是因为它们对应的后果不同，而把两者接到同一个处理函数上，是造出
+    一个重启循环的常见办法。
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>端点</th>
+          <th>是否碰存储</th>
+          <th>回答</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>GET /healthz</code></td>
+          <td>否</td>
+          <td>进程还在服务期间，永远是 <code>200</code></td>
+        </tr>
+        <tr>
+          <td><code>GET /readyz</code></td>
+          <td>是，每个存储读一次</td>
+          <td>信号存储和运行存储都答得上来时是 <code>200</code>，有一个答不上来时是 <code>503</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    <code>/healthz</code> 是存活。它有意地从不碰存储：一个很慢或者被锁住的
+    数据库，不该导致进程被杀掉再重启，因为重启修不好一块磁盘，而这个重启循环
+    还会让你连正在处理的那些批次一起赔进去。
+  </p>
+  <p>
+    <code>/readyz</code> 是就绪。它对一个读连接跑一次极简的查询，这样一个服务
+    不了的实例就不会再被派流量。存储连不上时，它回答 <code>503</code>，
+    <code>status</code> 是 <code>degraded</code>，<code>detail</code> 写明是哪里
+    失败了，而不是给你一个光秃秃的状态码，让你之后再去盲查。
+  </p>
+  <p>
+    两者的响应体带着同样的字段：<code>status</code>、<code>version</code>、
+    <code>spec_version</code>、<code>uptime_seconds</code>、
+    <code>storage</code>，出了问题时还有 <code>detail</code>。
+    <code>spec_version</code> 是这个构建实现的数据模型版本，客户端可以据此拒绝
+    和一个它读不懂的服务器对话。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="探测一个健康的实例"
+    lines={[
+      { cmd: 'curl -s localhost:4317/healthz' },
+      { out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0",' },
+      { out: ' "uptime_seconds":86400,"storage":"sqlite"}', tone: 'ok' },
+      { cmd: 'curl -s -o /dev/null -w "%{http_code}\\n" localhost:4317/readyz' },
+      { out: '200', tone: 'ok' },
+      { cmd: 'curl -s localhost:4317/metrics | head -4' },
+      { out: '# HELP mcpd_signals_accepted_total Signals written to storage.' },
+      { out: '# TYPE mcpd_signals_accepted_total counter' },
+      { out: 'mcpd_signals_accepted_total 184203' },
+      { out: '# HELP mcpd_signals_rejected_total Signals refused, with a reason returned to the sender.' },
+    ]}
+  />
+
+  <p>
+    两个探针都不需要密钥，<code>/metrics</code> 也不需要。如果这在你的网络里
+    不可接受，请在你的入口网关上限制它们。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="kubernetes"
+    samples={[{ lang: 'curl', label: 'Pod spec', shiki: 'yaml', code: probeYaml }]}
+  />
+
+  <h2>指标</h2>
+  <p>
+    mcpd 在 <code>/metrics</code> 上以 Prometheus 文本格式导出自己的计数器。
+    它们不藏在功能开关后面：一个没法被观测的可观测性工具，本身就是一份负债。
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>指标</th>
+          <th>类型</th>
+          <th>含义</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>mcpd_signals_accepted_total</code></td>
+          <td>counter</td>
+          <td>写入存储的信号</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_signals_rejected_total</code></td>
+          <td>counter</td>
+          <td>被拒绝的信号，并向发送方返回了原因</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_batches_duplicate_total</code></td>
+          <td>counter</td>
+          <td>被认出是重放并跳过的批次</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_traces_sampled_out_total</code></td>
+          <td>counter</td>
+          <td>被采样策略丢弃的 trace</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_signals_over_quota_total</code></td>
+          <td>counter</td>
+          <td>因超过某个项目的每分钟上限而被拒绝的信号</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_signals_unbounded_total</code></td>
+          <td>counter</td>
+          <td>
+            走到限流这一步、但所属项目不被任何上限覆盖的信号
+          </td>
+        </tr>
+        <tr>
+          <td><code>mcpd_ingest_requests_total</code></td>
+          <td>counter</td>
+          <td>处理过的摄取请求</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_query_requests_total</code></td>
+          <td>counter</td>
+          <td>处理过的查询请求</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_request_errors_total</code></td>
+          <td>counter</td>
+          <td>以服务端错误告终的请求</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_audit_write_failures_total</code></td>
+          <td>counter</td>
+          <td>
+            没能写下的审计行；它们所描述的那次请求仍然成功了
+          </td>
+        </tr>
+        <tr>
+          <td><code>mcpd_uptime_seconds</code></td>
+          <td>gauge</td>
+          <td>这个进程启动以来的秒数</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    每一个计数器都以进程生命周期为界，重启后归零，所以请对速率而不是对绝对值
+    配告警。最值得盯着的两个是 <code>mcpd_signals_rejected_total</code>，它意味着
+    发送方正在被拒绝，而且多半没在读那份回执；以及
+    <code>mcpd_request_errors_total</code>，按定义那是 mcpd 自己的错：4xx 是
+    调用方的错，从不计入这里。
+  </p>
+  <p>
+    <code>mcpd_traces_sampled_out_total</code> 在涨并不是故障。当有人问自己的
+    那次运行为什么不见了时，它就是解释界面里那个空档的数字。
+  </p>
+  <p>
+    <code>mcpd_signals_over_quota_total</code> 是同一形状的数字，对应信号没能
+    落盘的另一个原因：某个项目撞上了它的每分钟上限。这些拒绝同时也计入
+    <code>mcpd_signals_rejected_total</code>，所以盯着这一个，才能把一个正在被
+    限流的集群，和一个正在发送格式错误数据的集群区分开。这道上限覆盖什么，见
+    <a href={to('/docs/configuration')} class="link">配置</a>。
+  </p>
+  <p>
+    <code>mcpd_signals_unbounded_total</code> 是相反的那个数字：因为没有任何
+    上限覆盖它们指名的项目而被保留下来的信号。只写在 <code>projects</code>
+    下面的上限，只约束它们指名的那些项目，所以一个指名别的名字的发送方就从旁边
+    走过去了。这些信号被计数而不是被拒绝，因为拒绝一个没人写下来的项目，会丢掉
+    一份升级时没改配置的部署的数据。这个值不为零，就意味着要在按项目的上限旁边
+    再设一个顶层的 <code>--quota-per-minute</code>。
+  </p>
+  <p>
+    这道上限覆盖每一个能让数据行进来的入口：四个摄取端点、单条记录的评分和反馈
+    端点，以及 <code>POST /v1/api/score</code>，它算出的评分在存下之前，也要在
+    同一个计数器上计费。在那里放不进上限的部分，会在响应的 <code>skipped</code>
+    列表里逐条报告，而不是越过上限写下去。
+  </p>
+  <p>
+    <code>mcpd_audit_write_failures_total</code> 数的是没能写下的审计行。每一行
+    所描述的那次请求仍然成功了，也仍然返回了它的数据，这正是关键所在：写一行
+    审计从不会让它所描述的那次读取失败。因此这个值不为零，意味着发生了一些对
+    已存载荷的读取，而审计日志交代不了它们，所以请把它当作一个完整性信号，
+    而不是可用性信号。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="prometheus"
+    samples={[{ lang: 'curl', label: 'prometheus.yml', shiki: 'yaml', code: scrape }]}
+  />
+
+  <h2>停机</h2>
+  <p>
+    mcpd 处理 <code>SIGTERM</code> 和 <code>SIGINT</code>。收到任一个，它就停止
+    接受新连接，并让正在处理的请求跑完，然后进程才退出。
+  </p>
+  <p>
+    专门处理 <code>SIGTERM</code>，是这件事在编排系统下成立的原因。Kubernetes
+    发的是 <code>SIGTERM</code>，并等完宽限期才发 <code>SIGKILL</code>；一个只
+    监听 <code>SIGINT</code> 的容器是被杀掉而不是被停掉的，当时正在事务中间的
+    那个批次也就丢了。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="一次干净的停机"
+    lines={[
+      { out: 'mcpd 0.1.0 listening on http://0.0.0.0:4317' },
+      { out: '  storage     sqlite at /data/mcpd.db' },
+      { out: 'retention removed 12480 rows older than 30 days', tone: 'note' },
+      { out: 'received termination signal', tone: 'warn' },
+      { out: 'shutting down', tone: 'ok' },
+    ]}
+  />
+
+  <p>
+    mcpd 在退出的路上救不回来的，是还留在某个发送方队列里的东西。SDK 把 span
+    放在内存里，由一个工作线程导出，所以一个没有调用 <code>shutdown()</code>
+    就退出的进程，会丢掉还没发出去的那部分。那是智能体那边要做对的停机，不是
+    守护进程的。
+  </p>
+
+  <h2>备份</h2>
+  <p>
+    整个存储就是 <code>--data</code> 处的一个 SQLite 文件。它以 WAL 模式运行，
+    所以磁盘上你会看到 <code>mcpd.db</code> 旁边还有 <code>mcpd.db-wal</code>
+    和 <code>mcpd.db-shm</code>。在进程运行期间只复制 <code>.db</code>，得到的
+    文件会缺掉所有还在预写日志里的东西。
+  </p>
+  <p>
+    通过 SQLite 来备份，它会在 mcpd 继续写入的同时读出一份一致的快照：
+  </p>
+
+  <Command
+    class="my-6"
+    label="热备份"
+    command={`sqlite3 /data/mcpd.db ".backup '/backup/mcpd-$(date +%F).db'"`}
+  />
+
+  <p>
+    先停掉进程，再把三个文件都复制走，同样成立，而且镜像里不需要
+    <code>sqlite3</code> 这个二进制。这个构建里没有 <code>mcpd backup</code>
+    子命令，也没有定时备份：这是你的快照工具的活，假装不是，只会把一个做了一半
+    的东西放进关键路径上。
+  </p>
+  <p>
+    保留期清理会删掉数据行，但不会让文件变小。SQLite 会留下腾出来的页并重复
+    使用它们，所以一次大规模删除之后，磁盘占用是趋于平稳而不是下降。如果你确实
+    需要把空间收回来，请对一个已经停掉的实例执行 <code>VACUUM</code>。
+  </p>
+
+  <h3>恢复</h3>
+  <p>
+    把一份备份放回去有四步，而且因为预写日志的关系，顺序要紧。
+  </p>
+  <ol>
+    <li>
+      停掉守护进程。在一个还在运行的进程下做恢复，等于对同一个文件有了第二个
+      写入者。
+    </li>
+    <li>把备份复制过去，覆盖 <code>--data</code> 处的那个文件。</li>
+    <li>
+      删掉它旁边的 <code>-wal</code> 和 <code>-shm</code> 文件。它们属于你刚
+      替换掉的那个数据库，留着的话会被回放进你恢复出来的这个里面。
+    </li>
+    <li>
+      启动守护进程，并确认它读的是恢复出来的那个文件：<code>/readyz</code>
+      回答 200，而对那个项目做一次 trace 列表，会返回这份备份里原有的那些运行。
+    </li>
+  </ol>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="恢复，对着一个演示存储执行"
+    lines={[
+      { cmd: 'kill $(cat mcpd.pid) && cp /backup/mcpd-2026-09-01.db /data/mcpd.db' },
+      { cmd: 'rm -f /data/mcpd.db-wal /data/mcpd.db-shm' },
+      { cmd: 'mcpd --data /data/mcpd.db &' },
+      { cmd: 'curl -s -o /dev/null -w "%{http_code}\\n" localhost:4317/readyz' },
+      { out: '200', tone: 'ok' },
+      { cmd: 'curl -s "localhost:4317/v1/api/traces?project=default&limit=500" | jq ".traces | length"' },
+      { out: '2', tone: 'ok' },
+    ]}
+  />
+
+  <h2>升级</h2>
+  <p>
+    换掉二进制文件或者镜像标签，然后重新启动它。表结构在每一次启动时都会被应用，
+    而且它写成了对一个已经是最新的文件执行也不改变任何东西的样子。已应用的版本
+    记录在同一个文件里的 <code>schema_version</code> 表中，这个构建处在版本 2。
+  </p>
+  <p>
+    有两件事要记住。往前滚，不要往回滚：旧的二进制文件并不保证读得懂新的文件，
+    所以先做备份。另外，如果你固定了 SDK 版本，升级之后请从 <code>/healthz</code>
+    检查一下 <code>spec_version</code>，因为那正是客户端拿来比对的那个数字。
+  </p>
+
+  <h2>单个实例到哪里为止</h2>
+  <p>
+    在这件事上说实话，比给一个我们没有测过的数字更有用。我们不发布任何吞吐量
+    数据，因为并不存在我们敢站得住脚的数据。
+  </p>
+  <ul>
+    <li>
+      <strong>一个写入者。</strong>SQLite 存储在一把互斥锁后面维持一个写连接和
+      四个读连接。WAL 模式意味着一次仪表盘查询永远不会阻塞摄取，那才是会要紧的
+      那种故障；但所有写入都被串行化到那一个连接上。
+    </li>
+    <li>
+      <strong>一个文件配一个实例。</strong>两个 mcpd 进程指向同一个文件，不是
+      受支持的部署方式。请把它作为带一个卷的单副本运行，而不是作为一个水平扩展
+      的服务。
+    </li>
+    <li>
+      <strong>上面两条限制都是内嵌存储的。</strong>在 ClickHouse 上它们不再
+      适用，ClickHouse 已经编译进来了，下面会讲。
+    </li>
+    <li>
+      <strong>载荷很大。</strong>提示词和补全是以 KB 计的，不是以字节计的，
+      而它们正是 mcpd 值得跑起来的原因。存储随文本量增长的速度，远快于随 span
+      数量增长的速度，所以请用你自己的载荷去测，而不是用一个“每秒多少 span”
+      的数字。
+    </li>
+    <li>
+      <strong>保留期只覆盖你写下来的那些项目。</strong>每小时的那次清理，会从
+      <code>projects</code> 块里的每一个项目删除，各自按它自己设的
+      <code>retention_days</code>，没设的就按全局那个数字，再加上
+      <code>--project</code> 指名的那个项目。一个发送方自己编出来、两处都没出现
+      的项目没有窗口，永远不会被清理，在你把保留期当作一项隐私控制来依赖之前，
+      这一点值得知道。
+    </li>
+  </ul>
+  <p>
+    当数据量超出这个实例时，可用的手段按代价从小到大是：
+    <code>--retention-days</code>，它限定文件的大小；<code>--sample</code>，
+    它限定流入量，而且它是确定性的，所以被保留的 trace 是整条保留；以及换到
+    ClickHouse，它把单写入者和单副本一起去掉。见
+    <a href={to('/docs/sampling')} class="link">采样</a>和
+    <a href={to('/docs/privacy')} class="link">脱敏与保留期</a>。
+  </p>
+
+  <h2>Postgres，当你本来就在跑一个的时候</h2>
+  <p>
+    把 mcpd 指向一个 Postgres 连接串，它就存到那里，而不是内嵌文件。表结构在
+    启动时创建。
+  </p>
+
+  <Command
+    class="my-6"
+    title="存进 Postgres"
+    command="mcpd serve --postgres-url postgres://mcpd:$PGPASSWORD@db:5432/mcpd"
+  />
+
+  <p>
+    这去掉了 ClickHouse 同样去掉的那两条限制。写入不再经过单个连接，所以 mcpd
+    可以作为一个服务后面的若干个副本运行，而且是跑在一个多数团队本来就在运维、
+    备份和监控的数据库上。
+  </p>
+  <p>
+    迁移会取一把 Postgres 顾问锁，表结构已经是最新时会被整个跳过。因此若干个
+    副本同时启动是安全的，滚动发布也不会对其他副本正在写入的表加排他锁。
+  </p>
+  <p>
+    全文检索用的是一个生成的 <code>tsvector</code> 列加一个 GIN 索引，配置为
+    <code>simple</code>：它做小写化并按词边界切分，但不做词干还原，所以在一段
+    提示词里搜你打进去的那个字面词元，结果和你预期的一样。
+  </p>
+  <p>
+    当保留量要以十亿条 span 计时，选 ClickHouse 而不是 Postgres。在那以下，
+    你本来就在跑的那个数据库是更好的答案。
+  </p>
+
+  <h2>ClickHouse，当这个文件已经不是对的形状时</h2>
+  <p>
+    把 mcpd 指向一个 ClickHouse HTTP 端点，它就存到那里，而不是内嵌文件。表结构
+    在启动时创建，所以没有什么要手工去应用。
+  </p>
+
+  <Command
+    class="my-6"
+    title="存进 ClickHouse"
+    command={`mcpd serve \\
+  --clickhouse-url http://clickhouse:8123 \\
+  --clickhouse-database mcpd \\
+  --clickhouse-user default --clickhouse-password $CH_PASSWORD`}
+  />
+
+  <p>
+    上面那两条约束会同时解除。写入不再经过单个连接，所以 mcpd 可以作为一个服务
+    后面的若干个副本运行，而 span 落进一个为这份数据真正的形状而建的
+    <code>MergeTree</code>：写远多于读，而且查询扫的是一段时间范围。
+  </p>
+  <p>
+    当保留量要以几个月的生产流量来计、而不是以一块笔记本磁盘来计时，选它。比这
+    再小的规模，内嵌文件跑起来更快、备份更快，而且少一样要运维的东西。留着那个
+    文件，直到它开始让你难受。
+  </p>
+  <p>
+    trace 是一个 <code>ReplacingMergeTree</code>，因为一条 trace 的投影会随着它
+    的 span 陆续到达而重新计算，最后一次写入才是对的那个。因此乱序到达、重试过
+    或者被就地更新的 span，最终会收敛到正确的答案上，而不是堆出一堆重复。
+  </p>
+  <p>
+    有一项保证在这里比另外两个后端弱，而它可能正是你要去做合规声明的那一项。
+    在 ClickHouse 上删除是一次异步的 mutation，所以一次擦除请求先被接受，之后
+    才被应用。SQLite 和 Postgres 是在作答的那个事务里面删除的。回执会用
+    <code>deletes_pending</code> 说明发生的是两者中的哪一种。见
+    <a href={to('/docs/privacy')} class="link">脱敏与保留期</a>。
+  </p>
+
+  <h2>检查一份部署</h2>
+  <p>
+    <code>mcpd doctor</code> 读取配置和存储，报告哪里不对，并指出修好每一项要用
+    哪个参数。它之所以存在，是因为真正会咬人的故障都是安静的：没有任何东西崩溃，
+    而你几周之后才发现。
+  </p>
+
+  <Command
+    class="my-6"
+    title="除了存储之外什么都不联系，检查一份部署"
+    command="mcpd doctor --data /data/mcpd.db --offline"
+    primaryLabel="离线"
+    secondary={[
+      { label: '不写入', command: 'mcpd doctor --data /data/mcpd.db --offline --read-only' },
+      { label: '更长的窗口', command: 'mcpd doctor --data /data/mcpd.db --window-days 30' },
+    ]}
+  />
+
+  <p>
+    有三个参数是这条命令自己的。<code>--offline</code> 除了存储什么都不联系，
+    所以转发端点会被报告为跳过，而不是被检查。<code>--read-only</code> 什么都
+    不写，所以存储那项检查证明的是这个存储能读，而不是能写，并且它会这么说明。
+    <code>--window-days</code> 是活跃度、时钟和价目表这三项检查要读多少天的
+    历史，不特别指定就是七天，取值在 1 到 36525 之间。它接受的其余一切都是守护
+    进程自己的配置，所以它评的就是你将要启动的那次调用。
+  </p>
+  <p>
+    一共评十二组，按以下顺序，报告最后会给出每个等级的数量：
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>组</th><th>它评什么</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>storage</code></td>
+          <td>存储能应答一次 ping，并且一个探针 span 能挺过一次写入、一次读取和一次删除</td>
+        </tr>
+        <tr>
+          <td><code>runs</code></td>
+          <td>运行存储能应答，它持有多少个定义版本和多少个进行中的运行，以及在别人够得着的地址上，运行接口是否需要密钥。只读：doctor 从不领取步骤，也从不触发截止时间</td>
+        </tr>
+        <tr>
+          <td><code>keys</code></td>
+          <td>每一个作用域，连同它的继承关系一并写明，这样“没有设置管理员密钥、因此每一把读取密钥同时也能删除”这种情况，是写在这一页上，而不是藏在文档里</td>
+        </tr>
+        <tr>
+          <td><code>identity</code></td>
+          <td>审计主体的头，以及被允许设置它的地址范围是否窄到值得相信</td>
+        </tr>
+        <tr>
+          <td><code>projects</code></td>
+          <td>配置里的项目，对上真正持有运行的项目。一个从来没收到过 span 的项目，几乎总是名字打错了</td>
+        </tr>
+        <tr>
+          <td><code>retention</code></td>
+          <td>每个项目的数据往回追到多远，以及到底有没有东西会把它删掉</td>
+        </tr>
+        <tr>
+          <td><code>limits</code></td>
+          <td>按项目的摄取上限，和采样比率</td>
+        </tr>
+        <tr>
+          <td><code>forwarding</code></td>
+          <td>转发端点，做法是 POST 一个不含任何 span 的 OTLP 批次过去</td>
+        </tr>
+        <tr>
+          <td><code>judge</code></td>
+          <td>judge 块，只作为配置来看</td>
+        </tr>
+        <tr>
+          <td><code>monitors</code></td>
+          <td>监视器和目标，以及它们读取的那些信号</td>
+        </tr>
+        <tr>
+          <td><code>clock</code></td>
+          <td>每个项目历史两头的运行，对上这台机器的时钟，因为一个时钟走慢了的发送方，会排在所有诚实的运行下面，永远不会出现在最新的那一页上</td>
+        </tr>
+        <tr>
+          <td><code>pricing</code></td>
+          <td>近期的模型 span 对上价目表，这样一个没有任何东西能给它定价的模型会被点名</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    <code>identity</code> 和 <code>limits</code> 是最近才加上的两项，而它们此前
+    都没被评过，理由是同一个：它们都不会让任何东西崩溃。一份没有主体的审计日志，
+    记下了做了什么，却从不记下是谁做的。<code>--sample</code> 会拒绝 0.0 到 1.0
+    之外的采样比率，但项目块里的从来没被检查过，所以一个项目可以带着这样一个值，
+    守护进程照跑不误。一道只按项目设置、旁边没有顶层上限的上限，会让每一个没人
+    写下来的项目完全没有上限，而项目名是由发送方来挑的。
+  </p>
+
+  <h3>跳过不等于正常</h3>
+  <p>
+    一项没有跑过的检查显示为<strong>跳过</strong>，绝不会显示为正常。这个区分
+    正是这条命令的意义所在：一个在你指给它的那份配置里根本不存在的子系统，不是
+    一个健康的子系统，而把两者报成一样，会让 doctor 恰好在被递错文件的时候最有
+    自信。汇总那一行会单独统计跳过的检查，并用文字说明，这样一次只验证了十四项
+    发现中的两项的运行，不会被读成一张健康证明。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="对一份全新部署跑一次，最后是这样收尾的"
+    lines={[
+      { cmd: 'mcpd doctor --data /data/mcpd.db | tail -4' },
+      { out: '2 ok, 9 skipped, 2 warnings, 1 fault', tone: 'warn' },
+      { out: 'A skipped check proved nothing: it was not run, or there was nothing there' },
+      { out: 'to run it against. Only the 2 ok were verified.' },
+      { out: 'A fault is something broken or open. Exiting 2.', tone: 'warn' },
+    ]}
+  />
+
+  <h3>一个繁忙的存储不是一个坏掉的存储</h3>
+  <p>
+    存储探针是唯一需要写锁的检查。它下面的一切都是读，而读者不会排在写者后面。
+    一次抢那把锁失败的探针写入，会被报告为<strong>跳过</strong>：它会重试三次，
+    如果三次都在等锁然后放弃，报告就会说明写入没有被检查，以及为什么。
+  </p>
+  <p>
+    这一点要紧，是因为内嵌存储只接受一个写入者，而一份处在真实摄取压力下的部署，
+    几乎是一直握着那把锁的。把锁竞争报成故障，会让这条命令恰好在部署既健康又
+    繁忙的时候拦下一次发布。这个探针本来要抓的那些故障，每一个都会自报家门，
+    而且没有一个会说“locked”：一个只读挂载、一块满掉的磁盘、一个没有
+    <code>INSERT</code> 权限的角色，都仍然是故障；一把损坏的锁也是，它会说
+    “locking protocol”，那是真的损坏。
+  </p>
+
+  <h3>退出码</h3>
+  <p>
+    遇到故障时它以非零退出，所以它可以把住一次发布。警告不是故障：它以零退出，
+    并指望有个人去读它。有一种配置是故障而不是警告，在你把这条命令接进流水线
+    之前值得先知道：在一个非回环地址上开放的读取作用域，它把每一段已存的提示词
+    交给任何能连到这个端口的人。同一个地址上开放的摄取作用域仍然只是警告，因为
+    垃圾数据行是保留期清理会处理掉的，而泄露收不回来。一个包含整个互联网的可信
+    身份地址范围，按同样的方式评级，理由也一样：那样任何地址都能设置那个头，
+    并被记成它所声称的任何人。
+  </p>
+
+  <h2>在它可被访问之前要检查的设置</h2>
+  <p>
+    当 mcpd 绑定一个非回环地址时，它会在启动时为每一个向不该触及它的调用方敞开的
+    接口记一条告警，每条告警都会指出要设置哪些参数。它选择警告而不是拒绝启动，
+    因为拒绝会切断从零到第一条 trace 的那条路。但它仍然是一条关于真实漏洞的
+    警告：一个开放的读取 API，会把每一段已存的提示词交给任何能连到这个端口的人。
+  </p>
+
+  <Command
+    class="my-6"
+    command="mcpd --data /data/mcpd.db --ingest-key $INGEST_KEY --read-key $READ_KEY --execute-key $EXECUTE_KEY --worker-key $WORKER_KEY --admin-key $ADMIN_KEY --retention-days 30"
+  />
+
+  <p>
+    没有最后这三把密钥时，ingest 密钥和 read 密钥也能触及运行接口，read 密钥
+    还能删除。每把密钥的完整细节，以及你能设置的其他一切，都在
+    <a href={to('/docs/configuration')} class="link">配置</a>里。
+  </p>
+</Doc>

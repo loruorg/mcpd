@@ -1,0 +1,71 @@
+# Let Dependabot's patch and minor updates merge themselves once CI is green.
+#
+# Why this exists: mcpd depends on seven manifests across five languages, so
+# the update traffic is steady and almost all of it is uninteresting. A human
+# reviewing "bump serde from 1.0.220 to 1.0.221" learns nothing and delays the
+# updates that do matter. Auto-merge hands the judgement to the test suite,
+# which is the thing that can actually tell whether the bump broke anything.
+#
+# Major versions are excluded. A major bump is an API change by definition,
+# and that is the case a person should read.
+#
+# What a maintainer must configure for this to do anything. The pull requests
+# themselves come from .github/dependabot.yml, which is already in place; the
+# two settings below are not files and have to be set in the web interface.
+#   1. Settings > General > "Allow auto-merge".
+#   2. A branch protection rule on main with the ci.yml jobs required.
+#      Auto-merge waits for required checks. With no required checks it merges
+#      at once, which is the opposite of what this is for.
+name: dependabot-automerge
+
+# pull_request_target runs in the context of the base repository, which is what
+# gives this workflow a token that can merge. That makes it privileged, so it
+# never checks out the branch and never runs a line of code from the pull
+# request. It reads metadata and calls the merge API, nothing else.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  automerge:
+    name: enable auto-merge
+    if: github.repository == 'mcpd/mcpd' && github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Turning auto-merge on for the pull request.
+      pull-requests: write
+      # The merge itself, once the required checks pass.
+      contents: write
+    steps:
+      - name: read the update metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: enable auto-merge for patch and minor updates
+        if: >-
+          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-minor'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr merge --auto --squash "$PR_URL"
+
+      # Only on `opened`. Dependabot force-pushes the branch whenever the
+      # base moves, and each push is a `synchronize` event, so without this
+      # the same comment would arrive again every time.
+      - name: say why a major update was left alone
+        if: >-
+          github.event.action == 'opened' &&
+          steps.metadata.outputs.update-type == 'version-update:semver-major'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE: ${{ steps.metadata.outputs.dependency-names }}
+        run: |
+          gh pr comment "$PR_URL" --body \
+            "Auto-merge is off for this one: \`$PACKAGE\` is a major version bump, so it needs a person to read the changelog."

@@ -1,0 +1,289 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import Annunciator from '@/components/Annunciator.astro'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* As rotas internas continuam escritas em inglês e são localizadas aqui. Uma
+   rota cuja página em português ainda não existe leva à página em inglês, em
+   vez de a um URL português sem nada atrás. */
+const code = localeOf(Astro.url.pathname)
+const href = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+---
+
+<Doc
+  title="Monitores e alertas"
+  description="Como o mcpd acompanha taxa de erro, latência, custo e médias de nota em segundo plano, por que um monitor trava, por que uma janela vazia nunca limpa um alerta de pé, e o corpo do webhook."
+  lede="Uma condição que vale acompanhar, acompanhada. O mcpd avalia em um temporizador, trava o que encontra e avisa você uma vez."
+  og="docs"
+>
+  <h2>O que é um monitor</h2>
+  <p>
+    Um monitor é uma pergunta guardada que o mcpd faz a si mesmo em um temporizador: a
+    taxa de erro deste projeto está acima de cinco por cento nos últimos cinco
+    minutos? A média deste avaliador está abaixo do número que combinamos? Ele lê o
+    mesmo armazenamento que a interface lê, então um monitor só pode afirmar
+    algo que você mesmo poderia ter consultado.
+  </p>
+  <p>
+    Monitores ficam desligados até você configurar um. O mcpd não adivinha um
+    limiar por você, porque um limiar que ninguém escolheu é um limiar em que
+    ninguém confia.
+  </p>
+
+  <Annunciator class="not-prose my-8" />
+
+  <h2>Ele trava</h2>
+  <p>
+    Um monitor que dispara a cada avaliação enquanto uma condição persiste é
+    silenciado em um dia, e um monitor silenciado é pior que monitor nenhum,
+    porque parece cobertura. Então o mcpd relata a transição e não o estado: uma
+    vez na entrada do problema, uma vez na saída, e nada no meio.
+  </p>
+
+  <h2>Silêncio não é recuperação</h2>
+  <p>
+    Esta é a regra que custa interrupções às pessoas. Quando o tráfego para, a
+    janela guarda execuções de menos para julgar, e a implementação óbvia relata
+    &ldquo;nada de errado&rdquo; e limpa o alerta. Mas um agente que parou de
+    atender requisições é a falha, e não a recuperação dela.
+  </p>
+  <p>
+    Uma janela com execuções de menos dentro dela deixa um alerta de pé
+    exatamente onde ele estava. Um monitor volta ao nominal só quando uma
+    leitura com amostras suficientes atrás dela retorna para dentro do limiar.
+  </p>
+  <p>
+    O mesmo raciocínio define <code>min_samples</code>. Uma execução falha em
+    uma hora parada é uma taxa de erro de cem por cento, e o mcpd não vai chamar
+    isso de falha. O padrão é vinte.
+  </p>
+
+  <h2>O que pode ser acompanhado</h2>
+  <table>
+    <thead>
+      <tr><th>Observação</th><th>O que mede</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>error_rate</code></td>
+        <td>Execuções falhas sobre o total de execuções da janela.</td>
+      </tr>
+      <tr>
+        <td><code>latency_p95</code></td>
+        <td>Duração de execução no percentil noventa e cinco, em milissegundos.</td>
+      </tr>
+      <tr>
+        <td><code>cost</code></td>
+        <td>Gasto total na janela, na moeda da tabela de preços.</td>
+      </tr>
+      <tr>
+        <td><code>score_mean</code></td>
+        <td>
+          Média de um avaliador, nomeado por <code>scorer_id</code>. É esta que
+          pega uma regressão de qualidade que um gráfico de latência não
+          enxerga.
+        </td>
+      </tr>
+      <tr>
+        <td><code>trace_count</code></td>
+        <td>Execuções na janela. Acompanhe com <code>below</code> para pegar um pipeline que ficou mudo.</td>
+      </tr>
+      <tr>
+        <td><code>step_count_divergence</code></td>
+        <td>Execuções da janela que deram um número de passos incomum para a própria definição. É a única vigilância daqui sem limiar na unidade daquilo que mede. Lê execuções duráveis, não traces.</td>
+      </tr>
+      <tr>
+        <td><code>run_repetition</code></td>
+        <td>O quanto uma execução se repete: a média, sobre as execuções da janela, do maior número de tentativas que alguma delas fez em um mesmo nó da sua definição. 1 significa que nenhum nó rodou duas vezes. Lê execuções duráveis, não traces.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Um objetivo, quando um limiar é a pergunta errada</h2>
+  <p>
+    Um monitor pergunta se a taxa de erro está acima de cinco por cento agora.
+    Um SLO pergunta algo mais útil: vamos perder a meta que prometemos, e com
+    que rapidez estamos indo para lá.
+  </p>
+  <p>
+    A diferença importa porque um limiar não distingue uma oscilação de dois
+    minutos de um vazamento lento, e os dois pedem respostas opostas. Aperte o
+    limiar o bastante para pegar o vazamento e a oscilação chama você às três da
+    manhã. Afrouxe-o o bastante para dormir apesar da oscilação e o vazamento
+    corre por uma semana.
+  </p>
+
+  <h3>O orçamento, e a taxa em que ele queima</h3>
+  <p>
+    Um objetivo de <code>0.995</code> ao longo de trinta dias diz que meio por
+    cento das execuções pode falhar. Esse meio por cento é o orçamento de erro.
+    Uma taxa de queima de 1 o gasta exatamente ao longo dos trinta dias; uma
+    taxa de queima de 10 o gasta em três.
+  </p>
+  <p>
+    O mcpd mede a queima em duas janelas ao mesmo tempo e só dispara quando as
+    duas concordam: mais rápido que <span class="data">14,4x</span> na última
+    hora <em>e</em> mais rápido que <span class="data">6x</span> nas últimas
+    seis. É isso que separa os dois casos. Uma interrupção de cinco minutos move
+    o número de uma hora e não consegue mover o de seis, então não chama
+    ninguém. Um vazamento que corre a tarde toda move os dois.
+  </p>
+  <p>
+    Vale saber antes de você depender disto: em um objetivo de 99,5% esses
+    limiares equivalem a uma taxa de erro de cerca de 7,2%. Uma taxa constante
+    de 5% de falha queima o orçamento dez vezes rápido demais e vai esgotá-lo
+    cedo, mas não acorda ninguém. Acompanhe <code>budget_remaining</code> para
+    isso, e mantenha um monitor de <code>score_mean</code> ou de
+    <code>error_rate</code> se quiser saber antes.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "slos": [
+    {
+      "id": "support-availability",
+      "name": "99.5% of support runs succeed over 30 days",
+      "project": "support-desk",
+      "objective": 0.995,
+      "window_days": 30,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    <code>GET /v1/api/slos</code> devolve cada objetivo com a taxa de sucesso
+    dele, a fração de orçamento que sobrou e as duas taxas de queima.
+    <code>POST /v1/api/slos/&#123;id&#125;/ack</code> reconhece um. Eles travam e
+    são reconhecidos exatamente como os monitores, e uma janela fina demais para
+    julgar nunca limpa um alerta de pé.
+  </p>
+  <p>
+    <code>budget_remaining</code> fica negativo quando o orçamento é gasto além
+    da conta, em vez de parar em zero. Zero e "errou a meta por um fator de cem"
+    são situações diferentes, e o número diz qual é.
+  </p>
+
+  <h2>Configurar um</h2>
+  <p>
+    Monitores moram em um arquivo JSON e não na linha de comando, porque um
+    limiar, uma janela e uma comparação não cabem em uma opção e deveriam passar
+    por revisão como código. O arquivo monta como um ConfigMap do Kubernetes sem
+    mudança nenhuma.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitor_interval_seconds": 60,
+  "monitors": [
+    {
+      "id": "support-error-rate",
+      "name": "Support agent error rate above 5%",
+      "project": "support-desk",
+      "watch": "error_rate",
+      "compare": "above",
+      "threshold": 0.05,
+      "window_seconds": 300,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    },
+    {
+      "id": "relevance-regression",
+      "name": "Answer relevance fell below 0.8",
+      "project": "support-desk",
+      "watch": "score_mean",
+      "scorer_id": "answer_relevance",
+      "compare": "below",
+      "threshold": 0.8,
+      "window_seconds": 3600
+    }
+  ]
+}`}</code></pre>
+
+  <Command
+    class="not-prose my-6"
+    title="inicie com os monitores armados"
+    command="mcpd serve --config-file ./mcpd.json"
+  />
+
+  <p>
+    Uma chave desconhecida faz a partida falhar em vez de ser ignorada. Um erro
+    de digitação em <code>threshold</code> que silenciosamente não observa nada
+    é o pior desfecho disponível, então o mcpd o recusa em voz alta.
+  </p>
+  <p>
+    Defina <code>"enabled": false</code> para manter a definição de um monitor
+    sem avaliá-lo. <code>mcpd config</code> imprime quantos estão armados.
+  </p>
+
+  <h2>Para onde vai uma transição</h2>
+  <p>
+    Toda transição é logada com o id do monitor, o projeto, o limiar e o valor
+    medido como campos estruturados, para que um pipeline de logs possa
+    encaminhá-la sem interpretar uma frase. Se você já roda uma, essa é a
+    integração inteira.
+  </p>
+  <p>
+    Dê um <code>webhook</code> a um monitor e o mcpd também envia a transição por
+    POST. O corpo é genérico de propósito: Slack, PagerDuty, Opsgenie e toda
+    ferramenta de fluxo de trabalho aceitam um webhook de entrada, e moldar o
+    payload para uma delas significaria manter um conjunto de integrações de
+    fornecedor que envelhecem.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitor_id": "support-error-rate",
+  "name": "Support agent error rate above 5%",
+  "project": "support-desk",
+  "condition": "tripped",
+  "watch": "error_rate",
+  "threshold": 0.05,
+  "value": 0.5,
+  "samples": 40,
+  "detail": "error rate is 0.5000, threshold above 0.0500, over 40 run(s)",
+  "at": "2026-08-28T02:13:54.687391446Z"
+}`}</code></pre>
+
+  <p>
+    Uma entrega que falha é logada e descartada. Tentar de novo ou bloquearia o
+    laço de avaliação ou exigiria uma fila de saída durável, e um caminho de
+    alerta que pode ficar para trás em silêncio é pior que um que visivelmente
+    perdeu uma mensagem.
+  </p>
+
+  <h2>Ler e reconhecer</h2>
+  <p>
+    <code>GET /v1/api/monitors</code> devolve todo monitor com a condição travada
+    dele, a última leitura e quando ele disparou.
+  </p>
+  <p>
+    <code>POST /v1/api/monitors/&#123;id&#125;/ack</code> reconhece um.
+    Reconhecer silencia a transição sem fingir que a condição passou: o monitor
+    fica reconhecido enquanto ainda estiver em violação, e volta ao nominal
+    sozinho quando o número se recupera. Ninguém precisa lembrar de tirar o
+    silêncio.
+  </p>
+  <p>
+    O estado de um monitor fica em memória e é reconstruído a partir das
+    leituras a cada partida. Ele não é persistido, porque um reinício que
+    ressuscita um alerta que já se recuperou é uma falha pior que um reinício
+    que reavalia.
+  </p>
+
+  <h2>A seguir</h2>
+  <ul>
+    <li>
+      Os avaliadores que um monitor de <code>score_mean</code> acompanha:
+      <a href={href('/docs/testing')} class="link">Testes de regressão</a>.
+    </li>
+    <li>
+      A saúde do próprio mcpd, que monitor nenhum cobre:
+      <a href={href('/docs/operations')} class="link">Como executar</a>.
+    </li>
+    <li>
+      Toda opção e todo ajuste de arquivo:
+      <a href={href('/docs/configuration')} class="link">Configuração</a>.
+    </li>
+  </ul>
+</Doc>

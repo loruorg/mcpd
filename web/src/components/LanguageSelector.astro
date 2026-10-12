@@ -1,0 +1,347 @@
+---
+/**
+ * The language selector.
+ *
+ * A selector on a panel shows its own position, so the closed control carries
+ * the language you are reading, named in that language, and the open one is an
+ * engraved index of the nine: the name, then the code it is filed under.
+ *
+ * Below 400px the closed control falls back to the code alone, which is two
+ * characters in every locale. That is what stops the rail's width depending on
+ * which language you happen to be reading; the full name stays on the control
+ * for a screen reader, and the index is one tap away either way.
+ *
+ * It is a `<details>` over real links, not a scripted menu. With no JavaScript
+ * it still opens, and every language is still a link that goes somewhere, which
+ * is also what a crawler sees. The script below only adds what the native
+ * element leaves out: escape to close, arrow keys along the list, and a pointer
+ * anywhere else to dismiss.
+ *
+ * No flags. A flag is a country, and a language is not: Spanish is not Spain to
+ * most of the people who read it, and Portuguese is not Portugal to most of
+ * them either.
+ */
+import {
+  LOCALE_CODES,
+  locale as localeInfo,
+  localeOf,
+  localesWithPage,
+  routeOf,
+  urlFor,
+  type Locale,
+} from '@/lib/i18n'
+import { strings } from '@/lib/ui-strings'
+
+interface Props {
+  class?: string
+}
+
+const { class: className = '' } = Astro.props
+
+const current = localeOf(Astro.url.pathname)
+const route = routeOf(Astro.url.pathname)
+const s = strings(current)
+
+/*
+ * Which languages to offer, and where each one goes.
+ *
+ * A selector that lists eight languages the site has not been translated into
+ * yet is eight links to a 404, which is worse than no selector. `localesWithPage`
+ * reads the page files that were built, so a language appears the moment its
+ * first page lands and nothing here has to be edited to let it in.
+ *
+ * A locale that has this page gets this page. A locale that has been started
+ * but has not reached this page yet gets its own home, which is the nearest
+ * thing to what the reader asked for that actually exists. The head's `hreflang`
+ * alternates are the stricter list on purpose: they name only true translations
+ * of this page, while this is navigation.
+ */
+const translated = new Set(localesWithPage(route))
+const started = new Set(localesWithPage('/'))
+const offered = LOCALE_CODES.filter((code) => translated.has(code) || started.has(code))
+const target = (code: Locale) => (translated.has(code) ? urlFor(route, code) : urlFor('/', code))
+---
+
+{
+  /* One language is not a choice, so there is no control to show. The moment a
+     second locale has a page, this appears on every page at once. */
+  offered.length > 1 && (
+    <nav class:list={['mcpd-lang', className]} aria-label={s('lang.nav')}>
+      <details data-lang>
+        {/* The closed control says the language and that it can be changed, and
+            stops there. It carried the code too, which repeated the one fact it
+            had, was hidden from a screen reader as filing rather than
+            information, and at 11px on the well was the faintest text on the
+            page at a contrast of 4.53. The code belongs in the list, where it
+            is an index column and reads at 6.28. */}
+        <summary class="well">
+          {/* The name where the rail has room, the code where it does not.
+              A name makes the control's width depend on which language you are
+              reading: 54px on 中文, 106px on Português, which ran a 320px rail
+              35px past its own edge. The code is two characters in all nine, so
+              below 400px the rail stops depending on the language. */}
+          <span class="mcpd-lang-name">{localeInfo(current).name}</span>
+          <span class="mcpd-lang-short">
+            {/* Both halves reach the accessibility tree: the name so a screen
+                reader says the language instead of spelling a code, the code so
+                the accessible name still contains the label that is on screen
+                for anyone driving the page by voice. */}
+            <span class="sr-only">{localeInfo(current).name} </span>
+            <span class="data">{current}</span>
+          </span>
+          {/* The house chevron: the same path, stroke and caps as the panel's
+              select control, so the two read as one family of control. */}
+          <svg
+            class="mcpd-lang-chevron"
+            width="9"
+            height="6"
+            viewBox="0 0 9 6"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path
+              d="M1 1l3.5 3.5L8 1"
+              stroke="currentColor"
+              stroke-width="1.25"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </summary>
+
+        <ul class="panel-raised">
+          {offered.map((code) => (
+            <li>
+              {/* `lang` is what makes a screen reader say 日本語 in Japanese
+                  rather than spelling it out in the reader's own voice, and it
+                  is what tells the browser which cut of a shared Han character
+                  to draw. The code beside it is filing, not a name, so it is
+                  hidden from the reader who is being read to. */}
+              <a
+                href={target(code)}
+                hreflang={localeInfo(code).tag}
+                lang={localeInfo(code).tag}
+                data-lang-option
+                aria-current={code === current ? 'true' : undefined}
+              >
+                <span>{localeInfo(code).name}</span>
+                <span class="data mcpd-lang-code" aria-hidden="true">
+                  {code}
+                </span>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </details>
+    </nav>
+  )
+}
+
+<style>
+  .mcpd-lang { position: relative; }
+
+  /* --------------------------------------------------------- the control -- */
+
+  .mcpd-lang summary {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.625rem;
+    font-size: 0.9375rem;
+    /* The rail's own line-height, not a tighter one of this control's choosing.
+       At 1.2 this well stood 36px tall beside a 43.6px menu button, and two
+       controls of different heights side by side in the same row read as an
+       accident. Both now compute to 42px from the same type metrics. */
+    line-height: 1.6;
+    color: var(--color-ink-2);
+    cursor: pointer;
+    user-select: none;
+    transition: color 130ms ease;
+    /* The native disclosure triangle belongs to a different drawing. */
+    list-style: none;
+  }
+  .mcpd-lang summary::-webkit-details-marker { display: none; }
+  .mcpd-lang summary::marker { content: ''; }
+  .mcpd-lang summary:hover { color: var(--color-ink); }
+
+  .mcpd-lang-chevron {
+    display: block;
+    flex: none;
+    color: var(--color-ink-3);
+    transition: transform 160ms cubic-bezier(0.2, 0, 0, 1);
+  }
+  .mcpd-lang details[open] .mcpd-lang-chevron { transform: rotate(180deg); }
+
+  /* The code is filing, not prose: the tag the page is published under. In the
+     list it is the right-hand column, subordinate to the name beside it. */
+  .mcpd-lang-code {
+    font-size: 0.6875rem;
+    color: var(--color-ink-3);
+  }
+
+  /* The two closed labels. Narrow first: the code carries the control, so it is
+     the label rather than filing and takes the label's own ink and size. */
+  .mcpd-lang-name { display: none; }
+  .mcpd-lang-short .data { font-size: 0.8125rem; }
+  @media (min-width: 400px) {
+    .mcpd-lang-name { display: inline; }
+    .mcpd-lang-short { display: none; }
+  }
+
+  /* ------------------------------------------------------------ the list -- */
+
+  .mcpd-lang ul {
+    position: absolute;
+    top: calc(100% + 0.375rem);
+    right: 0;
+    z-index: 50;
+    margin: 0;
+    padding: 0.25rem 0;
+    list-style: none;
+    /*
+     * The list is sized by its own longest language, never by the control it
+     * hangs under.
+     *
+     * An absolutely positioned box with only `right` set shrinks to fit, and
+     * "fit" is capped by the containing block, which here is the summary. On a
+     * 390px screen that made the list 87px wide, collapsed the name column to
+     * 24px, and ran `Português` 14px straight through `pt`. `max-content` sizes
+     * it from the widest row instead, so every row keeps the full column gap.
+     */
+    width: max-content;
+    /* Never narrower than the control it belongs to, which would read as a
+       second, unrelated object rather than as that control opening. */
+    min-width: 100%;
+    /* A viewport narrower than the longest language still gets a whole list. */
+    max-width: calc(100vw - 1.5rem);
+    /* Nine languages fit any phone held either way. This is what keeps a tenth
+       from falling off the bottom edge with no way to reach it. */
+    max-height: calc(100dvh - 5rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    /* The one floating element in the chrome, so the one shadow the system
+       allows: a single source above, tight and tinted to the ink, never a bloom
+       on all sides. */
+    box-shadow: 0 2px 3px color-mix(in oklab, var(--color-ink) 13%, transparent);
+  }
+
+  .mcpd-lang a {
+    display: grid;
+    /* `1fr` is `minmax(auto, 1fr)`, and that `auto` minimum is the name's own
+       min-content width. `minmax(0, 1fr)` let the track collapse under its text
+       instead, and a nowrapped name then spilled over the code beside it. The
+       two tracks stay a real column each: names flush left, codes flush right,
+       every row on the same pair of edges. */
+    grid-template-columns: 1fr auto;
+    align-items: baseline;
+    column-gap: 1.5rem;
+    padding: 0.3125rem 0.75rem;
+    font-size: 0.875rem;
+    line-height: 1.45;
+    color: var(--color-ink-2);
+    text-decoration: none;
+    white-space: nowrap;
+    transition: background-color 120ms ease, color 120ms ease;
+  }
+  .mcpd-lang a:hover {
+    background: var(--color-panel-3);
+    color: var(--color-ink);
+  }
+  /* The language you are reading, said with weight and ink rather than a mark
+     tacked on beside it. */
+  .mcpd-lang a[aria-current] {
+    font-weight: 500;
+    color: var(--color-ink);
+  }
+  .mcpd-lang a:focus-visible { outline-offset: -2px; }
+
+  /*
+   * The three CJK names, on a page that is not in those languages.
+   *
+   * `panel.css` names a face for each writing system on `:root:lang()`, so a
+   * Japanese page is already set in a Japanese cut throughout, this control
+   * included. This list is the one place on the site where all nine languages
+   * are written at once, so on an English page those three names fall outside
+   * that rule and would be drawn by whichever face the system offers first.
+   * Naming a face per row is the narrow fix for the narrow case; the root rules
+   * remain the source for everything else.
+   */
+  .mcpd-lang a:lang(zh) {
+    font-family: 'Supreme', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+  }
+  .mcpd-lang a:lang(ja) {
+    font-family: 'Supreme', 'Hiragino Sans', 'Yu Gothic UI', 'Noto Sans CJK JP', sans-serif;
+  }
+  .mcpd-lang a:lang(ko) {
+    font-family: 'Supreme', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', sans-serif;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mcpd-lang-chevron,
+    .mcpd-lang a,
+    .mcpd-lang summary { transition: none; }
+  }
+</style>
+
+<script>
+  /*
+   * What `<details>` does not do on its own. Everything here is additive: with
+   * this script blocked the control still opens, still closes, and every
+   * language is still a link.
+   */
+  for (const box of document.querySelectorAll<HTMLDetailsElement>('[data-lang]')) {
+    const summary = box.querySelector('summary')
+    if (!summary) continue
+
+    const options = () => [...box.querySelectorAll<HTMLAnchorElement>('[data-lang-option]')]
+
+    box.addEventListener('keydown', (event) => {
+      const key = event.key
+
+      // Escape hands focus back to the control that opened the list, so the
+      // reader is not dropped at the top of the document.
+      if (key === 'Escape') {
+        if (!box.open) return
+        event.preventDefault()
+        box.open = false
+        summary.focus()
+        return
+      }
+
+      if (key !== 'ArrowDown' && key !== 'ArrowUp' && key !== 'Home' && key !== 'End') return
+      event.preventDefault()
+      box.open = true
+
+      const items = options()
+      if (items.length === 0) return
+      const here = items.indexOf(document.activeElement as HTMLAnchorElement)
+      const step = key === 'ArrowDown' ? 1 : -1
+      const next =
+        key === 'Home'
+          ? 0
+          : key === 'End'
+            ? items.length - 1
+            : here === -1
+              ? step === 1
+                ? 0
+                : items.length - 1
+              : (here + step + items.length) % items.length
+      items[next]?.focus()
+    })
+
+    // A pointer anywhere else dismisses it, the way every other menu behaves.
+    document.addEventListener('pointerdown', (event) => {
+      if (!box.open) return
+      if (!box.contains(event.target as Node)) box.open = false
+    })
+
+    // Tabbing past the last language closes it too. The check waits a frame
+    // because `focusout` fires before the next element has focus, and reading
+    // `document.activeElement` too early always says `body`.
+    box.addEventListener('focusout', () => {
+      requestAnimationFrame(() => {
+        if (box.open && !box.contains(document.activeElement)) box.open = false
+      })
+    })
+  }
+</script>

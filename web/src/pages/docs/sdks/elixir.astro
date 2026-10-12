@@ -1,0 +1,258 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+---
+
+<Doc
+  title="Elixir"
+  description="The mcpd SDK for Elixir: a GenServer worker, the span tree assembled from the process dictionary, and no dependencies at all because OTP already ships a JSON codec and an HTTP client."
+  lede="A GenServer for the worker, the process for the context, and nothing added to your dependency tree."
+  og="docs"
+>
+  <h2>Install</h2>
+  <p>
+    Add it to <code>mix.exs</code>. It brings nothing with it.
+  </p>
+
+  <pre><code class="language-elixir">{`defp deps do
+  [{:mcpd, "~> 0.1"}]
+end`}</code></pre>
+
+  <p>
+    That is the whole dependency list, and it is deliberate. OTP 27 ships a JSON
+    codec (<code>:json</code>) and an HTTP client (<code>:inets</code>), so a
+    library whose job is to watch your system does not have to become a reason
+    your system's build changes. The other five SDKs make the same promise in
+    their own languages.
+  </p>
+
+  <h2>Construct the client</h2>
+  <p>
+    Every option falls back to its environment variable, and code wins.
+    <code>Mcpd.start_link()</code> with no arguments talks to a local daemon.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="init" title="connect" />
+
+  <p>
+    Put it in your supervision tree and it behaves like any other worker:
+  </p>
+
+  <pre><code class="language-elixir">{`children = [
+  {Mcpd, project: "support-desk", environment: "production"}
+]
+
+Supervisor.start_link(children, strategy: :one_for_one)`}</code></pre>
+
+  <h2>Record a run</h2>
+  <p>
+    <code>span</code> is a macro, so a run is a block and its value is the
+    block's value.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="trace" title="record a run" />
+
+  <p>
+    Macros have to be required before they can be called, which is a rule of the
+    language rather than a choice here. <code>use Mcpd</code> does it for you:
+  </p>
+
+  <pre><code class="language-elixir">{`defmodule MyAgent do
+  use Mcpd
+
+  def answer(mcpd, question) do
+    Mcpd.span mcpd, "agent", kind: :agent_run, input: question do
+      do_the_work(question)
+    end
+  end
+end`}</code></pre>
+
+  <p>
+    If the body is already a function rather than a block, call
+    <code>Mcpd.with_span/4</code> instead. It is the same thing without the
+    macro.
+  </p>
+
+  <h2>The tree assembles itself</h2>
+  <p>
+    The active span lives in the process dictionary, and that is the right store
+    in Elixir specifically rather than a shortcut. A process is the unit of
+    concurrency here, so two requests handled at the same time cannot see each
+    other's span, and nothing has to be threaded through every function to keep
+    the tree together.
+  </p>
+  <p>
+    A child started three calls deep finds its parent on its own:
+  </p>
+
+  <pre><code class="language-elixir">{`Mcpd.span mcpd, "agent", kind: :agent_run do
+  plan(mcpd)          # opens a child of "agent" without being told
+end
+
+defp plan(mcpd) do
+  Mcpd.span mcpd, "plan_answer", kind: :model_generation, model: "gpt-4o" do
+    call_the_model()
+  end
+end`}</code></pre>
+
+  <p>
+    The consequence worth knowing: a span opened inside <code>Task.async</code>
+    starts a new trace, because that is a different process. Pass the trace
+    across with <code>Mcpd.traceparent/0</code> and
+    <code>Mcpd.continue/2</code>, the same pair you would use across an HTTP
+    boundary.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>Nothing blocks, and nothing raises</h2>
+  <p>
+    Recording a span sends a message to the worker and returns. The network
+    happens on that worker, so your agent's latency never depends on mcpd being
+    fast, or up, or running at all.
+  </p>
+  <p>
+    A raise inside a block is recorded on the span as an error and then
+    re-raised unchanged. mcpd's job is to see what happened, never to decide
+    what your code does about it.
+  </p>
+  <p>
+    The queue is bounded, and when it fills the oldest signals are dropped. That
+    direction is chosen: when the daemon is unreachable, the newest signals
+    describe what is happening now, and those are the ones somebody will want
+    when it comes back. <code>Mcpd.stats/1</code> answers what the client has
+    done: <code>queued</code>, <code>dropped</code>, <code>capacity</code>,
+    <code>exported</code>, <code>failed</code> and <code>rejected</code>.
+  </p>
+
+  <p>
+    <code>log_level:</code>, or <code>MCPD_LOG_LEVEL</code>, sets a floor under
+    <code>Mcpd.log/4</code>. The default is <code>debug</code>, which keeps
+    everything. A line below the floor is dropped before the record is built,
+    so a debug line in a production deployment costs one comparison. The floor
+    covers logs only; spans, metrics, scores and feedback are unaffected.
+  </p>
+
+  <h2>Keep payloads in the process</h2>
+  <p>
+    <code>capture_payloads: false</code>, or
+    <code>MCPD_CAPTURE_PAYLOADS=false</code>, keeps prompts and completions
+    where they are. Spans still go out with their timing, status, usage, model,
+    model parameters, correlation and errors; <code>input:</code>,
+    <code>output:</code> and a block's captured value are dropped before they
+    reach the queue, so nothing sensitive is queued and nothing sensitive leaves
+    on a flush. One span can say otherwise for itself with
+    <code>capture_payloads: true</code>.
+  </p>
+
+  <h2>How the model was called</h2>
+  <p>
+    <code>model_parameters:</code> records the settings a model call was made
+    with: <code>temperature</code>, <code>top_p</code>, <code>top_k</code>,
+    <code>max_tokens</code>, <code>seed</code>, <code>stop_sequences</code> and
+    <code>has_response_format</code>. Give it a keyword list, or a
+    <code>%Mcpd.ModelParameters&#123;&#125;</code> when you already hold one.
+  </p>
+
+  <pre><code class="language-elixir">{`Mcpd.span mcpd, "answer",
+  kind: :model_generation,
+  model_parameters: [temperature: 0.0, seed: 0, max_tokens: 1024] do
+  call_the_model()
+end`}</code></pre>
+
+  <p>
+    They are settings rather than payload, so they survive
+    <code>capture_payloads: false</code>, which is the case that matters: they
+    are what somebody reproducing the run has to match. A field you leave out is
+    absent and one you give is kept whatever it is, so <code>seed: 0</code> is a
+    seed. The schema behind <code>has_response_format</code> is not recorded,
+    only whether one was in force. It is an option rather than a setter because
+    an Elixir span is described by the options it was opened with, the same way
+    <code>model:</code>, <code>provider:</code> and <code>usage:</code> already
+    are.
+  </p>
+
+  <h2>Assert what you recorded</h2>
+  <p>
+    A sink is where a drained batch goes. The HTTP transport is the default;
+    <code>Mcpd.Sink.Recorder</code> keeps every batch in memory, so a test reads
+    back the spans, logs, metrics, scores and feedback the instrumentation
+    recorded without a daemon, and <code>Mcpd.Sink.Console</code> prints one
+    JSON line per signal to stderr. A sink of your own implements
+    <code>Mcpd.Sink</code>; one that raises is a failed batch, counted and
+    reported, never raised to the caller.
+  </p>
+  <p>
+    <code>Mcpd.record/3</code> queues a span that already ended, as given: its
+    own ids, parent, start and end, never re-parented, re-timed or re-sampled.
+    That is what an adapter for another tracing system or a batch import holds.
+    A record whose ids are not OpenTelemetry-shaped is refused and counted, and
+    never raises. <code>external_parent_span_id:</code> on any span carries a
+    parent from a tracing system that is not mcpd, for correlation only.
+  </p>
+
+  <h2>Durable runs</h2>
+  <p>
+    The same client serves the daemon's durable runs. <code>Mcpd.Workflow</code>
+    builds the definition and keeps the step bodies as three-arity functions;
+    a <code>Mcpd.StepWorker</code> registers it, long-polls for leases and
+    serves each one on a process of its own, and <code>Mcpd.start_run/3</code>,
+    <code>Mcpd.watch_run/3</code>, <code>Mcpd.publish_event/4</code> and the
+    rest mirror the run surface one for one. A body raises
+    <code>Mcpd.StepException</code> with <code>class: :retryable</code> to be
+    retried within the step's budget, and records spans under its step through
+    <code>Mcpd.StepContext.span/4</code>. Every span the body closes adds its
+    usage to the step's, and the last model seen wins, so the daemon prices
+    what the trace shows; <code>set_usage/2</code> is the explicit override.
+    <code>on_lease</code>, <code>on_step_start</code>,
+    <code>on_step_end</code> and <code>on_conflict</code> sit beside
+    <code>on_error</code> on the worker, and <code>StepWorker.stats/1</code>
+    counts what it has claimed, completed, failed by class and abandoned by
+    reason.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} example="workflow" region="workflow" title="a workflow" />
+  <p>
+    What each construct does, the lease protocol and the run API are on
+    <a href="/docs/workflows" class="link">Workflows</a>,
+    <a href="/docs/workers" class="link">Workers</a> and
+    <a href="/docs/runs" class="link">Runs</a>.
+  </p>
+
+  <h2>Scores and feedback</h2>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="score" title="score and feedback" />
+
+  <h2>Reading it back</h2>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="query" title="read the run" />
+
+  <h2>Short-lived processes must flush</h2>
+  <p>
+    A script or a task that exits quickly loses whatever had not been sent.
+    <code>Mcpd.shutdown/1</code> flushes and stops the worker, and is safe to
+    call twice.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="run the example against a local daemon"
+    command={`mcpd serve --data ./mcpd.db
+elixir examples/elixir/quickstart.exs`}
+  />
+
+  <h2>Next</h2>
+  <ul>
+    <li>
+      Every behaviour this SDK shares with the other five:
+      <a href="https://github.com/mcpd/mcpd/blob/main/sdks/SDK-CONTRACT.md" class="link">the SDK contract</a>.
+    </li>
+    <li>
+      What a span carries:
+      <a href="/docs/reference/data-model" class="link">Data model</a>.
+    </li>
+    <li>
+      Finding the run you care about afterwards:
+      <a href="/docs/searching" class="link">Finding a run</a>.
+    </li>
+  </ul>
+</Doc>

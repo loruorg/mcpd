@@ -1,0 +1,465 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import Conformance from '@/components/Conformance.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const loc = localeOf(Astro.url.pathname)
+const link = (route: string) => urlFor(route, loc)
+---
+
+<Doc
+  title="Integração"
+  description="Três formas de usar um mcpd em execução: a API HTTP sozinha, um dos seis SDKs, ou o mcpd como servidor MCP que um agente chama. O que cada uma custa e o que devolve."
+  lede="Um daemon está rodando em algum lugar. Estas são as três formas de qualquer outra coisa chegar até ele, e como escolher entre elas."
+  og="docs"
+>
+  <p>
+    O mcpd tem uma porta só e três formas de atravessá-la. Tudo o que vem
+    abaixo fala com a mesma superfície HTTP: os SDKs são uma conveniência por
+    cima dela, e o servidor MCP é um cliente dela.
+  </p>
+
+  <h2>Uma porta, quatro superfícies</h2>
+  <p>
+    Um único processo serve tudo isso em uma porta, a 4317 por padrão. Não há
+    sidecar, nem coletor para rodar ao lado, nem servidor de arquivos
+    estáticos para a interface.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Caminho</th><th>O que é</th><th>Chave</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>/v1/traces</code>, <code>/v1/logs</code>, <code>/v1/metrics</code></td>
+        <td>Ingestão OpenTelemetry. Qualquer SDK do OTel, sem nenhum código específico do mcpd na sua aplicação.</td>
+        <td>De ingestão</td>
+      </tr>
+      <tr>
+        <td><code>/v1/ingest</code></td>
+        <td>Ingestão nativa. Um lote carrega qualquer mistura dos seis sinais e do modelo de dados inteiro, e uma requisição carrega um fluxo de lotes.</td>
+        <td>De ingestão</td>
+      </tr>
+      <tr>
+        <td><code>/v1/api/…</code></td>
+        <td>A API de consulta. A interface e os SDKs leem por aqui e por mais nada.</td>
+        <td>De leitura, escrita, administração, execute ou worker, declarada endpoint a endpoint</td>
+      </tr>
+      <tr>
+        <td><code>/</code></td>
+        <td>A interface do operador, compilada dentro do binário.</td>
+        <td>Nenhuma para a marcação; os dados dela passam pela API de consulta</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Outros dois caminhos, <code>/healthz</code> e <code>/readyz</code>, não
+    pedem autenticação, para que uma sonda os alcance. Comece por eles quando
+    estiver descobrindo se um endpoint sequer responde:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="está de pé?"
+    lines={[
+      { cmd: 'curl -s "$MCPD/healthz"' },
+      { out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0",…}', tone: 'ok' },
+      { cmd: 'curl -s "$MCPD/readyz"' },
+      { out: 'storage is not reachable: …', tone: 'warn' },
+      { out: '# readyz toca no armazenamento, então um 503 aqui diz que o daemon' },
+      { out: '# está de pé e que o banco atrás dele não está.' },
+    ]}
+  />
+
+  <h2>A API HTTP, sem SDK nenhum</h2>
+  <p>
+    Se a sua linguagem tem um cliente HTTP, ela fala com o mcpd. Não há nada
+    para registrar, nenhum projeto para criar de antemão e nenhum aperto de
+    mão. Todo SDK é uma conveniência por cima das requisições abaixo, e escolher
+    este caminho custa a você o agrupamento em lotes, a repetição e a
+    geração de ids, que passam a ser trabalho seu.
+  </p>
+
+  <h3>Escrever uma execução</h3>
+  <p>
+    <code>POST /v1/ingest</code> recebe um lote. Um lote pode carregar spans,
+    logs, métricas, notas, feedback e notas de aspecto de uma vez, e é por
+    isso que a porta nativa existe ao lado da porta OTLP: os seis sinais
+    compartilham os ids de trace e de span, então mandá-los em uma requisição os
+    mantém correlacionados sem uma segunda consulta.
+  </p>
+
+  <p>
+    Três formatos chegam a esse endpoint, e o content type diz qual é. Nada é
+    deduzido dos bytes, então acrescentar uma quebra de linha dentro de uma
+    string nunca muda o que um corpo significa.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Content type</th><th>Corpo</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>application/json</code></td>
+          <td>Um objeto de lote, que é o que todo SDK manda</td>
+        </tr>
+        <tr>
+          <td><code>application/json</code></td>
+          <td>Um array de objetos de lote, para quem tem vários em mãos</td>
+        </tr>
+        <tr>
+          <td><code>application/x-ndjson</code></td>
+          <td>Um lote por linha, lido conforme o corpo chega em vez de guardado inteiro. <code>application/jsonl</code> quer dizer o mesmo</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Cada elemento é o lote que ele é: fica gravado na própria transação quando
+    carrega um <code>ingest_key</code>, então um fluxo reenviado é reconhecido
+    linha a linha e não como um bloco só, e os elementos sem chave ficam
+    gravados juntos. A requisição inteira é recusada, sem nada gravado, se
+    alguma linha não puder ser lida ou se a requisição como um todo passar de
+    qualquer um dos dois limites. A resposta é um único
+    <code>IngestResult</code> que cobre tudo.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <CodeSwitcher class="not-prose my-6" only={['curl']} region="trace" title="um lote" />
+
+  <p>Quatro coisas que a requisição precisa acertar:</p>
+  <ul>
+    <li>
+      <strong>Os ids têm o formato do OpenTelemetry.</strong> 32 caracteres
+      hexadecimais minúsculos para um trace, 16 para um span, nunca todos zero.
+      Qualquer outra coisa quebra a correlação com as demais ferramentas que
+      você roda.
+    </li>
+    <li>
+      <strong><code>ingest_key</code> torna uma repetição segura.</strong>
+      É uma chave de idempotência estável para um lote, então um reenvio é
+      reconhecido e contado como duplicata em vez de gravado duas vezes.
+    </li>
+    <li>
+      <strong>A chave vai em um cabeçalho.</strong>
+      <code>Authorization: Bearer …</code>, ou <code>X-Mcpd-Key</code>. A
+      ingestão pede uma chave de ingestão, e só quando o daemon tem alguma
+      configurada.
+    </li>
+    <li>
+      <strong>Lotes têm limites.</strong> 32 MiB de corpo e 10.000 sinais por
+      padrão, ambos ajustáveis com <code>--max-body-bytes</code> e
+      <code>--max-batch-signals</code>. O limite de sinais conta a requisição
+      inteira, então dividir os mesmos sinais em várias linhas não passa por
+      ele. Mande <code>content-encoding: gzip</code> para qualquer coisa
+      grande.
+    </li>
+  </ul>
+  <p>
+    A resposta relata o que houve por sinal:
+    <code>{'{"accepted":2,"rejected":0,"duplicate":0}'}</code>, com um array
+    <code>errors</code> que nomeia o índice e o motivo de tudo o que foi
+    recusado. Os endpoints OTLP respondem no formato do próprio OTLP, com um
+    objeto <code>partialSuccess</code> carregando a contagem de recusados,
+    porque é isso que um emissor do OpenTelemetry lê.
+  </p>
+
+  <h3>Ler de volta</h3>
+  <CodeSwitcher class="not-prose my-6" only={['curl']} region="query" title="ler" />
+
+  <p>
+    Os filtros se combinam, a paginação é por cursor, e <code>project</code>
+    assume o projeto padrão do daemon quando você o deixa de fora. A busca em
+    texto completo sobre os payloads gravados é o parâmetro <code>q</code>, que
+    é o que faz de “encontre a execução em que o modelo disse isto” uma
+    consulta e não um grep.
+  </p>
+  <p>
+    Uma falha que o próprio mcpd levanta volta como JSON com um código
+    <code>error</code> estável e legível por máquina, uma <code>message</code>
+    escrita para quem vai consertar, e um <code>field</code> quando um
+    parâmetro é o culpado. Ramifique pelo código, mostre a mensagem.
+  </p>
+  <p>
+    Uma classe de falha não tem esse formato, e um cliente que supõe que tem
+    não vai conseguir interpretar a resposta. Um corpo de requisição que não
+    pode ser decodificado no tipo que o endpoint espera é recusado pelo
+    framework web antes de qualquer código do mcpd rodar, então ele responde
+    <code>422</code> com <code>content-type: text/plain</code> e uma mensagem
+    como <code>missing field `scorer_id`</code>. Uma sintaxe de corpo que nem
+    JSON é responde <code>400</code>, também como texto. Não há código
+    <code>error</code> pelo qual ramificar em nenhum dos dois casos. Isso vale
+    para todo endpoint que recebe um corpo tipado:
+    <code>POST /v1/api/scores</code>, <code>/v1/api/feedback</code>,
+    <code>/v1/api/score</code>, <code>/v1/api/datasets</code>, suas rotas
+    <code>items</code> e <code>capture</code>, e
+    <code>/v1/api/experiments</code>. As portas de ingestão leem o corpo elas
+    mesmas, então <code>/v1/ingest</code> e as rotas OTLP devolvem sim o
+    formato JSON. Trate um corpo que não é JSON em um 4xx como uma requisição
+    malformada vinda do seu próprio código, e leia-o como texto.
+  </p>
+
+  <h2>Os SDKs</h2>
+  <p>
+    Seis linguagens: <a href={link('/docs/sdks/typescript')} class="link">TypeScript</a>,
+    <a href={link('/docs/sdks/python')} class="link">Python</a>,
+    <a href={link('/docs/sdks/rust')} class="link">Rust</a>,
+    <a href={link('/docs/sdks/go')} class="link">Go</a>,
+    <a href={link('/docs/sdks/kotlin')} class="link">Kotlin</a> e
+    <a href={link('/docs/sdks/elixir')} class="link">Elixir</a>. Cada um é
+    idiomático onde dá e idêntico onde importa. Quem leu o início rápido do
+    TypeScript consegue prever o do Kotlin.
+  </p>
+  <p>O que você ganha em relação ao HTTP puro:</p>
+  <ul>
+    <li>Agrupamento em lotes e um worker em segundo plano, de modo que registrar um span acrescenta a uma fila e retorna.</li>
+    <li>Repetição com backoff em 429 e nos códigos 5xx que valem a pena repetir, e nunca em um 4xx que vai seguir malformado.</li>
+    <li>Geração de ids, propagação de contexto, e o <code>traceparent</code> do W3C lido na entrada e emitido na saída, para que um trace sobreviva à fronteira entre serviços.</li>
+    <li>Tipos gerados da mesma especificação que a do daemon, de modo que um campo não possa dizer uma coisa no SDK e outra no armazenamento.</li>
+  </ul>
+  <p>
+    Três promessas valem em todas as linguagens, e são o motivo de um SDK ser
+    seguro no caminho quente. A instrumentação nunca lança exceção: um daemon
+    inalcançável é anotado no máximo uma vez por intervalo e engolido. Ela
+    nunca bloqueia: o trabalho de rede acontece no worker, então a latência do
+    seu agente não depende de o mcpd estar de pé. E a fila dela tem limite:
+    quando enche, os spans mais antigos são descartados e um contador sobe,
+    porque um buffer sem limite transforma uma queda de rede em uma morte por
+    falta de memória.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="init" title="conectar" />
+
+  <p>
+    Um cliente construído sem argumento nenhum funciona contra um daemon local.
+    Tudo se define em código ou por variável de ambiente, e o código vence, e
+    os nomes das variáveis são os mesmos em todas as linguagens, então um valor
+    copiado entre dois serviços continua funcionando quando eles estão escritos
+    em linguagens diferentes: <code>MCPD_ENDPOINT</code>,
+    <code>MCPD_API_KEY</code>, <code>MCPD_PROJECT</code>,
+    <code>MCPD_ENVIRONMENT</code>, <code>MCPD_SERVICE_NAME</code>,
+    <code>MCPD_SERVICE_VERSION</code>, <code>MCPD_SAMPLE</code> e
+    <code>MCPD_ENABLED</code>. Definir <code>MCPD_ENABLED=false</code>
+    transforma cada chamada em uma operação nula que ainda devolve objetos
+    válidos, então uma suíte de testes desliga o mcpd sem tocar em código
+    algum.
+  </p>
+
+  <h3>Eles são intercambiáveis, e isso é testado</h3>
+  <p>
+    Os testes de unidade provam que cada SDK faz o que os próprios autores dele
+    quiseram. Não provam nada sobre os seis concordarem entre si. Por isso a
+    suíte de conformidade escreve uma execução canônica por cada linguagem
+    contra um mesmo daemon vivo, mais um sétimo canal que manda a mesma
+    execução com nada além de <code>curl</code>, e afirma que o que volta é
+    estruturalmente idêntico:
+  </p>
+
+  <Conformance class="not-prose my-8" />
+
+  <p>
+    Se você está escolhendo uma linguagem para um serviço novo, esta é a
+    resposta para “os traces vão sair iguais aos que já temos”.
+  </p>
+
+  <h3>Se a sua linguagem não é uma das seis</h3>
+  <p>
+    Aponte um SDK do OpenTelemetry para <code>/v1/traces</code> e não escreva
+    código novo. O mcpd é um receptor OTLP, e mapeia tanto a convenção
+    <code>gen_ai.*</code> do OpenTelemetry quanto a <code>llm.*</code> do
+    OpenInference, então a instrumentação que você já tem chega no lugar certo.
+    Veja <a href={link('/docs/opentelemetry')} class="link">OpenTelemetry</a>.
+  </p>
+
+  <h2>De um agente de IA, por MCP</h2>
+  <p>
+    O terceiro caminho é para um agente, não para um serviço: em vez de o seu
+    código ler os traces, um agente de programação ou de suporte os lê por você
+    e responde a uma pergunta sobre eles. “Por que a última execução falhou”,
+    “me mostre as execuções que um avaliador rebaixou nesta semana”, “quanto
+    custou esta sessão”. O mcpd expõe isso pelo Model Context Protocol.
+  </p>
+
+  <h3>As três ferramentas</h3>
+  <p>
+    Três, não trinta. São os três movimentos de uma mesma investigação: qual
+    execução, o que aconteceu dentro dela, e se é uma execução só ou todas.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Ferramenta</th><th>O que ela responde</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>find_runs</code></td>
+        <td>
+          Qual execução. Uma linha para cada: id, idade, status, duração,
+          custo, etapas. Filtre por status, modelo, usuário, sessão ou texto
+          livre; ordene por duração para achar as mais lentas. O padrão são as
+          últimas 24 horas.
+        </td>
+      </tr>
+      <tr>
+        <td><code>get_run</code></td>
+        <td>
+          O que aconteceu. A cascata, a etapa que falhou e por quê, os prompts
+          e as respostas do modelo, os logs, as notas. Os payloads têm
+          teto, para que uma execução não encha uma janela de contexto.
+        </td>
+      </tr>
+      <tr>
+        <td><code>run_stats</code></td>
+        <td>
+          Uma execução ou todas. Custo, taxa de falha, latência e tokens ao
+          longo de uma janela, agrupados por modelo, nome, status, ambiente ou
+          usuário. Uma taxa de falha de 40% quer dizer que a execução que você
+          está lendo não é o problema.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Os resultados voltam como texto e não como JSON, o que é uma escolha
+    deliberada sobre o contexto de quem isso gasta. Quarenta objetos de span
+    são quase só pontuação; a mesma execução desenhada como cascata são algumas
+    centenas de tokens, e o agente enxerga o formato dela.
+  </p>
+
+  <h3>Como ele é montado</h3>
+  <p>
+    O servidor MCP é um subcomando do mesmo binário, não um segundo serviço.
+    Ele roda como <code>mcpd mcp</code>, fala JSON-RPC pela entrada e pela
+    saída padrão, e não guarda dado nenhum próprio. Não há porta para abrir,
+    processo para manter vivo nem nada para implantar: o host do agente o
+    inicia como processo filho quando uma conversa precisa dele e o encerra
+    depois.
+  </p>
+  <p>
+    O que ele guarda é uma conexão com um daemon. Cada chamada de ferramenta
+    vira uma requisição para a mesma API de consulta descrita acima, com a
+    mesma chave de leitura e o mesmo recorte por projeto, então um agente não
+    alcança um projeto que a chave dada a ele não alcança. O alcance de
+    entregar este servidor a um agente é exatamente o alcance de entregar a ele
+    aquela chave, e é essa a propriedade a conferir antes de configurar um.
+  </p>
+  <p>
+    O conjunto de ferramentas é pequeno de propósito. Uma superfície grande faz
+    um modelo escolher mal, e a maior parte das perguntas sobre o comportamento
+    de um agente se resume a listar execuções, abrir uma, e fazer uma pergunta
+    numérica sobre uma janela. Um cliente descobre o conjunto atual com a
+    própria chamada <code>tools/list</code> do protocolo, e não por uma lista
+    escrita aqui que poderia ficar para trás.
+  </p>
+
+  <h3>Configurar um cliente</h3>
+  <p>
+    Um host MCP levanta um servidor a partir de um comando, alguns argumentos e
+    um ambiente. O arquivo exato e a chave exata são do host, não do mcpd,
+    então consulte a documentação dele; os três valores que ele precisa de você
+    são os mesmos em toda parte.
+  </p>
+  <table>
+    <thead>
+      <tr><th>O que o host precisa</th><th>Valor</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Comando</td><td>O binário <code>mcpd</code>, em um caminho que o host consiga executar.</td></tr>
+      <tr>
+        <td>Argumentos</td>
+        <td>
+          O subcomando <code>mcp</code>. Ele aceita <code>--endpoint</code>, o
+          daemon a consultar, e <code>--api-key</code>, uma chave de leitura
+          para ele, para um host que passa argumentos com mais facilidade do
+          que um ambiente.
+        </td>
+      </tr>
+      <tr>
+        <td>Ambiente</td>
+        <td>
+          Os mesmos dois valores, como <code>MCPD_ENDPOINT</code> e
+          <code>MCPD_API_KEY</code>. O endpoint tem
+          <code>http://127.0.0.1:4317</code> por padrão, e a chave pode ficar
+          de fora quando o daemon não tem chave alguma definida.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <Command
+    class="not-prose my-6"
+    label="o que o host executa"
+    command="MCPD_ENDPOINT=https://mcpd.internal MCPD_API_KEY=$READ mcpd mcp"
+    primaryLabel="Como ambiente"
+    secondary={[
+      { label: 'Como opções', command: 'mcpd mcp --endpoint https://mcpd.internal --api-key $READ' },
+      { label: 'Pelo Docker', command: 'docker run -i --rm -e MCPD_ENDPOINT -e MCPD_API_KEY ghcr.io/mcpd/mcpd mcp' },
+    ]}
+  />
+
+  <p>Três coisas para segurar quando você emitir essa chave.</p>
+  <ul>
+    <li>
+      Dê ao agente uma chave <code>read</code>, não uma chave
+      <code>ingest</code>. Os escopos existem para que uma credencial de
+      escrita de spans não seja também uma credencial para todo prompt gravado.
+    </li>
+    <li>
+      Limite-a a um projeto. Uma chave configurada no nível de cima alcança
+      todos os projetos do daemon.
+    </li>
+    <li>
+      Saiba que uma chave de leitura também apaga traces enquanto você não
+      configurar uma lista <code>admin</code>, porque o escopo de administração
+      recai sobre a lista de leitura quando não está definido. Um agente com
+      uma chave de leitura em um daemon que nunca recebeu uma lista de
+      administração consegue apagar uma execução.
+    </li>
+  </ul>
+  <p>Os três estão em <a href={link('/docs/security')} class="link">Segurança</a>.</p>
+
+  <h2>Qual deles usar</h2>
+  <table>
+    <thead>
+      <tr><th>Caminho</th><th>Use quando</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>HTTP</td>
+        <td>Sua linguagem não tem SDK, você está mandando de um shell ou de um job, ou não quer dependência nenhuma.</td>
+      </tr>
+      <tr>
+        <td>Um SDK</td>
+        <td>Você está instrumentando uma aplicação, e ali o agrupamento em lotes, a repetição e o nunca lançar exceção valem mais do que a dependência.</td>
+      </tr>
+      <tr>
+        <td>OpenTelemetry</td>
+        <td>Você já emite OTel e prefere mudar uma URL a acrescentar uma biblioteca.</td>
+      </tr>
+      <tr>
+        <td>MCP</td>
+        <td>Uma pessoa está perguntando a um agente sobre execuções gravadas, em vez de um código lê-las em horário marcado.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Eles se misturam. Uma frota que emite pelo SDK de TypeScript, um job
+    noturno que manda notas com <code>curl</code>, e um agente lendo tudo
+    de volta por MCP são uma implantação só, não três.
+  </p>
+
+  <h2>A seguir</h2>
+  <ul>
+    <li>O que fica gravado e quem consegue ler: <a href={link('/docs/security')} class="link">Segurança</a>.</li>
+    <li>Apontar para o mcpd um OTel que você já tem: <a href={link('/docs/opentelemetry')} class="link">OpenTelemetry</a>.</li>
+    <li>Todos os endpoints, gerados a partir da especificação: <a href={link('/docs/reference/api')} class="link">API HTTP</a>.</li>
+    <li>As consultas que vale a pena conhecer: <a href={link('/docs/searching')} class="link">Encontrar uma execução</a>.</li>
+  </ul>
+</Doc>

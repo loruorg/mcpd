@@ -1,0 +1,339 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+const guard = `let run = mcpd.trace("support agent");
+{
+    let step = run.child_of("retrieve", SpanKind::Retrieval);
+    step.set_input("order 5512");
+    // Whatever this step does. The span ends at the closing brace, and it ends
+    // on an early return, on a ? and on a panic as well.
+}
+run.end();`
+
+const taskLocal = `// Opening a span does not make it current. scope() does.
+let run = mcpd.trace("support agent");
+run.scope(async {
+    lookup(&mcpd).await;
+})
+.await;
+run.end();
+
+async fn lookup(mcpd: &Mcpd) {
+    // No parent was threaded into this function, and this still nests under
+    // the run, because the task-local carries it.
+    let step = mcpd.span("lookup_order", SpanKind::ToolCall);
+    step.set_output(serde_json::json!({ "status": "shipped" }));
+}`
+
+const propagation = `// Outbound: put the header on the request.
+let header = span.traceparent();
+
+// Inbound: continue the caller's trace instead of starting a new one. An
+// absent or malformed header starts a fresh trace rather than failing.
+let run = mcpd.trace_from("charge card", inbound_header, SpanKind::AgentRun);`
+
+const payload = `generation.set_model("claude-sonnet-4", "anthropic");
+generation.set_usage(TokenUsage {
+    input_tokens: Some(412),
+    output_tokens: Some(96),
+    ..TokenUsage::default()
+});
+// Or, when the breakdown does not matter:
+generation.set_tokens(412, 96);
+
+// A message is required. "Something failed" is not actionable.
+tool.set_error("sms gateway timed out after 5s");
+
+// Or record the error you are already holding, which reads its message and kind.
+tool.record_error(&err);`
+
+const shutdown = `#[tokio::main]
+async fn main() {
+    let mcpd = Mcpd::new();
+
+    // ... the run ...
+
+    // Ignoring this is a reasonable default: an observability failure is not
+    // an application failure. Logging it costs one line.
+    if let Err(e) = mcpd.shutdown().await {
+        eprintln!("mcpd could not export: {e}");
+    }
+}`
+---
+
+<Doc
+  title="Rust"
+  description="面向 Rust 的 mcpd SDK：一个在 drop 时结束的 RAII span 守卫、用 tokio task-local 承载上下文，以及不返回错误、也不会 panic 的接入代码。"
+  lede="span 是一个守卫，被 drop 时就结束，所以一次提前返回或者一个错误，都不会让它一直开着。上下文走的是一个 tokio task-local。"
+  og="docs"
+>
+  <h2>安装</h2>
+  <p>
+    SDK 在一个后台 tokio 任务上做导出，所以它期望能找到一个运行时。没有运行时
+    它也能跑，只是在你调 <code>flush()</code> 之前什么都不会发出去；这对一个
+    同步的小工具是对的行为，但不是一个长期运行的服务想要的。
+  </p>
+
+  <Command
+    command="cargo add mcpd-sdk"
+    primaryLabel="SDK"
+    secondary={[{ label: '一个运行时，如果这个 crate 还没有', command: 'cargo add tokio --features macros,rt-multi-thread' }]}
+  />
+
+  <h2>构造客户端</h2>
+  <p>
+    一个进程一个客户端。<code>Mcpd::new()</code> 读环境变量，什么都不设置时就和
+    本地的 mcpd 通信。构造永远不会失败：mcpd 用不了的配置会把客户端禁用掉，并把
+    原因记进日志，因为一次可观测性调用，不该是一个程序还得去处理它的错误的东西。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="init" title="连接" />
+
+  <p>在 <code>Config::from_env()</code> 之后由构建器设置的任何东西，都优先于环境变量。</p>
+
+  <table>
+    <thead>
+      <tr><th>字段</th><th>环境变量</th><th>默认值</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>api_key</code></td><td><code>MCPD_API_KEY</code></td><td>无</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>无</td></tr>
+      <tr><td><code>service_name</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>无</td></tr>
+      <tr><td><code>service_version</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>无</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>batch_size</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flush_interval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2s</code></td></tr>
+      <tr><td><code>max_queue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10s</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capture_payloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>log_level</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    解析不了的设置会被跳过，同时记一条警告，然后用默认值，因为一次部署的环境
+    变量里打错一个字，不该把程序停下来。<code>enabled = false</code> 让每次调用
+    都变成空操作，但仍然返回合法的对象；id 依然是良构的，
+    <code>traceparent</code> 依然照常传播，所以一个测试不用碰被测代码，就能把
+    mcpd 关掉。
+  </p>
+
+  <h2>记录一次运行</h2>
+  <p>
+    <code>Span</code> 是一个 RAII 守卫。它在被 drop 时结束，这就是 Rust 里带
+    作用域的那种写法：一个代码块、一个作用域，或者函数的末尾。自己调
+    <code>end()</code> 做的是同一件事；守卫在那里，是为了让一次提前返回或者
+    一次 panic，不会留下一个开着、没结束的 span。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="span 是一个守卫"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: guard }]}
+  />
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="trace" title="记录一次运行" />
+
+  <h2>上下文</h2>
+  <p>
+    在一个进程内部，上下文走的是一个 tokio task-local。拿着一个 span 并不会让它
+    成为当前的那个：<code>Span::scope</code> 为一个 future 设置这个 task-local，
+    <code>Span::sync_scope</code> 为一个闭包做同样的事。在它们两个里面，
+    <code>Mcpd::span</code> 会挂到正在进行的那次运行上，所以往下好几层的一个
+    辅助函数，不用谁把父级递给它，也能正确地嵌套。当你手上已经拿着父级时，
+    <code>Span::child_of</code> 就是那个显式的写法。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="那个 task-local"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: taskLocal }]}
+  />
+
+  <p>
+    在进程之间，上下文走 W3C <code>traceparent</code> 请求头。采样标志跟着它一起
+    走，所以一条 trace 的两半，对这条 trace 是不是被留下这件事看法一致。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="跨过服务边界"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: propagation }]}
+  />
+
+  <h2>模型、用量与错误</h2>
+  <p>
+    mcpd 在摄取时就是按 token 数定价的，所以 trace 上的成本就是你被计费的那个
+    成本。记录一个错误的同时会把这个 span 的状态设成 <code>error</code>，所以
+    这两者不可能对不上；而那条消息是一个必填参数，不是一个可选项。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="一个 span 带着什么"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: payload }]}
+  />
+
+  <p>
+    其余的设置方法是 <code>set_input</code>、<code>set_output</code>、
+    <code>set_attributes</code>、<code>set_metadata</code>、
+    <code>set_tags</code>、<code>set_entity</code>、<code>set_session</code>、
+    <code>set_user</code>、<code>set_status</code> 和
+    <code>set_error_detail</code>。它们都收 <code>&amp;self</code>，所以一个
+    span 在任何借到它的地方都能往里填东西。
+  </p>
+
+  <h2>载荷、sink 与已经结束的 span</h2>
+  <p>
+    <code>Config::with_capture_payloads(false)</code> 把提示词和补全留在进程里：
+    span 照样带着它的时间、状态、用量、模型、关联信息和错误，而
+    <code>input</code> 和 <code>output</code> 在进入队列之前就被丢掉。单个 span
+    可以用 <code>span.capture_payloads(..)</code> 为自己覆盖客户端的设置，两个
+    方向都可以。
+  </p>
+  <p>
+    导出器把每个批次交给客户端的 sink。默认是 HTTP 传输层；
+    <code>Config::with_sink</code> 收下一个 <code>RecordingSink</code>，它把
+    批次留在内存里，于是一个测试不需要服务器就能断言记下了什么；或者收下一个
+    <code>ConsoleSink</code>，它把每个信号打印成一行 JSON。失败的 sink 算一次
+    失败的导出，每个间隔上报一次，绝不抛出。<code>mcpd.stats()</code> 会回答
+    <code>queued</code>、<code>dropped</code>、<code>capacity</code>、
+    <code>exported</code>、<code>failed</code> 和 <code>rejected</code>。
+  </p>
+  <p>
+    <code>mcpd.record(span)</code> 把一个已经结束的 span 排进队列，连同 id、
+    父级、开始和结束时间，按一个适配器或者一次导入手上的样子来：绝不重新指定
+    父级、重新计时或者重新采样。格式不对的记录会被丢弃，并计入
+    <code>rejected</code>。<code>span.set_external_parent</code> 携带的是一个
+    来自非 mcpd 的 tracing 系统的父级，只用于关联。
+  </p>
+
+  <h2>持久化运行</h2>
+  <p>
+    同一个客户端也服务守护进程的持久化运行。<code>Workflow::new</code> 构建定义，
+    并把那些步骤主体作为异步闭包持有；一个 <code>Worker</code> 注册它，用长轮询
+    要租约，并在一个任务上逐份服务，而 <code>start_run</code>、
+    <code>watch_run</code>、<code>publish_event</code> 以及其余的方法与运行接口
+    一一对应。步骤主体返回 <code>StepFailure::retryable</code>，表示要在这个
+    步骤的预算内重试，并通过 <code>StepContext</code> 把 span 记在自己这个步骤
+    下面。这样开出来的每一个 span，以及嵌套在其中任何一个下面的每一个 span，
+    结束时都会把自己的用量加到这个步骤上，所以守护进程按 trace 显示出来的东西
+    定价，步骤主体不用手工去加 token；<code>set_usage</code> 是那个显式的覆盖。
+    构建器上的 <code>on_lease</code>、<code>on_step_start</code>、
+    <code>on_step_end</code> 和 <code>on_conflict</code> 这几个钩子，加上
+    <code>worker.stats()</code>，让这个 worker 从内部也是可观测的。
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['rust']} example="workflow" region="workflow" title="一个工作流" />
+  <p>
+    每种构造做什么、租约协议和运行 API，在
+    <a href={linkTo('/docs/workflows')} class="link">工作流</a>、
+    <a href={linkTo('/docs/workers')} class="link">Worker</a> 和
+    <a href={linkTo('/docs/runs')} class="link">运行</a>这几页上。
+  </p>
+
+  <h2>评分与反馈</h2>
+  <p>
+    <code>Scale</code> 是一个必填参数，不是一个可选项。一个没有声明范围的裸
+    0.9 没法和任何东西比较，而等到有人在看图的时候，再问它当初是什么意思已经
+    太晚了。常用的是 <code>Scale::UNIT</code>，也就是 0.0 到 1.0。反馈是人的
+    判断，和评分分开放，因为这两者回答的是不同的问题，绝不能被平均到一起。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="score" title="评分与反馈" />
+
+  <h2>刷出与关闭</h2>
+  <p>
+    记录就是往内存里的一个队列追加一条然后返回。<code>flush()</code> 把排着队的
+    东西发出去；<code>shutdown()</code> 先刷出，再停掉 worker，而且调两次也是
+    安全的。两者都可以 await，也都会返回最后一次导出失败，这样你可以把它记进
+    日志。
+  </p>
+  <p>
+    一个短命的进程必须调它们其中一个。一个没有关闭就退出的二进制，退出时 span
+    还留在内存里；而在一个 serverless 函数里，处理函数一返回，运行时就把进程
+    冻住，于是那个后台任务再也轮不上了。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="关闭"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: shutdown }]}
+  />
+
+  <p>
+    因为一次刷出失败而丢掉的信号不会重新排队。传输层已经重试过了，而一个失败时
+    自己往回填的队列，正是一次故障变成一次内存耗尽被杀的路子。
+  </p>
+
+  <h2>你可以依赖的东西</h2>
+  <p>
+    在守护进程停着的情况下，这个示例照样跑完，把它做不到的事情打印出来，然后以
+    0 退出。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="没有守护进程在跑的时候"
+    lines={[
+      { cmd: 'cargo run -p mcpd-sdk --example quickstart' },
+      { out: '    Finished `dev` profile [unoptimized + debuginfo]' },
+      { out: '     Running `target/debug/examples/quickstart`' },
+      { out: 'mcpd could not export: export failed: mcpd could not be reached', tone: 'warn' },
+      { out: 'could not read the trace back: mcpd could not be reached', tone: 'warn' },
+      { cmd: 'echo $?' },
+      { out: '0', tone: 'ok' },
+    ]}
+  />
+
+  <ul>
+    <li>
+      没有哪个接入调用会返回错误，或者 panic。一个不可达的 mcpd、一次序列化
+      失败，或者一个满了的队列，都会通过 <code>tracing</code> 每个刷出间隔最多
+      记一条日志，然后被吞掉。可观测性绝不能把它观测的那个东西搞垮。
+    </li>
+    <li>
+      记录从不阻塞。导出发生在一个后台 tokio 任务上，所以你的智能体的延迟，不
+      取决于 mcpd 快不快，或者活没活着。
+    </li>
+    <li>
+      队列的上限是 <code>max_queue</code>。队列满时最旧的信号会被扔掉，
+      <code>mcpd.stats().dropped</code> 记下它们的数量。丢掉最旧的，是一个比
+      内存耗尽被杀小得多的失败。
+    </li>
+    <li>
+      采样率低于 1.0 时，采样是按 trace id 确定的，而不是随机的，所以一个集群
+      里的每个进程，对同一条 trace 都会做出同样的决定，一条跨过服务边界的
+      trace 也绝不会只记了一半。
+    </li>
+    <li>
+      一个 span 在开始时就导出，在结束时更新，所以一次跑到半路崩掉的运行仍然
+      读得出来。
+    </li>
+  </ul>
+
+  <h2>把它读回来</h2>
+  <p>
+    读也是同一个客户端。每个方法对应一个 HTTP 端点，返回生成出来的类型；这些
+    类型经由 <code>mcpd-core</code> 从规范来，并以 <code>mcpd_sdk::model</code>
+    重新导出。读取返回一个 <code>Result</code>，因为一次你等着结果、却答不上来
+    的查询是个消息。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="query" title="检索与分析" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">查找一次运行</a>把过滤条件
+    讲全了。<a href={linkTo('/docs/reference/data-model')} class="link">数据模型</a>
+    列出了这些类型带的每一个字段。
+  </p>
+</Doc>

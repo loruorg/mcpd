@@ -1,0 +1,303 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* Os links internos continuam escritos como rotas em inglês e são localizados
+   aqui. Uma rota cuja página em português ainda não existe leva para a página
+   em inglês, em vez de para um URL em português sem nada atrás. */
+const code = localeOf(Astro.url.pathname)
+const url = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+---
+
+<Doc
+  title="Notas e feedback"
+  description="Como o mcpd registra a avaliação automática e o julgamento humano, por que os dois ficam guardados separados, e a consulta que encontra as execuções que um avaliador rebaixou."
+  lede="Uma nota é o que uma máquina achou. Um feedback é o que uma pessoa achou. O mcpd guarda os dois como dois sinais e nunca dilui um na média do outro."
+  og="docs"
+>
+  <h2>Dois sinais, não um número</h2>
+  <p>
+    Uma <strong>nota</strong> é uma avaliação automática: um modelo juiz, uma
+    expressão regular, um teste unitário, qualquer coisa capaz de produzir um
+    número sobre uma execução. Um registro de <strong>feedback</strong> é o
+    julgamento de uma pessoa: um polegar para baixo dentro do seu produto, a
+    avaliação de um revisor, uma resposta corrigida.
+  </p>
+  <p>
+    Os dois se prendem a um <code>trace_id</code> ou a um <code>span_id</code>,
+    os dois chegam como sinais por direito próprio, e cada um fica na sua
+    própria tabela. Eles nunca são combinados. Um juiz dando 0,9 de relevância
+    e um cliente apertando o polegar para baixo são duas afirmações
+    verdadeiras, e a discordância entre elas é a coisa mais útil da execução.
+    Uma média apagaria justamente isso, e deixaria você com um número sobre o
+    qual ninguém consegue agir.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>Uma nota declara a sua escala</h2>
+  <p>
+    <code>min</code> e <code>max</code> fazem parte da nota. Sem eles um valor
+    não é interpretável: 0,86 pode ser um bom resultado numa escala de 0 a 1,
+    um resultado ruim numa escala de 0 a 5, ou uma distância em que menor é
+    melhor. Seis meses depois, com dois avaliadores no mesmo projeto, ninguém
+    consegue dizer qual é qual. A especificação usa 0 e 1 como padrão, e todo
+    SDK exige os dois no ponto da chamada, para que um padrão nunca seja aceito
+    por acidente.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Campo</th><th>Para que serve</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>scorer_id</code></td>
+        <td>Qual avaliador produziu esta nota, por exemplo <code>answer_relevance</code>. Obrigatório.</td>
+      </tr>
+      <tr>
+        <td><code>scorer_version</code></td>
+        <td>Uma nota só se compara com outra nota da mesma versão. Mude o prompt de um juiz e você tem um avaliador novo, não a continuação do antigo.</td>
+      </tr>
+      <tr>
+        <td><code>value</code></td>
+        <td>O número.</td>
+      </tr>
+      <tr>
+        <td><code>min</code>, <code>max</code></td>
+        <td>A escala declarada em que o número está.</td>
+      </tr>
+      <tr>
+        <td><code>label</code></td>
+        <td>Um resultado categórico, quando o avaliador produz um ao lado do número.</td>
+      </tr>
+      <tr>
+        <td><code>reason</code></td>
+        <td>Por quê. Para um modelo juiz é a explicação dele, e é o que torna uma nota discutível em vez de mágica.</td>
+      </tr>
+      <tr>
+        <td><code>source</code></td>
+        <td>Live, offline, experiment ou manual.</td>
+      </tr>
+      <tr>
+        <td><code>score_trace_id</code></td>
+        <td>O trace da própria execução de avaliação, para que uma nota suspeita possa ser aberta e lida como qualquer outra execução.</td>
+      </tr>
+      <tr>
+        <td><code>cost</code></td>
+        <td>Quanto custou produzir a nota.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Como registrar uma</h2>
+  <p>
+    O auxiliar do SDK enfileira uma nota do mesmo jeito que enfileira um span,
+    então a chamada não bloqueia e não pode lançar exceção. Sem nenhum
+    <code>traceId</code> informado, ela se prende ao trace do span ativo.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="score" title="nota e feedback" />
+
+  <p>
+    Por HTTP isso é <code>POST /v1/api/scores</code>, recebendo um
+    <code>Score</code> no corpo. Uma nota precisa nomear o
+    <code>trace_id</code> ou o <code>span_id</code> a que ela se refere; uma
+    nota presa a nada é recusada com 400 em vez de ficar guardada onde nunca
+    será encontrada. Mande <code>score_id</code> como string vazia e o servidor
+    gera um.
+  </p>
+
+  <h2>De onde veio uma nota</h2>
+  <p>
+    <code>source</code> é separado de <code>scorer_id</code> porque o mesmo
+    avaliador roda em mais de um contexto, e os contextos não são comparáveis.
+    Reavaliar o tráfego da semana passada com o juiz de hoje não é prova de que
+    a qualidade melhorou.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Origem</th><th>O que significa</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>live</code></td><td>Produzida on-line, enquanto a execução rastreada acontecia.</td></tr>
+      <tr><td><code>offline</code></td><td>Produzida depois, avaliando traces já guardados.</td></tr>
+      <tr><td><code>experiment</code></td><td>Produzida por um experimento rodado contra um dataset.</td></tr>
+      <tr><td><code>manual</code></td><td>Digitada por uma pessoa, pela API ou pela interface.</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Uma nota escrita por um SDK vem como <code>live</code> por padrão. Para as
+    outras três, defina você mesmo.
+  </p>
+
+  <h2>Avaliar custa dinheiro, então isso fica registrado</h2>
+  <p>
+    Uma avaliação por juiz costuma ser mais uma chamada de modelo. Avaliar toda
+    execução de produção com um juiz grande pode custar mais do que custou
+    atender o tráfego, e essa é uma conta que as pessoas descobrem tarde. Por
+    isso um <code>Score</code> carrega um <code>cost</code> no mesmo formato de
+    um span, com moeda, a divisão entre entrada e saída, e a tabela de preços
+    que produziu o número. Defina esse valor quando você escrever a nota pela
+    API HTTP ou por um lote de ingestão nativo.
+  </p>
+  <p>
+    <code>score_trace_id</code> é a outra metade da mesma ideia. Rastreie a
+    própria execução de avaliação e o id vai parar na nota, então um juiz que
+    começou a rebaixar tudo pode ser aberto, lido e mostrado como defeituoso.
+  </p>
+
+  <h2>Feedback humano</h2>
+  <p>
+    O feedback é escrito a partir do seu próprio produto. Chame-o a partir do
+    controle que a pessoa realmente apertou e o julgamento cai no trace exato
+    que produziu a resposta a que ela estava reagindo. O <code>kind</code>
+    decide o formato do <code>value</code>.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Tipo</th><th><code>value</code></th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>thumbs</code></td><td><code>up</code> ou <code>down</code>.</td></tr>
+      <tr><td><code>rating</code></td><td>Um número, numa escala que quem produz declara.</td></tr>
+      <tr><td><code>correction</code></td><td>A resposta certa, em texto.</td></tr>
+      <tr><td><code>tag</code></td><td>Um rótulo escolhido de um conjunto.</td></tr>
+      <tr><td><code>comment</code></td><td>Prosa livre, sem nota nenhuma junto.</td></tr>
+    </tbody>
+  </table>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="um polegar para baixo vindo do seu produto"
+    samples={[
+      {
+        lang: 'typescript',
+        label: 'TypeScript',
+        shiki: 'typescript',
+        code: `// No traceId: it attaches to the active span's trace.
+mcpd.feedback({
+  kind: 'thumbs',
+  value: 'down',
+  comment: 'Named the wrong depot.',
+  authorKind: 'end_user',
+})`,
+      },
+      {
+        lang: 'curl',
+        label: 'cURL',
+        shiki: 'bash',
+        code: `curl -s -X POST "$MCPD/v1/api/feedback" \\
+  -H 'content-type: application/json' \\
+  -d "{
+    \\"feedback_id\\": \\"\\",
+    \\"trace_id\\": \\"$TRACE\\",
+    \\"kind\\": \\"thumbs\\",
+    \\"value\\": \\"down\\",
+    \\"comment\\": \\"Named the wrong depot.\\",
+    \\"author_kind\\": \\"end_user\\",
+    \\"timestamp\\": \\"$NOW\\",
+    \\"correlation\\": { \\"project\\": \\"default\\" }
+  }"`,
+      },
+    ]}
+  />
+
+  <p>
+    A ocultação age sobre nomes de chave, e ele roda sobre os
+    <code>metadata</code> que você prende a um julgamento. O
+    <code>author_id</code> é guardado exatamente como você o manda, então mande
+    um id pseudônimo em vez de um endereço de e-mail. Veja
+    <a href={url('/docs/privacy')} class="link">Ocultação e retenção</a>.
+  </p>
+
+  <h2>A consulta que encontra respostas ruins</h2>
+  <p>
+    É para isto que servem as notas. <code>has_score</code> nomeia um avaliador
+    e <code>score_below</code> define a barra, e a lista de traces devolve as
+    execuções que aquele avaliador colocou abaixo dela. A comparação é estrita,
+    então <code>score_below=0.5</code> deixa de fora uma execução que tirou
+    exatamente 0.5.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="query" title="encontre as execuções que foram mal" />
+
+  <p>
+    <code>score_below</code> só significa alguma coisa com
+    <code>has_score</code> ao lado: uma barra sem avaliador nomeado é uma barra
+    sobre nada. Os dois são parâmetros de <code>GET /v1/api/traces</code>,
+    então se combinam com todos os outros filtros de lá. Respostas ruins de um
+    modelo, em produção, no último dia, é uma requisição só.
+  </p>
+
+  <h2>Como ler tudo de volta</h2>
+  <p>
+    <code>GET /v1/api/scores</code> lista as avaliações automáticas, filtradas
+    por <code>scorer_id</code>, <code>source</code>, <code>trace_id</code>,
+    <code>experiment_id</code>, <code>min_value</code>, <code>max_value</code>
+    e uma janela de tempo, com paginação por cursor. <code>source</code> aceita
+    <code>live</code>, <code>offline</code>, <code>experiment</code> ou
+    <code>manual</code>, que é como você lê de volta as notas do próprio juiz
+    sem as que uma pessoa digitou.
+    <code>GET /v1/api/feedback</code> recebe um <code>trace_id</code> e devolve
+    os julgamentos daquela execução. Listar o feedback de um projeto sem nomear
+    uma execução não está implementado nesta versão, e o endpoint diz isso: sem
+    <code>trace_id</code> ele recusa com um 400 nomeando o parâmetro. Antes ele
+    respondia uma lista vazia, o que se lê como se ninguém tivesse julgado
+    nada.
+  </p>
+  <p>
+    A lista de notas não aceita <code>order</code>: ela vem da mais nova para a
+    mais antiga, e o cursor dela compara em um sentido só. As listas de
+    execuções e de spans aceitam, então aqui o parâmetro é recusado pelo nome
+    em vez de ser aceito e descartado. O mesmo vale para os filtros
+    <code>kind</code>, <code>from</code>, <code>to</code> e
+    <code>cursor</code> que vários clientes de SDK deixam você definir numa
+    consulta de feedback. Nenhum deles chegou a ser aplicado, e os quatro agora
+    são recusados.
+  </p>
+  <p>
+    Para ler uma execução e tudo que está preso a ela de uma vez, peça os
+    extras pelo nome: <code>GET /v1/api/traces/{'{trace_id}'}?include=scores,feedback</code>,
+    ou <code>include=all</code> para levar os logs junto.
+  </p>
+
+  <h2>O que a lista de traces carrega, e o que ela não carrega</h2>
+  <p>
+    Cada trace guardado mantém dois resumos, para que a lista não precise de
+    nenhum join. Um é o valor médio <em>por avaliador</em>: uma média dentro de
+    <code>answer_relevance</code>, e outra média separada dentro de
+    <code>groundedness</code>. O outro é uma contagem de feedback
+    <em>por tipo</em>: três polegares, uma correção. Contagens, e não uma
+    média, porque a média de um polegar para cima com uma correção não é uma
+    quantidade.
+  </p>
+  <p>
+    Não existe uma nota geral de qualidade, e não vai existir. Um único número
+    somando um modelo juiz, uma expressão regular e o polegar para baixo de um
+    cliente seria um número sem unidade e sem como discutir com ele. O mcpd
+    mostra as partes e deixa a decisão com você.
+  </p>
+
+  <h2>A seguir</h2>
+  <ul>
+    <li>
+      Tudo o mais que dá para filtrar:
+      <a href={url('/docs/searching')} class="link">Encontrar uma execução</a>.
+    </li>
+    <li>
+      De que é feito um número de custo:
+      <a href={url('/docs/cost')} class="link">Apuração de custos</a>.
+    </li>
+    <li>
+      O que acontece com um id de autor antes de ele ser guardado:
+      <a href={url('/docs/privacy')} class="link">Ocultação e retenção</a>.
+    </li>
+  </ul>
+</Doc>

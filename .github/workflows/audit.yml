@@ -1,0 +1,111 @@
+# Known vulnerabilities in what mcpd depends on.
+#
+# Why this exists: almost nothing that will compromise this daemon will be
+# written in this repository. It will arrive in a transitive dependency of one
+# of the seven manifests below, published after the version in the lock file
+# was pinned. Nothing in ci.yml looks at that, so this workflow does.
+#
+# Two scanners, because they answer different questions:
+#
+#   cargo-deny reads the crate graph. It knows about yanked crates, duplicate
+#   versions of the same crate, and dependencies pulled from a registry or a
+#   git remote that is not crates.io. `cargo deny check advisories` reads the
+#   same RustSec database that `cargo audit` reads, so running cargo-audit as
+#   well would repeat the work and report the same findings twice.
+#
+#   OSV-Scanner reads lock files across every ecosystem. It is the only thing
+#   here that sees the npm, Go and Rust dependencies of the SDKs and the
+#   examples in one pass.
+name: audit
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Weekly. Most findings appear on a day nobody touched the repository,
+    # because an advisory was published, not because a dependency changed.
+    - cron: '41 5 * * 2'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # `--all-features` matters: mcpd-store puts the ClickHouse and Postgres
+      # backends behind Cargo features, and their dependencies are the ones
+      # that reach a network. A default-features scan would not see them.
+      #
+      # `licenses` reads deny.toml at the repository root, which names the
+      # licences a release may carry. supply-chain.yml runs the same four
+      # checks and keeps the report as an artefact; this one is the fast
+      # answer on a pull request.
+      - name: advisories, licences, bans and sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories licenses bans sources
+          arguments: --all-features
+
+  # A full scan of every lock file in the tree. OSV-Scanner walks the working
+  # directory and reads every manifest it can parse. The largest dependency
+  # surface in this repository by a wide margin is web/, which is why its
+  # package-lock.json is committed: 526 packages, none of them written here.
+  #
+  # One ecosystem is genuinely not covered. The Kotlin SDK declares two real
+  # dependencies (kotlinx-serialization-json and kotlinx-coroutines-core) and
+  # Gradle does not write a lock file unless
+  # dependency locking is switched on, so neither scanner sees them or their
+  # transitive graph. Closing it means enabling `dependencyLocking` in
+  # sdks/kotlin/build.gradle.kts and committing the result; the scan below then
+  # picks it up with no change here.
+  #
+  # Python and Elixir have no lock file either, and that one does not matter:
+  # both SDKs declare an empty dependency list on purpose, so the file would be
+  # empty and would prove nothing. An uncovered ecosystem with nothing in it is
+  # not a gap, and listing it as one would make this comment read as more
+  # thorough than it is.
+  osv-full:
+    name: osv-scanner (full tree)
+    if: github.event_name != 'pull_request'
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
+    with:
+      scan-args: |-
+        -r
+        ./
+
+  # On a pull request, scan the difference instead. This reports only what the
+  # branch introduces, so an advisory that main is already carrying does not
+  # block an unrelated change, and the person who added a dependency is the
+  # person who is told about it.
+  osv-diff:
+    name: osv-scanner (new in this pull request)
+    if: github.event_name == 'pull_request'
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
+    with:
+      scan-args: |-
+        -r
+        ./

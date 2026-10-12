@@ -1,0 +1,364 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+
+const guard = `let run = mcpd.trace("support agent");
+{
+    let step = run.child_of("retrieve", SpanKind::Retrieval);
+    step.set_input("order 5512");
+    // Whatever this step does. The span ends at the closing brace, and it ends
+    // on an early return, on a ? and on a panic as well.
+}
+run.end();`
+
+const taskLocal = `// Opening a span does not make it current. scope() does.
+let run = mcpd.trace("support agent");
+run.scope(async {
+    lookup(&mcpd).await;
+})
+.await;
+run.end();
+
+async fn lookup(mcpd: &Mcpd) {
+    // No parent was threaded into this function, and this still nests under
+    // the run, because the task-local carries it.
+    let step = mcpd.span("lookup_order", SpanKind::ToolCall);
+    step.set_output(serde_json::json!({ "status": "shipped" }));
+}`
+
+const propagation = `// Outbound: put the header on the request.
+let header = span.traceparent();
+
+// Inbound: continue the caller's trace instead of starting a new one. An
+// absent or malformed header starts a fresh trace rather than failing.
+let run = mcpd.trace_from("charge card", inbound_header, SpanKind::AgentRun);`
+
+const payload = `generation.set_model("claude-sonnet-4", "anthropic");
+generation.set_usage(TokenUsage {
+    input_tokens: Some(412),
+    output_tokens: Some(96),
+    ..TokenUsage::default()
+});
+// Or, when the breakdown does not matter:
+generation.set_tokens(412, 96);
+
+// A message is required. "Something failed" is not actionable.
+tool.set_error("sms gateway timed out after 5s");
+
+// Or record the error you are already holding, which reads its message and kind.
+tool.record_error(&err);`
+
+const shutdown = `#[tokio::main]
+async fn main() {
+    let mcpd = Mcpd::new();
+
+    // ... the run ...
+
+    // Ignoring this is a reasonable default: an observability failure is not
+    // an application failure. Logging it costs one line.
+    if let Err(e) = mcpd.shutdown().await {
+        eprintln!("mcpd could not export: {e}");
+    }
+}`
+---
+
+<Doc
+  title="Rust"
+  description="El SDK de mcpd para Rust: un guard RAII de span que termina al soltarse, un task-local de tokio para el contexto, e instrumentación que no devuelve errores ni hace panic."
+  lede="Un span es un guard que termina cuando se suelta, así que un retorno temprano o un error no puede dejar ninguno abierto. El contexto viaja en un task-local de tokio."
+  og="docs"
+>
+  <h2>Instalación</h2>
+  <p>
+    El SDK exporta en una tarea de tokio en segundo plano, así que espera
+    encontrar un runtime. Funciona sin él, y entonces no se envía nada hasta que
+    llamas a <code>flush()</code>, que es el comportamiento correcto para una
+    herramienta síncrona pero no lo que quiere un servicio de larga vida.
+  </p>
+
+  <Command
+    command="cargo add mcpd-sdk"
+    primaryLabel="El SDK"
+    secondary={[{ label: 'Un runtime, si el crate no tiene ninguno', command: 'cargo add tokio --features macros,rt-multi-thread' }]}
+  />
+
+  <h2>Construir el cliente</h2>
+  <p>
+    Un cliente por proceso. <code>Mcpd::new()</code> lee el entorno y habla con
+    un mcpd local sin que haya nada configurado. La construcción nunca falla:
+    una configuración que mcpd no puede usar desactiva el cliente y deja anotado
+    por qué, porque una llamada de observabilidad no es algo de lo que un
+    programa deba tener que gestionar un error.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="init" title="conectar" />
+
+  <p>Todo lo que se asigne en el builder después de <code>Config::from_env()</code> gana al entorno.</p>
+
+  <table>
+    <thead>
+      <tr><th>Campo</th><th>Entorno</th><th>Por defecto</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>api_key</code></td><td><code>MCPD_API_KEY</code></td><td>ninguno</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>ninguno</td></tr>
+      <tr><td><code>service_name</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>ninguno</td></tr>
+      <tr><td><code>service_version</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>ninguno</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>batch_size</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flush_interval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2s</code></td></tr>
+      <tr><td><code>max_queue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10s</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capture_payloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>log_level</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Un ajuste que no se puede parsear se omite con un aviso y se usa el valor
+    por defecto, porque una errata en el entorno de un despliegue no debe
+    detener el programa. <code>enabled = false</code> convierte cada llamada en
+    una operación vacía que sigue devolviendo objetos válidos; los ids siguen
+    estando bien formados y <code>traceparent</code> se sigue propagando, así
+    que una prueba puede apagar mcpd sin tocar el código bajo prueba.
+  </p>
+
+  <h2>Registrar una ejecución</h2>
+  <p>
+    <code>Span</code> es un guard RAII. Termina cuando se suelta, que es la
+    forma con ámbito en Rust: un bloque, un ámbito o el final de la función.
+    Llamar tú mismo a <code>end()</code> hace lo mismo, y el guard está para que
+    un retorno temprano o un panic no puedan dejar un span abierto y sin
+    terminar.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="un span es un guard"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: guard }]}
+  />
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="trace" title="registrar una ejecución" />
+
+  <h2>Contexto</h2>
+  <p>
+    Dentro de un proceso, el contexto viaja en un task-local de tokio. Tener un
+    span no lo convierte en el actual: <code>Span::scope</code> asigna el
+    task-local para un future y <code>Span::sync_scope</code> lo hace para un
+    closure. Dentro de cualquiera de los dos, <code>Mcpd::span</code> se engancha
+    a la ejecución en curso, así que una función auxiliar varias capas más abajo
+    se anida bien sin recibir el padre. <code>Span::child_of</code> es la
+    alternativa explícita cuando ya tienes el padre en la mano.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="el task-local"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: taskLocal }]}
+  />
+
+  <p>
+    Entre procesos, el contexto viaja en una cabecera <code>traceparent</code>
+    de W3C. La marca de muestreo va con ella, así que las dos mitades de una
+    traza coinciden sobre si la traza se está guardando.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="a través de un límite de servicio"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: propagation }]}
+  />
+
+  <h2>Modelo, uso y errores</h2>
+  <p>
+    mcpd calcula el precio a partir de los recuentos de tokens en la ingesta,
+    así que el costo que ves en la traza es el costo que te facturaron.
+    Registrar un error pone el estado del span en <code>error</code> en el mismo
+    movimiento, así que los dos nunca pueden discrepar, y el mensaje es un
+    argumento obligatorio y no una opción.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="qué lleva un span"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: payload }]}
+  />
+
+  <p>
+    Los demás setters son <code>set_input</code>, <code>set_output</code>,
+    <code>set_attributes</code>, <code>set_metadata</code>,
+    <code>set_tags</code>, <code>set_entity</code>, <code>set_session</code>,
+    <code>set_user</code>, <code>set_status</code> y
+    <code>set_error_detail</code>. Todos reciben <code>&amp;self</code>, así que
+    un span se puede rellenar desde cualquier sitio donde esté prestado.
+  </p>
+
+  <h2>Payloads, sinks y spans ya terminados</h2>
+  <p>
+    <code>Config::with_capture_payloads(false)</code> mantiene los prompts y las
+    completions dentro del proceso: los spans siguen llevando sus tiempos, su
+    estado, su uso, su modelo, su correlación y sus errores, y
+    <code>input</code> y <code>output</code> se descartan antes de llegar a la
+    cola. Un span anula al cliente para sí mismo con
+    <code>span.capture_payloads(..)</code>, en cualquiera de los dos sentidos.
+  </p>
+  <p>
+    El exportador entrega cada lote al sink del cliente. El transporte HTTP es
+    el valor por defecto; <code>Config::with_sink</code> acepta un
+    <code>RecordingSink</code>, que guarda los lotes en memoria para que una
+    prueba pueda comprobar lo que se registró sin servidor, o un
+    <code>ConsoleSink</code>, que imprime una línea JSON por señal. Un sink que
+    falla es una exportación fallida, informada una vez por intervalo y nunca
+    lanzada. <code>mcpd.stats()</code> responde <code>queued</code>,
+    <code>dropped</code>, <code>capacity</code>, <code>exported</code>,
+    <code>failed</code> y <code>rejected</code>.
+  </p>
+  <p>
+    <code>mcpd.record(span)</code> encola un span que ya terminó, con sus ids,
+    su padre, su inicio y su fin, tal como los tiene un adaptador o una
+    importación: nunca se le cambia el padre, ni los tiempos, ni el muestreo. Un
+    registro mal formado se descarta y se cuenta como <code>rejected</code>.
+    <code>span.set_external_parent</code> lleva un padre de un sistema de trazas
+    que no es mcpd, solo para correlacionar.
+  </p>
+
+  <h2>Ejecuciones duraderas</h2>
+  <p>
+    El mismo cliente sirve las ejecuciones duraderas del daemon.
+    <code>Workflow::new</code> construye la definición y guarda los cuerpos de
+    los pasos como closures async; un <code>Worker</code> la registra, hace long
+    polling para obtener leases y atiende cada uno en una tarea, y
+    <code>start_run</code>, <code>watch_run</code>, <code>publish_event</code> y
+    el resto reflejan la superficie de ejecuciones una a una. Un cuerpo devuelve
+    <code>StepFailure::retryable</code> para que se reintente dentro del
+    presupuesto del paso, y registra spans bajo su paso a través del
+    <code>StepContext</code>. Cada span abierto así, y cada span anidado bajo
+    uno de ellos, suma su uso al del paso cuando termina, de modo que el daemon
+    cobra lo que muestra la traza sin que el cuerpo sume tokens a mano;
+    <code>set_usage</code> es la anulación explícita. Los hooks
+    <code>on_lease</code>, <code>on_step_start</code>, <code>on_step_end</code>
+    y <code>on_conflict</code> del builder y <code>worker.stats()</code> hacen
+    que el worker se pueda observar desde dentro.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['rust']} example="workflow" region="workflow" title="un workflow" />
+  <p>
+    Qué hace cada construcción, el protocolo de leases y la API de ejecuciones
+    están en <a href={urlFor('/docs/workflows', locale)} class="link">Workflows</a>,
+    <a href={urlFor('/docs/workers', locale)} class="link">Workers</a> y
+    <a href={urlFor('/docs/runs', locale)} class="link">Ejecuciones</a>.
+  </p>
+
+  <h2>Puntuaciones y feedback</h2>
+  <p>
+    Una <code>Scale</code> es un argumento obligatorio, no una opción. Un 0.9
+    suelto sin rango declarado no se puede comparar con nada, y para cuando
+    alguien esté leyendo el gráfico ya es tarde para preguntar qué significaba.
+    <code>Scale::UNIT</code> es la habitual, de 0.0 a 1.0. El feedback es el
+    juicio de una persona, y se mantiene aparte de una puntuación porque los dos
+    responden preguntas distintas y nunca se deben promediar juntos.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="score" title="puntuación y feedback" />
+
+  <h2>Flush y apagado</h2>
+  <p>
+    Registrar añade a una cola en memoria y vuelve. <code>flush()</code> envía
+    lo que está en la cola; <code>shutdown()</code> hace flush, detiene el worker
+    y se puede llamar dos veces sin problema. Los dos se pueden esperar, y los
+    dos devuelven el último fallo de exportación para que lo puedas anotar.
+  </p>
+  <p>
+    Un proceso de vida corta tiene que llamar a uno de los dos. Un binario que
+    sale sin apagar el cliente sale con sus spans todavía en memoria, y en una
+    función serverless el runtime congela el proceso en cuanto el handler
+    devuelve, así que la tarea en segundo plano no vuelve a tener turno.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="apagar el cliente"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: shutdown }]}
+  />
+
+  <p>
+    Las señales que se pierden en un flush fallido no vuelven a la cola. El
+    transporte ya ha reintentado, y una cola que se rellena sola cuando falla es
+    la forma en que una caída se convierte en una muerte por falta de memoria.
+  </p>
+
+  <h2>Con qué puedes contar</h2>
+  <p>
+    Con el daemon detenido, el ejemplo llega hasta el final, imprime lo que no
+    pudo hacer y sale con cero.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="sin ningún daemon en marcha"
+    lines={[
+      { cmd: 'cargo run -p mcpd-sdk --example quickstart' },
+      { out: '    Finished `dev` profile [unoptimized + debuginfo]' },
+      { out: '     Running `target/debug/examples/quickstart`' },
+      { out: 'mcpd could not export: export failed: mcpd could not be reached', tone: 'warn' },
+      { out: 'could not read the trace back: mcpd could not be reached', tone: 'warn' },
+      { cmd: 'echo $?' },
+      { out: '0', tone: 'ok' },
+    ]}
+  />
+
+  <ul>
+    <li>
+      Ninguna llamada de instrumentación devuelve un error ni hace panic. Un
+      mcpd inalcanzable, un fallo de serialización o una cola llena se anotan
+      por <code>tracing</code> como mucho una vez por intervalo de flush y se
+      tragan. La observabilidad nunca debe tumbar aquello que observa.
+    </li>
+    <li>
+      Registrar nunca bloquea. La exportación ocurre en una tarea de tokio en
+      segundo plano, así que la latencia de tu agente no depende de que mcpd sea
+      rápido, ni de que esté en pie.
+    </li>
+    <li>
+      La cola está limitada a <code>max_queue</code>. Cuando está llena se
+      descartan las señales más antiguas y <code>mcpd.stats().dropped</code> las
+      cuenta. Descartar las más antiguas es un fallo menor que una muerte por
+      falta de memoria.
+    </li>
+    <li>
+      Un muestreo por debajo de 1.0 es determinista sobre el id de traza en vez
+      de aleatorio, así que todos los procesos de una flota toman la misma
+      decisión sobre la misma traza y una traza que cruza un límite de servicio
+      nunca se registra a medias.
+    </li>
+    <li>
+      Un span se exporta cuando empieza y se actualiza cuando termina, así que
+      una ejecución que se cae a mitad de vuelo sigue siendo legible.
+    </li>
+  </ul>
+
+  <h2>Volver a leerlo</h2>
+  <p>
+    El mismo cliente lee. Cada método refleja un endpoint HTTP y devuelve los
+    tipos generados, que salen de la especificación pasando por
+    <code>mcpd-core</code> y se reexportan como <code>mcpd_sdk::model</code>.
+    Las lecturas devuelven un <code>Result</code>, porque una consulta que
+    esperaste y no se puede responder es una noticia.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="query" title="buscar y analizar" />
+
+  <p>
+    <a href={urlFor('/docs/searching', locale)} class="link">Encontrar una ejecución</a>
+    cubre los filtros por completo.
+    <a href={urlFor('/docs/reference/data-model', locale)} class="link">El modelo de datos</a>
+    lista todos los campos que llevan estos tipos.
+  </p>
+</Doc>

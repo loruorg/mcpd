@@ -1,0 +1,301 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Scores et retours"
+  description="Comment mcpd enregistre l’évaluation automatique et le jugement humain, pourquoi les deux sont stockés à part, et la requête qui trouve les exécutions qu’un scorer a mal notées."
+  lede="Un score est ce qu’une machine a pensé. Un retour est ce qu’une personne a pensé. mcpd en fait deux signaux et ne fond jamais l’un dans l’autre par une moyenne."
+  og="docs"
+>
+  <h2>Deux signaux, pas un chiffre</h2>
+  <p>
+    Un <strong>score</strong> est une évaluation automatique : un modèle juge,
+    une expression régulière, un test unitaire, tout ce qui peut produire un
+    nombre au sujet d’une exécution. Un enregistrement de
+    <strong>retour</strong> est le jugement d’une personne : un pouce vers le
+    bas dans votre produit, la note d’un relecteur, une réponse corrigée.
+  </p>
+  <p>
+    Les deux se rattachent à un <code>trace_id</code> ou à un
+    <code>span_id</code>, les deux arrivent comme des signaux à part entière, et
+    chacun est stocké dans sa propre table. Ils ne sont
+    jamais combinés. Un juge qui note 0.9 en pertinence et un client qui appuie
+    sur le pouce vers le bas disent tous les deux quelque chose de vrai, et leur
+    désaccord est ce qu’il y a de plus utile sur l’exécution. Une moyenne
+    effacerait précisément cela et vous laisserait un nombre sur lequel personne
+    ne peut agir.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>Un score déclare son échelle</h2>
+  <p>
+    <code>min</code> et <code>max</code> font partie du score. Sans eux, une
+    valeur ne s’interprète pas : 0.86 peut être un bon résultat sur une échelle
+    de 0 à 1, un mauvais sur une échelle de 0 à 5, ou une distance où plus bas
+    vaut mieux. Six mois plus tard, avec deux scorers dans le même projet,
+    personne ne peut trancher. La spécification leur donne 0 et 1 par défaut, et
+    chaque SDK les exige à l’appel pour qu’une valeur par défaut ne soit jamais
+    acceptée par accident.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Champ</th><th>À quoi il sert</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>scorer_id</code></td>
+        <td>Quel scorer a produit ce score, par exemple <code>answer_relevance</code>. Obligatoire.</td>
+      </tr>
+      <tr>
+        <td><code>scorer_version</code></td>
+        <td>Un score ne se compare qu’à un autre score de la même version. Changez le prompt d’un juge et vous avez un nouveau scorer, pas la suite de l’ancien.</td>
+      </tr>
+      <tr>
+        <td><code>value</code></td>
+        <td>Le nombre.</td>
+      </tr>
+      <tr>
+        <td><code>min</code>, <code>max</code></td>
+        <td>L’échelle déclarée sur laquelle le nombre se place.</td>
+      </tr>
+      <tr>
+        <td><code>label</code></td>
+        <td>Un résultat catégoriel, quand le scorer en produit un à côté du nombre.</td>
+      </tr>
+      <tr>
+        <td><code>reason</code></td>
+        <td>Pourquoi. Pour un modèle juge, c’est son explication, et c’est ce qui rend un score discutable plutôt que magique.</td>
+      </tr>
+      <tr>
+        <td><code>source</code></td>
+        <td>Live, offline, experiment ou manual.</td>
+      </tr>
+      <tr>
+        <td><code>score_trace_id</code></td>
+        <td>La trace de l’exécution de notation elle-même, pour qu’un score suspect s’ouvre et se lise comme n’importe quelle autre exécution.</td>
+      </tr>
+      <tr>
+        <td><code>cost</code></td>
+        <td>Ce que la production du score a coûté.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>En enregistrer un</h2>
+  <p>
+    La fonction utilitaire du SDK met un score en file d’attente comme elle y met
+    un span : l’appel ne bloque pas et ne peut pas lever d’exception. Sans
+    <code>traceId</code>, il se rattache à la trace du span actif.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="score" title="score et retour" />
+
+  <p>
+    En HTTP, c’est <code>POST /v1/api/scores</code>, avec un
+    <code>Score</code> pour corps. Un score doit nommer le
+    <code>trace_id</code> ou le <code>span_id</code> qu’il concerne ; un score
+    rattaché à rien est refusé par un 400 plutôt que stocké là où on ne le
+    retrouvera jamais. Envoyez <code>score_id</code> comme chaîne vide et le
+    serveur en génère un.
+  </p>
+
+  <h2>D’où vient un score</h2>
+  <p>
+    <code>source</code> est distinct de <code>scorer_id</code> parce que le même
+    scorer tourne dans plusieurs contextes, et que ces contextes ne se comparent
+    pas. Renoter le trafic de la semaine dernière avec le juge d’aujourd’hui ne
+    prouve pas que la qualité s’est améliorée.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Source</th><th>Signification</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>live</code></td><td>Produit en ligne, pendant que l’exécution tracée avait lieu.</td></tr>
+      <tr><td><code>offline</code></td><td>Produit plus tard, en notant des traces déjà stockées.</td></tr>
+      <tr><td><code>experiment</code></td><td>Produit par une expérience lancée sur un dataset.</td></tr>
+      <tr><td><code>manual</code></td><td>Saisi par une personne, par l’API ou par l’interface.</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Un score écrit par un SDK vaut <code>live</code> par défaut. Réglez-le
+    vous-même pour les trois autres.
+  </p>
+
+  <h2>Noter coûte de l’argent, donc c’est enregistré</h2>
+  <p>
+    Une évaluation par juge est en général un autre appel de modèle. Noter
+    chaque exécution de production avec un gros juge peut coûter plus cher que
+    n’a coûté le trafic servi, et c’est une facture que l’on découvre tard. Un
+    <code>Score</code> porte donc un <code>cost</code> de la même forme que
+    celui d’un span, avec une devise, une répartition entre entrée et sortie, et
+    la grille tarifaire qui a produit le chiffre. Renseignez-le quand vous écrivez le score
+    par l’API HTTP ou par un lot d’ingestion natif.
+  </p>
+  <p>
+    <code>score_trace_id</code> est l’autre moitié de la même idée. Tracez
+    l’exécution de notation elle-même et son identifiant se pose sur le score,
+    de sorte qu’un juge qui s’est mis à tout dévaluer peut être ouvert, lu, et
+    montré comme défectueux.
+  </p>
+
+  <h2>Les retours humains</h2>
+  <p>
+    Un retour s’écrit depuis votre propre produit. Appelez l’endpoint depuis le
+    contrôle sur lequel la personne a réellement appuyé et le jugement se pose
+    sur la trace exacte qui a produit la réponse à laquelle elle réagissait.
+    <code>kind</code> décide de la forme de <code>value</code>.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Type</th><th><code>value</code></th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>thumbs</code></td><td><code>up</code> ou <code>down</code>.</td></tr>
+      <tr><td><code>rating</code></td><td>Un nombre, sur une échelle que le producteur déclare.</td></tr>
+      <tr><td><code>correction</code></td><td>La bonne réponse, en texte.</td></tr>
+      <tr><td><code>tag</code></td><td>Une étiquette choisie dans un ensemble.</td></tr>
+      <tr><td><code>comment</code></td><td>Du texte libre, sans score attaché.</td></tr>
+    </tbody>
+  </table>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="un pouce vers le bas depuis votre produit"
+    samples={[
+      {
+        lang: 'typescript',
+        label: 'TypeScript',
+        shiki: 'typescript',
+        code: `// Sans traceId : il se rattache à la trace du span actif.
+mcpd.feedback({
+  kind: 'thumbs',
+  value: 'down',
+  comment: 'Named the wrong depot.',
+  authorKind: 'end_user',
+})`,
+      },
+      {
+        lang: 'curl',
+        label: 'cURL',
+        shiki: 'bash',
+        code: `curl -s -X POST "$MCPD/v1/api/feedback" \\
+  -H 'content-type: application/json' \\
+  -d "{
+    \\"feedback_id\\": \\"\\",
+    \\"trace_id\\": \\"$TRACE\\",
+    \\"kind\\": \\"thumbs\\",
+    \\"value\\": \\"down\\",
+    \\"comment\\": \\"Named the wrong depot.\\",
+    \\"author_kind\\": \\"end_user\\",
+    \\"timestamp\\": \\"$NOW\\",
+    \\"correlation\\": { \\"project\\": \\"default\\" }
+  }"`,
+      },
+    ]}
+  />
+
+  <p>
+    Le masquage s’applique aux noms de clés, et il passe sur les
+    <code>metadata</code> que vous attachez à un jugement. <code>author_id</code>
+    est stocké tel que vous l’envoyez : envoyez donc un identifiant pseudonyme
+    plutôt qu’une adresse e-mail. Voir
+    <a href={urlFor('/docs/privacy', locale)} class="link">Masquage et conservation</a>.
+  </p>
+
+  <h2>La requête qui trouve les mauvaises réponses</h2>
+  <p>
+    C’est à cela que servent les scores. <code>has_score</code> nomme un scorer
+    et <code>score_below</code> place la barre ; la liste des traces renvoie les
+    exécutions que ce scorer a mises en dessous. La comparaison est stricte,
+    donc <code>score_below=0.5</code> exclut une exécution notée exactement 0.5.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="query" title="trouver les exécutions mal notées" />
+
+  <p>
+    <code>score_below</code> ne veut dire quelque chose qu’avec
+    <code>has_score</code> à côté : une barre sans scorer nommé est une barre
+    sur rien. Les deux sont des paramètres de
+    <code>GET /v1/api/traces</code>, donc ils se combinent avec tous les autres
+    filtres de cet endpoint. Les mauvaises réponses d’un modèle donné, en
+    production, sur la dernière journée : une seule requête.
+  </p>
+
+  <h2>Les relire</h2>
+  <p>
+    <code>GET /v1/api/scores</code> liste les évaluations automatiques, filtrées
+    par <code>scorer_id</code>, <code>source</code>, <code>trace_id</code>,
+    <code>experiment_id</code>, <code>min_value</code>, <code>max_value</code>
+    et une fenêtre temporelle, avec pagination par curseur. <code>source</code>
+    accepte <code>live</code>, <code>offline</code>, <code>experiment</code> ou
+    <code>manual</code>, ce qui vous permet de relire les scores du juge sans
+    ceux qu’une personne a saisis.
+    <code>GET /v1/api/feedback</code> prend un <code>trace_id</code> et renvoie
+    les jugements portés sur cette exécution. Lister les retours d’un projet
+    sans nommer d’exécution n’est pas implémenté dans cette version, et
+    l’endpoint le dit : sans <code>trace_id</code>, il refuse par un 400 qui
+    nomme le paramètre. Il répondait autrefois une liste vide, ce qui se lit
+    comme si personne n’avait rien jugé.
+  </p>
+  <p>
+    La liste des scores n’accepte pas <code>order</code> : elle va du plus
+    récent au plus ancien, et son curseur ne compare que dans un sens. Les
+    listes d’exécutions et de spans en acceptent un, donc il est ici refusé
+    nommément plutôt qu’accepté puis ignoré. Il en va de même pour les filtres
+    <code>kind</code>, <code>from</code>, <code>to</code> et
+    <code>cursor</code> que plusieurs clients SDK vous laissent poser sur une
+    requête de retours. Aucun n’a jamais été appliqué, et les quatre sont
+    désormais refusés.
+  </p>
+  <p>
+    Pour lire une exécution et tout ce qui y est attaché en une fois, demandez
+    les suppléments par leur nom :
+    <code>GET /v1/api/traces/{'{trace_id}'}?include=scores,feedback</code>,
+    ou <code>include=all</code> pour avoir aussi les logs.
+  </p>
+
+  <h2>Ce que porte la liste des traces, et ce qu’elle ne porte pas</h2>
+  <p>
+    Chaque trace stockée conserve deux agrégats pour que la liste n’ait besoin
+    d’aucune jointure. Le premier est la valeur moyenne <em>par scorer</em> :
+    une moyenne à l’intérieur d’<code>answer_relevance</code>, et une moyenne
+    distincte à l’intérieur de <code>groundedness</code>. Le second est un
+    décompte des retours <em>par type</em> : trois pouces, une correction. Des
+    décomptes, pas une moyenne, parce que la moyenne d’un pouce levé et d’une
+    correction n’est pas une quantité.
+  </p>
+  <p>
+    Il n’y a pas de score de qualité global, et il n’y en aura pas. Un chiffre
+    unique combinant un modèle juge, une expression régulière et le pouce baissé
+    d’un client serait un nombre sans unité et sans prise pour le contester.
+    mcpd vous montre les pièces et vous laisse décider.
+  </p>
+
+  <h2>Ensuite</h2>
+  <ul>
+    <li>
+      Tout ce sur quoi vous pouvez filtrer par ailleurs :
+      <a href={urlFor('/docs/searching', locale)} class="link">Retrouver une exécution</a>.
+    </li>
+    <li>
+      De quoi est fait un chiffre de coût :
+      <a href={urlFor('/docs/cost', locale)} class="link">Comptabilité des coûts</a>.
+    </li>
+    <li>
+      Ce qui arrive à un identifiant d’auteur avant d’être stocké :
+      <a href={urlFor('/docs/privacy', locale)} class="link">Masquage et conservation</a>.
+    </li>
+  </ul>
+</Doc>

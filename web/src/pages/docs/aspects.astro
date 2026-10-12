@@ -1,0 +1,273 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+
+/*
+ * The session is written from the shapes the specification publishes and from
+ * nothing else: the catalogue's own field names, the `aspect_notes` array on an
+ * ingest batch, the counts `IngestResult` returns, and the note fields
+ * `GET /v1/api/traces/{trace_id}/aspects` hands back. A transcript that invents
+ * a field teaches a reader to look for one that is not there, which is the
+ * failure mode a documented example has that a code sample does not.
+ */
+const session = [
+  { cmd: 'curl -s "$MCPD/v1/api/aspects?project=support"' },
+  { out: '"aspects": [' },
+  { out: '  { "name": "goal",      "derived": false, "enabled": true  },' },
+  { out: '  { "name": "sentiment", "derived": false, "enabled": false },' },
+  { out: '  { "name": "behaviour", "derived": false, "enabled": true  },' },
+  { out: '  { "name": "outcome",   "derived": true,  "enabled": true  }],' },
+  { out: '"limits": { "min_notes_to_cluster": 50, "max_notes_per_pass": 20000 }' },
+  { cmd: '# your worker reads the instruction, calls your model, posts the sentence' },
+  { cmd: 'curl -s "$MCPD/v1/ingest" -H "Authorization: Bearer $INGEST_KEY" -d @batch.json' },
+  { out: '{ "accepted": 1, "rejected": 0, "duplicate": 0 }', tone: 'ok' },
+  { cmd: 'curl -s "$MCPD/v1/api/traces/$TRACE/aspects"' },
+  { out: '"notes": [ { "aspect": "goal", "definition_version": 3,' },
+  { out: '             "model": "gpt-4o-mini",' },
+  { out: '             "text": "The customer wanted a refund on a late order." } ]' },
+]
+---
+
+<Doc
+  title="Aspect notes"
+  description="What an aspect note is, who writes one and with which model and credential, the four aspects that ship, and the outcome aspect the daemon derives with no model anywhere."
+  lede="An aspect is an axis. An aspect note is one sentence recorded against one finished run along that axis. Your process writes most of them, with your model and your key, the daemon writes the outcome notes, and mcpd stores each one as a signal."
+  og="docs"
+>
+  <h2>An axis, and a sentence recorded against it</h2>
+  <p>
+    An <strong>aspect</strong> is an axis a run can be described along: what the
+    user wanted, how the interaction ended. An <strong>aspect note</strong> is
+    one sentence recorded against one trace along one of those axes. The two are
+    different kinds of thing and they are stored apart. An aspect is a
+    definition, and a note is a recording made against it.
+  </p>
+  <p>
+    Keeping the two nouns straight is worth the effort, because every query
+    parameter in this family names one or the other. An aspect carries a name, a
+    display label, one line of description and, where a model writes the
+    sentence, the instruction handed to whatever produces it. A note carries the
+    sentence, the trace it is about, the version of the definition it was
+    written against, and the model that wrote it.
+  </p>
+  <p>
+    A note is not a score. A score is a number on a scale it declares, and the
+    <code>label</code> on a score is a categorical result from a fixed set. A
+    note is prose, and nothing here ever compares two notes by value. When what
+    you want is a number you can chart and alert on, record a score instead: see
+    <a href="/docs/evaluation" class="link">Scores and feedback</a>.
+  </p>
+
+  <h2>Who writes one, and with whose model</h2>
+  <p>
+    mcpd stores the instruction for an aspect and hands it out on request. It
+    does not read it, and it does not act on it. Whatever fetches the
+    instruction, calls a model with it and posts the sentence back is yours: your
+    endpoint, your model, your credential, your rate limit and your bill. The
+    daemon makes no model call of its own along the way.
+  </p>
+  <p>
+    That keeps the rule the rest of mcpd holds to. mcpd is not in your agent's
+    request path to a model, and writing a note does not put it there either.
+    The call that produces a note happens after the run has finished, against a
+    trace that is already stored, from a process you started. Delete that
+    process and the runs still record; only the sentences stop.
+  </p>
+  <p>
+    A note arrives as a signal, not through a side door. It goes in the
+    <code>aspect_notes</code> array of a batch posted to <code>/v1/ingest</code>
+    with a key scoped to ingest, beside the spans, logs, metrics, scores and
+    feedback for the same trace, under the same idempotency key. A batch
+    replayed after a timeout is a no-op that still returns 200, so a worker that
+    cannot tell whether its last post landed can send it again.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    A note travels those stages like everything else, and the third one is the
+    one that matters for prose. A model writing about a run repeats what it
+    read, so an address or a card number can reach a sentence that nothing in
+    your code composed. The redactor takes it out on the way in, before the note
+    is written down. There is no cleanup pass afterwards, because there is
+    nothing left to clean up.
+  </p>
+
+  <TerminalCast class="not-prose my-8" title="recording a note" lines={session} />
+
+  <h2>The four aspects that ship</h2>
+  <p>
+    Four aspects ship with the daemon, compiled into it. There is one list that
+    says what exists, and no client holds a second one that could disagree with
+    it: <code>GET /v1/api/aspects</code> serves that list with the bounds a
+    clustering pass runs under, and every screen reads that route.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Aspect</th><th>The axis</th><th>Who writes the sentence</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>goal</code></td>
+        <td>What the user wanted.</td>
+        <td>Your process, with your model.</td>
+      </tr>
+      <tr>
+        <td><code>sentiment</code></td>
+        <td>The tone they expressed.</td>
+        <td>Your process, with your model.</td>
+      </tr>
+      <tr>
+        <td><code>behaviour</code></td>
+        <td>What the agent did about it.</td>
+        <td>Your process, with your model.</td>
+      </tr>
+      <tr>
+        <td><code>outcome</code></td>
+        <td>How the interaction ended.</td>
+        <td>The daemon, with no model at all.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Those four are the whole catalogue in this build. You cannot add an aspect,
+    edit one, or switch one on for a single project. The route also publishes
+    <code>max_aspects</code>, the ceiling on how many aspects one project may
+    have, and it is fixed at 32.
+  </p>
+
+  <h2>The outcome aspect is derived, and needs no model</h2>
+  <p>
+    <code>outcome</code> ships with <code>derived</code> set. The daemon writes
+    its notes itself, from four things it already holds: the run's status, the
+    error class of the step that failed, the <code>silent_producer</code> flag on
+    the cause report, and the divergence watch. No model is called, no endpoint
+    is contacted and no key is needed. It writes them during the analysis pass,
+    so only when <code>aspects.enabled</code> is set in the config file.
+  </p>
+  <p>
+    That is there to solve a specific problem with this feature, which is that
+    the interesting screen is the last thing you reach. Wiring a model, writing
+    an instruction and running a worker long enough to clear the floor is a
+    morning's work before you have seen the thing you are building towards. A
+    deployment that sets <code>aspects.enabled</code> and configures nothing else
+    still fills one aspect from the runs it already has, so the pipeline can be
+    watched working end to end before anyone spends a token on it.
+  </p>
+  <p>
+    A derived note carries no <code>model</code>, because nothing wrote it but
+    the daemon, and its aspect carries no <code>instruction</code>, because there
+    is nothing to instruct. Those two absences are how you tell a derived note
+    from one of yours without reading the catalogue.
+  </p>
+
+  <h2>Switching an aspect off</h2>
+  <p>
+    Whether an aspect is on is deployment configuration, not a setting per
+    project. The <code>aspects</code> block of the config file holds a
+    <code>disabled</code> list of aspect names. An aspect named there is off on
+    every project, and every other aspect is on. Every catalogue row carries the
+    resulting <code>enabled</code> flag, and no endpoint changes it: the read
+    API reports the state and does not set it.
+  </p>
+  <p>
+    Switching an aspect off changes what the pass does afterwards and never
+    rewrites what is stored. No pass clusters it, its progress no longer counts
+    towards readiness, and for <code>outcome</code> the daemon stops writing
+    notes. Notes already stored stay readable, and the aspect stays in the
+    catalogue. That is why the catalogue returns disabled rows as well as
+    enabled ones. A name that vanished from the list would make every note filed
+    under it look like a mistake.
+  </p>
+  <p>
+    An aspect can be switched off. It cannot be deleted, for the same reason:
+    notes already name it, and a note whose aspect no longer exists is a sentence
+    filed under nothing.
+  </p>
+
+  <h2>Every note names a definition version</h2>
+  <p>
+    Every note records the <code>definition_version</code> it was written
+    against, and the catalogue reports each aspect's <code>version</code>. In
+    this build every aspect is at version 1 and none can be edited, so the
+    outcome notes the daemon writes all carry 1. A note your own process posts
+    carries the version it sends.
+  </p>
+  <p>
+    Read the version when a set of notes surprises you. Two notes along one
+    aspect that answer visibly different questions can come from two writers
+    that sent different versions, and that is the first thing to rule out.
+  </p>
+
+  <h2>Reading what was written about one run</h2>
+  <p>
+    <code>GET /v1/api/traces/{'{trace_id}'}/aspects</code> returns every note
+    recorded about one trace, in catalogue order, at most one per aspect. It is
+    not entity scoped, because a trace id is unique across the deployment.
+  </p>
+  <p>
+    Read it beside the trace itself. This is the shortest route from an
+    aggregate back to a run: a note is the sentence that put this trace in each
+    of its themes, so it is also the place to check a grouping you do not
+    believe. An empty list is the ordinary answer for a recent trace. Writing a
+    note lags ingestion, sometimes by a long way.
+  </p>
+
+  <h2>What a note proves, and what it does not</h2>
+  <p>
+    A note proves one thing: that this sentence was recorded against that trace,
+    by the definition named in <code>aspect</code>, at the version in
+    <code>definition_version</code>. It does not prove the sentence is true.
+  </p>
+  <p>
+    Nothing checks a note against the trace it describes. mcpd cannot: it did not
+    make the model call, it has no view of what the model was shown, and it has
+    no second opinion to compare the sentence against. So a note is evidence of
+    what a definition said about a run, and the run is what settles whether the
+    definition was right. When the two disagree, the trace wins. Read a note as a
+    pointer into the recording, never as a finding about it.
+  </p>
+  <p>
+    That is also the honest reason the aggregate on the next page groups notes by
+    their wording and not by their meaning: mcpd never reads a sentence, at any
+    point, in either direction.
+  </p>
+
+  <h2>The text is payload, and is treated as payload</h2>
+  <p>
+    A note is prose about a real conversation, and one a model wrote can repeat
+    anything the model read. That makes notes the same kind of material as a
+    prompt or a completion, and mcpd handles every note the same way. It passes through the redactor on the way in. Retention sweeps it
+    on the same schedule as the trace it belongs to. Erasing a subject erases it,
+    because a note inherits its trace's correlation and is scoped, filtered,
+    retained and erased exactly as that trace is.
+  </p>
+  <p>
+    Reading notes back needs a read key, and every route that hands back a
+    sentence is recorded in the audit ledger like every other endpoint that
+    returns what a user wrote. See
+    <a href="/docs/privacy" class="link">Redaction and retention</a> for what
+    never reaches storage and what stops being stored, and
+    <a href="/docs/security" class="link">Security</a> for the scopes and the
+    ledger.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>
+      What happens to these sentences once there are enough of them:
+      <a href="/docs/themes" class="link">Themes and snapshots</a>.
+    </li>
+    <li>
+      The number-shaped judgement a note is not:
+      <a href="/docs/evaluation" class="link">Scores and feedback</a>.
+    </li>
+    <li>
+      Every field of an aspect, a note and a theme:
+      <a href="/docs/reference/data-model" class="link">Data model</a>.
+    </li>
+  </ul>
+</Doc>

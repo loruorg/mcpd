@@ -1,0 +1,511 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+
+const exporterEnv = `# The base URL. Your exporter appends /v1/traces itself.
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+
+# Optional. Send gzip if your payloads are large.
+export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
+
+# Only when mcpd runs with --ingest-key.
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer YOUR_INGEST_KEY"`
+
+const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
+  -H 'content-type: application/json' \\
+  -d '{
+  "resourceSpans": [{
+    "resource": { "attributes": [
+      { "key": "service.name", "value": { "stringValue": "checkout-agent" } }
+    ]},
+    "scopeSpans": [{
+      "spans": [{
+        "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "spanId": "00f067aa0ba902b7",
+        "name": "chat gpt-4o",
+        "startTimeUnixNano": "1700000000000000000",
+        "endTimeUnixNano": "1700000001500000000",
+        "status": { "code": 1 },
+        "attributes": [
+          { "key": "gen_ai.system", "value": { "stringValue": "openai" } },
+          { "key": "gen_ai.request.model", "value": { "stringValue": "gpt-4o" } },
+          { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+          { "key": "gen_ai.usage.input_tokens", "value": { "intValue": "1200" } },
+          { "key": "gen_ai.usage.output_tokens", "value": { "intValue": "350" } }
+        ]
+      }]
+    }]
+  }]
+}'
+
+# {"partialSuccess":{"rejectedSpans":0,"errorMessage":""}}`
+---
+
+<Doc
+  title="OpenTelemetry"
+  description="mcpd는 /v1/traces, /v1/logs, /v1/metrics에서 OTLP/JSON을 받고, OpenTelemetry의 gen_ai.* 규약과 OpenInference의 llm.* 규약을 모두 읽습니다. mcpd 전용 코드는 필요 없습니다."
+  lede="에이전트가 이미 OpenTelemetry를 내보내고 있다면, mcpd는 엔드포인트를 바꾸는 일입니다. 이 페이지는 OTLP 경로 전체입니다. 엔드포인트 셋, 인코딩, 그리고 mcpd가 읽는 모든 속성입니다."
+  og="docs"
+>
+  <h2>엔드포인트 셋</h2>
+  <p>
+    mcpd는 질의 API와 인터페이스를 내주는 바로 그 포트에서 OTLP HTTP
+    엔드포인트도 내줍니다. 앞에 세워 둘 컬렉터도, 두 번째 컨테이너도, 따로 쓰는
+    수신 포트도 없습니다.
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>엔드포인트</th>
+          <th>받는 것</th>
+          <th>답하는 것</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>POST /v1/traces</code></td>
+          <td><code>ExportTraceServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedSpans</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/logs</code></td>
+          <td><code>ExportLogsServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedLogRecords</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/metrics</code></td>
+          <td><code>ExportMetricsServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedDataPoints</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    성공한 내보내기는 모두 개수를 실은 OTLP 자신의 <code>partialSuccess</code>
+    모양으로 답합니다. 컬렉터가 무언가를 버렸다고 보낸 쪽에 알리는 방식이 그것이고,
+    익스포터는 그 값을 읽습니다. 빈 본문을 돌려주면 보낸 쪽은 얻지 못한 성공을
+    성공으로 보고하게 됩니다.
+  </p>
+
+  <h2>익스포터를 이쪽으로 향하게 하기</h2>
+  <p>
+    변수 두 개면 됩니다. 에이전트를 돌리는 프로세스의 환경에 두십시오. 그 밖에
+    바뀌는 것은 없습니다.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="익스포터"
+    samples={[{ lang: 'curl', label: '환경 변수', shiki: 'bash', code: exporterEnv }]}
+  />
+
+  <p>
+    아무것도 오지 않는 이유를 디버깅하기 전에 알아 둘 것이 둘 있습니다. 첫째,
+    <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>는 기준 URL이고 익스포터가 거기에
+    시그널 경로를 덧붙입니다. 경로까지 포함해 전체 URL을 주고 싶다면
+    <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code>를 대신 쓰십시오. 둘째,
+    OpenTelemetry에서 4317번 포트는 관례상 gRPC 포트이고 4318번이 HTTP
+    포트입니다. mcpd는 모든 것을 한 포트에서 내주기 때문에 4317에서 HTTP를
+    받습니다. 그래서 기본 포트를 그대로 둔 익스포터는 4318로 보내고, 아무것도
+    도착하지 않습니다. 포트를 명시하십시오.
+  </p>
+
+  <h2>트레이스는 두 인코딩 모두</h2>
+  <p>
+    <code>/v1/traces</code>는 <code>content-type</code> 헤더를 읽고 두 인코딩을
+    모두 받습니다. <code>protobuf</code>가 들어 있으면 OTLP/protobuf이고, 그렇지
+    않으면 OTLP/JSON입니다. protobuf가 OpenTelemetry의 기본값이므로, 손대지 않은
+    SDK를 mcpd로 향하게 하면 아무 설정 없이도 트레이스가 도착합니다.
+  </p>
+  <p>
+    <code>/v1/logs</code>와 <code>/v1/metrics</code>는 JSON만 받습니다. 거기로 온
+    protobuf 본문은 <code>body is not valid JSON</code>으로 거절됩니다. 세 시그널을
+    모두 보낸다면 프로토콜을 전역으로 한 번 정하십시오.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="모든 시그널을 json으로"
+    command="export OTEL_EXPORTER_OTLP_PROTOCOL=http/json"
+  />
+
+  <p>
+    <code>content-type</code>이 아예 오지 않으면 mcpd는
+    <code>application/json</code>으로 가정합니다.
+  </p>
+
+  <h2>압축과 크기</h2>
+  <p>
+    요청 본문은 <code>content-encoding: gzip</code>으로 오거나,
+    <code>identity</code>로 오거나, 인코딩 헤더 없이 올 수 있습니다. 그 밖의 것은
+    이름을 짚어 거절합니다. <code>content-encoding "br" is not supported; use gzip
+    or send the body uncompressed</code>입니다. 응답은 콘텐츠 협상으로 압축되므로,
+    느린 회선으로 큰 트레이스를 되읽을 때도 압축됩니다.
+  </p>
+  <p>
+    한 요청에 한계 두 개가 걸립니다. 본문 한계는 32 MiB이고 도착한 것을 기준으로
+    재므로, gzip이 여유를 만들어 줍니다. 배치 한계는 시그널 10,000개이며 모든 수집
+    문에서 디코딩한 뒤에 셉니다. <code>/v1/traces</code>의 스팬,
+    <code>/v1/logs</code>의 레코드, <code>/v1/metrics</code>의 데이터 포인트,
+    그리고 <code>/v1/ingest</code>의 요청에 들어 있는 전부입니다. 더 큰 배치는 두
+    숫자를 함께 짚으며 <code>413 payload_too_large</code>로 거절됩니다. 두 한계 다
+    설정 항목입니다. <code>--max-body-bytes</code>와
+    <code>--max-batch-signals</code>이며
+    <a href={urlFor('/docs/configuration', locale)} class="link">설정</a>에
+    적혀 있습니다.
+  </p>
+
+  <h2>도착한 뒤 저장되기까지</h2>
+  <p>
+    OTLP 스팬과 네이티브 스팬은 같은 길을 갑니다. 파이프라인을 공유하는 이유가
+    그것입니다. 아래의 순서가 두 문 사이에서 어긋날 수 없습니다.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    OTLP 스팬이 비용 수치를 갖게 되는 것은 수집 시점에 값을 매기기 때문입니다.
+    mcpd는 스팬이 도착한 그 순간, 이 서버가 돌고 있는 가격표로 값을 매깁니다.
+    그래서 나중에 요율을 바꾸어도 지난달의 비용이 조용히 다시 쓰이는 일은 없습니다.
+    <a href={urlFor('/docs/cost', locale)} class="link">비용 산정</a>을 보십시오.
+  </p>
+
+  <h2>두 시맨틱 규약 모두</h2>
+  <p>
+    AI 스팬을 위한 속성 이름은 서로 겨루는 두 벌이 쓰이고 있습니다.
+    OpenTelemetry 자신의 <code>gen_ai.*</code>와, OpenInference의
+    <code>llm.*</code> 및 <code>openinference.span.kind</code>입니다. mcpd는 둘 다
+    읽고, 그 위에 자기 <code>mcpd.*</code> 이름도 읽습니다. 이름을 바꿔 줄 것은
+    없습니다.
+  </p>
+  <p>
+    아래의 각 행은 순서대로 읽히고, 먼저 맞는 것이 이깁니다. 어느 행도 이름 짓지
+    않은 속성도 그대로 보관됩니다. 평탄화된 속성 맵 전체가 스팬에 저장되므로,
+    보낸 것이 매핑되지 않았다는 이유로 사라지는 일은 없습니다.
+  </p>
+
+  <h3>모델, 페이로드, 사용량</h3>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>mcpd 필드</th>
+          <th>읽는 곳, 순서대로</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>model</code></td>
+          <td><code>gen_ai.request.model</code>, <code>gen_ai.response.model</code>, <code>llm.model_name</code>, <code>mcpd.model</code></td>
+        </tr>
+        <tr>
+          <td><code>provider</code></td>
+          <td><code>gen_ai.system</code>, <code>llm.provider</code>, <code>mcpd.provider</code></td>
+        </tr>
+        <tr>
+          <td><code>input</code></td>
+          <td><code>input.value</code>, <code>gen_ai.prompt</code>, <code>mcpd.input</code></td>
+        </tr>
+        <tr>
+          <td><code>output</code></td>
+          <td><code>output.value</code>, <code>gen_ai.completion</code>, <code>mcpd.output</code></td>
+        </tr>
+        <tr>
+          <td><code>entity_name</code></td>
+          <td><code>gen_ai.agent.name</code>, <code>mcpd.entity.name</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.input_tokens</code></td>
+          <td><code>gen_ai.usage.input_tokens</code>, <code>gen_ai.usage.prompt_tokens</code>, <code>llm.token_count.prompt</code>, <code>mcpd.usage.input_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.output_tokens</code></td>
+          <td><code>gen_ai.usage.output_tokens</code>, <code>gen_ai.usage.completion_tokens</code>, <code>llm.token_count.completion</code>, <code>mcpd.usage.output_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.total_tokens</code></td>
+          <td><code>llm.token_count.total</code>, <code>gen_ai.usage.total_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.cache_read</code></td>
+          <td><code>gen_ai.usage.cache_read_input_tokens</code>, <code>llm.token_count.prompt_details.cache_read</code>, <code>mcpd.usage.cache_read_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.cache_write</code></td>
+          <td><code>gen_ai.usage.cache_creation_input_tokens</code>, <code>llm.token_count.prompt_details.cache_write</code>, <code>mcpd.usage.cache_write_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.audio</code></td>
+          <td><code>llm.token_count.prompt_details.audio</code></td>
+        </tr>
+        <tr>
+          <td><code>output_details.reasoning</code></td>
+          <td><code>llm.token_count.completion_details.reasoning</code>, <code>gen_ai.usage.reasoning_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>output_details.audio</code></td>
+          <td><code>llm.token_count.completion_details.audio</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    토큰 개수 셋 중 어느 것도 없는 스팬은 0으로 채운 사용량 객체 대신 아예
+    사용량 객체를 싣지 않습니다. 입력 토큰이 0이라는 사실과 입력 토큰을 모른다는
+    사실은 서로 다르고, 두 번째를 뜻하는데 첫 번째로 만든 비용 보고서는 아무도
+    알아채지 못하는 방식으로 틀립니다.
+  </p>
+
+  <h3>상관 정보</h3>
+  <p>
+    상관 필드는 한 사용자의 실행이나 한 세션의 실행을 물어볼 수 있게 해 주는
+    것입니다. 스팬 속성을 먼저 읽고, 그다음 리소스 속성을 읽습니다.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>mcpd 필드</th>
+          <th>읽는 곳, 순서대로</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>project</code></td>
+          <td>스팬의 <code>mcpd.project</code>, 그다음 리소스의 같은 값, 그다음 데몬의 <code>--project</code></td>
+        </tr>
+        <tr>
+          <td><code>environment</code></td>
+          <td><code>mcpd.environment</code>, 리소스 <code>deployment.environment.name</code>, 리소스 <code>deployment.environment</code></td>
+        </tr>
+        <tr>
+          <td><code>service_name</code></td>
+          <td>리소스 <code>service.name</code></td>
+        </tr>
+        <tr>
+          <td><code>service_version</code></td>
+          <td>리소스 <code>service.version</code></td>
+        </tr>
+        <tr>
+          <td><code>session_id</code></td>
+          <td><code>gen_ai.conversation.id</code>, <code>session.id</code>, <code>mcpd.session_id</code></td>
+        </tr>
+        <tr>
+          <td><code>thread_id</code></td>
+          <td><code>mcpd.thread_id</code>, <code>thread.id</code></td>
+        </tr>
+        <tr>
+          <td><code>user_id</code></td>
+          <td><code>user.id</code>, <code>enduser.id</code>, <code>mcpd.user_id</code></td>
+        </tr>
+        <tr>
+          <td><code>request_id</code></td>
+          <td><code>mcpd.request_id</code>, <code>http.request.id</code></td>
+        </tr>
+        <tr>
+          <td><code>release</code></td>
+          <td><code>mcpd.release</code>, 리소스 <code>service.version</code></td>
+        </tr>
+        <tr>
+          <td><code>run_id</code>, <code>resource_id</code>, <code>experiment_id</code></td>
+          <td><code>mcpd.run_id</code>, <code>mcpd.resource_id</code>, <code>mcpd.experiment_id</code></td>
+        </tr>
+        <tr>
+          <td><code>tags</code></td>
+          <td><code>mcpd.tags</code>, 문자열 배열로</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>상태와 오류</h3>
+  <p>
+    OTLP 상태 코드 <code>1</code>은 <code>ok</code>가 되고 <code>2</code>는
+    <code>error</code>가 됩니다. 상태가 설정되지 않았는데 종료 시각이 있으면
+    <code>ok</code>로 기록합니다. 불평 없이 끝난 스팬은 실제로 잘 끝난 것이기
+    때문입니다. 상태가 설정되지 않았고 종료 시각도 없으면 <code>unset</code>으로
+    남습니다. 그 스팬은 아직 돌고 있고, mcpd는 결과를 지어내는 대신 그대로
+    저장합니다.
+  </p>
+  <p>
+    오류 스팬에서 메시지는 <code>status.message</code>, 그다음
+    <code>exception.message</code>에서 오고, 둘 다 없으면 문자열 그대로
+    <code>unspecified error</code>가 됩니다. 오류 종류는
+    <code>exception.type</code>에서, 스택은 <code>exception.stacktrace</code>에서
+    옵니다. 오류 스팬은 언제나 메시지를 싣습니다. 글 없이 무언가 실패했다는 말은
+    손쓸 수 있는 것이 아니기 때문입니다.
+  </p>
+
+  <h3>스팬 종류</h3>
+  <p>
+    종류는 그 스팬이 워터폴에 어떻게 그려질지를 정합니다. mcpd는 구체적인 것부터
+    차례로 추론하고, 언제나 안전한 <code>generic</code>으로 물러납니다. 스팬에
+    잘못된 이름표를 붙이는 것은 이름표를 붙이지 않는 것보다 나쁩니다.
+  </p>
+  <ol>
+    <li><code>mcpd.span.kind</code>가 mcpd가 아는 종류를 가리킬 때, 그 값.</li>
+    <li><code>openinference.span.kind</code>.</li>
+    <li><code>gen_ai.operation.name</code>.</li>
+    <li>한 종류의 스팬만 싣는 속성이 있는지 여부.</li>
+  </ol>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>속성 값</th>
+          <th>mcpd 종류</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>openinference.span.kind=LLM</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>openinference.span.kind=CHAIN</code></td><td><code>workflow_run</code></td></tr>
+        <tr><td><code>openinference.span.kind=TOOL</code></td><td><code>tool_call</code></td></tr>
+        <tr><td><code>openinference.span.kind=AGENT</code></td><td><code>agent_run</code></td></tr>
+        <tr><td><code>openinference.span.kind=RETRIEVER</code></td><td><code>retrieval</code></td></tr>
+        <tr><td><code>openinference.span.kind=EMBEDDING</code></td><td><code>rag_embedding</code></td></tr>
+        <tr><td><code>openinference.span.kind=RERANKER</code></td><td><code>rag_action</code></td></tr>
+        <tr><td><code>openinference.span.kind=GUARDRAIL</code></td><td><code>guardrail</code></td></tr>
+        <tr><td><code>openinference.span.kind=EVALUATOR</code></td><td><code>scorer_run</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=chat</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=text_completion</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=generate_content</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=embeddings</code></td><td><code>rag_embedding</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=execute_tool</code></td><td><code>tool_call</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=invoke_agent</code></td><td><code>agent_run</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=create_agent</code></td><td><code>agent_run</code></td></tr>
+        <tr><td><code>gen_ai.system</code>, <code>llm.model_name</code>, <code>llm.provider</code> 중 하나라도 있음</td><td><code>model_generation</code></td></tr>
+        <tr><td><code>mcp.tool.name</code> 있음</td><td><code>mcp_tool_call</code></td></tr>
+        <tr><td><code>http.request.method</code> 또는 <code>http.method</code> 있음</td><td><code>http_request</code></td></tr>
+        <tr><td>그 밖의 모든 것</td><td><code>generic</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    <code>openinference.span.kind</code>나 <code>gen_ai.operation.name</code>
+    아래에서 mcpd가 알아보지 못하는 스팬 종류는 거절되지 않고
+    <code>generic</code>으로 내려갑니다. 종류의 전체 목록은
+    <a href={urlFor('/docs/reference/data-model', locale)} class="link">데이터 모델</a>에
+    있습니다.
+  </p>
+
+  <h2>로그와 메트릭</h2>
+  <p>
+    로그 레코드는 명세가 정한 대로 심각도 번호로 매핑됩니다. 1에서 4는 trace,
+    5에서 8은 debug, 9에서 12는 info, 13에서 16은 warn, 17에서 20은 error이고, 그
+    위는 모두 fatal입니다. 심각도 번호가 없으면 레코드는 info로 다룹니다. 메시지는
+    <code>body.stringValue</code>에서, 로거 이름은 스코프 이름에서 오고,
+    <code>traceId</code>와 <code>spanId</code>는 유효할 때 그대로 보관됩니다. 로그
+    한 줄을 그것을 낸 스팬 옆에 놓아 주는 것이 바로 이것입니다.
+  </p>
+  <p>
+    메트릭에서는 합이 카운터가 되고 게이지는 게이지가 됩니다. 히스토그램은 버킷
+    경계를 보존한 채 합과 개수로 기록합니다. mcpd는 미리 집계된 히스토그램에서
+    정확한 분위수를 되살릴 수 있는 척하지 않습니다. exemplar는 보관하며,
+    차트 위의 급등에서 그것을 일으킨 실행을 열 수 있게 해 주는 것이 이것입니다.
+    대부분의 도구는 이 값을 버립니다.
+  </p>
+
+  <h2>id, 그리고 W3C traceparent</h2>
+  <p>
+    mcpd는 OpenTelemetry의 식별자 모양을 그대로 씁니다. 트레이스 id는 128비트로
+    소문자 16진수 32자, 스팬 id는 64비트로 16자입니다. 전송 형식을 똑같이 두는
+    것이 변환 계층을 없애 줍니다. 모두 0인 id는 트레이스가 없음을 뜻하도록
+    예약되어 있어, mcpd가 스스로 만드는 id를 포함해 어디에 나타나든 거절됩니다.
+  </p>
+  <p>
+    OTLP/JSON은 id 필드에 16진수를 규정하지만, 몇몇 SDK는 base64를 내보냅니다.
+    mcpd는 둘 다 받아서 16진수로 저장합니다. id가 없거나 길이가 틀리거나 모두
+    0인 스팬은 건너뛰고 배치의 나머지는 그대로 씁니다. 나쁜 스팬 하나 때문에
+    멀쩡한 스팬 만 개를 거절하는 컬렉터는 사람들이 꺼 버리는 컬렉터이기
+    때문입니다.
+  </p>
+  <p>
+    타임스탬프는 Unix epoch 이후의 나노초입니다. 2<sup>53</sup>을 넘으므로
+    OTLP/JSON은 문자열로 보내고, mcpd도 문자열로 파싱합니다. 이것을 부동소수점으로
+    읽으면 정밀도를 잃고, 그것은 실제로는 그렇지 않은데도 몇 마이크로초 차이로
+    시작한 것처럼 보이는 스팬으로 드러납니다. <code>endTimeUnixNano</code>가
+    <code>0</code>이거나 없으면 그 스팬은 아직 끝나지 않은 것입니다.
+  </p>
+  <p>
+    <code>traceparent</code> 헤더는
+    <code>version-traceid-parentid-flags</code>입니다. mcpd는 명세가 정한 규칙대로
+    파싱합니다. 버전 <code>ff</code>는 거절하고, 버전 <code>00</code>은 정확히 네
+    필드여야 하며, 이후 버전은 더 실어도 되고, id는 검증을 통과해야 하고, 플래그
+    바이트의 0번 비트가 샘플링 플래그입니다. 형식이 틀린 헤더는 결코 요청을 거절할
+    이유가 되지 않습니다. mcpd는 대신 새 트레이스를 시작합니다.
+  </p>
+  <p>
+    이것이 중요해지는 곳은 이렇습니다. mcpd SDK들은 들어오는
+    <code>traceparent</code>를 읽고 나가는 호출에 하나를 실어 보내므로, 트레이스가
+    서비스 경계를 넘어 살아남습니다. OTLP 엔드포인트는 id를 페이로드에서
+    가져옵니다. 익스포터가 이미 스팬에 넣어 두었기 때문입니다. mcpd로 계측하지 않는
+    서비스에서 트레이스가 시작된다면 그 <code>traceparent</code>를 함께 넘기십시오.
+    그러면 양쪽이 하나의 트레이스 id 아래에 놓입니다.
+  </p>
+
+  <h2>요청 하나, 통째로</h2>
+  <p>
+    위의 어느 것에도 SDK는 필요 없습니다. 아래는 터미널에 그대로 붙여 넣을 수 있는
+    완전하고 유효한 내보내기입니다.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="OTLP/JSON 원본"
+    samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: rawPost }]}
+  />
+
+  <h2>OTLP가 실을 수 없는 것</h2>
+  <p>
+    OTLP에는 스팬과 로그와 메트릭을 위한 모양이 있습니다. 기계가 낸 점수, 사람이
+    누른 부정 평가, 관점 노트를 위한 모양은 없고, 요즘 공급자가 청구하는
+    토큰 세부 항목을 위한 어휘도 없습니다. 그런 것을 보내는 길은 둘입니다.
+  </p>
+  <ul>
+    <li>
+      <code>POST /v1/ingest</code>. mcpd의 네이티브 배치 엔드포인트이며, 요청
+      하나에 데이터 모델 전체를 싣습니다.
+    </li>
+    <li>
+      <code>POST /v1/api/scores</code>와 <code>POST /v1/api/feedback</code>. 이미
+      OTLP로 보내 둔 트레이스에 붙습니다.
+    </li>
+  </ul>
+  <p>
+    둘을 섞어 쓰는 것은 흔한 일이고 그러라고 있는 것입니다. 이미 돌리고 있는
+    OpenTelemetry SDK로 스팬을 내보내고, 평가 잡에서 점수를 올리십시오. 둘은
+    트레이스 id에서 만납니다.
+    <a href={urlFor('/docs/evaluation', locale)} class="link">점수와 피드백</a>과
+    <a href={urlFor('/docs/reference/api', locale)} class="link">HTTP API</a>를
+    보십시오.
+  </p>
+
+  <h2>포트를 열기 전에</h2>
+  <p>
+    <code>--ingest-key</code>를 두지 않으면 4317에 닿을 수 있는 누구든 거기에 쓸 수
+    있고, <code>--read-key</code>가 없으면 저장된 모든 프롬프트를 읽을 수 있습니다.
+    mcpd는 둘 중 하나라도 열린 채로 루프백이 아닌 주소에 바인드하면 시작할 때 경고를
+    남깁니다.
+    <a href={urlFor('/docs/configuration', locale)} class="link">설정</a>으로 키를
+    두고, <code>Authorization: Bearer</code>로 보내십시오. 위의
+    <code>OTEL_EXPORTER_OTLP_HEADERS</code>가 하는 일이 그것입니다.
+  </p>
+
+  <Command
+    class="my-6"
+    label="키와 함께 실행하기"
+    command="mcpd --ingest-key $INGEST_KEY --read-key $READ_KEY"
+  />
+</Doc>

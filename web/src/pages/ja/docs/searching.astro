@@ -1,0 +1,663 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import SearchDemo from '@/components/SearchDemo.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code0 = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code0)
+
+/* これらの例は、例示プログラムから読むのではなくここに書いてあります。読者が
+   自分のデーモンに対して実行するクエリであって、CI が実行できるコードでは
+   ないからです。ここにあるパラメーターはすべてサーバーが解析するものです。 */
+const finding = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# 直近 1 日のうち、スパン名、プロンプト、補完のどこかに両方の語を含む、
+# 失敗した実行。
+curl -s --get http://localhost:4317/v1/api/traces \\
+  --data-urlencode 'q=Leeds depot' \\
+  --data-urlencode 'status=error' \\
+  --data-urlencode 'from=-24h'
+
+# すべての実行を一度に横断して、あるモデルを呼び出して失敗したステップ。
+curl -s --get http://localhost:4317/v1/api/spans \\
+  --data-urlencode 'model=gpt-4o-mini' \\
+  --data-urlencode 'status=error' \\
+  --data-urlencode 'min_duration_ms=2000'
+`,
+  },
+  {
+    lang: 'typescript' as const,
+    label: 'TypeScript',
+    shiki: 'typescript',
+    code: `import { Mcpd } from '@mcpd/sdk'
+
+const mcpd = new Mcpd()
+
+const bad = await mcpd.listTraces({
+  q: 'Leeds depot',
+  status: 'error',
+  from: '-24h',
+  limit: 20,
+})
+
+for (const trace of bad.traces) {
+  console.log(trace.traceId, trace.name, trace.status)
+}`,
+  },
+  {
+    lang: 'python' as const,
+    label: 'Python',
+    shiki: 'python',
+    code: `from mcpd import Mcpd
+
+mcpd = Mcpd()
+
+bad = mcpd.list_traces(q="Leeds depot", status="error", from_="-24h", limit=20)
+
+for trace in bad.traces:
+    print(trace.trace_id, trace.name, trace.status.value)`,
+  },
+]
+
+const discovery = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# フィルター欄のための、このプロジェクトが報告したすべての環境。
+curl -s --get http://localhost:4317/v1/api/discovery \\
+  --data-urlencode 'project=default' \\
+  --data-urlencode 'facet=environment'
+
+# タイプアヘッド。"check" で始まるサービス名。
+curl -s --get http://localhost:4317/v1/api/discovery \\
+  --data-urlencode 'facet=service_name' \\
+  --data-urlencode 'prefix=check'
+
+# あるメトリクスラベルが取る値。
+curl -s --get http://localhost:4317/v1/api/discovery \\
+  --data-urlencode 'facet=metric_label_value' \\
+  --data-urlencode 'key=model'
+`,
+  },
+  {
+    lang: 'curl' as const,
+    label: '200 OK',
+    shiki: 'json',
+    code: `{
+  "facet": "environment",
+  "values": [
+    { "value": "production", "last_seen": "2026-09-03T08:04:18Z" },
+    { "value": "staging", "last_seen": "2026-09-02T17:41:02Z" }
+  ]
+}`,
+  },
+  {
+    lang: 'curl' as const,
+    label: '501 Not Implemented',
+    shiki: 'json',
+    code: `{
+  "error": "not_implemented",
+  "capability": "discovery",
+  "message": "this deployment stores signals in <backend>, which does not support discovery: ... GET /v1/api/capabilities lists what it does support."
+}`,
+  },
+]
+
+const badParam = [
+  {
+    lang: 'curl' as const,
+    label: '400 Bad Request',
+    shiki: 'json',
+    code: `{
+  "error": "bad_parameter",
+  "field": "from",
+  "message": "\\"yesterday\\" is not an RFC 3339 timestamp or a relative duration like -1h"
+}`,
+  },
+]
+
+const paging = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# 1 ページ目は page.next_cursor でカーソルを返します。
+curl -s --get http://localhost:4317/v1/api/traces \\
+  --data-urlencode 'q=refund' \\
+  --data-urlencode 'sort=cost' \\
+  --data-urlencode 'limit=100'
+
+# 次のページ。同じフィルター、同じ並び順に、カーソルを足します。
+curl -s --get http://localhost:4317/v1/api/traces \\
+  --data-urlencode 'q=refund' \\
+  --data-urlencode 'sort=cost' \\
+  --data-urlencode 'limit=100' \\
+  --data-urlencode 'cursor=MzEzNzQyfDBhZjM...'
+`,
+  },
+  {
+    lang: 'typescript' as const,
+    label: 'TypeScript',
+    shiki: 'typescript',
+    code: `let cursor: string | undefined
+
+do {
+  const page = await mcpd.listTraces({
+    q: 'refund',
+    sort: 'cost',
+    order: 'desc',
+    limit: 100,
+    cursor,
+  })
+
+  for (const trace of page.traces) {
+    console.log(trace.traceId, trace.cost?.totalCost ?? 'not priced')
+  }
+
+  // hasMore でループします。目指して数えるべき総件数はありません。
+  cursor = page.page.hasMore ? page.page.nextCursor : undefined
+} while (cursor)`,
+  },
+  {
+    lang: 'python' as const,
+    label: 'Python',
+    shiki: 'python',
+    code: `cursor = None
+
+while True:
+    page = mcpd.list_traces(
+        q="refund", sort="cost", order="desc", limit=100, cursor=cursor
+    )
+
+    for trace in page.traces:
+        cost = trace.cost.total_cost if trace.cost else "not priced"
+        print(trace.trace_id, cost)
+
+    # has_more でループします。目指して数えるべき総件数はありません。
+    if not page.page.has_more:
+        break
+    cursor = page.page.next_cursor`,
+  },
+]
+---
+
+<Doc
+  title="実行を探す"
+  description="プロンプトと補完に対する全文検索、mcpd がトレースとスパンで受け付けるすべてのフィルター、そしてスコアラーが低く評価した回答を見つけるクエリ。"
+  lede="調査はダッシュボードではなく苦情から始まります。このページでは、苦情を、それを引き起こした 1 つの実行に変える方法を説明します。"
+  og="docs"
+>
+  <h2>ラベルではなくペイロードを検索</h2>
+  <p>
+    たいていのトレーシングツールは、名前と属性をインデックスに入れます。mcpd はプロンプトと
+    補完もインデックスに入れます。人が苦情を言うのはモデルが言った内容についてであり、その
+    人が引用してくる言葉が、こちらにある唯一の手がかりだからです。<code>q</code>
+    パラメーターがそのインデックスです。
+  </p>
+
+  <SearchDemo class="not-prose my-8" />
+
+  <h2>q が正確に対象とするもの</h2>
+  <p>
+    インデックスはスパンごとに 3 つのフィールドを持ちます。名前、入力、出力です。入力と出力は
+    JSON なので、インデックスに入れる前に mcpd はペイロードをたどり、文字列と数値だけを
+    残して、波括弧、引用符、キーを捨てます。生の JSON をインデックスに入れると、記号が
+    すべてトークンになり、本当に探している語が埋もれてしまいます。
+  </p>
+  <p>これに頼る前に知っておく価値のある帰結が 6 つあります。</p>
+  <ul>
+    <li>
+      実行が一致するのは、<strong>その中のいずれか 1 つのスパン</strong>が一致した
+      ときです。返ってくるのは実行の単位なので、どのステップだったかを見るには
+      1 つ開いてください。
+    </li>
+    <li>
+      語は AND で結ばれます。<code>q=refund delayed</code> は、インデックス済みのテキストの
+      どこかに両方を含むスパンを見つけます。隣り合っている必要はありません。
+    </li>
+    <li>
+      一致は単語単位で、大文字と小文字は区別せず、ダイアクリティカルマークは
+      畳まれるので、<code>resume</code> は <code>résumé</code> を見つけます。
+      ステミングはありません。<code>refund</code> は <code>refunds</code> を
+      見つけません。
+    </li>
+    <li>
+      入力と出力それぞれの先頭 64 KiB がインデックスに入ります。それより長いペイロードも
+      全体が保存され表示されます。インデックスに入らないのは、とても長いプロンプトの末尾
+      だけです。
+    </li>
+    <li>
+      秘匿化は保存の前に走るので、秘匿化が取り除いたものはインデックスにも入って
+      いません。
+      <a href={linkTo('/docs/privacy')} class="link">マスキングと保持</a>の
+      ページを参照してください。
+    </li>
+    <li>
+      二度以上書かれたスパンは、インデックスの行を置き換えます。長く続くスパンは
+      終了時にそうなります。ですから検索は、常に現在の版を反映します。
+    </li>
+  </ul>
+
+  <h2>引用符が紛れ込んでも、エラーではなく検索です</h2>
+  <p>
+    下にあるインデックスには独自のクエリ言語があります。二重引用符はフレーズを開き、
+    <code>NEAR</code>、<code>OR</code>、<code>*</code> は演算子です。入力された
+    テキストをそのまま渡すと、引用符を含む顧客のメッセージは結果ではなく構文
+    エラーとして返ってきます。例外を投げうる検索欄は、人が使うのをやめる
+    検索欄です。
+  </p>
+  <p>
+    そこで、あなたのテキストがそのパーサーに届くことはありません。mcpd は入力された
+    ものを空白で分け、各語から二重引用符を取り除き、各語をリテラルの語として包み、
+    AND でつなぎます。<code>q=say "no"</code> は <em>say</em> と <em>no</em> という
+    語を検索します。<code>q=NEAR</code> は NEAR という語を検索します。入力できる
+    ものの中に構文エラーになるものはなく、演算子は使えません。これがトレードオフ
+    であり、意図してこの向きに決めてあります。
+  </p>
+  <p>
+    空白だけの <code>q</code> は、何にも一致しないのではなく無視されます。空の
+    <code>q=</code> は、指定されなかったものとして扱われます。どのパラメーターも
+    同じ振る舞いをするので、空のフィルター欄を送信するフォームが、うっかり空文字列
+    で絞り込むことはありません。
+  </p>
+
+  <h2>実行一覧の絞り込み</h2>
+  <p>
+    <code>GET /v1/api/traces</code> は次のものを受け取ります。省いたものは適用され
+    ません。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>パラメーター</th><th>選ぶもの</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>q</code></td>
+        <td>各スパンの名前、入力、出力に対する全文検索。</td>
+      </tr>
+      <tr>
+        <td><code>status</code></td>
+        <td>
+          <code>unset</code>、<code>ok</code>、<code>error</code>、
+          <code>cancelled</code> のいずれか。実行が <code>error</code> になるのは、
+          その中のいずれかのスパンが失敗したときで、エラーが捕捉された場合も
+          含みます。
+        </td>
+      </tr>
+      <tr>
+        <td><code>kind</code></td>
+        <td>
+          実行のルートスパンの種類。<code>agent_run</code> や
+          <code>workflow_run</code> などです。
+        </td>
+      </tr>
+      <tr>
+        <td><code>name</code></td>
+        <td>ルートスパンの名前と完全に一致するもの。前方一致でもパターンでもありません。</td>
+      </tr>
+      <tr>
+        <td><code>tags</code></td>
+        <td>
+          カンマ区切り。実行は、挙げられたタグの<em>すべて</em>を持つ必要があり
+          ます。いずれかではありません。
+        </td>
+      </tr>
+      <tr><td><code>session_id</code></td><td>1 つの会話に属するすべての実行。</td></tr>
+      <tr><td><code>thread_id</code></td><td>1 つのスレッドに属するすべての実行。</td></tr>
+      <tr><td><code>user_id</code></td><td>1 人のエンドユーザーのすべての実行。</td></tr>
+      <tr><td><code>environment</code></td><td>1 つの環境。<code>production</code> など。</td></tr>
+      <tr>
+        <td><code>model</code></td>
+        <td>このモデル id に対するスパンを少なくとも 1 つ持つ実行。</td>
+      </tr>
+      <tr>
+        <td><code>from</code>、<code>to</code></td>
+        <td>期間。実行の開始時刻を基準に比べます。</td>
+      </tr>
+      <tr>
+        <td><code>min_duration_ms</code></td>
+        <td>少なくともこれだけ遅い実行。ミリ秒で指定します。</td>
+      </tr>
+      <tr>
+        <td><code>min_cost</code></td>
+        <td>
+          少なくともこれだけかかった実行。値付けされたスパンを持たない実行はゼロ
+          として数えるので、正の値を指定すると除外されます。
+        </td>
+      </tr>
+      <tr>
+        <td><code>has_score</code></td>
+        <td>このスコアラー id のスコアを持つ実行。</td>
+      </tr>
+      <tr>
+        <td><code>score_below</code></td>
+        <td><code>has_score</code> と併せて使い、そのスコアラーがこの値を下回る評価を付けた実行を返します。</td>
+      </tr>
+      <tr>
+        <td><code>sort</code></td>
+        <td>
+          <code>start_time</code>、<code>duration</code>、<code>cost</code>、
+          <code>span_count</code>、<code>score</code> のいずれか。既定は
+          <code>start_time</code> です。<code>score</code> は、どのスコアラーが
+          付けたものであれ最も低いスコアで実行を並べるので、昇順にすると最悪の
+          実行が先頭に来ます。スコアのない実行はゼロとして順位づけされます。
+        </td>
+      </tr>
+      <tr>
+        <td><code>order</code></td>
+        <td><code>asc</code> か <code>desc</code>。既定は <code>desc</code> です。</td>
+      </tr>
+      <tr>
+        <td><code>limit</code></td>
+        <td>ページの大きさ。1 以上 500 以下に丸められます。既定は 50 です。</td>
+      </tr>
+      <tr>
+        <td><code>cursor</code></td>
+        <td>前のページから返された不透明なカーソル。</td>
+      </tr>
+      <tr>
+        <td><code>project</code></td>
+        <td>
+          どのプロジェクトを読むか。既定はデーモン自身の既定プロジェクトなので、
+          プロジェクトが 1 つだけのデプロイでは渡す必要がありません。
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>name</code>、相関の各 id、<code>environment</code> は等値の判定で、
+    だからこそ安価です。名前の部分一致がほしいときは <code>q</code> を使って
+    ください。スパン名もテキストのインデックスに入っています。
+  </p>
+
+  <h2>一覧の 1 行にかかるコスト</h2>
+  <p>
+    もっと軽い 2 つ目の実行一覧はありません。最初のものがすでに軽いからです。保存
+    されるトレースの射影は、入力も出力も属性も一切持ちません。名前、件数、時刻、
+    コスト、タグ、相関だけで、モデルが言ったことは何も入りません。ペイロードを
+    取ってくるのは、実行を開いたときです。
+  </p>
+  <p>
+    現実的な実行 1 つで測った結果です。3 つのポリシー文書を取得し、2 つのツールを呼び、
+    本物のプロンプトと補完で 2 回モデルを呼ぶ、8 ステップのサポートエージェントの
+    場合、一覧の 1 行は <strong>577 バイト</strong>、実行全体は
+    <strong>10,717 バイト</strong>で、<strong>94.6% の削減</strong>です。これは
+    このデーモンで、その実行について、実際の HTTP 面を通して測ったものです。
+    あなたの実行では違う数字になります。大事なのは向きです。プロンプトが大きく
+    なるほど節約は大きくなります。大きくなる部分こそ、一覧が持たない部分だから
+    です。
+  </p>
+  <p>
+    この数字は、ここに打ち込まれたものではなくテストが生み出します。ですから、
+    片方だけが古くなって、もう片方が失敗しないということは起こりません。
+    <code>cargo test -p mcpd-server --test payload_size -- --nocapture</code> を
+    実行すると、両方のバイト数を出力します。ペイロードを運ぶフィールドを射影に
+    足すと、そのテストが失敗します。
+  </p>
+
+  <h2>それ以外は、名指しで拒否されます</h2>
+  <p>
+    上の表が語彙のすべてです。そこにないパラメーターは、受け付けて捨てられるのでは
+    なく、それを名指しした 400 で拒否されます。これは変更されました。以前の mcpd は
+    知らないパラメーターを無視していたので、<code>?statuss=error</code> は
+    プロジェクトのすべての実行とともに 200 で返り、フィルターが適用されなかったこと
+    は応答のどこにも書かれていませんでした。もっともらしい間違った答えはエラーより
+    悪いものです。気づくきっかけが何もないからです。
+  </p>
+  <p>
+    この判断が引き受けたトレードオフは、はっきり言っておく価値があります。新しい
+    デーモンが理解するフィルターを送るクライアントは、古いデーモンに対しては、広すぎる結果
+    ではなく 400 を受け取ります。2 つの失敗のうちでは、こちらのほうが良いものです。
+    400 はパラメーターを名指しして止まります。
+  </p>
+  <p>
+    拒否のなかには「不明」以上のことを言うものもあります。mcpd はすべてのトレースに
+    <code>service_name</code>、<code>service_version</code>、
+    <code>resource_id</code>、<code>run_id</code>、<code>request_id</code>、
+    <code>experiment_id</code>、<code>release</code> を記録しますが、実行の一覧は
+    まだそれらで絞り込めません。7 つのうち
+    <a href="#filling-a-filter-box" class="link">ディスカバリ</a>のファセットに
+    なっているのは <code>service_name</code> だけなので、ディスカバリが値を一覧
+    できるのはそれだけです。この 7 つは、その旨を伝えるメッセージとともに拒否
+    されます。<code>service_name=checkout-api</code> は打ち間違いではなく、これを
+    不明なパラメーターだと伝えると、ありもしない綴りの間違いを探しに行かせて
+    しまうからです。
+  </p>
+
+  <p>
+    この規則は実行の一覧だけのものではありません。<code>GET /v1/api/spans</code>、
+    <code>/v1/api/logs</code>、<code>/v1/api/scores</code>、
+    <code>/v1/api/metrics</code>、<code>/v1/api/feedback</code> は、それぞれ自分の
+    語彙を同じやり方で強制します。出会う前に知っておく価値があるものが 2 つ
+    あります。スコアの一覧は <code>order</code> を受け取りません。新しい順で固定
+    されており、そのカーソルは一方向にしか比較しないからです。そしてフィードバックの
+    一覧は <code>trace_id</code> を必須にします。mcpd はまだプロジェクト全体の
+    フィードバックを一覧できず、空の一覧は「1 件もない」と読めてしまうからです。
+  </p>
+
+  <h2 id="filling-a-filter-box">フィルター欄の埋め方</h2>
+  <p>
+    フィルターは、そこに何を入れればよいか分かって初めて使えます。そして値は決まった
+    一覧ではありません。プロジェクトに報告しているサービスが送ってくるものが、
+    そのまま値になります。<code>GET /v1/api/discovery</code> がそれに答えます。
+    <code>facet</code> で一度に 1 つの軸を尋ねると、その軸がプロジェクトで取った値を、
+    値の順に、それぞれ最後にシグナルがその値を運んだ時刻とともに返します。
+  </p>
+  <table>
+    <thead>
+      <tr><th>ファセット</th><th>一覧するもの</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>entity_kind</code></td><td>エージェント、ワークフロー、ツール、モデル、スコアラー、プロセッサー、パイプライン、サービスのいずれか。</td></tr>
+      <tr><td><code>entity_name</code></td><td>それらが持つ名前。呼ばれたツールの名前などです。</td></tr>
+      <tr><td><code>service_name</code></td><td>報告してきたサービス。</td></tr>
+      <tr><td><code>environment</code></td><td>観測された環境。<code>production</code> など。</td></tr>
+      <tr><td><code>tag</code></td><td>いずれかの実行が持つすべてのタグ。</td></tr>
+      <tr><td><code>metric_name</code></td><td>記録されたメトリクス名。mcpd が導出するものも含みます。</td></tr>
+      <tr><td><code>metric_label_key</code></td><td>プロジェクトで観測されたすべてのラベルキー。</td></tr>
+      <tr><td><code>metric_label_value</code></td><td>あるラベルが取る値。<code>key</code> が必要です。</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>prefix</code> はタイプアヘッドのために一覧を絞ります。一致は文字どおりで
+    大文字と小文字を区別します。これらの値はフィルターが照合される相手であり、ここで
+    畳んでしまうと、何にも一致しない値を提示することになるからです。
+    <code>limit</code> は応答を 1000 件で頭打ちにします。値は新しさではなく値の順に
+    並ぶので、誰かが読んでいる一覧が、ポーリングのたびに目の前で並び替わることは
+    ありません。
+  </p>
+  <p>
+    これを前提に作り込む前に、知っておく価値のある制限が 1 つあります。
+    <code>metric_label_key</code> が一覧するのは、プロジェクトのどこかで観測された
+    すべてのラベルキーであって、名前を指定した 1 つのメトリクスのキーではありません。
+    一意な値の一覧は、それを運んだメトリクスではなく、ラベルを鍵にしています。
+  </p>
+
+  <h2>もう一度実行せずに一覧を更新</h2>
+  <p>
+    <code>GET /v1/api/deltas</code> は、あるカーソル以降に届いたものを古い順に
+    返します。対象は <code>traces</code>、<code>spans</code>、<code>logs</code> です。
+    前回のポーリングのカーソルを保持して送り返し、すでに手元にある一覧に行を適用して
+    ください。
+  </p>
+  <p>
+    ポーリングはページ送りではなく、2 つのカーソルは意図的に交換できません。ページ
+    送りは、選んだ並び順で固定された結果集合を後ろへたどります。ポーリングは到着順に
+    前へ進み、終わりがありません。ウォーターマークは行の到着時刻とその id の組です。
+    バッチは中のすべての行を 1 つのタイムスタンプで書くので、「このナノ秒より後」と
+    しか言えないウォーターマークでは、バッチ全体を再生するか、残りを飛ばすかの
+    どちらかになってしまうからです。何もなかったポーリングはカーソルをそのまま
+    返します。前に進めてしまうと、少しあとに、より早い到着時刻で着地する行を落として
+    しまうからです。
+  </p>
+  <p>
+    スコアとフィードバックはポーリングできません。これらは呼び出し側が送った
+    タイムスタンプで印が付けられ、サーバーが設定する到着時刻を持たないので、
+    ウォーターマークを当てると、遅れて届いた行を飛ばすか、すべての行を永遠に繰り返す
+    かのどちらかになります。<code>signal=scores</code> は、空のページで答えるのでは
+    なく拒否されます。
+  </p>
+
+  <h2>このデプロイで何ができるか</h2>
+  <p>
+    mcpd はストレージのトレイトを 1 つ持ち、その裏に 3 つのバックエンドがあります。
+    そしてそれらは同等ではありません。ClickHouse では、削除は受け付けられた後、
+    呼び出しが返ってから適用されます。そのため応答の件数は一致したものを示し、
+    ディスクから消えたものを示すわけではありません。SQLite と Postgres では、
+    呼び出しが返った時点で行は消えています。こうした違いが書いてあるのが
+    <code>GET /v1/api/capabilities</code> です。デーモンの裏にあるのはどの
+    バックエンドか、<code>q</code> が何に一致するか、ASCII の外側でも大文字小文字が
+    畳まれるか、呼び出しが返った時点で削除がディスクに反映されているか、そして
+    ディスカバリとデルタポーリングがそもそも答えるかどうかが分かります。
+  </p>
+  <p>
+    接続時に一度読み、そのデプロイが答えるものだけを提示してください。ケイパビリ
+    ティが偽であるエンドポイントは <code>501</code> で拒否し、その本文の
+    <code>capability</code> フィールドは、ケイパビリティ一覧が公開しているのと同じ
+    語を名指しします。したがって両者が食い違うことはなく、拒否に出会った
+    クライアントは、決して変わらないものをリトライするのではなく、それを調べられ
+    ます。
+  </p>
+  <p>
+    今日出荷されている 3 つのバックエンドは、ディスカバリもデルタポーリングも
+    答えます。ですから下の 501 は、あとから追加されたバックエンドが拒否するときの
+    形であって、SQLite、Postgres、ClickHouse から返ってくる応答ではありません。
+    どれであるかを教えてくれるのがケイパビリティ一覧で、今でも読む価値があります。
+    3 つは、呼び出しが返った時点で削除がディスクに反映されているかどうかと、
+    保持期間の強制のしかたで違うからです。ASCII の外側の大文字小文字は、3 つとも
+    畳みます。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={discovery} title="何で絞り込めるか" />
+
+  <h2>期間</h2>
+  <p>
+    <code>from</code> と <code>to</code> は、RFC 3339 のタイムスタンプか、相対の
+    短縮形を受け取ります。短縮形はマイナス記号、数字、そして <code>s</code>、
+    <code>m</code>、<code>h</code>、<code>d</code> のいずれかです。
+    <code>-15m</code>、<code>-1h</code>、<code>-7d</code> はどれも使えます。この短縮形が
+    あるのは、直近 1 時間を見るために ISO のタイムスタンプを手で打つ手間は、誰も
+    払うべきではないからです。
+  </p>
+  <p>
+    <code>from</code> は含み、<code>to</code> は含みません。どちらも実行が
+    <em>始まった</em>時刻と比べます。期間より前に始まり、期間の中でもまだ動いて
+    いた長い実行は返りません。09:00 に動いていた何かを探しているなら、
+    <code>from</code> を狭めるのではなく、後ろへ広げてください。
+  </p>
+  <p>
+    タイムスタンプでも期間でもない値は、無視されるのではなく名指しで拒否されます。
+    どの一覧エンドポイントのどのパラメーターもこの形で失敗します。黙って捨てられた
+    フィルターは、もっともらしい間違った答えを返し、もっともらしい間違った答えは
+    エラーより悪いからです。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={badParam} title="from=yesterday" />
+
+  <h2>悪い回答を見つけるクエリ</h2>
+  <p>
+    <code>has_score=answer_relevance&amp;score_below=0.5</code> は、そのスコアラーが
+    0.5 を下回る評価を付けたすべての実行を返します。苦情が失敗ではなく品質について
+    のものであるときに使うのはこれです。悪い回答は、たいてい成功した実行だから
+    です。
+  </p>
+  <p>
+    <code>has_score</code> だけを指定すると、そのスコアラーが見たすべての実行が
+    返ります。<code>score_below</code> だけを指定しても何も起きません。スコアラーの
+    付いていないしきい値には意味がなく、mcpd はどのスコアラーのことか推測しなければ
+    ならなくなります。mcpd は推測しません。それらの値がどこから来るのかは
+    <a href={linkTo('/docs/evaluation')} class="link">スコアとフィードバック</a>が
+    扱います。
+  </p>
+
+  <h2>実行ではなくステップを検索</h2>
+  <p>
+    <code>GET /v1/api/spans</code> は、すべての実行を横断して個々のステップを一度に
+    検索します。セッションではなくステップについての問い、つまりどのツール呼び出しが
+    遅いか、あるモデルへの呼び出しのどれがエラーになったか、情報の取得にどれだけかかるか、
+    といった問いに使ってください。
+  </p>
+  <p>
+    受け取るのは <code>q</code>、<code>kind</code>、<code>status</code>、
+    <code>name</code>、<code>model</code>、<code>trace_id</code>、
+    <code>from</code>、<code>to</code>、<code>min_duration_ms</code>、
+    <code>sort</code>、<code>order</code>、<code>limit</code>、
+    <code>cursor</code> で、意味も既定値も同じです。ここには <code>tags</code>、
+    <code>session_id</code>、<code>user_id</code> のフィルターはありません。それらは
+    実行に属するものだからで、3 つとも受け付けて捨てられるのではなく名指しで拒否
+    されます。
+  </p>
+  <p>
+    <code>sort</code> が取る値は、実行の一覧より少なくなります。
+    <code>start_time</code>、<code>duration</code>、<code>cost</code> だけで、ほかは
+    ありません。スパンはスパン数もスコアの集計も持たないので、
+    <code>span_count</code> と <code>score</code> には並べる対象がなく、無視される
+    のではなく名指しで拒否されます。
+  </p>
+  <p>
+    実行に対する <code>model</code> は、いずれかのスパンがそれを使ったかを尋ねます。
+    スパンに対する <code>model</code> は、そのスパン自身のモデルです。同じ語で、
+    問いは 2 つです。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={finding} title="検索" />
+
+  <h2>ページ送りと、カーソルが不透明である理由</h2>
+  <p>
+    一覧は最大で <code>limit</code> 件の行と、1 つの <code>page</code> オブジェクトを
+    返します。続きがあるときは <code>page.next_cursor</code> が入り、
+    <code>page.has_more</code> が同じことを真偽値で言います。
+  </p>
+  <p>
+    ページ送りはオフセットではなくキーセット方式です。カーソルは最後に渡された行を
+    指し、次のページはその直後から始まります。オフセットのページ送りではずれて
+    いきます。トレースは絶えず届くので、50 件目から 99 件目を求めるころには足元で
+    範囲が動いており、ある実行を二度読み、別の実行は一度も現れません。調査では、
+    取りこぼした実行こそが探していた実行です。
+  </p>
+  <p>
+    カーソルは、並び替えの値と行の id を 16 進で符号化した組で、意味のないものとして
+    扱ってください。不透明にしてあるのは、すべての呼び出し側を壊さずに符号化を
+    変えられるようにするためと、中の値が並び順ごとに別の量だからです。
+    <code>start_time</code> と <code>duration</code> ではナノ秒、
+    <code>cost</code> では倍率をかけた整数、<code>span_count</code> では単なる件数、
+    <code>score</code> ではその実行の最も低いスコアです。
+  </p>
+  <p>
+    これには規則が 1 つ付きます。<strong>カーソルは、それを生んだのと同じフィルター、
+    同じ <code>sort</code>、同じ <code>order</code> と一緒に送り返してください。</strong>
+    mcpd はそうしたかどうかを検査しません。違う並び順で使い回されたカーソルは、
+    間違った列と比較して行を飛ばします。編集されたり切り詰められたりしたカーソルは、
+    <code>invalid_query</code> と <code>malformed cursor</code> という
+    メッセージで拒否されます。
+  </p>
+  <p>
+    総件数はありません。<code>page.total</code> は、一致件数を安価に数えられる
+    バックエンドのために予約されており、組み込みの SQLite ストアは埋めません。
+    数字を目指して数えるのではなく、<code>has_more</code> でループしてください。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={paging} title="ページ送り" />
+
+  <h2>実行が見つかったあと</h2>
+  <p>
+    これらのクエリのどれかで得たトレース id を
+    <code>GET /v1/api/traces/{'{trace_id}'}</code> に渡すと、その実行と中のすべての
+    スパンが返ります。すでに順序づけられているので、二度目のリクエストなしで
+    ウォーターフォールを描けます。<code>include=logs,scores,feedback</code> を足すと、
+    それに紐づくすべてが同じ応答で返ります。
+  </p>
+  <p>
+    そこから先は、各ステップの数字について
+    <a href={linkTo('/docs/cost')} class="link">コスト集計</a>が説明し、
+    <a href={linkTo('/docs/reference/api')} class="link">HTTP API リファレンス</a>が、
+    仕様が宣言するとおりのすべてのエンドポイントとフィールドを列挙します。
+  </p>
+</Doc>

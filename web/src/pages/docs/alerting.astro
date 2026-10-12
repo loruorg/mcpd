@@ -1,0 +1,521 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import Annunciator from '@/components/Annunciator.astro'
+---
+
+<Doc
+  title="Monitors and alerts"
+  description="How mcpd watches error rate, latency, cost, score means, structural divergence and run repetition, why a monitor latches, why a quiet window never clears a standing alert, and its webhook."
+  lede="A condition worth watching, watched. mcpd evaluates on a timer, latches what it finds, and tells you once."
+  og="docs"
+>
+  <h2>What a monitor is</h2>
+  <p>
+    A monitor is a saved question mcpd asks itself on a timer: is the error rate
+    in this project above five percent over the last five minutes? Is the mean
+    of this scorer below the number we agreed on? It reads the same storage the
+    interface reads, so a monitor can only assert something you could have
+    looked up yourself.
+  </p>
+  <p>
+    Monitors are off until you configure one. mcpd does not guess a threshold
+    for you, because a threshold that nobody chose is a threshold nobody trusts.
+  </p>
+
+  <Annunciator class="not-prose my-8" />
+
+  <h2>It latches</h2>
+  <p>
+    A monitor that fires on every evaluation while a condition persists gets
+    muted within a day, and a muted monitor is worse than no monitor because it
+    looks like coverage. So mcpd reports the transition and not the state: once
+    on the way into trouble, once on the way out, and nothing in between.
+  </p>
+
+  <h2>Silence is not recovery</h2>
+  <p>
+    This is the rule that costs people outages. When traffic stops, the window
+    holds too few runs to judge, and the obvious implementation reports
+    &ldquo;nothing wrong&rdquo; and clears the alert. But an agent that has
+    stopped serving requests is the failure, not the recovery from it.
+  </p>
+  <p>
+    A window with too few runs in it leaves a standing alert exactly where it
+    was. A monitor returns to nominal only when a reading with enough samples
+    behind it comes back inside the threshold.
+  </p>
+  <p>
+    The same reasoning sets <code>min_samples</code>. One failed run in a quiet
+    hour is a hundred percent error rate, and mcpd will not call that a fault.
+    The default is twenty.
+  </p>
+
+  <h2>What can be watched</h2>
+  <table>
+    <thead>
+      <tr><th>Watch</th><th>Measures</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>error_rate</code></td>
+        <td>Failed runs over total runs in the window.</td>
+      </tr>
+      <tr>
+        <td><code>latency_p95</code></td>
+        <td>Ninety-fifth percentile run duration, in milliseconds.</td>
+      </tr>
+      <tr>
+        <td><code>cost</code></td>
+        <td>Total spend in the window, in the price book's currency.</td>
+      </tr>
+      <tr>
+        <td><code>score_mean</code></td>
+        <td>
+          Mean of one scorer, named by <code>scorer_id</code>. This is the one
+          that catches a quality regression a latency chart cannot see.
+        </td>
+      </tr>
+      <tr>
+        <td><code>trace_count</code></td>
+        <td>Runs in the window. Watch it with <code>below</code> to catch a pipeline that went silent.</td>
+      </tr>
+      <tr>
+        <td><code>step_count_divergence</code></td>
+        <td>
+          Runs in the window that took an unusual number of steps for their own
+          definition. The only watch here with no threshold in the units of the
+          thing it measures. It reads durable runs, not traces.
+        </td>
+      </tr>
+      <tr>
+        <td><code>run_repetition</code></td>
+        <td>
+          How much a run repeats itself: the mean, over the runs in the window,
+          of the most attempts any one of them made at a single node of its
+          definition. One means no node ran twice. It reads durable runs, not
+          traces.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>When you cannot name the number</h2>
+  <p>
+    Every watch above compares a measurement against a ceiling you chose. That
+    works while you know what the measurement should be. The hardest runaway to
+    catch is the one that never reaches any ceiling you would have thought to
+    set: a run that loops eight times instead of twice, finishes, costs four
+    times what it should, and reports no error at all. Its step count is not
+    high in absolute terms. It is high <em>for that definition</em>, and only
+    that definition&rsquo;s own recent runs can say so.
+  </p>
+  <p>
+    <code>step_count_divergence</code> sets no threshold in steps. For each
+    definition version it takes the step counts of that version&rsquo;s recently
+    completed runs, takes the middle of them as the usual shape, and reports the
+    runs that sit further out than a standardised bound allows. Nobody has to know
+    that <code>checkout</code> normally takes eleven steps, and nobody has to
+    revisit the number when it starts taking fourteen.
+  </p>
+
+  <h3>The statistic, and why it is this one</h3>
+  <p>
+    The measure of how far out a run sits is the modified z-score:
+    <span class="data">0.6745 &times; (steps &minus; median) &divide; MAD</span>,
+    where MAD is the median of the absolute deviations from the median. A run
+    diverges when that score passes <code>z_bound</code>, which defaults to
+    <span class="data">3.5</span>.
+  </p>
+  <p>
+    Both constants are the conventional ones and neither is arbitrary. For
+    normally distributed data the median absolute deviation converges to
+    0.6745&sigma; rather than to &sigma;, so the raw ratio is measured in units
+    of about two thirds of a standard deviation. Multiplying by 0.6745 puts it
+    back into units of &sigma;, which is what lets 3.5 mean what everyone reads
+    it to mean. 3.5 is the bound published with the statistic, about one run in
+    two thousand on normal data. Step counts are not normally distributed, so
+    treat it as the value to tune away from rather than a promised false alarm
+    rate.
+  </p>
+  <p>
+    The median and the MAD are used rather than a mean and a standard deviation
+    because they survive the thing being looked for. A single run that took
+    forty times the usual number of steps moves a mean and inflates a standard
+    deviation enough to hide itself; the median absolute deviation tolerates up
+    to half its sample being outliers before it moves at all.
+  </p>
+
+  <h3>What it will not do</h3>
+  <ul>
+    <li>
+      <strong>Judge a small sample.</strong> A definition version needs
+      <span class="data">12</span> completed runs in the window before the watch
+      will compare anything against it. The median of twelve sits between the
+      sixth and seventh value, so no single run decides where the middle is.
+      Below that, one unusual run moves the middle itself, so the baseline
+      describes the outlier rather than the norm. A version with too few reads
+      as insufficient, which leaves a standing alert exactly where it was. The
+      twelve are counted inside the monitor&rsquo;s own window, so set the two
+      together: a definition that runs a few times an hour needs a
+      <code>window_seconds</code> measured in hours to reach them.
+    </li>
+    <li>
+      <strong>Divide by zero.</strong> A definition with no loop and no branch
+      takes the same number of steps every time, so its MAD is zero and every
+      departure from it is infinitely anomalous. Emitting infinity is not an
+      answer: it cannot be compared, it prints as <code>inf</code> in a sentence
+      somebody has to act on, and it reaches a webhook as <code>null</code>.
+      mcpd falls back to the mean absolute deviation, scaled by
+      &radic;(&pi;/2) so it estimates the same &sigma;. When even that is zero,
+      because every run in the sample took exactly the same number of steps,
+      there is no ratio to report and the alert says it in steps instead:
+      &ldquo;every one of the last 12 completed runs took 9&rdquo;. In that one
+      case <code>z_bound</code> does not apply, because there is no score to
+      hold against it: raising the bound widens what counts as ordinary
+      variation, and a cohort with no variation has none to widen.
+    </li>
+    <li>
+      <strong>Mix two versions of a definition.</strong> Runs are grouped by
+      definition <em>version</em>. A new version is a deliberate change of
+      shape, so a run of v3 is not anomalous for differing from a run of v2, and
+      pooling them makes a two-humped sample whose median describes neither. A
+      freshly published version therefore reports nothing until it has twelve
+      completed runs of its own, which is the right way round.
+    </li>
+    <li>
+      <strong>Report a failure twice.</strong> Only completed runs join the
+      baseline, and only a completed run is reported for taking too
+      <em>few</em> steps. Ending short is what failing, being cancelled, timing
+      out and not having finished yet all mean, and this is the one watch that
+      exists to see what the error rate cannot. A run still in flight is scored,
+      though: a run that has already gone long is reported while it is still
+      going, which is the whole point of the watch.
+    </li>
+  </ul>
+
+  <h3>Configuring it</h3>
+  <p>
+    This watch has two numbers because it asks two questions.
+    <code>z_bound</code> asks how far out a single run has to be, and it is a
+    standardised score, so the same 3.5 serves a definition that usually takes
+    four steps and one that usually takes four hundred. <code>threshold</code>
+    then asks how many such runs a window may hold before anyone is told, which
+    is an operational choice. Set it to <code>0</code> with
+    <code>above</code> to be told about any of them. <code>below</code> has no
+    use on this watch: every run being ordinary is the healthy state, not the
+    one worth waking somebody for.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitors": [
+    {
+      "id": "checkout-shape",
+      "name": "A checkout run took an unusual number of steps",
+      "project": "support-desk",
+      "watch": "step_count_divergence",
+      "compare": "above",
+      "threshold": 0,
+      "z_bound": 3.5,
+      "window_seconds": 3600,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    The measured value is the number of runs that diverged, so
+    <code>compare</code> and <code>threshold</code> count runs and not steps.
+    The detail names the worst three: <code>checkout v1 run r_9f2 took 40 steps
+    against a usual 10 (z 20.2)</code>.
+  </p>
+  <p>
+    This watch reads the durable run store rather than stored traces, because
+    only a run header knows which definition version a run pinned and how many
+    steps it has taken. <code>run_repetition</code> below reads it too, and
+    those two are the only ones that do. A daemon that serves no runs reports
+    this as insufficient and says so. <code>min_samples</code> is not read here:
+    the sample that matters is per definition version, not per window.
+  </p>
+
+  <h2>When a run keeps doing the same thing</h2>
+  <p>
+    Divergence asks how far a run strays from the shape its own definition
+    usually takes, and it needs a cohort of recent runs before it can answer.
+    There is a narrower question that needs no cohort at all: how many times did
+    a run go round the same node?
+  </p>
+  <p>
+    Two faults hide from the error rate here. A loop that keeps re-entering one
+    node succeeds, and a retry storm that gets there in the end is a success.
+    Both do the same work over and over while the error rate stays at zero. It
+    is also the reading a step count cannot give on its own: a run of forty
+    steps that visited forty nodes once is a long definition, and a run of forty
+    steps that visited one node forty times is stuck.
+  </p>
+  <p>
+    <code>run_repetition</code> counts attempts. For each run in the window it
+    takes the number of attempts made at each node of that run&rsquo;s
+    definition, keeps the largest, and reads the mean of that number across the
+    window. A retry writes another attempt at the node it retried, and a loop
+    iteration writes a new position at the node it re-entered, so both count.
+    <span class="data">1</span> means no node ran twice.
+  </p>
+  <p>
+    Unlike divergence, this one has a threshold in the units it measures. A
+    definition that is forty steps long and a definition that is four steps long
+    both read <span class="data">1</span> when nothing repeats, so the number
+    means the same thing in every project and you can name a ceiling for it.
+    That makes it an ordinary threshold watch, and only its reading of the run
+    store is borrowed from the watch above.
+  </p>
+
+  <h3>What it counts, and what it does not</h3>
+  <ul>
+    <li>
+      <strong>A fan-out counts.</strong> A <code>foreach</code> over nine items
+      is nine attempts at one node, and the journal cannot tell that apart from
+      a loop that went round nine times: both are indexed positions under one
+      node, and only the definition knows which construct wrote them. So a
+      project whose definitions fan out sits high, and its threshold has to be
+      set for that. Every evaluation carries its value, tripped or not, so read
+      what an ordinary window reports before you choose one.
+    </li>
+    <li>
+      <strong>A skipped position does not count.</strong> A false
+      <code>when</code> guard writes an attempt row and the node never ran, so
+      counting it would let a <code>foreach</code> over a filtered list read as
+      repetition.
+    </li>
+    <li>
+      <strong>A run that attempted nothing is left out.</strong> Not counted as
+      zero: it has not repeated anything because it has not run anything, and a
+      zero in the sample would pull the mean below the
+      <span class="data">1</span> that the threshold is set against.
+    </li>
+    <li>
+      <strong>A run still in flight is counted.</strong> That is most of the
+      point. A run stuck in a retry loop is in the reading while it is still
+      looping, rather than after it finally gives up.
+    </li>
+  </ul>
+
+  <h3>Configuring it</h3>
+  <p>
+    One number, unlike divergence. <code>threshold</code> is the mean attempt
+    count the window may reach before anyone is told, and
+    <span class="data">1.2</span> is a fifth of a window&rsquo;s runs going round
+    twice. <code>below</code> has no use here: every run in the sample attempted
+    at least one node at least once, so the reading has a floor of
+    <span class="data">1</span> and can never fall through it.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitors": [
+    {
+      "id": "checkout-repetition",
+      "name": "Checkout runs are going round the same step",
+      "project": "support-desk",
+      "watch": "run_repetition",
+      "compare": "above",
+      "threshold": 1.2,
+      "window_seconds": 3600,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    <code>min_samples</code> is read here, and it counts the runs the watch read
+    from the run store rather than traces, so a deployment whose spans are
+    ingested somewhere else is still judged on its runs. A window under it
+    reports as insufficient, which leaves a standing alert exactly where it was.
+  </p>
+  <p>
+    The detail names the worst three runs and the node each one went round:
+    <code>checkout v1 run r_9f2 attempted settle 11 times</code>. Runs that
+    repeated nothing are not named, because there is nothing in them to open.
+  </p>
+
+  <h2>An objective, when a threshold is the wrong question</h2>
+  <p>
+    A monitor asks whether the error rate is above five percent right now. An
+    SLO asks something more useful: are we going to miss the target we promised,
+    and how fast are we heading there.
+  </p>
+  <p>
+    The difference matters because a threshold cannot tell a two minute blip
+    apart from a slow leak, and those want opposite responses. Set a threshold
+    tight enough to catch the leak and the blip pages you at three in the
+    morning. Set it loose enough to sleep through the blip and the leak runs for
+    a week.
+  </p>
+
+  <h3>The budget, and the rate it burns</h3>
+  <p>
+    An objective of <code>0.995</code> over thirty days says half a percent of
+    runs may fail. That half percent is the error budget. A burn rate of 1 spends
+    it exactly over the thirty days; a burn rate of 10 spends it in three.
+  </p>
+  <p>
+    mcpd measures the burn over two windows at once and trips only when both
+    agree: faster than <span class="data">14.4x</span> over the last hour
+    <em>and</em> faster than <span class="data">6x</span> over the last six. That
+    is what separates the two cases. A five minute outage moves the one hour
+    number and cannot move the six, so it does not page. A leak that has been
+    running all afternoon moves both.
+  </p>
+  <p>
+    Worth knowing before you rely on it: on a 99.5% objective those thresholds
+    are an error rate of about 7.2%. A steady 5% failure rate burns the budget
+    ten times too fast and will exhaust it early, but it does not wake anyone.
+    Watch <code>budget_remaining</code> for that, and keep a
+    <code>score_mean</code> or <code>error_rate</code> monitor if you want to
+    know sooner.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "slos": [
+    {
+      "id": "support-availability",
+      "name": "99.5% of support runs succeed over 30 days",
+      "project": "support-desk",
+      "objective": 0.995,
+      "window_days": 30,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    <code>GET /v1/api/slos</code> returns each objective with its success rate,
+    the fraction of budget left, and both burn rates.
+    <code>POST /v1/api/slos/&#123;id&#125;/ack</code> acknowledges one. They
+    latch and acknowledge exactly as monitors do, and a window too thin to judge
+    never clears a standing alert.
+  </p>
+  <p>
+    <code>budget_remaining</code> goes negative once the budget is overspent,
+    rather than stopping at zero. Zero and "missed the target by a factor of a
+    hundred" are different situations and the number says which.
+  </p>
+
+  <h2>Configuring one</h2>
+  <p>
+    Monitors live in a JSON file rather than on the command line, because a
+    threshold, a window and a comparison do not fit on a flag and should be
+    reviewed like code. The file mounts as a Kubernetes ConfigMap unchanged.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitor_interval_seconds": 60,
+  "monitors": [
+    {
+      "id": "support-error-rate",
+      "name": "Support agent error rate above 5%",
+      "project": "support-desk",
+      "watch": "error_rate",
+      "compare": "above",
+      "threshold": 0.05,
+      "window_seconds": 300,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    },
+    {
+      "id": "relevance-regression",
+      "name": "Answer relevance fell below 0.8",
+      "project": "support-desk",
+      "watch": "score_mean",
+      "scorer_id": "answer_relevance",
+      "compare": "below",
+      "threshold": 0.8,
+      "window_seconds": 3600
+    }
+  ]
+}`}</code></pre>
+
+  <Command
+    class="not-prose my-6"
+    title="start with monitors armed"
+    command="mcpd serve --config-file ./mcpd.json"
+  />
+
+  <p>
+    An unknown key fails the start rather than being ignored. A typo in
+    <code>threshold</code> that silently watches nothing is the worst outcome
+    available, so mcpd refuses it out loud.
+  </p>
+  <p>
+    Set <code>"enabled": false</code> to keep a monitor's definition without
+    evaluating it. <code>mcpd config</code> prints how many are armed.
+  </p>
+
+  <h2>Where a transition goes</h2>
+  <p>
+    Every transition is logged with the monitor id, the project, the threshold
+    and the measured value as structured fields, so a log pipeline can route it
+    without parsing a sentence. If you already run one, that is the whole
+    integration.
+  </p>
+  <p>
+    Give a monitor a <code>webhook</code> and mcpd also POSTs the transition.
+    The body is generic on purpose: Slack, PagerDuty, Opsgenie and every
+    workflow tool accept an inbound webhook, and shaping the payload for one of
+    them would mean maintaining a set of vendor integrations that go stale.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitor_id": "support-error-rate",
+  "name": "Support agent error rate above 5%",
+  "project": "support-desk",
+  "condition": "tripped",
+  "watch": "error_rate",
+  "threshold": 0.05,
+  "value": 0.5,
+  "samples": 40,
+  "detail": "error rate is 0.5000, threshold above 0.0500, over 40 run(s)",
+  "at": "2026-08-28T02:13:54.687391446Z"
+}`}</code></pre>
+
+  <p>
+    A failed delivery is logged and dropped. Retrying would either block the
+    evaluation loop or need a durable outbound queue, and an alerting path that
+    can quietly fall behind is worse than one that visibly missed a message.
+  </p>
+
+  <h2>Reading and acknowledging</h2>
+  <p>
+    <code>GET /v1/api/monitors</code> returns every monitor with its latched
+    condition, its last reading and when it tripped.
+  </p>
+  <p>
+    <code>POST /v1/api/monitors/&#123;id&#125;/ack</code> acknowledges one.
+    Acknowledging silences the transition without pretending the condition
+    cleared: the monitor stays acknowledged while it still breaches, and returns
+    to nominal on its own when the number recovers. Nobody has to remember to
+    un-mute it.
+  </p>
+  <p>
+    Monitor state is held in memory and rebuilt from readings on every start. It
+    is not persisted, because a restart that resurrects an alert which has
+    already recovered is a worse failure than a restart that re-evaluates.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>
+      The scorers a <code>score_mean</code> monitor watches:
+      <a href="/docs/testing" class="link">Regression testing</a>.
+    </li>
+    <li>
+      mcpd's own health, which no monitor covers:
+      <a href="/docs/operations" class="link">Running it</a>.
+    </li>
+    <li>
+      Every flag and file setting:
+      <a href="/docs/configuration" class="link">Configuration</a>.
+    </li>
+  </ul>
+</Doc>

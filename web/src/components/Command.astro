@@ -1,0 +1,206 @@
+---
+/**
+ * A command in a sunken well.
+ *
+ * This is the site's primary call to action. It is a command rather than a
+ * button because the action genuinely is "run this", and a button that scrolls
+ * to a command is a step nobody needs.
+ */
+import { localeOf } from '@/lib/i18n'
+import { strings } from '@/lib/ui-strings'
+
+interface Secondary {
+  label: string
+  command: string
+}
+
+interface Props {
+  command: string
+  /** The engraved caption above the well. */
+  label?: string
+  /**
+   * The same caption under the name the other blocks use. Sixteen pages passed
+   * `title`, which is what CodeSwitcher and TerminalCast call it, and every one
+   * of those captions was dropped on the floor.
+   */
+  title?: string
+  /** What to call the primary command in the switcher, when there is one. */
+  primaryLabel?: string
+  secondary?: Secondary[]
+  variant?: 'panel' | 'floor'
+  class?: string
+}
+
+const {
+  command,
+  label: givenLabel,
+  title,
+  primaryLabel: givenPrimary,
+  secondary = [],
+  variant = 'panel',
+  class: className = '',
+} = Astro.props
+const label = givenLabel ?? title
+const onFloor = variant === 'floor'
+
+const s = strings(localeOf(Astro.url.pathname))
+
+/**
+ * The primary's name in the switcher, when the page did not give one.
+ *
+ * It defaulted to "Docker", which was right for the landing page and wrong
+ * everywhere else: a `helm install` and a `sqlite3` backup were both labelled
+ * Docker. The program the command runs is the honest fallback, read past any
+ * leading environment assignments.
+ */
+const program = command
+  .split(/\s+/)
+  .find((word) => word && !word.includes('='))
+const primaryLabel =
+  givenPrimary ??
+  // Locale-invariant on purpose, and this is the one case where that is right
+  // for text a reader sees. The word is a program name, so `istioctl` has to
+  // read `Istioctl` in every locale; the Turkish mapping would title it
+  // `İstioctl`, which names no program that exists.
+  (program ? program.charAt(0).toUpperCase() + program.slice(1) : s('command.unnamed'))
+
+/**
+ * The primary is the first option, not a hidden default.
+ *
+ * It shipped without one, so choosing Kubernetes overwrote the command and left
+ * no way back to Docker short of reloading the page. A switcher you can only
+ * use once is worse than no switcher, because the reader has already lost the
+ * thing they came for.
+ */
+const options = secondary.length > 0 ? [{ label: primaryLabel, command }, ...secondary] : []
+---
+
+<div class={`min-w-0 ${className}`}>
+  {label && (
+    <p class:list={['legend mb-2', onFloor ? 'text-floor-ink/75' : 'text-ink-3']}>{label}</p>
+  )}
+
+  <div
+    class:list={[
+      'flex items-stretch overflow-hidden rounded-[2px] border',
+      onFloor ? 'border-white/14 bg-white/[0.045]' : 'well',
+    ]}
+    data-command
+  >
+    <div class="flex min-w-0 flex-1 items-baseline gap-2.5 px-3.5 py-3">
+      <span
+        class:list={['data shrink-0 select-none text-[0.8125rem]', onFloor ? 'text-floor-ink/60' : 'text-ink-3']}
+        aria-hidden="true">$</span
+      >
+      {/* Wrap rather than scroll. A command that runs past the edge reads as
+          truncated, and the reader cannot tell whether what they copied is the
+          whole thing. */}
+      <code
+        class:list={[
+          'data min-w-0 whitespace-pre-wrap break-words text-[0.8125rem] leading-relaxed',
+          onFloor ? 'text-floor-ink' : 'text-ink',
+        ]}
+        data-command-text>{command}</code
+      >
+    </div>
+    {/* The three words this button says are carried on the element, not built
+        in the script: a bundled script is one copy for all nine locales. */}
+    <button
+      type="button"
+      data-command-copy
+      data-copy-idle={s('command.copy')}
+      data-copy-done={s('command.copied')}
+      data-copy-manual={s('command.copyByHand')}
+      class:list={[
+        'shrink-0 self-stretch border-l px-3.5 text-[0.8125rem] transition-colors',
+        onFloor
+          ? 'border-white/14 text-floor-ink/75 hover:text-floor-ink'
+          : 'border-scribe text-ink-3 hover:text-ink',
+      ]}
+      aria-label={s('command.copyLabel')}>{s('command.copy')}</button
+    >
+  </div>
+
+  {/* The alternatives, one full line each. They were a wrapping row of
+      truncated fragments, and on a phone a `helm install` was cut to its first
+      three words with no sign that anything was missing. A line that wraps is
+      a command the reader can check against the well before choosing it.
+
+      The selected one is announced, not only shown. Without `aria-pressed` a
+      screen reader hears three buttons and no indication which command is
+      currently in the well above them. */}
+  {
+    options.length > 0 && (
+      <div
+        class="mt-3 flex min-w-0 flex-col gap-1.5"
+        role="group"
+        aria-label={s('command.methods')}
+        data-command-options
+      >
+        {/* Not `s`: that is the string reader in this file's scope, and shadowing
+            it here means the next person to want a translated word inside this
+            loop reaches for `s(...)` and gets an option object. */}
+        {options.map((option, i) => (
+          <button
+            type="button"
+            data-command-alt={option.command}
+            aria-pressed={i === 0 ? 'true' : 'false'}
+            class:list={[
+              // Stacked on a phone, where a label column beside the command
+              // would squeeze it into a column of broken tokens; a labelled
+              // line from `sm`.
+              'flex min-w-0 flex-col gap-y-0.5 text-left transition-colors sm:grid sm:grid-cols-[minmax(6rem,auto)_minmax(0,1fr)] sm:items-baseline sm:gap-x-3',
+              onFloor
+                ? 'text-floor-ink/80 hover:text-floor-ink aria-pressed:text-floor-ink'
+                : 'text-ink-3 hover:text-ink aria-pressed:text-ink',
+            ]}
+          >
+            <span class="text-[0.8125rem] font-medium">{option.label}</span>
+            <code class="data min-w-0 whitespace-pre-wrap break-words text-[0.75rem] leading-relaxed">{option.command}</code>
+          </button>
+        ))}
+      </div>
+    )
+  }
+</div>
+
+<script>
+  // Copy, and swap the primary command when an alternative is chosen. Both are
+  // real behaviours: nothing here is a control that only looks like one.
+  document.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement
+
+    const copy = target.closest<HTMLButtonElement>('[data-command-copy]')
+    if (copy) {
+      const text = copy
+        .closest('[data-command]')
+        ?.querySelector<HTMLElement>('[data-command-text]')?.textContent
+      if (!text) return
+      const idle = copy.dataset.copyIdle ?? 'Copy'
+      navigator.clipboard
+        .writeText(text)
+        .then(() => {
+          copy.textContent = copy.dataset.copyDone ?? 'Copied'
+          setTimeout(() => (copy.textContent = idle), 1400)
+        })
+        .catch(() => {
+          copy.textContent = copy.dataset.copyManual ?? 'Press ⌘C'
+          setTimeout(() => (copy.textContent = idle), 2000)
+        })
+      return
+    }
+
+    const alt = target.closest<HTMLButtonElement>('[data-command-alt]')
+    if (alt) {
+      const group = alt.closest('[role="group"]')
+      const root = group?.parentElement
+      const slot = root?.querySelector<HTMLElement>('[data-command-text]')
+      if (slot && alt.dataset.commandAlt) slot.textContent = alt.dataset.commandAlt
+      // Move the selected state with the choice, so the row says which command
+      // is in the well rather than leaving the reader to remember.
+      group?.querySelectorAll('[data-command-alt]').forEach((b) => {
+        b.setAttribute('aria-pressed', String(b === alt))
+      })
+    }
+  })
+</script>

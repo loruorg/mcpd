@@ -1,0 +1,1164 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+/* 英文路由，按这个语言重新生成。 */
+const code = localeOf(Astro.url.pathname)
+const to = (route: string) => urlFor(route, code)
+
+const composeEnv = `services:
+  mcpd:
+    image: ghcr.io/mcpd/mcpd
+    ports: ['4317:4317']
+    volumes: ['mcpd-data:/data']
+    environment:
+      MCPD_LISTEN: 0.0.0.0:4317
+      MCPD_DATA: /data/mcpd.db
+      MCPD_PROJECT: checkout
+      MCPD_RETENTION_DAYS: '30'
+      MCPD_INGEST_KEYS: write-key-one,write-key-two
+      MCPD_READ_KEYS: read-key
+      MCPD_REDACT_KEY: a-long-random-string
+      MCPD_LOG_FORMAT: json
+      MCPD_LOG: mcpd=info,mcpd_server=warn
+
+volumes:
+  mcpd-data:`
+---
+
+<Doc
+  title="配置"
+  description="mcpd 的每一个参数和环境变量，以及各自的默认值：监听地址、数据路径、项目、保留期、摄取密钥与读取密钥、采样、脱敏、允许的来源、请求超时和日志。"
+  lede="每一项设置都是一个参数，每一个参数都有一个含义相同的环境变量。少数几项结构太复杂，命令行放不下，它们住在同一个 JSON 文件里。这一页把它们全部列出来。"
+  og="docs"
+>
+  <h2>同一件事的两种写法</h2>
+  <p>
+    不带任何参数运行 mcpd，它就能工作：监听 <code>0.0.0.0:4317</code>，把数据
+    放在 <code>./mcpd.db</code>，对机密做脱敏，并且永久保存每一条 trace。下面
+    的每一项，都是在改动这些决定中的某一个。
+  </p>
+  <p>
+    参数总是压过它对应的环境变量。两者都是全局的，所以放在子命令前面或后面
+    都能被接受。
+  </p>
+
+  <h2>速查表</h2>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>参数</th>
+          <th>环境变量</th>
+          <th>默认值</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>--listen</code></td>
+          <td><code>MCPD_LISTEN</code></td>
+          <td><code>0.0.0.0:4317</code></td>
+        </tr>
+        <tr>
+          <td><code>--data</code></td>
+          <td><code>MCPD_DATA</code></td>
+          <td><code>./mcpd.db</code></td>
+        </tr>
+        <tr>
+          <td><code>--project</code></td>
+          <td><code>MCPD_PROJECT</code></td>
+          <td><code>default</code></td>
+        </tr>
+        <tr>
+          <td><code>--retention-days</code></td>
+          <td><code>MCPD_RETENTION_DAYS</code></td>
+          <td>不设置：全部保留</td>
+        </tr>
+        <tr>
+          <td><code>--ingest-key</code></td>
+          <td><code>MCPD_INGEST_KEYS</code></td>
+          <td>无：摄取是开放的</td>
+        </tr>
+        <tr>
+          <td><code>--read-key</code></td>
+          <td><code>MCPD_READ_KEYS</code></td>
+          <td>无：读取是开放的</td>
+        </tr>
+        <tr>
+          <td><code>--write-key</code></td>
+          <td><code>MCPD_WRITE_KEYS</code></td>
+          <td>无：接受摄取密钥</td>
+        </tr>
+        <tr>
+          <td><code>--admin-key</code></td>
+          <td><code>MCPD_ADMIN_KEYS</code></td>
+          <td>无：接受读取密钥</td>
+        </tr>
+        <tr>
+          <td><code>--execute-key</code></td>
+          <td><code>MCPD_EXECUTE_KEYS</code></td>
+          <td>无：接受写入密钥</td>
+        </tr>
+        <tr>
+          <td><code>--worker-key</code></td>
+          <td><code>MCPD_WORKER_KEYS</code></td>
+          <td>无：接受写入密钥</td>
+        </tr>
+        <tr>
+          <td><code>--runs-data</code></td>
+          <td><code>MCPD_RUNS_DATA</code></td>
+          <td>在 <code>--data</code> 的路径的扩展名前加上 <code>.runs</code></td>
+        </tr>
+        <tr>
+          <td><code>--trusted-identity-header</code></td>
+          <td><code>MCPD_TRUSTED_IDENTITY_HEADER</code></td>
+          <td>无：不记录任何主体</td>
+        </tr>
+        <tr>
+          <td><code>--trusted-proxy-cidr</code></td>
+          <td><code>MCPD_TRUSTED_PROXY_CIDRS</code></td>
+          <td>无：任何地址都不得设置那个头</td>
+        </tr>
+        <tr>
+          <td><code>--sample</code></td>
+          <td><code>MCPD_SAMPLE</code></td>
+          <td>不设置：保留每一条 trace</td>
+        </tr>
+        <tr>
+          <td><code>--quota-per-minute</code></td>
+          <td><code>MCPD_QUOTA_PER_MINUTE</code></td>
+          <td>不设置：没有上限</td>
+        </tr>
+        <tr>
+          <td><code>--no-redact</code></td>
+          <td><code>MCPD_NO_REDACT</code></td>
+          <td>关：脱敏是开着的</td>
+        </tr>
+        <tr>
+          <td><code>--redact-key</code></td>
+          <td><code>MCPD_REDACT_KEY</code></td>
+          <td>一个内置的密钥，它是公开的</td>
+        </tr>
+        <tr>
+          <td><code>--redact-key-contains</code></td>
+          <td><code>MCPD_REDACT_KEY_CONTAINS</code></td>
+          <td>无：只有内置规则</td>
+        </tr>
+        <tr>
+          <td><code>--redact-max-string</code></td>
+          <td><code>MCPD_REDACT_MAX_STRING</code></td>
+          <td>128 KiB</td>
+        </tr>
+        <tr>
+          <td><code>--cors-origin</code></td>
+          <td><code>MCPD_CORS_ORIGINS</code></td>
+          <td>无：只允许同源</td>
+        </tr>
+        <tr>
+          <td><code>--request-timeout-seconds</code></td>
+          <td><code>MCPD_REQUEST_TIMEOUT_SECONDS</code></td>
+          <td><code>30</code></td>
+        </tr>
+        <tr>
+          <td><code>--max-body-bytes</code></td>
+          <td><code>MCPD_MAX_BODY_BYTES</code></td>
+          <td><code>33554432</code>，也就是 32 MiB</td>
+        </tr>
+        <tr>
+          <td><code>--max-batch-signals</code></td>
+          <td><code>MCPD_MAX_BATCH_SIGNALS</code></td>
+          <td><code>10000</code></td>
+        </tr>
+        <tr>
+          <td><code>--log-format</code></td>
+          <td><code>MCPD_LOG_FORMAT</code></td>
+          <td><code>text</code></td>
+        </tr>
+        <tr>
+          <td><code>--clickhouse-url</code></td>
+          <td><code>MCPD_CLICKHOUSE_URL</code></td>
+          <td>关：使用内嵌的文件</td>
+        </tr>
+        <tr>
+          <td><code>--clickhouse-database</code></td>
+          <td><code>MCPD_CLICKHOUSE_DATABASE</code></td>
+          <td><code>mcpd</code></td>
+        </tr>
+        <tr>
+          <td><code>--clickhouse-user</code></td>
+          <td><code>MCPD_CLICKHOUSE_USER</code></td>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td><code>--clickhouse-password</code></td>
+          <td><code>MCPD_CLICKHOUSE_PASSWORD</code></td>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td><code>--postgres-url</code></td>
+          <td><code>MCPD_POSTGRES_URL</code></td>
+          <td>关：使用内嵌的文件</td>
+        </tr>
+        <tr>
+          <td><code>--config-file</code></td>
+          <td><code>MCPD_CONFIG_FILE</code></td>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td><code>--forward-endpoint</code></td>
+          <td><code>MCPD_FORWARD_ENDPOINT</code></td>
+          <td>关：什么都不转发</td>
+        </tr>
+        <tr>
+          <td><code>--forward-header</code></td>
+          <td><code>MCPD_FORWARD_HEADERS</code></td>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>无</td>
+          <td><code>MCPD_LOG</code></td>
+          <td><code>mcpd=info,mcpd_server=info,tower_http=warn</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>--listen</h3>
+  <p>
+    要绑定的地址。一个端口同时提供 OTLP 端点、原生摄取端点、查询 API、探针、
+    指标和界面，所以 mcpd 只有这一个地址。
+  </p>
+  <p>
+    绑定回环地址是安静的那个选择：只有当绑定的地址不是回环地址时，mcpd 才会
+    就开放的摄取发出警告。在 <code>0.0.0.0</code> 上且没有设置任何密钥时，它在
+    启动时警告两次，一次为摄取，一次为读取。
+  </p>
+
+  <h3>--data</h3>
+  <p>
+    SQLite 文件的路径。上级目录不存在时会被创建。传 <code>:memory:</code> 得到
+    一个什么都不留下的存储，这对演示或测试是对的，对任何你明天还想再看一眼的
+    东西都是错的。
+  </p>
+
+  <h3>--project</h3>
+  <p>
+    发送方没有指定项目时，信号落进的那个项目。项目是租户边界：每一次查询都限定
+    在一个项目里。保留期清理会针对它，以及 <code>projects</code> 块里的每一个
+    项目运行；两处都没出现的项目永远不会被清理，如果你的发送方自己指定项目名，
+    这一点就要紧。
+  </p>
+
+  <h3>--retention-days</h3>
+  <p>
+    删除早于这个天数的信号。不设置就是全部保留，这对一台笔记本是正确的默认值，
+    在其他任何地方都值得你专门做一次决定。
+  </p>
+  <p>
+    窗口是 1 到 36500 天，这里和项目的 <code>retention_days</code> 一样。
+    0 在启动时就会被拒绝，而不是被当成不设保留期：它会把截止点设成现在，而第一轮清理在启动时就运行，
+    于是会删掉这个项目的全部信号。要全部保留，就不要设置它。
+  </p>
+  <p>
+    这次清理跑在一个每小时触发的定时器上，而不是在查询时，所以一次大规模删除
+    永远不会落在某个用户的请求里面。span、trace、日志和指标按 mcpd 收到它们的
+    时间裁剪；评分、反馈和方面注释按它们自己的时间戳。删除行并不会让文件变小。见
+    <a href={to('/docs/operations')} class="link">把它跑起来</a>。
+  </p>
+
+  <h3>--ingest-key、--read-key、--write-key、--admin-key、--execute-key 和 --worker-key</h3>
+  <p>
+    六个作用域，因为它们承担的风险确实不同。每个端点在
+    <code>spec/mcpd.spec.json</code> 里声明自己需要哪一个，它的处理函数打上匹配
+    的标记，<code>make check</code> 比对两者，所以这里写的作用域就是运行中的
+    服务器实际执行的作用域。
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>作用域</th>
+          <th>用什么设置</th>
+          <th>它打开什么</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>ingest</code></td>
+          <td><code>--ingest-key</code></td>
+          <td>四个摄取端点。什么都读不到。</td>
+        </tr>
+        <tr>
+          <td><code>read</code></td>
+          <td><code>--read-key</code></td>
+          <td>查询 API：trace、span、日志、指标、评分、分析。</td>
+        </tr>
+        <tr>
+          <td><code>write</code></td>
+          <td><code>--write-key</code></td>
+          <td>
+            评分、反馈、数据集、实验、确认，以及把一次运行采集进数据集。
+          </td>
+        </tr>
+        <tr>
+          <td><code>admin</code></td>
+          <td><code>--admin-key</code></td>
+          <td>删除一条 trace、读取审计日志，以及下面两个作用域打开的一切。</td>
+        </tr>
+        <tr>
+          <td><code>execute</code></td>
+          <td><code>--execute-key</code></td>
+          <td>启动、取消一次运行，向它发信号，以及向它发布一个事件。</td>
+        </tr>
+        <tr>
+          <td><code>worker</code></td>
+          <td><code>--worker-key</code></td>
+          <td>注册定义、领取步骤并上报它们的结果。读不到任何 trace。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    最要紧的一道分界，是 <code>ingest</code> 和其他一切之间的那道。摄取密钥住在
+    每一个发出 span 的进程里，包括那些跑着不是你写的代码的进程。给这么一大群
+    进程一份还能读回所有已存提示词的凭据，是 mcpd 不让你轻易犯的错误：把摄取
+    密钥递给查询 API，会被拒绝。
+  </p>
+  <p>
+    出于同样的理由，只是规模更小，<code>write</code> 和 <code>ingest</code>
+    也是分开的。把一次运行采集进数据集，要读这次运行的输入和输出，所以它是一次
+    穿着写入外衣的读取，不该待在你整个集群都带着的那把密钥上。
+  </p>
+  <p>
+    <code>admin</code> 和 <code>read</code> 分开，是因为删除一次运行并不是读取
+    一次运行。在你设置 <code>--admin-key</code> 之前，读取密钥既能读也能删，
+    mcpd 会在启动时说明这一点。
+  </p>
+  <p>
+    <code>execute</code> 和 <code>worker</code> 是运行接口的两个作用域。启动一次
+    运行会让别人的 worker 去干活、去花钱，而给一条 trace 加注解不会，所以它不是
+    <code>write</code>。worker 密钥住在执行步骤主体的那个进程里，通常也就是持有
+    模型提供方凭据的那个进程，所以它打开的是租约协议，以及任何读不到已存提示词
+    的东西。在你设置这两个参数之前，两者都接受写入密钥，而管理员密钥永远被接受。
+  </p>
+
+  <h4>升级不用停机</h4>
+  <p>
+    没有设置的 <code>--write-key</code> 接受摄取密钥，没有设置的
+    <code>--admin-key</code> 接受读取密钥。因此，一份在这两个作用域出现之前就
+    配好的部署，作用域原封不动，升级时什么都不会坏。设置这两个参数，就能拿到
+    更窄的授权；<code>mcpd config</code> 会告诉你现在处于哪种状态：当这个作用域
+    有自己的密钥时，它打印 <code>key required</code>；当它是在继承别人的密钥时，
+    它打印 <code>key required (ingest keys)</code> 或
+    <code>key required (read keys)</code>。
+  </p>
+  <p>
+    这六个参数中的任何一个都可以重复，用来设置多把密钥，轮换密钥而不停机就是
+    这么做的。环境变量接受一个逗号分隔的列表。调用方以
+    <code>Authorization: Bearer KEY</code> 或 <code>X-Mcpd-Key: KEY</code>
+    的形式出示密钥，比较是恒定时间的，所以长度和第一处不同的位置都观察不到。
+  </p>
+  <p>
+    mcpd 不认识的密钥是 <code>401</code>。mcpd 认识、但用在它的作用域覆盖不到的
+    端点上的密钥，是 <code>403</code>。这两者值得分清楚：一个 401 会让你去一把
+    完全正确的密钥里找拼写错误。
+  </p>
+  <p>
+    完全不配置密钥时，每一个作用域都是开放的。这是有意的，因为第一次运行不该
+    要求任何凭据，这也是那条启动警告存在的原因。
+  </p>
+  <p>
+    注意这些密钥不覆盖什么：在这个构建里，<code>/healthz</code>、
+    <code>/readyz</code>、<code>/metrics</code> 和界面本身都不需要密钥就能访问。
+    如果这对你要紧，请把它们放到你自己的入口网关后面。
+  </p>
+
+  <p>
+    空的条目会在任何东西读取列表之前被丢弃。设置了却一个密钥都没有的列表，例如 <code>MCPD_EXECUTE_KEYS=</code> 或 Kubernetes Secret 里的空值，会让守护进程拒绝启动，拒绝信息写明参数和变量；想让这个作用域保持未设置，就不要设置这个变量；发送空密钥头的请求等于没有出示密钥。仍然是 <code>deploy/</code> 里示例文件占位符的密钥，也就是以 <code>REPLACE_WITH</code> 或 <code>replace-me</code> 开头的任何值（不分大小写），会让守护进程拒绝启动；拒绝信息写明参数或项目列表，从不写出值本身。<code>--redact-key</code> 也一样。每把密钥都用 <code>openssl rand -hex 32</code> 生成。没有设置 <code>--write-key</code>、<code>--execute-key</code> 和 <code>--worker-key</code> 时，摄取密钥还能启动运行、认领步骤，mcpd 会在启动时和 <code>mcpd doctor</code> 里对此发出警告。
+  </p>
+
+  <h4>审计日志</h4>
+  <p>
+    那些会把载荷交回去的处理函数会记下谁读了什么：
+    <code>{`GET /v1/api/traces/{id}`}</code>、span 和日志的搜索、反馈、数据集
+    条目、采集和删除。每一行都带着时间、动作那把密钥的短摘要、动作、项目、
+    资源，以及授权是否放行。密钥本身永远不会被写下来。
+  </p>
+  <p>
+    用 <code>GET /v1/api/audit</code> 读这份日志，它需要 admin 作用域。它不受
+    <code>--retention-days</code> 裁剪：一份和它所描述的数据同步删除自己的日志，
+    没办法说出谁读过那些已经消失的数据。写一行审计从不会让它所描述的那次读取
+    失败；写不进去的行会被记进日志，并在 <code>/metrics</code> 上计入
+    <code>mcpd_audit_write_failures_total</code>，这个值值得配一条告警。
+  </p>
+
+  <h3>--sample</h3>
+  <p>
+    一个 0.0 到 1.0 之间的分数。超出这个范围的值是启动错误，而不是悄悄地截断：
+    <code>--sample must be between 0.0 and 1.0, got 2</code>。
+  </p>
+  <p>
+    这个决定是对 trace id 做哈希得出的，所以负载均衡器后面的一群 mcpd 实例，
+    不用互相通信也会保留和丢弃同一批 trace。它对每条 trace 只做一次，并被这批
+    数据里该 trace 的每一个 span 继承，因为一条记了一半的 trace，看起来就像你
+    正在观测的那个系统出了 bug。
+  </p>
+  <p>
+    哈希读的是 trace id 的末尾几个字节。有些生产方的开头几个字节是从时间戳推出
+    来的，一个去看开头的采样器会和一天中的时刻相关，然后悄悄丢掉整整几个小时。
+  </p>
+  <p>
+    这个策略类型还带着“总是保留错误”和“总是保留慢于某值的”，但那属于尾部
+    决定，要等一条 trace 结束之后才做。这个构建只在头部采样，没有任何参数能打开
+    尾部采样。<a href={to('/docs/sampling')} class="link">采样</a>讲了这里面的
+    取舍。
+  </p>
+
+  <h3>--no-redact、--redact-key、--redact-key-contains 和 --redact-max-string</h3>
+  <p>
+    脱敏默认开启，并且在任何东西被写下之前运行，所以一个本就不该被持久化的值，
+    从来不会被持久化。事后再删掉它，不是同一种保证。内置三组规则，按键名的
+    小写子串匹配：
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>规则</th>
+          <th>键名包含以下内容时生效</th>
+          <th>存下来的是什么</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>遮蔽</td>
+          <td>
+            <code>api_key</code>、<code>apikey</code>、<code>api-key</code>、
+            <code>secret</code>、<code>password</code>、<code>passwd</code>、
+            <code>access_token</code>、<code>refresh_token</code>、
+            <code>id_token</code>、<code>bearer</code>、
+            <code>authorization</code>、<code>auth_token</code>、
+            <code>private_key</code>、<code>client_secret</code>、
+            <code>session_token</code>、<code>credential</code>、
+            <code>signature</code>、<code>x-api-key</code>
+          </td>
+          <td><code>[redacted]</code></td>
+        </tr>
+        <tr>
+          <td>部分保留</td>
+          <td>
+            <code>email</code>、<code>phone</code>、<code>ssn</code>、
+            <code>credit_card</code>、<code>card_number</code>、
+            <code>iban</code>
+          </td>
+          <td>
+            头两个和末两个字符，<code>ab…yz</code>。六个字符及以下的值会被整个
+            遮蔽，而不是把自己泄露掉大半
+          </td>
+        </tr>
+        <tr>
+          <td>哈希</td>
+          <td><code>user_id</code>、<code>userid</code></td>
+          <td>
+            <code>sha256:</code> 加上带密钥的摘要的 12 个字节，这样你还能按用户
+            分组，却没有存下任何一个用户
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    命中的键如果持有一个对象或一个数组，它下面的所有内容也会被脱敏，所以
+    <code>{'{'}"credentials": {'{'}"token": "..."{'}'}{'}'}</code>
+    不会仅靠嵌套的名字就溜过去。任何长于 128 KiB 的单个字符串会被截断，并留下
+    一个标明字节数的标记，这就限定了一段失控的提示词能对你的磁盘做什么。
+  </p>
+  <p>
+    <code>--redact-key</code> 是哈希规则用的密钥。在同一把密钥下，相同的输入
+    哈希出相同的结果，分组才成立；轮换这把密钥会有意地切断这种关联。任何做哈希
+    的部署都要设置它：内置的默认值就在源码里，所以不带密钥的摘要是可以猜出来的。
+  </p>
+  <p>
+    <code>--redact-key-contains</code> 在内置的三组之上，再加一条你自己的遮蔽
+    规则。内置规则知道凭据通常存在哪些名字下面；它们不知道你自己的工具把客户
+    账号放在哪个字段里。这个值的匹配方式和内置规则一样，都是键名的小写子串，
+    所以 <code>--redact-key-contains ticket</code> 会一并遮蔽
+    <code>ticket_id</code> 和 <code>supportTicket</code>，以及命中的键下面嵌套的
+    一切。要设置多条就重复这个参数，或者把
+    <code>MCPD_REDACT_KEY_CONTAINS</code> 设成一个逗号分隔的列表。
+  </p>
+  <p>
+    <code>--redact-max-string</code> 把长度上限从内置的 128 KiB 调低。长过上限的
+    字符串会在那里被切断，并带上一个标明丢掉了多少字节的标记，然后才被存下。
+  </p>
+  <p>
+    <code>--no-redact</code> 把整条流水线关掉，长度上限也一起关掉。作为环境变量
+    它写作 <code>MCPD_NO_REDACT=true</code>。只有当上游已经做过脱敏时它才讲得
+    通，而且如果上面那两个附加参数中的任何一个和它同时设置，守护进程会拒绝启动，
+    因为它们已经没有可作用的对象了。
+  </p>
+
+  <h3>--runs-data</h3>
+  <p>
+    运行存储放在哪里：定义、步骤尝试的流水、每一个截止时间和每一次等待。无论
+    信号存储是什么，它都是一个内嵌文件，所以在 Postgres 或 ClickHouse 上，运行
+    仍然待在守护进程旁边的一个文件里，运行接口也由一个副本提供。默认是在
+    <code>--data</code> 的路径的扩展名前加上 <code>.runs</code>，对默认值来说
+    就是 <code>./mcpd.runs.db</code>；当 <code>--data</code> 是
+    <code>:memory:</code> 时它也是。<code>--runs-data off</code> 完全不提供
+    运行：每一个运行端点都回答 <code>503</code> 并指出这个参数，守护进程的其余
+    部分不变。
+  </p>
+  <p>
+    这个存储的各项时长在配置文件的 <code>runs</code> 下，单位是整毫秒：
+    <code>lease_ttl_ms</code>、<code>reclaim_window_ms</code>、
+    <code>stall_window_ms</code>、<code>idempotency_window_ms</code>、
+    <code>park_ttl_ms</code> 和 <code>max_depth</code>。默认值是 30 秒的租约和
+    30 秒的回收窗口，对一台机器上的一个守护进程来说是对的，也是 worker 注册时
+    读回来的那些值。
+  </p>
+
+  <h3>--cors-origin</h3>
+  <p>
+    哪些浏览器来源可以从别的站点调用查询 API。一个都不设置时，跨源请求拿不到
+    <code>access-control-allow-origin</code> 头，浏览器就不会把响应交给页面。
+    这是默认行为，也是它让一个跑在你笔记本上、读取 API 开放的守护进程，不会被
+    同一个浏览器里打开的任意网页读走。随包发布的界面由守护进程自己的来源提供，
+    永远不需要这个参数。
+  </p>
+  <p>
+    从别的地方提供这个界面，比如一个 CDN 或者一个内部门户，才是这个参数存在的
+    理由：写出那个来源，包含协议和主机，例如
+    <code>--cors-origin https://console.example</code>。要设置多个就重复它，
+    或者把 <code>MCPD_CORS_ORIGINS</code> 设成一个逗号分隔的列表。一个不是来源
+    的值，比如 <code>console.example</code>，或者带结尾斜杠的那种，会让启动失败
+    并指出这个参数，而不是留给你一个连不上的界面和一个不知道为什么。
+    <code>--cors-origin '*'</code> 允许所有来源，那是早期构建不问一声就做的事。
+  </p>
+  <p>
+    <code>/healthz</code>、<code>/readyz</code> 和 <code>/metrics</code> 不受这个
+    参数管辖。它们不携带任何已存的数据，而且界面在做别的事之前会先探测
+    <code>/healthz</code>，所以它们对任何来源都保持可读。
+  </p>
+
+  <h3>--request-timeout-seconds</h3>
+  <p>
+    一次请求最长可以花多久，读取请求体的时间也算在内，超过守护进程就替它作答。
+    跑过截止时间的处理函数会得到一个 <code>503</code>，响应体里带着
+    <code>timeout</code> 和这个参数的名字。默认是 30 秒，长到足以读完并存下一个
+    很大的批次，短到能把一个接受连接却从不作答的存储后端报出来，而不是一直等
+    下去。它不能关掉；如果某个操作确实需要更久，就把它调高。
+  </p>
+
+  <h3>--max-body-bytes 和 --max-batch-signals</h3>
+  <p>
+    对同一个请求的两道限制。<code>--max-body-bytes</code> 是守护进程会读取的
+    最大请求体，默认 32 MiB，它决定了在任何内容被解码之前，一次请求最多能占用
+    多少内存。更大的请求体会被以 <code>413</code> 拒绝，并写明这两个数字；
+    压缩过的请求体在解压之后按同一个数字衡量，所以一个膨胀一千倍的请求体会被
+    拒绝，而不是被展开。
+  </p>
+  <p>
+    <code>--max-batch-signals</code> 是一次请求解码之后可以携带多少条信号，
+    默认 10,000。它是在整个请求上累计的，所以一个批次数组和一条 NDJSON 流，
+    和单个批次受同一个数字约束。请求超出它时什么都不会存下：拒绝发生在第一次
+    写入之前，而不是在写了一半之后。
+  </p>
+  <p>
+    两者也都是配置文件的键，<code>max_body_bytes</code> 和
+    <code>max_batch_signals</code>，两处都设置时参数胜出。两者都不能关掉，
+    零在启动时会被拒绝，而不是被读成“无限制”：请求体上限为零会拒绝每一个请求，
+    所以那个看起来更宽松的解释，才是会让摄取彻底停摆的那一个。
+  </p>
+
+  <h3>--log-format 和 MCPD_LOG</h3>
+  <p>
+    终端用 <code>text</code>，日志管道用 <code>json</code>。
+    <code>MCPD_LOG</code> 接受一个 <code>tracing</code> 过滤串，它没有对应的
+    参数，因为它是调试控制而不是部署决定。想看每次请求的细节时，把它设成
+    <code>mcpd_server=debug</code>。
+  </p>
+
+  <h2>这两道请求限制作用在哪里</h2>
+  <p>
+    请求体上限作用于每一条会读取请求体的路由，查询 API 也在内。信号上限作用于
+    各个摄取入口，下面是它在每个入口分别数的是什么。
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>入口</th>
+          <th>信号上限数的是什么</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>POST /v1/ingest</code></td>
+          <td>请求里的每一个 span、日志、指标、评分、每一条反馈和每一条方面注释，全部加在一起，不管它是作为一个批次、一个批次数组，还是一串 NDJSON 行到达的</td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/traces</code></td>
+          <td>发送方发来的那些 span，在映射之前计数，这才是发送方能据以行动的数字</td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/logs</code></td>
+          <td>这次导出里的日志记录</td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/metrics</code></td>
+          <td>这次导出里的数据点，跨其中的每一个指标</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>子命令</h2>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>命令</th>
+          <th>它做什么</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>mcpd serve</code></td>
+          <td>运行守护进程。完全不带子命令时发生的就是这件事</td>
+        </tr>
+        <tr>
+          <td><code>mcpd demo</code></td>
+          <td>往存储里写一次逼真的示例运行，然后开始服务，这样你第一次打开界面时里面就有东西</td>
+        </tr>
+        <tr>
+          <td><code>mcpd config</code></td>
+          <td>打印这次调用将会使用的配置，然后退出</td>
+        </tr>
+        <tr>
+          <td><code>mcpd mcp</code></td>
+          <td>在 stdio 上提供 Model Context Protocol，这样一个智能体就能从运行中的守护进程读回自己的 trace</td>
+        </tr>
+        <tr>
+          <td><code>mcpd doctor</code></td>
+          <td>给这份部署评分，并报告哪里配错了。遇到故障时以 2 退出，所以它可以把住一次发布。见 <a href={to('/docs/operations')} class="link">把它跑起来</a></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    <code>mcpd config</code> 是为你即将和一个容器展开的那场争论准备的。参数、
+    环境变量和默认值最后都汇到同一个地方，这条命令把那个地方打印出来，不启动
+    服务器，也不碰数据文件：
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="mcpd config"
+    lines={[
+      { cmd: 'MCPD_INGEST_KEYS=k1,k2 mcpd --retention-days 30 --sample 0.1 config' },
+      { out: 'listen          0.0.0.0:4317' },
+      { out: 'storage         sqlite at ./mcpd.db' },
+      { out: 'config file     none' },
+      { out: 'log format      text' },
+      { out: 'project         default' },
+      { out: 'projects        none' },
+      { out: 'retention       30 days' },
+      { out: 'ingest auth     key required', tone: 'ok' },
+      { out: 'read auth       open', tone: 'warn' },
+      { out: 'write auth      key required (ingest keys)', tone: 'ok' },
+      { out: 'admin auth      open', tone: 'warn' },
+      { out: 'execute auth    key required (ingest keys)', tone: 'warn' },
+      { out: 'worker auth     key required (ingest keys)', tone: 'warn' },
+      { out: 'runs            sqlite at ./mcpd.runs.db' },
+      { out: 'run settings    lease_ttl_ms 30000, reclaim_window_ms 30000, stall_window_ms 300000, idempotency_window_ms 86400000, park_ttl_ms 86400000, max_depth 8, max_step_repeats 16' },
+      { out: 'identity        off' },
+      { out: 'sampling        deterministic 0.1' },
+      { out: 'quota           unlimited' },
+      { out: 'redaction       on', tone: 'ok' },
+      { out: 'redact key      built in, which is public; set --redact-key', tone: 'warn' },
+      { out: 'cors            same-origin only' },
+      { out: 'timeout         30s per request' },
+      { out: 'limits          32 MiB per request, 10000 signals per batch' },
+      { out: 'derived         duration and token metrics' },
+      { out: 'aspects         off' },
+      { out: 'monitors        none' },
+      { out: 'objectives      none' },
+      { out: 'judge           off' },
+      { out: 'forwarding      off' },
+    ]}
+  />
+
+  <p>
+    在部署任何东西之前，先读那六行 auth。<code>open</code> 意味着对任何能连到
+    这个端口的人开放。括号里的一行写明这个作用域正在继承的那份更宽的列表，
+    从旧版本升级上来的部署，一开始就处在这个状态。
+  </p>
+
+  <h2>一份配好的部署</h2>
+  <p>
+    这里没有任何 mcpd 专有的东西：这些变量就是普通的环境变量，所以它们在
+    Compose 里、在 Kubernetes 清单里、在 systemd unit 里的用法都一样。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="compose"
+    samples={[{ lang: 'curl', label: 'docker-compose.yml', shiki: 'yaml', code: composeEnv }]}
+  />
+
+  <p>
+    同样的设置写成参数，供 shell 或 unit 文件使用：
+  </p>
+
+  <Command
+    class="my-6"
+    command="mcpd --listen 0.0.0.0:4317 --data /data/mcpd.db --retention-days 30 --ingest-key $KEY --log-format json"
+  />
+
+  <h2>SDK 读的是什么</h2>
+  <p>
+    这些变量由你的智能体进程读取，不是由守护进程读取。之所以列在这里，是因为
+    两组变量共用名字，而一个同时跑着智能体和 mcpd 的容器，是由同一份环境配置的。
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>变量</th>
+          <th>默认值</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+        <tr><td><code>MCPD_API_KEY</code></td><td>不设置</td></tr>
+        <tr><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+        <tr><td><code>MCPD_ENVIRONMENT</code></td><td>不设置</td></tr>
+        <tr><td><code>MCPD_SERVICE_NAME</code></td><td>不设置</td></tr>
+        <tr><td><code>MCPD_SERVICE_VERSION</code></td><td>不设置</td></tr>
+        <tr><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+        <tr><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+        <tr><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+        <tr><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    <code>MCPD_PROJECT</code> 和 <code>MCPD_SAMPLE</code> 在两边含义相同，这通常
+    正是你想要的：设置一次，智能体和守护进程就在项目上达成一致。要想一想的是
+    采样。SDK 在 trace 被发出去之前丢掉它，省下网络。守护进程在它被存下之前
+    丢掉它，而这是唯一能对你管不到的发送方强制执行采样率的地方。请只在一个地方
+    设置这个比率，不要两边都设，否则你是在过滤一条已经过滤过的流。
+  </p>
+  <p>
+    <code>MCPD_ENABLED=false</code> 让每一次 SDK 调用都变成空操作，但仍然返回
+    合法的对象，所以在测试里可以不改任何代码就把 mcpd 关掉。
+    <code>MCPD_CAPTURE_PAYLOADS=false</code> 把提示词和补全留在进程里：span
+    仍然带着它们的时长、用量、模型和错误到达，但 <code>input</code> 和
+    <code>output</code> 会在入队之前被丢掉，所以它们永远不会穿过网络。守护进程
+    上的脱敏是同一根线的另一端，而对于一个绝对不能把这些字节发出去的团队来说，
+    那是错的一端。逐语言的细节在各自的
+    <a href={to('/docs/sdks/typescript')} class="link">SDK 页面</a>上。
+  </p>
+
+  <h3>--config-file</h3>
+  <p>
+    一个 JSON 文件，装着命令行放不下的那些设置：监视器、服务水平目标、评估它们
+    的间隔、转发、裁判模型、运行存储的各项时长、两道请求限制，以及下面的按项目
+    配置块。选 JSON 而不是 YAML 或 TOML，是因为 mcpd 本来就为其他一切解析 JSON，
+    所以这个文件不引入新依赖，也不引入第二套要学的语法。它可以原样作为
+    Kubernetes ConfigMap 挂载。
+  </p>
+  <p>
+    <code>max_body_bytes</code> 和 <code>max_batch_signals</code> 除了命令行之外
+    也在这里，这样一个集群就能把它们和一起部署的那些监视器放在同一处。参数压过
+    文件，一个实例要用不同的上限，就不必为所有人改动那份共享文件。
+  </p>
+  <p>
+    未知的键会让启动失败，而不是被忽略，因为一个拼错的键悄悄什么都不监视，是
+    所有结果里最糟的那个。
+  </p>
+
+  <p>
+    后台定时器无法运行的值也一样会让启动失败：不在 0（含）到 1（不含）之间的 <code>objective</code>，
+    超出 1 到 365 的目标 <code>window_days</code>，
+    大于 86400 的 <code>monitor_interval_seconds</code>，
+    超出 1 到 31536000 的 <code>aspects.window_seconds</code>，
+    大于 604800 的 <code>aspects.interval_seconds</code>，
+    以及超出 1 到 300 的 <code>judge.timeout_seconds</code>。
+    每次拒绝都会写明键名和范围。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "max_body_bytes": 33554432,
+  "max_batch_signals": 10000,
+  "monitor_interval_seconds": 60,
+  "monitors": [
+    {
+      "id": "error-rate",
+      "name": "Error rate above 5%",
+      "project": "checkout",
+      "watch": "error_rate",
+      "compare": "above",
+      "threshold": 0.05,
+      "window_seconds": 300,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ],
+  "forward": {
+    "endpoint": "https://otlp.example.com",
+    "headers": [["Authorization", "Bearer sk-..."]],
+    "batch_size": 256,
+    "enabled": true
+  }
+}`}</code></pre>
+
+  <h3>项目，以及能够到它们的密钥</h3>
+  <p>
+    项目是租户的键。把密钥列在某个项目之下，才让这句话是真的而不是装饰：写在
+    一个项目块里的密钥只能到达那个项目，别的都到不了，所以一个守护进程可以服务
+    好几个团队，而其中任何一个都读不到别人的提示词。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "projects": {
+    "checkout": {
+      "ingest_keys": ["ck-write-..."],
+      "read_keys": ["ck-read-..."],
+      "admin_keys": ["ck-admin-..."],
+      "retention_days": 30,
+      "sample": 0.25
+    },
+    "support": {
+      "ingest_keys": ["sp-write-..."],
+      "read_keys": ["sp-read-..."],
+      "retention_days": 90
+    }
+  }
+}`}</code></pre>
+
+  <p>
+    这六份列表每个项目都有，分别是 <code>ingest_keys</code>、
+    <code>read_keys</code>、<code>write_keys</code>、<code>admin_keys</code>、
+    <code>execute_keys</code> 和 <code>worker_keys</code>，
+    它们的回退方式也一样：没有 <code>write_keys</code> 的项目接受它自己的摄取
+    密钥，没有 <code>admin_keys</code> 的项目接受它自己的读取密钥。上面的
+    <code>support</code> 块两个都没设，所以它的行为和这两个作用域出现之前
+    一模一样。
+  </p>
+  <p>
+    用那六个顶层参数中的任何一个设置的密钥，能到达每一个项目。那是单租户的
+    路径，它也一直是简单的那条：只要你从不打开这个块，就不会遇到里面的任何东西。
+  </p>
+  <p>
+    项目没有设置 <code>retention_days</code> 和 <code>sample</code> 时，它们回退
+    到全局参数。两者按项目设置的理由和密钥一样：一个团队九十天的要求，不该逼着
+    其他所有人的数据也留那么久；一个团队的流量，也不该决定另一个团队怎么被采样。
+  </p>
+  <p>
+    一个批次里可以出现好几个项目。一把有作用域的摄取密钥会写下它够得到的那些
+    信号，拒绝其余的，并在响应里报告这次拒绝，而不是悄悄丢掉它们，这样一个指错
+    了项目的集群，从它本来就在读的那份回执上就能看出来。
+  </p>
+  <p>
+    对一个你的密钥够不到的项目发起的读取请求会被拒绝，并且不会说出那个项目是否
+    存在。在一个共享的守护进程上，项目名往往就是团队名或客户名。
+  </p>
+
+  <p>
+    监视器和服务水平目标见
+    <a href={to('/docs/alerting')} class="link">监视与告警</a>；目标写在
+    <code>monitors</code> 旁边的一个 <code>slos</code> 数组里，并在同一个定时器上
+    被评估。<code>judge</code> 块打开由模型评判的评分，见
+    <a href={to('/docs/testing')} class="link">回归测试</a>。在你设置它之前它是
+    关着的，而且除非某个请求点名要它，被评判的评分器永远不会运行，因为评判会为
+    它读到的每一次运行花钱。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "judge": {
+    "endpoint": "http://localhost:11434/v1",
+    "model": "qwen2.5:14b",
+    "api_key": "",
+    "criteria": {
+      "answer_relevance": "Does the answer address the question that was asked?"
+    }
+  }
+}`}</code></pre>
+
+  <p>
+    <code>monitor_interval_seconds</code> 是监视器和目标的评估间隔。默认是 60，小于 5 的值会被提高到 5。
+  </p>
+
+  <h3>derived_metrics</h3>
+  <p>
+    守护进程从它存下的 span 派生哪些指标。没有这个块时两半都开着。<code>durations</code> 为每个结束的智能体、工具、工作流、模型生成或处理器 span 写一个时长点。<code>tokens</code> 为每个报告了用量的模型生成 span 写最多十三个 token 计数器。把任何一个设为 <code>false</code> 就不再写它；省略的字段保持开启。这没有对应的参数。派生的点在按项目的上限之后才加入，也不计入摄取响应里的 <code>accepted</code> 数。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "derived_metrics": { "durations": true, "tokens": false }
+}`}</code></pre>
+
+  <h3>aspects</h3>
+  <p>
+    守护进程是否把方面注释聚类成主题，以及在什么界限下聚类。没有这个块时是关闭的。<code>enabled</code> 打开这一轮处理，不需要模型也不需要凭据，因为 <code>outcome</code> 方面由守护进程自己写。<code>interval_seconds</code> 是一轮处理的间隔，默认 300，小于 30 的值会被提高到 30。<code>window_seconds</code> 是一轮处理往回读笔记的范围，默认 86400。<code>disabled</code> 列出不参与聚类的方面；已经记录在其下的笔记仍然可读。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "aspects": {
+    "enabled": true,
+    "interval_seconds": 300,
+    "window_seconds": 86400,
+    "disabled": ["sentiment"]
+  }
+}`}</code></pre>
+
+  <h3>--forward-endpoint</h3>
+  <p>
+    把每一个存下来的 span 复制一份，发到另一个 OTLP/HTTP 端点。给出基础 URL 即可，
+    <code>/v1/traces</code> 会被追加上去。本地写入总是先发生，所以一个挂掉的
+    目的地不会让你付出任何代价。
+  </p>
+  <p>
+    这个参数压过配置文件里的 <code>forward</code> 块，所以一个实例可以被指到别处，
+    而不必编辑一份共享的 ConfigMap。见
+    <a href={to('/docs/forwarding')} class="link">转发</a>。
+  </p>
+
+  <h3>--forward-header</h3>
+  <p>
+    随每一个转发批次一起发送的头，写作 <code>Name: value</code>。要设置多个就
+    重复这个参数。环境变量接受一个逗号分隔的列表。
+  </p>
+  <p>
+    没有冒号的值不会被悄悄丢掉，而是在启动时被拒绝，并给出正确的写法。OpenTelemetry 风格的 <code>key=value</code> 头部，
+    在这里要写成 <code>key: value</code>。
+  </p>
+
+  <h3>--clickhouse-url</h3>
+  <p>
+    一台 ClickHouse 服务器的 HTTP 端点，比如
+    <code>http://clickhouse:8123</code>。设置它就把存储从内嵌文件切换到
+    ClickHouse，<code>--data</code> 也就不再被读取。表结构在启动时创建。
+  </p>
+  <p>
+    这就是那项去掉内嵌存储的单写入者和单副本限制的设置。当保留期要按几个月的
+    生产流量来算时再动它，不要更早：
+    <a href={to('/docs/operations')} class="link">把它跑起来</a>讲了其中的取舍。
+  </p>
+
+  <h3>--clickhouse-database、--clickhouse-user、--clickhouse-password</h3>
+  <p>
+    在哪个数据库里建表，以及用什么凭据连上去。没有密码的用户会被不带密码地发送，
+    这对私有网络里的一个容器是对的，在其他任何地方都是错的。
+  </p>
+
+  <h3>--postgres-url</h3>
+  <p>
+    一个 Postgres 连接串，比如
+    <code>postgres://mcpd:secret@db:5432/mcpd</code>。设置它就把存储从内嵌文件
+    切换到 Postgres，<code>--data</code> 也就不再被读取。表结构在启动时创建。
+  </p>
+  <p>
+    这是折中的那个选项。它去掉了 ClickHouse 同样去掉的单写入者和单副本限制，
+    又不要求你去运维一个你手上还没有的数据库。同时指定它和
+    <code>--clickhouse-url</code> 会让启动失败，而不是替你挑一个。
+  </p>
+  <p>
+    迁移会取一把顾问锁，所以几个副本一起启动是安全的，而一次没有东西要应用的
+    启动根本不会碰表结构。
+  </p>
+
+  <p>
+    要使用 TLS，请在连接字符串里加上 <code>sslmode=require</code>。mcpd 会加密连接，并且总是验证服务器的证书：
+    对照公开的证书颁发机构，或者在给出 <code>sslrootcert=/path/to/ca.pem</code> 时对照该文件里的颁发机构，自带颁发机构的托管服务需要这一点。
+    <code>verify-ca</code> 和 <code>verify-full</code> 按 <code>require</code> 处理。默认的 <code>prefer</code> 和 <code>disable</code> 不加密连接。
+  </p>
+
+  <h2>记录下的是谁，而不只是哪把密钥</h2>
+  <p>
+    审计日志记录的是动作那把密钥的摘要。那回答的是“一把管理员密钥删掉了这次
+    运行”，而不是“是哪个人干的”。mcpd 没有身份提供方，
+    所以身份必须来自已经站在它前面的那个入口网关。
+  </p>
+  <p>
+    把你的代理设置的那个头交给它，再交给它允许设置这个头的地址：
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="从你信任的入口网关取得身份"
+    command={`mcpd serve \\
+  --trusted-identity-header x-forwarded-user \\
+  --trusted-proxy-cidr 10.42.0.0/16`}
+  />
+
+  <p>
+    两半都是必需的，而地址列表正是它安全的理由。头不过是一串字符，任何能向这个
+    端口打开一条 socket 的人都能发它，所以 mcpd 只从你指名的地址读它。来自别处
+    的请求会被正常服务，它的审计行不带任何主体，这是诚实的答案，而不是一次猜测。
+    这个值还会被限长，并剥掉控制字符，因为即使代理本身没有恶意，头也是受攻击者
+    影响的。
+  </p>
+  <p>
+    两个参数都不设置时，什么都不变，也永远不会记录任何主体。那是默认行为。
+  </p>
+
+
+  <h2>一个项目不能把整个守护进程花光</h2>
+  <p>
+    一个把 mcpd 淹掉的项目，代价由这台机器上的每一个其他项目承担：磁盘满了，
+    保留期清理跟不上，而丢掉运行的，是那个什么都没做错的团队。
+    <code>--quota-per-minute</code> 就是拦住这件事的上限。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="给每个项目一个上限，再给其中一个更大的上限"
+    command="mcpd serve --quota-per-minute 10000"
+  />
+
+  <p>
+    不设置就是没有上限，所以一份从不设置它的部署，行为和配额出现之前完全一样。
+    设置之后，它覆盖三样东西：<code>projects</code> 块里每一个没有指定自己的
+    <code>quota_per_minute</code> 的项目，<code>--project</code> 指定的那个项目，
+    以及<strong>配置里完全没有列出的每一个项目</strong>。
+  </p>
+  <p>
+    最后那一样，才让它成为一道上限而不是一句建议。项目名是随请求体一起到达的，
+    所以一个挑了个任何配置文件都没列出的名字的发送方，以前不会被计到任何账上，
+    可以无边无际地存。一道发送方靠编一个字符串就能绕开的限制，不是限制。
+  </p>
+  <p>
+    所有未列出的项目共用一个计数器，而不是每个分一个。按名字一个一个分配，会变成
+    任何发送方靠编名字就能撑大的一笔开销，那是同一个洞换了个形状。共用意味着，
+    分散在一千个编造出来的名字上的洪水，总量仍然被这个数字兜住；也意味着，值得
+    拥有自己额度的项目，应该写进 <code>projects</code> 里，在那里它就有一份。
+  </p>
+
+  <h3>这道上限实际兜住的是什么</h3>
+  <p>
+    这个计数器是两窗口加权的那种：本分钟的计数，加上前一分钟的计数，按截至现在
+    的那个窗口还覆盖它多少来加权。它把持续速率压在上限之内，并在此之上允许一次
+    最多达到整个上限的突发，因为一个 SDK 刷空整个队列时是作为一次突发到达的，
+    而一个会拒绝它的计数器也会拒绝正常流量。
+  </p>
+  <p>
+    这两点加在一起有一个算术上的后果，值得说明白而不是藏起来。一个项目可以在
+    一段 60 秒里存下略少于它上限<strong>两倍</strong>的量：在一个窗口的最末尾用满
+    一整个上限，再在下一个窗口的最末尾又用满一整个上限。这不是这套近似算法带来
+    的假象。任何允许一个项目一次性花掉它的上限、此后每分钟再花掉一次上限的限流器，
+    在窗口边界上都会允许这件事，唯一能去掉它的办法，就是拒绝那次突发。
+  </p>
+  <p>
+    窗口是一分钟，并且不可配置。参数名里就写着单位，如果再来一个设置能改变
+    “每分钟”的含义，前面那个数字就没法读了。
+  </p>
+
+  <h3>超出的部分会怎样</h3>
+  <p>
+    超过上限的信号会被拒绝并报告出来，绝不会被悄悄丢掉。整个批次不会被整体拒绝：
+    mcpd 存下放得下的部分，并告诉你哪些没放下。
+  </p>
+  <ul>
+    <li>
+      span 按整条 trace 处理。半条运行会有一些父级没人存下的 span，读起来像是
+      一次坏掉的运行，而不是一次缺失的运行。一条对剩余额度来说太大的 trace 会被
+      跳过，然后试下一条，这样一次大的运行不会把剩下的额度花在无用功上。
+    </li>
+    <li>
+      日志、指标、评分和反馈各自独立，所以它们按到达顺序填满剩下的额度。
+    </li>
+    <li>
+      只有真正存下来的才计费。这次裁剪保留的是整条 trace，因此可能存下比它被
+      允许的更少的信号，差额会被退回去。没有这一点，一个运行规模大于剩余额度的
+      项目，会一边什么都存不下，一边把自己的额度花到零。
+    </li>
+    <li>
+      同一个请求里的其他项目不受影响。一个项目超了它的上限，不会让另一个项目
+      赔上它一同发来的那些信号。
+    </li>
+  </ul>
+  <p>
+    回执在 <code>rejected</code> 里带着数量，并在 <code>errors</code> 里带一行，
+    写明是哪个项目和它的上限。配置从未列出的项目会得到另一句话，因为被告知
+    <code>analytics-v2</code> 这个项目超了它的上限，会让你去找一个根本不存在的
+    设置，而答案其实是把这个项目加进去：
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="八条信号发往一个没人配置过的项目，共享上限是五"
+    lines={[
+      { cmd: 'curl -sX POST "$MCPD/v1/ingest" -H content-type:application/json -d @batch.json | jq' },
+      { out: '{' },
+      { out: '  "accepted": 5,' },
+      { out: '  "rejected": 3,', tone: 'warn' },
+      { out: '  "duplicate": 0,' },
+      { out: '  "errors": [' },
+      { out: '    {' },
+      { out: '      "signal": "span",' },
+      { out: '      "index": 0,' },
+      { out: '      "message": "3 signal(s) named project analytics-v2, which', tone: 'warn' },
+      { out: '                  no configuration lists. Every unlisted project', tone: 'warn' },
+      { out: '                  shares one ceiling of 5 per minute and it was', tone: 'warn' },
+      { out: '                  full, so they were not stored. Add analytics-v2', tone: 'warn' },
+      { out: '                  to the `projects` block to give it an allowance', tone: 'warn' },
+      { out: '                  of its own, or raise --quota-per-minute."', tone: 'warn' },
+      { out: '    }' },
+      { out: '  ]' },
+      { out: '}' },
+    ]}
+  />
+
+  <p>
+    一次拒绝既计入 <code>mcpd_signals_over_quota_total</code>，也计入
+    <code>mcpd_signals_rejected_total</code>，所以一个正在被限流的集群，和一个
+    正在发送格式错误数据的集群是可以区分的。见
+    <a href={to('/docs/operations')} class="link">把它跑起来</a>。
+  </p>
+
+  <h3>设置它时要检查的两件事</h3>
+  <p>
+    这道上限覆盖每一个会存下信号的入口：批量的那些，
+    <code>/v1/ingest</code>、<code>/v1/traces</code>、<code>/v1/logs</code> 和
+    <code>/v1/metrics</code>，以及单条记录的那些，
+    <code>POST /v1/api/scores</code> 和 <code>POST /v1/api/feedback</code>。
+    对于一个超了上限的项目，两类入口的回答有意不同。批量入口存下放得下的部分，
+    把其余的连同原因作为 <code>rejected</code> 报告出来，因为一个批次可能指名
+    好几个项目，拒绝整个请求会惩罚那些没超限的项目。单条记录的入口没有部分成功
+    这个答案可给，所以它以 <code>429</code> 拒绝，并带一个
+    <code>Retry-After</code> 头，写着距离那个项目的计数器再接受一条信号还有多少
+    秒。这个数字来自计数器本身，所以遵守它的客户端会在真的有空位时回来，而不是
+    在一个固定的延时之后。
+  </p>
+  <p>
+    有一个写入入口不计入它：<code>POST /v1/api/score</code>，它对已存的运行跑
+    评分器。它把产出的评分直接交给存储，所以一次评分会落到磁盘上，哪怕那个项目
+    的上限已经花光；而这些行既不被 <code>mcpd_signals_over_quota_total</code>
+    统计，也不被 <code>mcpd_signals_unbounded_total</code> 统计。它是你自己打开
+    的一道门，而不是一个集群会指过来的那种，所以请把这道上限当作对发送方能推进
+    多少的约束，而不是对一切能碰到磁盘的东西的约束。
+  </p>
+  <p>
+    上限低于 <code>--max-batch-signals</code>（默认 10,000）时，意味着一个合法的
+    批次就能超过一整分钟的额度，不管发送方多规矩都会被裁剪。<code>mcpd doctor</code>
+    在 <code>limits</code> 下给这一项评分，并写出它适用于哪些项目。当只按项目
+    设置了上限、旁边却没有设置顶层上限时，它也会警告，因为那份配置会让每一个
+    未列出的项目都不受约束。
+  </p>
+  <p>
+    <code>mcpd config</code> 会按名字打印被限流的项目，这样你可以把这项设置覆盖
+    到什么读回来，而不是靠推断。它只打印指名的那些上限，所以共享的那个请从参数
+    本身确认。
+  </p>
+
+</Doc>

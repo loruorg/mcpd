@@ -1,0 +1,349 @@
+# The evidence that goes with a release: what is inside the artefacts, and what
+# is known about it.
+#
+# Why this exists separately from audit.yml. That workflow is the gate: it fails
+# a pull request that introduces a known vulnerability, and it answers "is this
+# safe to merge". This one produces the paperwork that answers "may we run this
+# in our estate", which is a different question asked by different people, and
+# it is asked about a released version rather than about a commit. Procurement
+# will not admit an image without a bill of materials for it and a statement on
+# known advisories, and neither existed in this repository.
+#
+# What a release ends up carrying, alongside the archives and SHA256SUMS that
+# release.yml attaches:
+#
+#   mcpd-<version>-crates.cdx.json   CycloneDX for the Rust crate graph
+#   mcpd-<version>-image.cdx.json    CycloneDX for the container image
+#   mcpd-<version>-cargo-deny.txt    the advisory and licence run, in full
+#
+# Two SBOM tools, because they see different things. cargo-cyclonedx reads the
+# resolved crate graph, so it knows which crates a feature actually pulls in and
+# it carries every crate's licence expression, which is the half procurement
+# cares about. Syft reads the image, so it sees the Alpine packages around the
+# binary, which the crate graph knows nothing about. Neither tool covers the
+# other's half.
+#
+# ---------------------------------------------------------------------------
+# What a maintainer must configure
+#
+#   Nothing, to run this. Every step below uses GITHUB_TOKEN, which exists in
+#   every repository. There is no scanner account, no registry account and no
+#   signing key here, and none is referenced.
+#
+#   Pulling the released image needs `packages: read`, which the job requests.
+#   That is enough while the package belongs to this repository. If the image
+#   is ever moved to a registry outside GitHub, the pull step needs a
+#   credential and that credential needs adding as a secret first.
+#
+#   Signing: none, deliberately. release.yml already attests the archives and
+#   the image with actions/attest-build-provenance, which signs against this
+#   workflow's OIDC identity and needs no key. Binding an SBOM to the image
+#   digest the same way is actions/attest-sbom, and it wants the digest from
+#   the job that pushed the image. That job is in release.yml, so adding it is
+#   a change to that file rather than to this one.
+#
+#   audit.yml runs cargo-deny too, with the same four checks, on every pull
+#   request. This workflow is the one that keeps the report.
+# ---------------------------------------------------------------------------
+name: supply-chain
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Weekly. An advisory is published on a day nobody touched the repository
+    # far more often than a dependency changes.
+    - cron: '17 6 * * 3'
+  workflow_dispatch:
+  # Not `release: types: [published]`, which is the obvious trigger and does
+  # not work. GitHub will not start a workflow from an event raised by
+  # GITHUB_TOKEN, and release.yml creates the release with GITHUB_TOKEN, so a
+  # release trigger here would never fire once. workflow_run is the trigger
+  # built for this, and it carries the tag in `head_branch`.
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A cancelled run on the release path leaves a release with some of its
+  # evidence attached, which is the state that takes longest to work out.
+  cancel-in-progress: ${{ github.event_name != 'workflow_run' }}
+
+permissions: {}
+
+env:
+  # Pinned so a run is reproducible and so an upgrade is a commit somebody
+  # reviewed. Both are installed from crates.io, which verifies the checksum in
+  # the lock file, so there is no download to trust here beyond the registry
+  # cargo already uses.
+  CARGO_DENY_VERSION: '0.20.2'
+  CARGO_CYCLONEDX_VERSION: '0.5.9'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deny:
+    name: cargo-deny
+    # A failed release run has nothing worth documenting.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08-05
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: supply-chain
+
+      # cargo-deny is installed rather than run as a container action, which is
+      # what audit.yml does, because this workflow needs the report as a file
+      # and a container action gives you an exit code and a log.
+      - name: install cargo-deny
+        run: cargo install --locked "cargo-deny@${CARGO_DENY_VERSION}"
+
+      - name: read the version
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(python3 -c \
+            "import tomllib;print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      # `--all-features` matters here for the same reason it does in audit.yml:
+      # the ClickHouse and Postgres backends are Cargo features, and they carry
+      # the dependencies that reach a network. deny.toml sets it too, so this is
+      # a statement of intent rather than a change of behaviour.
+      #
+      # The file keeps every warning as well as the failures. A duplicate crate
+      # version is not a finding, but a reader assessing this tree should see
+      # that it was reported and not filtered out of the evidence.
+      - name: advisories, licences, bans and sources
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cargo deny --all-features check 2>&1 \
+            | tee "dist/mcpd-${VERSION}-cargo-deny.txt"
+
+      # Keep the report even when the check failed. A finding is exactly when
+      # somebody wants to read the file rather than scroll a log.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: supply-chain-cargo-deny
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  sbom:
+    name: bill of materials
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # Pulling the released image back out of ghcr.io.
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08-05
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: supply-chain
+
+      - name: read the version
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(python3 -c \
+            "import tomllib;print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: install cargo-cyclonedx
+        run: cargo install --locked "cargo-cyclonedx@${CARGO_CYCLONEDX_VERSION}"
+
+      # The graph for the binary as it is released: the musl target, every
+      # feature on, and the whole transitive tree rather than the direct
+      # dependencies. `--describe binaries` names the SBOM after the binary it
+      # describes, which is what makes this the bill of materials for mcpd and
+      # not for the workspace.
+      - name: SBOM for the crate graph
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cargo cyclonedx \
+            --manifest-path crates/mcpd/Cargo.toml \
+            --all-features \
+            --all \
+            --format json \
+            --spec-version 1.5 \
+            --target x86_64-unknown-linux-musl \
+            --describe binaries
+          mv crates/mcpd/mcpd_bin.cdx.json "dist/mcpd-${VERSION}-crates.cdx.json"
+          python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(len(d['components']),'components')" \
+            "dist/mcpd-${VERSION}-crates.cdx.json"
+
+      # Which image gets scanned, and whether one is scanned at all.
+      #
+      # After a release, the published one, so the SBOM describes the bytes
+      # people pull rather than a rebuild that might differ. On a push, a
+      # schedule or a manual run there is no published image for the commit, so
+      # one is built here and thrown away.
+      #
+      # On a pull request, none. ci.yml already builds this image on every pull
+      # request, and what a pull request changes about the image is a change to
+      # Cargo.lock or to the Dockerfile. The first is already in the crate SBOM
+      # above, and the second is in the diff. Building it a second time to scan
+      # it would add minutes to every review and report nothing new.
+      - name: work out the image
+        id: image
+        env:
+          RELEASE_REF: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            pull_request)
+              echo "scan=false" >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_run)
+              echo "scan=true" >> "$GITHUB_OUTPUT"
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              echo "ref=ghcr.io/${GITHUB_REPOSITORY}:${RELEASE_REF#v}" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "scan=true" >> "$GITHUB_OUTPUT"
+              echo "build=true" >> "$GITHUB_OUTPUT"
+              echo "ref=mcpd:supply-chain" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: steps.image.outputs.build == 'false' && steps.image.outputs.scan == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: pull the published image
+        if: steps.image.outputs.build == 'false' && steps.image.outputs.scan == 'true'
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: docker pull "$IMAGE"
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        if: steps.image.outputs.build == 'true'
+
+      # `load: true`, not `push`. Nothing built here is published: this image
+      # exists to be read by the scanner in the next step and then thrown away.
+      # ci.yml writes this build cache on every push, so this is usually a fetch
+      # rather than a build. Nothing is written back to it from here.
+      - name: build an image to scan
+        if: steps.image.outputs.build == 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: mcpd:supply-chain
+          cache-from: type=gha
+
+      # Syft reads the image that is now in the local daemon. Uploading is
+      # turned off in both directions: the attach job below collects every file
+      # in one place, so there is one path that puts assets on a release and one
+      # place to read when an asset is missing.
+      - name: SBOM for the image
+        if: steps.image.outputs.scan == 'true'
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ steps.image.outputs.ref }}
+          format: cyclonedx-json
+          output-file: dist/mcpd-${{ steps.version.outputs.version }}-image.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      # The scan the inventory above was missing. Syft says what is in the
+      # image; nothing said whether any of it had a published vulnerability.
+      # Trivy reads the same image and fails the job on a HIGH or CRITICAL
+      # finding, fixed or not: an unfixed advisory is still a question a
+      # reviewer asks, and the answer belongs in a commit that adds a
+      # .trivyignore entry with the reason, not in a flag that hides the class.
+      # The surface is Alpine plus one static binary, so a finding here is
+      # almost always the base image, and the fix is the digest pin in the
+      # Dockerfile.
+      - name: known vulnerabilities in the image
+        if: steps.image.outputs.scan == 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.image.outputs.ref }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        # Even when the scan failed: a finding is exactly when somebody wants
+        # the bill of materials beside it.
+        if: ${{ !cancelled() }}
+        with:
+          name: supply-chain-sbom
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  attach:
+    name: attach to the release
+    # Only after release.yml has finished and succeeded, because the release
+    # has to exist before anything can be uploaded to it.
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    needs: [deny, sbom]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: supply-chain-*
+          merge-multiple: true
+
+      - name: attach the evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          # release.yml runs on tags only, so this should always hold. It is
+          # checked because the alternative is uploading a release's evidence
+          # onto something that is not that release.
+          case "$TAG" in
+            v*) ;;
+            *) echo "::error::${TAG} is not a release tag, so there is no release to attach to."; exit 1 ;;
+          esac
+          ls -l dist
+          # --clobber so re-running this workflow replaces the assets rather
+          # than failing on the ones already there.
+          gh release upload "$TAG" dist/* --clobber

@@ -1,0 +1,492 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+const exporterEnv = `# The base URL. Your exporter appends /v1/traces itself.
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+
+# Optional. Send gzip if your payloads are large.
+export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
+
+# Only when mcpd runs with --ingest-key.
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer YOUR_INGEST_KEY"`
+
+const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
+  -H 'content-type: application/json' \\
+  -d '{
+  "resourceSpans": [{
+    "resource": { "attributes": [
+      { "key": "service.name", "value": { "stringValue": "checkout-agent" } }
+    ]},
+    "scopeSpans": [{
+      "spans": [{
+        "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "spanId": "00f067aa0ba902b7",
+        "name": "chat gpt-4o",
+        "startTimeUnixNano": "1700000000000000000",
+        "endTimeUnixNano": "1700000001500000000",
+        "status": { "code": 1 },
+        "attributes": [
+          { "key": "gen_ai.system", "value": { "stringValue": "openai" } },
+          { "key": "gen_ai.request.model", "value": { "stringValue": "gpt-4o" } },
+          { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+          { "key": "gen_ai.usage.input_tokens", "value": { "intValue": "1200" } },
+          { "key": "gen_ai.usage.output_tokens", "value": { "intValue": "350" } }
+        ]
+      }]
+    }]
+  }]
+}'
+
+# {"partialSuccess":{"rejectedSpans":0,"errorMessage":""}}`
+---
+
+<Doc
+  title="OpenTelemetry"
+  description="mcpd 在 /v1/traces、/v1/logs 和 /v1/metrics 上接受 OTLP/JSON，并同时读 OpenTelemetry 的 gen_ai.* 与 OpenInference 的 llm.* 语义约定。不需要写 mcpd 专有的代码。"
+  lede="如果你的智能体已经在发 OpenTelemetry，那么接上 mcpd 只是换一个端点。这一页讲完整条 OTLP 路径：三个端点、编码方式，以及 mcpd 读的每一个属性。"
+  og="docs"
+>
+  <h2>三个端点</h2>
+  <p>
+    mcpd 把 OTLP 的 HTTP 端点放在和它的查询 API、它的界面同一个端口上。前面不用
+    再跑一个 collector，不用第二个容器，也没有单独的接收端口。
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>端点</th>
+          <th>接受</th>
+          <th>答复里带</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>POST /v1/traces</code></td>
+          <td><code>ExportTraceServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedSpans</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/logs</code></td>
+          <td><code>ExportLogsServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedLogRecords</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/metrics</code></td>
+          <td><code>ExportMetricsServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedDataPoints</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    每一次成功的导出，答复都用 OTLP 自己的 <code>partialSuccess</code> 形状，
+    里面带一个计数。collector 就是这样告诉发送方它丢掉了东西的，而导出器会读它。
+    返回一个空的响应体，会让发送方报出一次它其实没有得到的成功。
+  </p>
+
+  <h2>把一个导出器指过来</h2>
+  <p>
+    两个环境变量就够了。把它们设在跑你智能体的那个进程的环境里，别的什么都不用改。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="导出器"
+    samples={[{ lang: 'curl', label: '环境变量', shiki: 'bash', code: exporterEnv }]}
+  />
+
+  <p>
+    在你开始排查“怎么什么都没来”之前，有两件事值得先知道。第一，
+    <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> 是一个基础 URL，导出器会自己把信号
+    的路径接在后面。如果你想给出包含路径的完整 URL，那就改设
+    <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code>。第二，在 OpenTelemetry 的
+    惯例里 4317 是 gRPC 端口，4318 才是 HTTP 端口。mcpd 在 4317 上服务 HTTP，
+    因为它把所有东西都放在一个端口上，所以一个还停在默认端口上的导出器会发往
+    4318，而你什么也收不到。把端口明确写出来。
+  </p>
+
+  <h2>trace 的两种编码都收</h2>
+  <p>
+    <code>/v1/traces</code> 会读 <code>content-type</code> 头，两种编码都接受：
+    头里含 <code>protobuf</code> 时按 OTLP/protobuf 读，否则按 OTLP/JSON 读。
+    protobuf 是 OpenTelemetry 的默认值，所以一个没改过的 SDK 指向 mcpd 时，
+    发出的 trace 不用任何配置就能落下来。
+  </p>
+  <p>
+    <code>/v1/logs</code> 和 <code>/v1/metrics</code> 只接受 JSON。在这两个地方
+    发一个 protobuf 的请求体，会被以 <code>body is not valid JSON</code> 拒掉。
+    如果三种信号你都要发，那就一次性把协议全局设好：
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="所有信号都用 json"
+    command="export OTEL_EXPORTER_OTLP_PROTOCOL=http/json"
+  />
+
+  <p>
+    完全没有发 <code>content-type</code> 时，mcpd 按
+    <code>application/json</code> 处理。
+  </p>
+
+  <h2>压缩与大小</h2>
+  <p>
+    一个请求体可以带着 <code>content-encoding: gzip</code> 到来，可以带
+    <code>identity</code>，也可以不带这个头。别的都会被点名拒掉：
+    <code>content-encoding "br" is not supported; use gzip or send the
+    body uncompressed</code>。响应按内容协商压缩，所以一条很大的 trace 在慢链路
+    上被读回来时也是压缩过的。
+  </p>
+  <p>
+    一个请求上有两条限制。请求体的上限是 32 MiB，按到达时的字节数量，所以
+    gzip 能给你换出余地。批次的上限是 10,000 个信号，在每一道摄取入口后按解码后
+    的数量算：<code>/v1/traces</code> 上是 span，<code>/v1/logs</code> 上是记录，
+    <code>/v1/metrics</code> 上是数据点，<code>/v1/ingest</code> 上是请求里的
+    全部东西。更大的批次会被 <code>413 payload_too_large</code> 拒掉，并把两个
+    数字都说出来。两条限制都是可设置的：<code>--max-body-bytes</code> 和
+    <code>--max-batch-signals</code>，见
+    <a href={linkTo('/docs/configuration')} class="link">配置</a>。
+  </p>
+
+  <h2>从到达到存下之间发生了什么</h2>
+  <p>
+    一个 OTLP span 和一个原生 span 走同一条路。这正是共用这条流水线的意义：
+    下面这个顺序不可能在两道门之间发生偏移。
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    在摄取时就算成本，正是一个 OTLP span 会有成本数字的原因。mcpd 用这台服务器
+    当前跑着的那份价目表，在它到达的那一刻给它定价，所以你之后改了自己的费率，
+    也不会悄悄改写上个月花了多少。参见
+    <a href={linkTo('/docs/cost')} class="link">成本核算</a>。
+  </p>
+
+  <h2>两套语义约定都读</h2>
+  <p>
+    AI 的 span 上有两套互相竞争的属性命名在用：OpenTelemetry 自己的
+    <code>gen_ai.*</code>，以及 OpenInference 的 <code>llm.*</code> 加上
+    <code>openinference.span.kind</code>。mcpd 两套都读，在这之上还读它自己的
+    <code>mcpd.*</code>。你不用改任何名字。
+  </p>
+  <p>
+    下面每一行都按顺序读，先匹配上的胜出。没有被任何一行点名的属性也仍然会留着：
+    整份拍平的属性表都存在这个 span 上，所以你发的东西不会因为没有被映射而丢失。
+  </p>
+
+  <h3>模型、载荷与用量</h3>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>mcpd 字段</th>
+          <th>按顺序从这些里读</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>model</code></td>
+          <td><code>gen_ai.request.model</code>、<code>gen_ai.response.model</code>、<code>llm.model_name</code>、<code>mcpd.model</code></td>
+        </tr>
+        <tr>
+          <td><code>provider</code></td>
+          <td><code>gen_ai.system</code>、<code>llm.provider</code>、<code>mcpd.provider</code></td>
+        </tr>
+        <tr>
+          <td><code>input</code></td>
+          <td><code>input.value</code>、<code>gen_ai.prompt</code>、<code>mcpd.input</code></td>
+        </tr>
+        <tr>
+          <td><code>output</code></td>
+          <td><code>output.value</code>、<code>gen_ai.completion</code>、<code>mcpd.output</code></td>
+        </tr>
+        <tr>
+          <td><code>entity_name</code></td>
+          <td><code>gen_ai.agent.name</code>、<code>mcpd.entity.name</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.input_tokens</code></td>
+          <td><code>gen_ai.usage.input_tokens</code>、<code>gen_ai.usage.prompt_tokens</code>、<code>llm.token_count.prompt</code>、<code>mcpd.usage.input_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.output_tokens</code></td>
+          <td><code>gen_ai.usage.output_tokens</code>、<code>gen_ai.usage.completion_tokens</code>、<code>llm.token_count.completion</code>、<code>mcpd.usage.output_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.total_tokens</code></td>
+          <td><code>llm.token_count.total</code>、<code>gen_ai.usage.total_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.cache_read</code></td>
+          <td><code>gen_ai.usage.cache_read_input_tokens</code>、<code>llm.token_count.prompt_details.cache_read</code>、<code>mcpd.usage.cache_read_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.cache_write</code></td>
+          <td><code>gen_ai.usage.cache_creation_input_tokens</code>、<code>llm.token_count.prompt_details.cache_write</code>、<code>mcpd.usage.cache_write_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.audio</code></td>
+          <td><code>llm.token_count.prompt_details.audio</code></td>
+        </tr>
+        <tr>
+          <td><code>output_details.reasoning</code></td>
+          <td><code>llm.token_count.completion_details.reasoning</code>、<code>gen_ai.usage.reasoning_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>output_details.audio</code></td>
+          <td><code>llm.token_count.completion_details.audio</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    一个三种 token 计数一个都没有的 span，根本不带 usage 对象，而不是带一个填满
+    零的。输入 token 为零，和输入 token 未知，是两件不同的事实，一份把后者当成
+    前者算出来的成本报告是错的，而且错得没人会注意到。
+  </p>
+
+  <h3>关联</h3>
+  <p>
+    关联字段就是让你能要一个用户的运行、或者一次会话的运行的那些字段。先读 span
+    上的属性，再读资源属性。
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>mcpd 字段</th>
+          <th>按顺序从这些里读</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>project</code></td>
+          <td>span 上的 <code>mcpd.project</code>，然后是资源上的，然后是守护进程的 <code>--project</code></td>
+        </tr>
+        <tr>
+          <td><code>environment</code></td>
+          <td><code>mcpd.environment</code>、资源上的 <code>deployment.environment.name</code>、资源上的 <code>deployment.environment</code></td>
+        </tr>
+        <tr>
+          <td><code>service_name</code></td>
+          <td>资源上的 <code>service.name</code></td>
+        </tr>
+        <tr>
+          <td><code>service_version</code></td>
+          <td>资源上的 <code>service.version</code></td>
+        </tr>
+        <tr>
+          <td><code>session_id</code></td>
+          <td><code>gen_ai.conversation.id</code>、<code>session.id</code>、<code>mcpd.session_id</code></td>
+        </tr>
+        <tr>
+          <td><code>thread_id</code></td>
+          <td><code>mcpd.thread_id</code>、<code>thread.id</code></td>
+        </tr>
+        <tr>
+          <td><code>user_id</code></td>
+          <td><code>user.id</code>、<code>enduser.id</code>、<code>mcpd.user_id</code></td>
+        </tr>
+        <tr>
+          <td><code>request_id</code></td>
+          <td><code>mcpd.request_id</code>、<code>http.request.id</code></td>
+        </tr>
+        <tr>
+          <td><code>release</code></td>
+          <td><code>mcpd.release</code>、资源上的 <code>service.version</code></td>
+        </tr>
+        <tr>
+          <td><code>run_id</code>、<code>resource_id</code>、<code>experiment_id</code></td>
+          <td><code>mcpd.run_id</code>、<code>mcpd.resource_id</code>、<code>mcpd.experiment_id</code></td>
+        </tr>
+        <tr>
+          <td><code>tags</code></td>
+          <td><code>mcpd.tags</code>，取一个字符串数组</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>状态与错误</h3>
+  <p>
+    OTLP 的状态码 <code>1</code> 变成 <code>ok</code>，<code>2</code> 变成
+    <code>error</code>。一个没有设状态但有结束时间的 span 记为 <code>ok</code>，
+    因为一个没喊过疼就跑完的 span 确实是 ok。一个没有设状态也没有结束时间的
+    span 保持 <code>unset</code>：它还在跑，mcpd 就照这样存下来，而不是替它编出
+    一个结局。
+  </p>
+  <p>
+    在一个出错的 span 上，消息先取 <code>status.message</code>，再取
+    <code>exception.message</code>，两个都没有时取字面字符串
+    <code>unspecified error</code>。错误的种类取自 <code>exception.type</code>，
+    调用栈取自 <code>exception.stacktrace</code>。一个出错的 span 永远带着一条
+    消息，因为一句没有正文的“出错了”，你拿它没有任何办法。
+  </p>
+
+  <h3>Span 类型</h3>
+  <p>
+    类型决定一个 span 在瀑布图里怎么画。mcpd 按从具体到笼统的顺序推断它，最后
+    退回到 <code>generic</code>，而这一个永远是安全的。把一个 span 标错，比不标
+    它更糟。
+  </p>
+  <ol>
+    <li><code>mcpd.span.kind</code>，当它给出的是一个 mcpd 认识的类型时。</li>
+    <li><code>openinference.span.kind</code>。</li>
+    <li><code>gen_ai.operation.name</code>。</li>
+    <li>某个只有一类 span 才会带的属性出现了。</li>
+  </ol>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>属性的值</th>
+          <th>mcpd 的类型</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>openinference.span.kind=LLM</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>openinference.span.kind=CHAIN</code></td><td><code>workflow_run</code></td></tr>
+        <tr><td><code>openinference.span.kind=TOOL</code></td><td><code>tool_call</code></td></tr>
+        <tr><td><code>openinference.span.kind=AGENT</code></td><td><code>agent_run</code></td></tr>
+        <tr><td><code>openinference.span.kind=RETRIEVER</code></td><td><code>retrieval</code></td></tr>
+        <tr><td><code>openinference.span.kind=EMBEDDING</code></td><td><code>rag_embedding</code></td></tr>
+        <tr><td><code>openinference.span.kind=RERANKER</code></td><td><code>rag_action</code></td></tr>
+        <tr><td><code>openinference.span.kind=GUARDRAIL</code></td><td><code>guardrail</code></td></tr>
+        <tr><td><code>openinference.span.kind=EVALUATOR</code></td><td><code>scorer_run</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=chat</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=text_completion</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=generate_content</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=embeddings</code></td><td><code>rag_embedding</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=execute_tool</code></td><td><code>tool_call</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=invoke_agent</code></td><td><code>agent_run</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=create_agent</code></td><td><code>agent_run</code></td></tr>
+        <tr><td><code>gen_ai.system</code>、<code>llm.model_name</code>、<code>llm.provider</code> 中出现任意一个</td><td><code>model_generation</code></td></tr>
+        <tr><td>出现 <code>mcp.tool.name</code></td><td><code>mcp_tool_call</code></td></tr>
+        <tr><td>出现 <code>http.request.method</code> 或 <code>http.method</code></td><td><code>http_request</code></td></tr>
+        <tr><td>其他任何情况</td><td><code>generic</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    <code>openinference.span.kind</code> 或
+    <code>gen_ai.operation.name</code> 下面出现一个 mcpd 不认识的 span 类型时，
+    它落到 <code>generic</code>，而不是被拒掉。全部类型的清单在
+    <a href={linkTo('/docs/reference/data-model')} class="link">数据模型</a>一页上。
+  </p>
+
+  <h2>日志与指标</h2>
+  <p>
+    日志记录按严重级别数字映射，就照规范规定的那样：1 到 4 是 trace，5 到 8 是
+    debug，9 到 12 是 info，13 到 16 是 warn，17 到 20 是 error，再往上都是
+    fatal。没有严重级别数字时，一条记录按 info 处理。消息取自
+    <code>body.stringValue</code>，logger 名取自 scope 名，而
+    <code>traceId</code> 和 <code>spanId</code> 在合法时会被保留，正是它们把一行
+    日志放到了发出它的那个 span 旁边。
+  </p>
+  <p>
+    指标这边，sum 变成计数器，gauge 还是 gauge。直方图按它的 sum 和 count 记录，
+    并保留桶的边界：mcpd 不会假装自己能从一个预聚合的直方图里重新推出一个精确的
+    分位数。exemplar 会被保留，正是它让图上的一个尖峰可以打开造成它的那次运行。
+    多数工具会把它们丢掉。
+  </p>
+
+  <h2>id，以及 W3C traceparent</h2>
+  <p>
+    mcpd 完全照用 OpenTelemetry 的标识符形状：一个 trace id 是 128 位，写成 32
+    个小写十六进制字符；一个 span id 是 64 位，写成 16 个。让线上格式保持一致，
+    正是省掉那层翻译的办法。全零的 id 被保留用来表示“没有 trace”，无论它出现在
+    哪里都会被拒掉，包括 mcpd 自己生成的 id。
+  </p>
+  <p>
+    OTLP/JSON 规定 id 字段用十六进制，但有几个 SDK 发的是 base64。mcpd 两种都
+    接受，存下来的是十六进制。一个 id 缺失、长度不对或者全零的 span 会被跳过，
+    这一批里其余的照样写入，因为一个为了一个坏 span 就拒掉一万个好 span 的
+    collector，是一个大家会关掉的 collector。
+  </p>
+  <p>
+    时间戳是自 Unix 纪元起的纳秒数。它们超过 2<sup>53</sup>，所以 OTLP/JSON 把
+    它们当字符串发，mcpd 也把它们当字符串解析。用浮点去读会丢精度，表现出来就是
+    几个 span 看着像是相差几微秒开始的，其实并没有。<code>endTimeUnixNano</code>
+    为 <code>0</code> 或者不存在，表示这个 span 还没有结束。
+  </p>
+  <p>
+    一个 <code>traceparent</code> 头的形状是
+    <code>version-traceid-parentid-flags</code>。mcpd 按规范定下的规则解析它：
+    版本 <code>ff</code> 被拒掉，版本 <code>00</code> 必须正好有四段，更晚的版本
+    可以带更多段，各个 id 必须合法，而 flags 字节的第 0 位是采样位。一个格式
+    不对的头，永远不构成拒掉一个请求的理由。mcpd 会改为开始一条新的 trace。
+  </p>
+  <p>
+    这在哪里要紧：mcpd 的各个 SDK 会读进来的 <code>traceparent</code>，并在往外
+    调用时发出一个，所以一条 trace 能跨过服务边界活下来。OTLP 的那几个端点从
+    载荷里取 id，因为你的导出器已经把它们放进 span 里了。如果一条 trace 起点在
+    一个你没有用 mcpd 接入的服务里，把它的 <code>traceparent</code> 一路传下去，
+    两半就会落在同一个 trace id 下面。
+  </p>
+
+  <h2>一个完整的请求</h2>
+  <p>
+    上面这些没有一样需要 SDK。这是一次完整、合法的导出，你可以直接粘进终端：
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="原始的 OTLP/JSON"
+    samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: rawPost }]}
+  />
+
+  <h2>OTLP 带不了什么</h2>
+  <p>
+    OTLP 有 span、日志和指标的形状。它没有机器评分的形状，没有人的一次点踩的形状，
+    也没有方面注释的形状，更没有词汇去描述今天的模型厂商用来计费的那些
+    token 细分。发送这些有
+    两条路：
+  </p>
+  <ul>
+    <li>
+      <code>POST /v1/ingest</code>，mcpd 自己的批量摄取端点，一个请求就能带上
+      完整的数据模型。
+    </li>
+    <li>
+      <code>POST /v1/api/scores</code> 和 <code>POST /v1/api/feedback</code>，
+      它们挂到你已经通过 OTLP 发过来的一条 trace 上。
+    </li>
+  </ul>
+  <p>
+    两者混着用是正常的，也是预期之内的。用你已经在跑的 OpenTelemetry SDK 导出
+    span，从你的评估任务里发评分。它们靠 trace id 连在一起。参见
+    <a href={linkTo('/docs/evaluation')} class="link">评分与反馈</a>和
+    <a href={linkTo('/docs/reference/api')} class="link">HTTP API</a>。
+  </p>
+
+  <h2>在你把端口暴露出去之前</h2>
+  <p>
+    没有设 <code>--ingest-key</code> 时，任何能连上 4317 的人都能往里写；没有设
+    <code>--read-key</code> 时，他还能读走每一条存下来的提示词。当 mcpd 绑定一个
+    非回环地址、而这两个里有任何一个还开着时，它会在启动时打一条警告。用
+    <a href={linkTo('/docs/configuration')} class="link">配置</a>把它们设上，然后
+    把密钥作为 <code>Authorization: Bearer</code> 发过来，上面的
+    <code>OTEL_EXPORTER_OTLP_HEADERS</code> 做的就是这件事。
+  </p>
+
+  <Command
+    class="my-6"
+    label="带着密钥运行"
+    command="mcpd --ingest-key $INGEST_KEY --read-key $READ_KEY"
+  />
+</Doc>

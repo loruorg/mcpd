@@ -1,0 +1,165 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* Internal links stay written as English routes and are localised here. A
+   route whose Japanese page is not written yet resolves to the English page
+   rather than to a Japanese URL with nothing behind it. */
+const code = localeOf(Astro.url.pathname)
+const url = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+
+/* Japanese prose is written one block element to a line on purpose. A newline
+   between two Japanese characters is only removed by the segment-break rule in
+   browsers that implement it; the rest render it as a space, and a stray space
+   inside a Japanese sentence is visible. */
+---
+
+<Doc
+  title="概念"
+  description="mcpd が使う用語です。トレースとスパン、スパンの種別、ルートスパンとイベントスパン、6 つのシグナル、相関、そして generation から chunk までのモデル階層。"
+  lede="わずかな数の言葉が、データモデル全体を支えています。以降のドキュメントはそれを知っている前提で書かれているので、このページでひとつずつ定義し、何のためにあるかを述べます。"
+  og="docs"
+>
+  <h2>スパン</h2>
+  <p>スパンは仕事の 1 単位です。名前、種別、開始時刻、たいていは終了時刻、そしてステータスを持ちます。何が入り、何が出て、トークンをいくつ使い、いくらかかったか、失敗した場合はそのエラーも持てます。</p>
+  <p>名前はカーディナリティを低く保ってください。<code>search_docs</code> は名前ですが、<code>search_docs(query=hello)</code> は名前と値をくっつけたもので、実行が 2 件になった時点で、名前による集計が役に立たなくなります。</p>
+
+  <h2>トレース</h2>
+  <p>トレースは 1 回の実行から出たすべてのスパンで、128 ビットの trace id で結ばれています。トレースの中では <code>parent_span_id</code> がツリーの形を決めます。モデルのステップの中で行われたツール呼び出しはそのステップの子になるので、画面上の入れ子は、実際に起きた入れ子です。</p>
+  <p>id は OpenTelemetry と同じ形で、トレースは小文字の 16 進 32 文字、スパンは 16 文字です。これは飾りではありません。Web 層で始まりエージェントで終わったトレースが、その両方をまたいで 1 つのトレースであり続けられるのはこのためで、すでにテレメトリーを読んでいる別のものと mcpd が並んで動けるのも、このためです。</p>
+  <p>親が別のトレーシングシステムから来たスパンは、その値を <code>external_parent_span_id</code> に持ちます。mcpd はこの値を相関のために保持しますが、ツリーの構築には決して使いません。mcpd が受け取っていないスパンを指す親 id は、部分木ごと何もない場所にぶら下げてしまうからです。</p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>mcpd は各トレースの射影も保存します。スパン数、エラー数、トークンの合計、コストの合計、モデル呼び出しの数、ツール呼び出しの数です。この行は、加算するのではなく、書き込みのたびにスパンから計算し直します。スパンは順不同で届き、再送され、その場で更新されるからです。カウンターはこの 3 つのどれでもずれますし、一覧のスパン数が明らかに間違っていれば、読む人はページ上のほかのすべての数値も信じなくなります。</p>
+
+  <h2>ルートスパンとイベントスパン</h2>
+  <p>ルートスパンは、そのトレースの中に親を持たないスパンです。ふつうは <code>agent_run</code> か <code>workflow_run</code> で、トレースの名前、タグ、相関はここから取られます。タグに意味があるのはルートの上だけで、そこでは実行全体にラベルを付けます。</p>
+  <p>イベントスパンは長さではなく時点なので、終了も所要時間も持ちません。ストリーミングのチャンクが代表例です。この区別は、終了時刻がないことから推測するのではなく、そのまま保存します。「これには最初から終わりがない」と「これはまだ終わっていない」は別の事実で、問題なのは一方だけだからです。</p>
+  <p>トレースが完了するのは、ルートが終わり、開いたままのスパンが 1 つもなくなったときです。それまでの間も、終わるまで隠すのではなく、その時点で分かる最良の名前を付けて一覧に出します。終わらなかった実行こそ、あなたが見に来たものであることが多いからです。</p>
+
+  <h2>スパンの種別</h2>
+  <p>種別は、その操作が<em>何であるか</em>を示します。スパンの描かれ方、そのスパンで意味を持つ属性、コスト計算の対象になるかどうかは、これで決まります。mcpd は 33 の種別を系統ごとに定義しています。</p>
+  <div class="scroll-x">
+    <table>
+    <thead>
+      <tr><th>系統</th><th>種別</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>エージェント</td>
+        <td><code>agent_run</code></td>
+      </tr>
+      <tr>
+        <td>モデル</td>
+        <td>
+          <code>model_generation</code>, <code>model_step</code>,
+          <code>model_inference</code>, <code>model_chunk</code>
+        </td>
+      </tr>
+      <tr>
+        <td>ツール</td>
+        <td>
+          <code>tool_call</code>, <code>client_tool_call</code>,
+          <code>provider_tool_call</code>, <code>mcp_tool_call</code>
+        </td>
+      </tr>
+      <tr>
+        <td>ワークフロー</td>
+        <td>
+          <code>workflow_run</code>, <code>workflow_step</code>,
+          <code>workflow_conditional</code>, <code>workflow_parallel</code>,
+          <code>workflow_loop</code> ほか
+        </td>
+      </tr>
+      <tr>
+        <td>リトリーバル</td>
+        <td>
+          <code>rag_ingestion</code>, <code>rag_embedding</code>,
+          <code>rag_vector_operation</code>, <code>rag_action</code>,
+          <code>retrieval</code>, <code>memory_operation</code>,
+          <code>graph_action</code>
+        </td>
+      </tr>
+      <tr>
+        <td>評価</td>
+        <td>
+          <code>scorer_run</code>, <code>scorer_step</code>,
+          <code>guardrail</code>, <code>processor_run</code>
+        </td>
+      </tr>
+      <tr>
+        <td>その他</td>
+        <td>
+          <code>mapping</code>, <code>skill_resolution</code>,
+          <code>workspace_action</code>, <code>http_request</code>,
+          <code>generic</code>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p>トークンを計上する種別は 4 つ、<code>model_generation</code>、<code>model_step</code>、<code>model_inference</code>、<code>rag_embedding</code> です。コスト計算が読むのは、このスパンたちです。<code>generic</code> は常に有効で、推測されることはありません。分類できないスパンには、当て推量ではなく正直にこのラベルが付きます。<a href={url('/docs/reference/data-model')} class="link">データモデル</a>に、すべての種別とその意味が並んでいます。</p>
+
+  <h2>モデルの階層</h2>
+  <p>このうち 4 つの種別は互いに入れ子になり、その入れ子が、このモデルでいちばん役に立つ部分です。</p>
+  <ul>
+    <li><code>model_generation</code> は論理的な生成 1 回分です。最初のリクエストから最終的な答えまでのすべてを指します。</li>
+    <li><code>model_step</code> はその中の 1 ステップです。ツールを 2 回呼ぶ生成には、ステップが 3 つあります。</li>
+    <li><code>model_inference</code> はプロバイダーとの往復だけで、プロセッサーもツールの実行も含みません。</li>
+    <li><code>model_chunk</code> はストリーミングのチャンク 1 つで、イベントとして記録されます。</li>
+  </ul>
+  <p>階層が 1 つではなく 4 つある理由は、「モデルの呼び出しが遅かった」がそのままの意味で正しいことは、ほとんどないからです。ツールが絡めば、あなたのコードからの 1 回の呼び出しは HTTP の 1 往復ではありません。リクエスト、ツール、もう 1 回のリクエスト、ガードレール、さらにもう 1 回のリクエストです。これを 1 つのスパンにまとめてしまうと、自分のリトライループで 6 秒使った実行と、プロバイダーの応答を 6 秒待った実行が、まったく同じに見えます。inference と step と generation を分けているからこそ、この違いが読み取れます。そして time to first token は、最初のチャンクのイベントから分かります。</p>
+  <p>トークンの使用量は、プロバイダーを呼んだスパンに<strong>一度だけ</strong>記録してください。トレースの射影は、トレース内のすべてのスパンについて入力と出力のトークンを合計します。同じ数を generation にも各 step にも付ければ、画面上のトークン合計もコストも 2 倍になります。階層は時間のためのもので、トークンは、実際にプロバイダーと話した階層のものです。</p>
+
+  <h2>6 つのシグナル</h2>
+  <p>スパンは、mcpd が保存する 6 つのもののうちの 1 つです。ログは実行が出した行。メトリクスは数値の観測で、カウンター、ゲージ、ヒストグラムの形を取ります。スコアはスパンやトレースに対する機械の評価。フィードバックは人の評価。観点ノートは、終わった実行についての 1 文です。ほとんどはモデルが書きます。<code>outcome</code> のノートは、実行のステータスと、すでに持っているほかの事実から、デーモンが書きます。</p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <p>6 つとも、自分が属する trace id を持ち、ほとんどは span id も持ちます。そして 6 つとも、何かが書き込まれる前に同じ秘匿化のパイプラインを通ります。秘密は、プロンプトからと同じようによく、ログの 1 行からも漏れます。</p>
+  <p>スコアは必ず尺度を宣言します。値と、その値が収まる最小値と最大値です。どの SDK も呼び出し側で両方を要求します。尺度の付かない 0.7 という値だけでは、何とも比べられないからです。先週の同じスコアラーの出力とも比べられません。</p>
+  <p>フィードバックはスコアとは別の場所に置き、スコアと平均を取ることはありません。形は 5 つ、<code>thumbs</code>、<code>rating</code>、<code>correction</code>、<code>tag</code>、<code>comment</code> です。5 つのうちいちばん価値があるのは <code>correction</code> です。正しい答えを運ぶ唯一のシグナルだからです。</p>
+
+  <h2>相関</h2>
+  <p>相関とは、シグナルが属する文脈のことです。ただ積み上がった実行と、切り分けられる集合との違いが、ここにあります。</p>
+  <div class="scroll-x">
+    <table>
+    <thead>
+      <tr><th>フィールド</th><th>保持する内容</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>project</code></td><td>テナントのキー。どのシグナルも、ちょうど 1 つに属します。</td></tr>
+      <tr><td><code>environment</code></td><td>どこで動いたか。production や staging など。</td></tr>
+      <tr><td><code>service_name</code></td><td>送り出したサービス。</td></tr>
+      <tr><td><code>service_version</code></td><td>そのバージョン。リグレッションをリリースに結び付けられます。</td></tr>
+      <tr><td><code>session_id</code></td><td>利用者から見たセッション。多くのトレースを 1 つの会話にまとめます。</td></tr>
+      <tr><td><code>thread_id</code></td><td>そのセッションの中のスレッド。</td></tr>
+      <tr><td><code>user_id</code></td><td>その実行の対象だったエンドユーザー。</td></tr>
+      <tr><td><code>resource_id</code></td><td>あなたのアプリケーションの中のテナントやワークスペース。</td></tr>
+      <tr><td><code>run_id</code></td><td>この実行に対する、あなた自身の識別子。</td></tr>
+      <tr><td><code>request_id</code></td><td>その仕事を引き起こした、受信したリクエスト。</td></tr>
+      <tr><td><code>experiment_id</code></td><td>実験がその実行を生んだときに設定します。</td></tr>
+      <tr><td><code>release</code></td><td>リリース名、または git の sha。</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>必須のフィールドは <code>project</code> だけです。送信側が指定しなかった場合、デーモンは <code>--project</code> の既定値の下に振り分けるので、居場所のないまま保存されるものはありません。</p>
+  <p>冗長に見えても <code>session_id</code> は設定してください。エージェントの 1 回の実行はトレースですが、苦情はたいてい会話についてのものです。session id がなければ、ばらばらの 11 本のトレースを、その人が実際に交わしたやり取りに戻すものが何もありません。</p>
+  <p>トレースの一覧は、<code>environment</code>、<code>session_id</code>、<code>thread_id</code>、<code>user_id</code> でそのまま絞り込めます。ステータス、種別、名前、タグ、モデル、期間、最小の所要時間、最小のコスト、スコアも同じように使えます。<a href={url('/docs/searching')} class="link">実行を探す</a>で、これらを組み合わせます。</p>
+
+  <h2>リンク</h2>
+  <p>スパンは親を 1 つと、いくつでもリンクを持てます。リンクは別のスパンや別のトレースを指し、その理由を述べます。<code>follows_from</code>、<code>retry_of</code>、<code>replay_of</code>、あるいはあなたが付けた名前です。</p>
+  <p>リンクがあるのは、親子関係ではファンインを表せないからです。20 件のリクエストが引き起こしたバッチ処理には、リンクが 20 本と親が 1 つあります。これを無理にツリーへ収めれば、重複した部分木を 19 個でっち上げるか、原因を 19 個捨てるかのどちらかになります。</p>
+
+  <h2>次に</h2>
+  <ul>
+    <li>すべてのエンティティとフィールドを網羅：<a href={url('/docs/reference/data-model')} class="link">データモデル</a>。</li>
+    <li>これらの言葉がコードでどう現れるか：<a href={url('/docs/sdks/typescript')} class="link">SDK</a>。</li>
+    <li>スパンが OTLP として届いたとき mcpd が何を推測するか：<a href={url('/docs/opentelemetry')} class="link">OpenTelemetry</a>。</li>
+    <li>この用語をクエリにする：<a href={url('/docs/searching')} class="link">実行を探す</a>。</li>
+  </ul>
+</Doc>

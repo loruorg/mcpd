@@ -1,0 +1,319 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="Conceptos"
+  description="El vocabulario que usa mcpd: trazas y spans, tipos de span, spans raíz y de evento, las seis señales, la correlación y la jerarquía del modelo, de la generación al chunk."
+  lede="Un puñado de palabras sostiene todo el modelo de datos. El resto de la documentación da por hecho que las conoces, así que esta página define cada una y dice para qué sirve."
+  og="docs"
+>
+  <h2>Span</h2>
+  <p>
+    Un span es una unidad de trabajo. Tiene un nombre, un tipo, una hora de
+    inicio, casi siempre una hora de fin, y un estado. Puede llevar qué entró,
+    qué salió, cuántos tokens usó, cuánto costó y un error si falló.
+  </p>
+  <p>
+    Mantén el nombre con poca cardinalidad. <code>search_docs</code> es un
+    nombre; <code>search_docs(query=hello)</code> es un nombre y un valor
+    pegados, y deja inservible agrupar por nombre en cuanto tienes dos
+    ejecuciones.
+  </p>
+
+  <h2>Traza</h2>
+  <p>
+    Una traza son todos los spans de una ejecución, unidos por un id de traza de
+    128 bits. Dentro de la traza, <code>parent_span_id</code> le da forma al
+    árbol: una llamada a una herramienta hecha dentro de un paso del modelo es
+    hija de ese paso, así que el anidamiento en pantalla es el anidamiento que
+    ocurrió de verdad.
+  </p>
+  <p>
+    Los ids tienen la forma de OpenTelemetry: 32 caracteres hexadecimales en
+    minúscula para una traza y 16 para un span. Eso no es decoración. Es lo que
+    permite que una traza que empezó en tu capa web y terminó en tu agente siga
+    siendo una sola traza en las dos, y lo que permite que mcpd conviva con
+    cualquier otra cosa que ya lea tu telemetría.
+  </p>
+  <p>
+    Un span cuyo padre viene de otro sistema de trazado lo lleva en
+    <code>external_parent_span_id</code>. mcpd conserva ese valor para la
+    correlación, pero nunca construye su árbol a partir de él, porque un id de
+    padre que nombra un span que mcpd nunca recibió dejaría todo el subárbol
+    colgando de nada.
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>
+    mcpd guarda además una proyección de cada traza: el número de spans, el
+    número de errores, el total de tokens, el costo total, cuántas llamadas al
+    modelo y cuántas llamadas a herramientas. Esa fila se recalcula a partir de
+    los spans en cada escritura, en vez de irse incrementando, porque los spans
+    llegan desordenados, se reintentan y se actualizan en el sitio. Un contador
+    se desvía con las tres cosas, y un número de spans visiblemente equivocado
+    en la lista hace que quien lo lee desconfíe de las demás cifras de la
+    página.
+  </p>
+
+  <h2>Spans raíz y spans de evento</h2>
+  <p>
+    Un span raíz es el que no tiene padre dentro de la traza. Normalmente es un
+    <code>agent_run</code> o un <code>workflow_run</code>, y es de donde la traza
+    saca su nombre, sus etiquetas y su correlación. Las etiquetas solo tienen
+    sentido en una raíz, donde etiquetan la ejecución entera.
+  </p>
+  <p>
+    Un span de evento es un punto en el tiempo y no una duración, así que no
+    tiene fin ni duración. El caso habitual es un chunk de un flujo. La
+    distinción se guarda en vez de deducirse de una hora de fin ausente, porque
+    «esto nunca tuvo fin» y «esto todavía no ha terminado» son hechos distintos
+    y solo uno de los dos es un problema.
+  </p>
+  <p>
+    Una traza está completa cuando su raíz ha terminado y no queda ningún span
+    abierto. Hasta entonces sigue apareciendo en la lista, con el mejor nombre
+    disponible, en vez de esconderse hasta acabar. La ejecución que nunca
+    terminó suele ser la que viniste a mirar.
+  </p>
+
+  <h2>Tipo de span</h2>
+  <p>
+    El tipo dice qué <em>es</em> una operación. Decide cómo se dibuja el span,
+    qué atributos significan algo en él y si la contabilidad de costos lo mira.
+    mcpd define 33 tipos, agrupados en familias:
+  </p>
+  <div class="scroll-x">
+    <table>
+    <thead>
+      <tr><th>Familia</th><th>Tipos</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Agente</td>
+        <td><code>agent_run</code></td>
+      </tr>
+      <tr>
+        <td>Modelo</td>
+        <td>
+          <code>model_generation</code>, <code>model_step</code>,
+          <code>model_inference</code>, <code>model_chunk</code>
+        </td>
+      </tr>
+      <tr>
+        <td>Herramientas</td>
+        <td>
+          <code>tool_call</code>, <code>client_tool_call</code>,
+          <code>provider_tool_call</code>, <code>mcp_tool_call</code>
+        </td>
+      </tr>
+      <tr>
+        <td>Workflow</td>
+        <td>
+          <code>workflow_run</code>, <code>workflow_step</code>,
+          <code>workflow_conditional</code>, <code>workflow_parallel</code>,
+          <code>workflow_loop</code>, y el resto
+        </td>
+      </tr>
+      <tr>
+        <td>Recuperación</td>
+        <td>
+          <code>rag_ingestion</code>, <code>rag_embedding</code>,
+          <code>rag_vector_operation</code>, <code>rag_action</code>,
+          <code>retrieval</code>, <code>memory_operation</code>,
+          <code>graph_action</code>
+        </td>
+      </tr>
+      <tr>
+        <td>Evaluación</td>
+        <td>
+          <code>scorer_run</code>, <code>scorer_step</code>,
+          <code>guardrail</code>, <code>processor_run</code>
+        </td>
+      </tr>
+      <tr>
+        <td>Otros</td>
+        <td>
+          <code>mapping</code>, <code>skill_resolution</code>,
+          <code>workspace_action</code>, <code>http_request</code>,
+          <code>generic</code>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    Cuatro tipos facturan tokens: <code>model_generation</code>,
+    <code>model_step</code>, <code>model_inference</code> y
+    <code>rag_embedding</code>. Esos son los spans que lee la contabilidad de
+    costos. <code>generic</code> siempre es válido y nunca se deduce, así que un
+    span que mcpd no puede clasificar queda etiquetado con honestidad en vez de
+    a base de suposiciones.
+    <a href={linkTo('/docs/reference/data-model')} class="link">El modelo de datos</a>
+    enumera cada tipo con lo que significa.
+  </p>
+
+  <h2>La jerarquía del modelo</h2>
+  <p>
+    Cuatro de esos tipos se anidan unos dentro de otros, y ese anidamiento es lo
+    más útil del modelo:
+  </p>
+  <ul>
+    <li>
+      <code>model_generation</code> es una generación lógica: todo, desde la
+      primera solicitud hasta la respuesta final.
+    </li>
+    <li>
+      <code>model_step</code> es un paso dentro de ella. Una generación que
+      llama a herramientas dos veces tiene tres pasos.
+    </li>
+    <li>
+      <code>model_inference</code> es solo la ida y vuelta al proveedor, sin
+      procesadores y sin ejecución de herramientas dentro.
+    </li>
+    <li>
+      <code>model_chunk</code> es un chunk del flujo, registrado como evento.
+    </li>
+  </ul>
+  <p>
+    La razón de que haya cuatro niveles y no uno es que «la llamada al modelo
+    fue lenta» casi nunca es cierto tal cual. Una llamada desde tu código no es
+    una sola ida y vuelta HTTP en cuanto hay herramientas de por medio: es una
+    solicitud, una herramienta, otra solicitud, un guardrail, otra solicitud. Junta
+    todo eso en un solo span y una ejecución que pasó seis segundos en tu propio
+    bucle de reintentos parece idéntica a otra que pasó seis segundos esperando
+    a un proveedor. Separar la inferencia del paso, y el paso de la generación,
+    es lo que hace legible la diferencia, y el evento del primer chunk es lo que
+    te da el tiempo hasta el primer token.
+  </p>
+  <p>
+    Registra el uso de tokens <strong>una sola vez</strong>, en el span que hizo
+    la llamada al proveedor. La proyección de la traza suma los tokens de
+    entrada y de salida de todos los spans de la traza, así que las mismas
+    cifras puestas en una generación y otra vez en cada uno de sus pasos
+    duplicarán el total de tokens y duplicarán el costo en pantalla. La
+    jerarquía es para los tiempos; los tokens pertenecen al nivel que habló de
+    verdad con el proveedor.
+  </p>
+
+  <h2>Las seis señales</h2>
+  <p>
+    Los spans son una de las seis cosas que guarda mcpd. Los logs son las
+    líneas que emitió una ejecución. Las métricas son observaciones numéricas,
+    en forma de contadores, medidores o histogramas. Las puntuaciones son la
+    evaluación que una máquina hace de un span o de una traza. El feedback es el
+    de una persona. Una nota de aspecto es una frase sobre
+    una ejecución ya terminada. Un modelo escribe la mayoría. El daemon escribe
+    las notas de <code>outcome</code>, a partir del estado de la ejecución y de
+    otros hechos que ya tiene.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <p>
+    Las seis llevan el id de traza al que pertenecen, y casi todas también el id
+    de span, y las seis pasan por el mismo pipeline de ocultación antes de que
+    se escriba nada. Un secreto se escapa por una línea de log igual de bien que por un
+    prompt.
+  </p>
+  <p>
+    Una puntuación siempre declara su escala: el valor, y el mínimo y el máximo
+    entre los que está. Todos los SDK exigen los dos en el punto de llamada,
+    porque un 0.7 suelto y sin escala no se puede comparar con nada, ni siquiera
+    con lo que dio el mismo evaluador la semana pasada.
+  </p>
+  <p>
+    El feedback se guarda aparte de las puntuaciones, y nunca se promedia con
+    ellas. Viene en cinco formas: <code>thumbs</code>, <code>rating</code>,
+    <code>correction</code>, <code>tag</code> y <code>comment</code>. La
+    corrección es la más valiosa de las cinco, porque es la única señal que trae
+    la respuesta correcta.
+  </p>
+
+  <h2>Correlación</h2>
+  <p>
+    La correlación es el contexto al que pertenece una señal. Es la diferencia
+    entre un montón de ejecuciones y un conjunto que puedes segmentar.
+  </p>
+  <div class="scroll-x">
+    <table>
+    <thead>
+      <tr><th>Campo</th><th>Qué contiene</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>project</code></td><td>La clave de tenencia. Cada señal pertenece exactamente a uno.</td></tr>
+      <tr><td><code>environment</code></td><td>Dónde se ejecutó, por ejemplo production o staging.</td></tr>
+      <tr><td><code>service_name</code></td><td>El servicio que la emite.</td></tr>
+      <tr><td><code>service_version</code></td><td>Su versión, para poder atribuir una regresión a una entrega.</td></tr>
+      <tr><td><code>session_id</code></td><td>Una sesión de cara al usuario. Agrupa muchas trazas en una conversación.</td></tr>
+      <tr><td><code>thread_id</code></td><td>Un hilo dentro de esa sesión.</td></tr>
+      <tr><td><code>user_id</code></td><td>El usuario final para el que era la ejecución.</td></tr>
+      <tr><td><code>resource_id</code></td><td>Un inquilino o espacio de trabajo dentro de tu propia aplicación.</td></tr>
+      <tr><td><code>run_id</code></td><td>Tu propio identificador de esta ejecución.</td></tr>
+      <tr><td><code>request_id</code></td><td>La solicitud entrante que provocó el trabajo.</td></tr>
+      <tr><td><code>experiment_id</code></td><td>Se rellena cuando la ejecución la produjo un experimento.</td></tr>
+      <tr><td><code>release</code></td><td>Un nombre de entrega o un sha de git.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    <code>project</code> es el único campo obligatorio. Cuando quien envía no
+    nombra ninguno, el daemon archiva la señal bajo el valor por defecto de
+    <code>--project</code>, así nada queda guardado sin un sitio al que
+    pertenecer.
+  </p>
+  <p>
+    Rellena <code>session_id</code> aunque parezca redundante. Una ejecución de
+    un agente es una traza, pero una queja casi siempre trata de una
+    conversación, y sin un id de sesión no hay nada que devuelva once trazas
+    sueltas al intercambio que la persona tuvo de verdad.
+  </p>
+  <p>
+    La lista de trazas filtra directamente por <code>environment</code>,
+    <code>session_id</code>, <code>thread_id</code> y <code>user_id</code>,
+    junto con el estado, el tipo, el nombre, las etiquetas, el modelo, el rango
+    de tiempo, la duración mínima, el costo mínimo y la puntuación.
+    <a href={linkTo('/docs/searching')} class="link">Encontrar una ejecución</a>
+    los junta todos.
+  </p>
+
+  <h2>Enlaces</h2>
+  <p>
+    Un span tiene un padre y cualquier número de enlaces. Un enlace apunta a
+    otro span o a otra traza y dice por qué: <code>follows_from</code>,
+    <code>retry_of</code>, <code>replay_of</code>, o el nombre que tú le pongas.
+  </p>
+  <p>
+    Los enlaces existen porque la paternidad no sabe expresar una convergencia.
+    Un trabajo por lotes provocado por veinte solicitudes tiene veinte enlaces y
+    un padre. Meter eso a la fuerza en el árbol inventaría diecinueve subárboles
+    duplicados o tiraría diecinueve de las causas.
+  </p>
+
+  <h2>A continuación</h2>
+  <ul>
+    <li>
+      Cada entidad y cada campo al completo:
+      <a href={linkTo('/docs/reference/data-model')} class="link">Modelo de datos</a>.
+    </li>
+    <li>
+      Cómo aparecen estas palabras en el código:
+      <a href={linkTo('/docs/sdks/typescript')} class="link">los SDK</a>.
+    </li>
+    <li>
+      Qué deduce mcpd cuando los spans llegan como OTLP:
+      <a href={linkTo('/docs/opentelemetry')} class="link">OpenTelemetry</a>.
+    </li>
+    <li>
+      Convertir el vocabulario en una consulta:
+      <a href={linkTo('/docs/searching')} class="link">Encontrar una ejecución</a>.
+    </li>
+  </ul>
+</Doc>

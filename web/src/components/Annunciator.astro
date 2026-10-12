@@ -1,0 +1,229 @@
+---
+/**
+ * The monitor panel.
+ *
+ * An annunciator is the row of lit legend windows on a control panel, and the
+ * property that makes it an annunciator rather than a row of coloured labels is
+ * that it LATCHES: it lights on a fault and holds until the condition genuinely
+ * clears or somebody acknowledges it.
+ *
+ * That is exactly what `crates/mcpd-server/src/monitor.rs` does, so this is the
+ * instrument the alerting page should carry rather than a decoration. The loop
+ * below dramatises the one rule that is easy to get wrong and expensive to get
+ * wrong: in the middle of the sequence the traffic goes quiet and there is no
+ * reading at all, and the window STAYS LIT. Silence is not recovery.
+ *
+ * Everything is drawn into the markup at its resting state. If the animation
+ * never runs, the panel is still a populated panel with a lit window and a
+ * legible reading.
+ */
+
+interface Props {
+  /** Seconds for one full sequence. */
+  period?: number
+  class?: string
+}
+
+const { period = 24, class: className = '' } = Astro.props
+
+/** The threshold this panel is watching, as a percentage. */
+const THRESHOLD = 5
+
+/**
+ * One reading per slot. `null` is a window with too few runs in it to judge,
+ * which is a real state and not a gap in the data.
+ */
+const READINGS: (number | null)[] = [0.4, 0.9, 7.2, 6.1, null, null, 3.1, 0.6]
+const SLOT = 100 / READINGS.length
+
+/** The bar is measured against twice the threshold, so the mark sits mid-scale. */
+const FULL = THRESHOLD * 2
+const width = (v: number | null) => (v === null ? 0 : Math.min(100, (v / FULL) * 100))
+
+/**
+ * The latch, computed from the readings rather than written by hand, so the
+ * graphic cannot claim behaviour the rule does not produce.
+ *
+ * `null` holds the previous condition. That single line is the whole point of
+ * the illustration.
+ */
+let held = false
+const latched = READINGS.map((v) => {
+  if (v !== null) held = v > THRESHOLD
+  return held
+})
+
+/**
+ * The slot the panel rests on when nothing is animating: the first reading that
+ * tripped the latch. The window is drawn lit in the markup, so the gauge and
+ * the drum have to rest on a reading that lights it, or the resting frame
+ * shows a lit fault lamp beside a 0.4% reading and contradicts itself.
+ */
+const REST = latched.indexOf(true)
+
+/** Percent boundaries where the lamp changes, for keyframes that snap. */
+const latchFrames = latched.flatMap((lit, i) => {
+  const at = i * SLOT
+  return [
+    { pct: at, lit },
+    { pct: at + SLOT - 0.01, lit },
+  ]
+})
+
+/** A second window on its own schedule, so the panel reads as independent watches. */
+const P95_ON = 4 * SLOT
+const P95_OFF = 6 * SLOT
+
+/**
+ * Six real monitors. Every legend below names something mcpd can actually
+ * watch: the four `watch` kinds, and two `score_mean` monitors on two of the
+ * built-in scorers. A panel that advertises a lamp for a condition the daemon
+ * cannot measure would be a prop.
+ */
+const WINDOWS = [
+  { legend: 'Error rate', animated: 'oxide' as const },
+  { legend: 'P95 latency', animated: 'amber' as const },
+  { legend: 'Hourly cost', animated: null },
+  { legend: 'Run count', animated: null },
+  { legend: 'No tool loop', animated: null },
+  { legend: 'Not a refusal', animated: null },
+]
+
+/** Height of one drum cell, in rem. The drum steps by exactly this. */
+const CELL = 1.25
+---
+
+<figure class={`panel-raised ${className}`}>
+  <div class="flex items-baseline justify-between gap-4 px-4 pt-3.5 pb-3">
+    <p class="legend">Monitor panel</p>
+    <p class="legend text-ink-3">6 watched &middot; every 60s</p>
+  </div>
+
+  {/* The windows. Two carry a latch animation; the rest sit dark, because a
+      panel where every lamp is lit tells an operator nothing.
+
+      The error window's resting state is the lit one, so a reader who never
+      sees the animation still sees the point the panel is making. The
+      keyframes override it while they play. */}
+  <div class="seam grid grid-cols-2 gap-1.5 px-4 py-4 sm:grid-cols-3">
+    {
+      WINDOWS.map((w) => (
+        <span
+          class:list={[
+            'annunciator justify-center px-2 py-2 text-center',
+            w.animated === 'oxide' && 'mcpd-latch-error',
+            w.animated === 'amber' && 'mcpd-latch-p95',
+          ]}
+          data-lit={w.animated === 'oxide' ? 'oxide' : undefined}
+        >
+          {w.legend}
+        </span>
+      ))
+    }
+  </div>
+
+  {/* The measurement the first window is latched to. */}
+  <div class="seam px-4 py-4">
+    <div class="flex items-baseline justify-between gap-4">
+      <p class="legend text-ink-3">Error rate</p>
+      <p class="legend text-ink-3">Threshold {THRESHOLD}%</p>
+    </div>
+
+    <div class="mt-2.5 flex items-center gap-3">
+      {/* The bar, in a recess: a real gauge is set into the panel. Its height
+          is the drum's, so the two recesses in this row share top and bottom
+          edges rather than merely sharing a centre line. */}
+      <div class="well relative flex-1 overflow-hidden" style={`height:${CELL}rem`}>
+        <div class="mcpd-gauge absolute inset-y-0 left-0 bg-oxide/70"></div>
+        {/* The threshold mark. It sits ON the scale it belongs to, at the value
+            it represents, not at a guessed offset. */}
+        <div
+          class="absolute inset-y-0 w-px bg-ink"
+          style={`left:${(THRESHOLD / FULL) * 100}%`}
+          aria-hidden="true"
+        >
+        </div>
+      </div>
+
+      {/* The counter drum. A panel counter snaps between readings; it does not
+          tween, so every step below uses steps(1). */}
+      <div
+        class="well data relative w-[4.5rem] overflow-hidden text-right text-[0.8125rem] leading-none text-ink"
+        style={`height:${CELL}rem`}
+        aria-hidden="true"
+      >
+        <div class="mcpd-drum absolute inset-x-0 top-0 px-2">
+          {
+            READINGS.map((v) => (
+              <div class="flex items-center justify-end" style={`height:${CELL}rem`}>
+                {v === null ? <span class="text-ink-3">&mdash;</span> : `${v.toFixed(1)}%`}
+              </div>
+            ))
+          }
+        </div>
+      </div>
+    </div>
+
+    <p class="mt-2.5 max-w-[46ch] text-[0.75rem] leading-relaxed text-ink-3">
+      Two readings in the middle are <span class="data">&mdash;</span>: too few
+      runs in the window to judge. The lamp stays lit through them.
+    </p>
+  </div>
+
+  <figcaption class="sr-only">
+    A monitor panel of six annunciator windows. The error-rate window lights when
+    the measured rate crosses five percent, stays lit through two windows that
+    hold too few runs to judge, and clears only when a later reading genuinely
+    falls back under the threshold.
+  </figcaption>
+</figure>
+
+{/* The keyframes are computed from the readings above, so the lamp and the
+    gauge cannot disagree about when the condition tripped. `define:vars` is not
+    used: on an inline block it emits a bare custom property outside any
+    selector, which no rule can read. */}
+<style is:inline set:html={`
+  .mcpd-latch-error { animation: mcpd-latch-error ${period}s steps(1, end) infinite; }
+  .mcpd-latch-p95   { animation: mcpd-latch-p95 ${period}s steps(1, end) infinite; }
+  .mcpd-gauge       { animation: mcpd-gauge ${period}s steps(1, end) infinite; width: ${width(READINGS[REST]!).toFixed(2)}%; }
+  .mcpd-drum        { animation: mcpd-drum ${period}s steps(1, end) infinite; transform: translateY(-${(REST * CELL).toFixed(3)}rem); }
+
+  @keyframes mcpd-latch-error {
+${latchFrames
+  .map(
+    (f) =>
+      `    ${f.pct.toFixed(2)}% { background: var(${f.lit ? '--lit-oxide-bg' : '--color-well'}); ` +
+      `border-color: var(${f.lit ? '--lit-oxide-edge' : '--color-scribe'}); ` +
+      `color: var(${f.lit ? '--color-oxide' : '--color-ink-3'}); }`,
+  )
+  .join('\n')}
+  }
+
+  @keyframes mcpd-latch-p95 {
+    0% { background: var(--color-well); border-color: var(--color-scribe); color: var(--color-ink-3); }
+    ${P95_ON.toFixed(2)}% { background: var(--lit-amber-bg); border-color: var(--lit-amber-edge); color: var(--color-amber); }
+    ${P95_OFF.toFixed(2)}% { background: var(--color-well); border-color: var(--color-scribe); color: var(--color-ink-3); }
+  }
+
+  @keyframes mcpd-gauge {
+${READINGS.map((v, i) => `    ${(i * SLOT).toFixed(2)}% { width: ${width(v).toFixed(2)}%; }`).join('\n')}
+  }
+
+  @keyframes mcpd-drum {
+${READINGS.map((_, i) => `    ${(i * SLOT).toFixed(2)}% { transform: translateY(-${(i * CELL).toFixed(3)}rem); }`).join('\n')}
+  }
+
+  /* With motion reduced the panel holds the frame that carries the lesson: the
+     window latched, and the reading beside it absent. Nothing is hidden. */
+  @media (prefers-reduced-motion: reduce) {
+    .mcpd-latch-error {
+      animation: none;
+      background: var(--lit-oxide-bg);
+      border-color: var(--lit-oxide-edge);
+      color: var(--color-oxide);
+    }
+    .mcpd-latch-p95 { animation: none; }
+    .mcpd-gauge { animation: none; width: 0%; }
+    .mcpd-drum { animation: none; transform: translateY(-${(4 * CELL).toFixed(3)}rem); }
+  }
+`}></style>

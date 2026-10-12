@@ -1,0 +1,423 @@
+# mcpd chart values.
+#
+# The chart refuses to install without keys. That is deliberate: a daemon on a
+# cluster network with open ingest accepts writes from anything that can reach
+# the Service, and a chart that lets you find that out later is not doing its
+# job. Set keys.ingest and keys.read, or point keys.existingSecret at a Secret
+# you manage yourself.
+
+image:
+  repository: ghcr.io/mcpd/mcpd
+  # Empty means the chart's appVersion. Pin it in production.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Daemon configuration. Each of these maps to one environment variable.
+config:
+  # The container port and the NetworkPolicy port are read from the number
+  # after the last colon, so moving the listener moves both.
+  listen: 0.0.0.0:4317
+  dataPath: /data/mcpd.db
+  project: default
+  # Days to keep signals. Empty or 0 keeps everything for ever, and the chart
+  # then sets no MCPD_RETENTION_DAYS at all.
+  retentionDays: 30
+  # Fraction of traces to keep, 0.0 to 1.0. Empty keeps all of them.
+  sample: ""
+  logFormat: json
+  # Turn off built-in redaction. Only sensible when something upstream already
+  # redacts.
+  noRedact: false
+  # Mask any value whose key contains one of these, on top of the built-in
+  # rules. Matched on lowercase substrings of the key.
+  redactKeyContains: []
+  # Longest single string stored, in bytes. Empty keeps the built-in 128 KiB.
+  redactMaxString: ""
+  # Where the run store lives, when runs.enabled is true. It must be inside the
+  # directory of dataPath, because that directory is the only writable mount.
+  # Empty derives it from dataPath: /data/mcpd.runs.db for the default. "off"
+  # is the same as runs.enabled false.
+  runsPath: ""
+  # Browser origins allowed to call the query API from another site, such as
+  # an interface served from a portal. Empty answers no cross-origin request.
+  corsOrigins: []
+  # Longest a request may take before it is answered with a 503. Empty keeps
+  # the built-in 30 seconds. Raise terminationGracePeriodSeconds with it.
+  requestTimeoutSeconds: ""
+
+# An external database for signals, instead of the embedded file.
+#
+# An external store is what lets mcpd run more than one pod: the single writer
+# and the single replica are limits of the SQLite file, not of mcpd. It is half
+# of what it takes, though. The run store is always an embedded file (see
+# `runs` below), so more than one replica also needs runs.enabled false.
+#
+# `type` decides the mode, never the URLs. That is what lets a URL live only in
+# a Secret you manage: set the type here, point keys.existingSecret at the
+# Secret, and leave the URL values empty. A URL value with type none, or with
+# the other type, refuses to render rather than being ignored.
+externalStore:
+  # none, postgres or clickhouse.
+  type: none
+  # A Postgres connection string. Reach for this first: it lifts both limits on
+  # a database most teams already run, back up and monitor.
+  postgresUrl: ""
+  # A ClickHouse HTTP endpoint. Reach for this when retention is measured in
+  # billions of spans.
+  clickhouseUrl: ""
+  clickhouseDatabase: mcpd
+  clickhouseUser: ""
+  # Both URLs and the ClickHouse password carry credentials, so they are held in
+  # the chart's Secret rather than in the pod spec. With keys.existingSecret,
+  # the chart creates no Secret: put them in yours under the keys postgres-url,
+  # clickhouse-url and clickhouse-password, and leave these values empty.
+  clickhousePassword: ""
+
+# The durable run surface: definitions, the journal of step attempts, deadlines
+# and waits.
+#
+# Its store is an embedded SQLite file whatever the signal store is, so while
+# it is on, the pod keeps a file on a volume and runs as one replica. With an
+# external store that volume holds the run store alone. Turn it off to run
+# several pods against an external store; the daemon then answers the run
+# endpoints with a 503 that says so, and nothing else changes.
+runs:
+  enabled: true
+
+# Pods to run. More than one needs both an external store and runs.enabled
+# false, because each embedded SQLite file has one writer. The chart refuses to
+# render a larger count otherwise, rather than pinning it to 1 behind your back.
+replicaCount: 1
+
+keys:
+  # Comma-separated keys permitted to write.
+  ingest: ""
+  # Comma-separated keys permitted to read stored prompts and completions.
+  read: ""
+  # Comma-separated keys permitted to change stored data: scores, feedback,
+  # datasets, experiments and acknowledgements. Unset means the ingest keys are
+  # accepted, which is what a deployment written before this scope existed did.
+  # The ingest key is in every container that emits a span, so separating them
+  # is worth doing once you have more than one team.
+  write: ""
+  # Comma-separated keys permitted to destroy data and read the audit log.
+  # Unset means the read keys are accepted, so a read key can delete a trace.
+  # `mcpd doctor` reports that as a warning and names this setting.
+  admin: ""
+  # Comma-separated keys permitted to start, cancel and signal runs. Unset
+  # means the write keys are accepted, and an admin key always is.
+  execute: ""
+  # Comma-separated keys permitted to claim steps and report their outcome.
+  # This is the key that lives in the process running step bodies. Unset means
+  # the write keys are accepted, and an admin key always is.
+  worker: ""
+  # Salt for the hashes redaction leaves behind. Optional, but set it anywhere
+  # that hashes: without it, digests of short identifiers can be guessed.
+  redact: ""
+  # Use a Secret you already manage instead of the values above. It must carry
+  # ingest-keys and read-keys, and optionally write-keys, admin-keys,
+  # execute-keys, worker-keys and redact-key.
+  existingSecret: ""
+
+# The two bounds on one request. Empty means the built-in defaults, 33554432
+# bytes (32 MiB) of body and 10000 signals per request.
+#
+# The byte cap is what bounds how much memory one request can take before
+# anything is decoded, so lower it on a small pod. The signal cap is counted
+# across the whole request on every ingest door, whether the signals arrive as
+# one batch, an array of batches or an NDJSON stream.
+maxBodyBytes: ""
+maxBatchSignals: ""
+
+# A ceiling on signals stored per project per minute. Empty means no ceiling,
+# which is what a deployment that never sets it had before quotas existed.
+#
+# It stops one project spending the whole daemon. Signals over the ceiling are
+# refused and reported with the count and the project, never dropped in silence,
+# and the rest of the batch is still stored.
+quotaPerMinute: ""
+
+# Record WHICH PERSON acted on an audit row, not only which key.
+#
+# mcpd has no identity provider and is not getting one, so the identity comes
+# from the ingress already in front of it. Both halves are required: the header
+# your ingress sets, and the ranges allowed to set it. A header is a string
+# anyone who can reach the port may send, so mcpd reads it only from an address
+# you have named here. A request from anywhere else is served normally and its
+# audit row carries no subject.
+#
+# Set trustedProxyCidrs to the range your ingress controller runs in, not to
+# 0.0.0.0/0, which would trust every client to name itself.
+identity:
+  # For example x-forwarded-user, x-forwarded-email or x-auth-request-user.
+  header: ""
+  # A list of CIDR ranges, for example ["10.42.0.0/16"].
+  trustedProxyCidrs: []
+  # The header your proxy puts the client's address in, for example
+  # cf-connecting-ip. Read only from trustedProxyCidrs. The sign-up and log-in
+  # limits count this address; without it they count the proxy's.
+  clientIpHeader: ""
+
+# Open sign-up: anyone may create an account, which owns one new project and
+# its own API keys. Off by default. On, a request with no key is refused
+# everywhere except the health probes, sign-up and log-in. Set
+# identity.clientIpHeader and identity.trustedProxyCidrs as well when an
+# ingress is in front, so the per-address limits count clients.
+signup:
+  enabled: false
+  # Where the accounts file goes. Empty puts it beside the data file, as
+  # mcpd.accounts.db, which is on the volume.
+  accountsData: ""
+
+# Copy every stored span on to another OTLP endpoint. The local write always
+# happens first, so a slow or absent destination never costs you the data.
+forward:
+  # Base URL, not the /v1/traces path; mcpd appends it.
+  endpoint: ""
+  # Headers as "Name: value" strings. A credential here lands in the Secret.
+  headers: []
+
+# The volume for whatever the pod keeps on disk: the signal store and the run
+# store on the embedded store, or the run store alone with an external one.
+# Not used with an external store and runs.enabled false, since nothing local
+# is left to keep.
+#
+# With enabled false the chart mounts an emptyDir instead, so the daemon can
+# still write, and everything it wrote is gone when the pod is.
+persistence:
+  enabled: true
+  # Sized for the embedded signal store. A volume that holds the run store
+  # alone needs far less.
+  size: 20Gi
+  # Leave empty for the cluster default. SQLite locking is only correct on a
+  # local block device, so do not point this at NFS.
+  storageClass: ""
+  existingClaim: ""
+
+service:
+  type: ClusterIP
+  port: 4317
+  annotations: {}
+
+# Everything from here to `resources` is off by default, so an install that sets
+# nothing renders the same four objects it always did. Each block is here
+# because a chart review asks a question this chart could not otherwise answer.
+
+# "What identity does this pod run as, and what can that identity do?"
+serviceAccount:
+  create: false
+  # With create true, empty means the release's fullname. With create false,
+  # naming an account you manage yourself puts the pod on it, and leaving it
+  # empty keeps the namespace's `default` account, which is today's behaviour.
+  name: ""
+  annotations: {}
+  # mcpd never calls the Kubernetes API, so it has no use for a token.
+  # Turn this on only if something you add to the pod needs one.
+  automountServiceAccountToken: false
+
+# "How does traffic reach mcpd from outside the cluster, and who terminates
+# TLS?"
+#
+# Not mcpd: it speaks plain HTTP and has no TLS configuration, so the ingress
+# controller has to terminate. Two things to know before you publish it.
+#
+# One path root. mcpd serves OTLP ingest, the query API and the operator
+# interface from the same root, so a rule for "/" publishes all three, and your
+# ingest keys are what stands between the open internet and a write. There is no
+# path prefix that separates them.
+#
+# Body size. mcpd accepts a 32 MiB batch, and several ingress controllers cap a
+# request body at 1 MiB by default, so a batch the daemon would have taken is
+# refused before it arrives. On ingress-nginx the annotation to raise is
+# `nginx.ingress.kubernetes.io/proxy-body-size`.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: mcpd.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: mcpd-tls
+  #    hosts:
+  #      - mcpd.example.com
+
+# "Only these namespaces may reach ingest."
+#
+# The limit belongs in the answer, so here it is. mcpd serves ingest, the query
+# API, the operator interface and /metrics on ONE port, and a NetworkPolicy
+# matches pods and ports, never paths. This gates the whole daemon or nothing:
+# every source you allow in for ingest can also reach /v1/api and read stored
+# prompts and completions. The read key is what holds those apart, not this
+# policy. A split at the network layer would need a second listener, and mcpd
+# does not have one.
+#
+# What it does do is still worth having. With no policy in the namespace, every
+# pod in the cluster can open a connection to mcpd. With one, only these can.
+#
+# A trap worth knowing first: some CNI plugins enforce policy on traffic
+# arriving from the node, and the kubelet's liveness and readiness probes
+# arrive that way. On those clusters, add the node CIDR to `ipBlocks`, or the
+# pod never becomes ready and the rollout stalls.
+networkPolicy:
+  enabled: false
+  ingress:
+    # Whole namespaces, by label. Kubernetes sets
+    # `kubernetes.io/metadata.name` on every namespace itself, so this works
+    # without labelling anything first.
+    namespaceSelectors: []
+    #  - matchLabels:
+    #      kubernetes.io/metadata.name: agents
+    # Pods in mcpd's OWN namespace. A podSelector with no namespaceSelector
+    # beside it never reaches across a namespace boundary.
+    podSelectors: []
+    #  - matchLabels:
+    #      app.kubernetes.io/part-of: checkout-agents
+    ipBlocks: []
+    #  - cidr: 10.42.0.0/16
+    #    except:
+    #      - 10.42.7.0/24
+    # Whole `from` entries, written out and appended as they are. Use this for
+    # the one thing the three lists above cannot say: a namespaceSelector and a
+    # podSelector inside a SINGLE entry, which means "those pods, in those
+    # namespaces" rather than "either of the two".
+    extraFrom: []
+    #  - namespaceSelector:
+    #      matchLabels:
+    #        kubernetes.io/metadata.name: agents
+    #    podSelector:
+    #      matchLabels:
+    #        app.kubernetes.io/name: checkout-agent
+  egress:
+    # Leave this off unless you have a reason. Restricting egress breaks four
+    # things and breaks them quietly, because mcpd logs a warning and carries
+    # on: alert webhooks, forwarding to another OTLP endpoint, the judge's model
+    # endpoint, and an external Postgres or ClickHouse.
+    enabled: false
+    allowDns: true
+    dnsNamespace: kube-system
+    # Complete egress rules, appended as written, because what mcpd is allowed
+    # to dial depends entirely on what you configured it to dial.
+    rules: []
+
+# "What happens to ingest while a node is drained?"
+#
+# Only answerable with more than one replica, which takes an external store and
+# runs.enabled false. With one replica, a budget over that pod either blocks
+# every drain or permits every one. The chart refuses to render it there rather
+# than let you discover which during a cluster upgrade.
+podDisruptionBudget:
+  enabled: false
+  # Set one of these, never both. With replicaCount 2, minAvailable 1 lets one
+  # pod go at a time and keeps ingest up through a drain.
+  minAvailable: 1
+  maxUnavailable: ""
+
+# "Is the collector itself monitored?"
+#
+# Needs the Prometheus Operator's CRDs in the cluster. Without them the install
+# fails on a kind the API server does not know, which is why this is off rather
+# than on with a capability check: a chart that silently drops the object you
+# asked for is worse than one that fails.
+#
+# There is no credential below because mcpd serves /metrics with no key. It
+# exposes counters and uptime, not stored prompts or completions.
+serviceMonitor:
+  enabled: false
+  # Empty means the release's namespace.
+  namespace: ""
+  interval: 30s
+  scrapeTimeout: 10s
+  # The labels your Prometheus selects ServiceMonitors by. Without the ones it
+  # expects, this object is created and never scraped, and nothing reports that.
+  labels: {}
+  relabelings: []
+  metricRelabelings: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# The uid and gid are the ones the image creates its user with, so the pod and
+# a plain `docker run` own files the same way. fsGroup is what makes a new
+# volume, created owned by root, writable to that user. The seccomp profile is
+# required by the Pod Security `restricted` level, which refuses the pod
+# without it.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+# Longer than the longest request. A request may run for the request timeout,
+# 30 seconds by default, and the pod has to outlive it after SIGTERM or the
+# kubelet kills it mid-write. Raise it with config.requestTimeoutSeconds.
+terminationGracePeriodSeconds: 45
+
+# The settings too structured for an environment variable: monitors, SLOs, the
+# judge, per-project keys, retention and sampling under `projects`, and the run
+# store's timings under `runs`. Written here as the JSON object the daemon's
+# --config-file reads (see https://mcpd.sh/docs/configuration), mounted
+# read-only at /etc/mcpd/mcpd.json, and named in MCPD_CONFIG_FILE. A change
+# restarts the pod, as a key rotation does.
+#
+# Per-project keys, the judge's api_key and forward headers are credentials. A
+# ConfigMap is readable by anything allowed to list ConfigMaps in the
+# namespace, so the chart refuses to put content carrying any of them in one.
+# Set kind to Secret, or keep the file in a Secret you manage and name it in
+# existingSecret.
+configFile:
+  content: {}
+  #  monitors:
+  #    - name: error-rate
+  #      ...
+  #  projects:
+  #    checkout:
+  #      retention_days: 90
+  # ConfigMap or Secret: the object `content` is rendered into.
+  kind: ConfigMap
+  # A Secret you manage that holds the file, instead of `content`.
+  existingSecret: ""
+  # The entry in existingSecret that holds the file.
+  existingSecretKey: mcpd.json
+
+# Extra environment variables, as Kubernetes writes them, appended after the
+# ones the chart sets. Use it for a setting this chart has no value for, or to
+# read one from a Secret of your own with valueFrom.
+extraEnv: []
+#  - name: MCPD_FORWARD_HEADERS
+#    valueFrom:
+#      secretKeyRef:
+#        name: otlp-credentials
+#        key: headers
+
+# Extra volumes and where to mount them, for example a CA bundle for a
+# ClickHouse or a judge endpoint behind a private certificate authority.
+extraVolumes: []
+extraVolumeMounts: []
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

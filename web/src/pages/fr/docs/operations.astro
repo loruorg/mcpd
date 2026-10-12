@@ -1,0 +1,718 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const href = (route: string) => urlFor(route, code)
+
+const probeYaml = `livenessProbe:
+  httpGet: { path: /healthz, port: 4317 }
+  periodSeconds: 10
+readinessProbe:
+  httpGet: { path: /readyz, port: 4317 }
+  periodSeconds: 5
+
+# SIGTERM est géré : laissez à l’ingestion en vol le temps de finir.
+terminationGracePeriodSeconds: 30`
+
+const scrape = `scrape_configs:
+  - job_name: mcpd
+    static_configs:
+      - targets: ['mcpd:4317']`
+---
+
+<Doc
+  title="Exploitation"
+  description="Exploiter mcpd en production : sondes de vivacité et de disponibilité, métriques Prometheus, arrêt propre, sauvegarde du fichier SQLite, mises à niveau, et où s’arrête une seule instance."
+  lede="mcpd est un seul processus qui tient un seul fichier. Cela rend l’essentiel de son exploitation court, et cela rend les rares points qui comptent dignes d’être connus exactement."
+  og="docs"
+>
+  <h2>Ce qu’il y a sur le port</h2>
+  <p>
+    Une seule adresse sert tout : l’ingestion OTLP sur <code>/v1/traces</code>,
+    <code>/v1/logs</code> et <code>/v1/metrics</code>, l’ingestion native sur
+    <code>/v1/ingest</code>, l’API de requête sous <code>/v1/api</code>,
+    l’interface d’exploitation sur <code>/</code>, et les trois endpoints
+    d’exploitation ci-dessous. Il n’y a ni side-car ni proxy inverse à
+    configurer, ce qui explique en grande partie que le déploiement tienne sur
+    une ligne.
+  </p>
+  <p>
+    L’interface est compilée dans le binaire : il n’y a donc pas de serveur de
+    fichiers statiques ni de second volume à monter. L’ingestion porte la grande
+    limite de corps et pas de CORS. L’API de requête porte le CORS, pour qu’une
+    interface servie depuis une autre origine puisse la lire.
+  </p>
+
+  <h2>/healthz et /readyz ne posent pas la même question</h2>
+  <p>
+    Ils sont séparés parce qu’ils répondent à des conséquences différentes, et
+    câbler les deux sur le même gestionnaire est une façon courante de
+    fabriquer une boucle de redémarrage.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Endpoint</th>
+          <th>Touche au stockage</th>
+          <th>Répond</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>GET /healthz</code></td>
+          <td>Non</td>
+          <td>Toujours <code>200</code> tant que le processus sert</td>
+        </tr>
+        <tr>
+          <td><code>GET /readyz</code></td>
+          <td>Oui, une lecture de chaque stockage</td>
+          <td><code>200</code> quand le stockage des signaux et celui des exécutions répondent, <code>503</code> quand l’un ne répond pas</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    <code>/healthz</code> est la vivacité. Il ne touche volontairement jamais au
+    stockage : une base lente ou verrouillée ne doit pas faire tuer et
+    redémarrer le processus, parce que le redémarrer ne répare pas un disque et
+    que la boucle de redémarrage vous coûte en plus les lots en vol.
+  </p>
+  <p>
+    <code>/readyz</code> est la disponibilité. Il lance une requête triviale sur
+    une connexion de lecture, pour qu’une instance incapable de servir cesse de
+    recevoir du trafic. Quand le stockage est injoignable, il répond
+    <code>503</code> avec un <code>status</code> à <code>degraded</code> et un
+    <code>detail</code> nommant la panne, plutôt qu’un simple code d’état qu’il
+    vous faudrait ensuite instruire à l’aveugle.
+  </p>
+  <p>
+    Les deux corps portent les mêmes champs : <code>status</code>,
+    <code>version</code>, <code>spec_version</code>,
+    <code>uptime_seconds</code>, <code>storage</code>, et
+    <code>detail</code> quand quelque chose ne va pas. <code>spec_version</code>
+    est la version du modèle de données que cette version implémente, et c’est
+    ainsi qu’un client peut refuser de parler à un serveur qu’il ne comprend
+    pas.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="sonder une instance en bonne santé"
+    lines={[
+      { cmd: 'curl -s localhost:4317/healthz' },
+      { out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0",' },
+      { out: ' "uptime_seconds":86400,"storage":"sqlite"}', tone: 'ok' },
+      { cmd: 'curl -s -o /dev/null -w "%{http_code}\\n" localhost:4317/readyz' },
+      { out: '200', tone: 'ok' },
+      { cmd: 'curl -s localhost:4317/metrics | head -4' },
+      { out: '# HELP mcpd_signals_accepted_total Signals written to storage.' },
+      { out: '# TYPE mcpd_signals_accepted_total counter' },
+      { out: 'mcpd_signals_accepted_total 184203' },
+      { out: '# HELP mcpd_signals_rejected_total Signals refused, with a reason returned to the sender.' },
+    ]}
+  />
+
+  <p>
+    Aucune des deux sondes ne demande de clé, et <code>/metrics</code> non plus.
+    Si cela n’est pas acceptable sur votre réseau, restreignez-les à votre
+    ingress.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="kubernetes"
+    samples={[{ lang: 'curl', label: 'Pod spec', shiki: 'yaml', code: probeYaml }]}
+  />
+
+  <h2>Métriques</h2>
+  <p>
+    mcpd exporte ses propres compteurs sur <code>/metrics</code>, au format
+    texte d’exposition Prometheus. Ils ne sont pas derrière une option de
+    compilation : un outil d’observabilité que l’on ne peut pas observer est un
+    risque.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Métrique</th>
+          <th>Type</th>
+          <th>Sens</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>mcpd_signals_accepted_total</code></td>
+          <td>compteur</td>
+          <td>Signaux écrits dans le stockage</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_signals_rejected_total</code></td>
+          <td>compteur</td>
+          <td>Signaux refusés, avec un motif rendu à l’émetteur</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_batches_duplicate_total</code></td>
+          <td>compteur</td>
+          <td>Lots reconnus comme un rejeu et sautés</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_traces_sampled_out_total</code></td>
+          <td>compteur</td>
+          <td>Traces écartées par la politique d’échantillonnage</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_signals_over_quota_total</code></td>
+          <td>compteur</td>
+          <td>Signaux refusés pour dépassement du plafond par minute d’un projet</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_signals_unbounded_total</code></td>
+          <td>compteur</td>
+          <td>
+            Signaux arrivés à l’étape du plafond pour un projet qu’aucun plafond
+            ne couvre
+          </td>
+        </tr>
+        <tr>
+          <td><code>mcpd_ingest_requests_total</code></td>
+          <td>compteur</td>
+          <td>Requêtes d’ingestion traitées</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_query_requests_total</code></td>
+          <td>compteur</td>
+          <td>Requêtes de lecture traitées</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_request_errors_total</code></td>
+          <td>compteur</td>
+          <td>Requêtes ayant échoué sur une erreur serveur</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_audit_write_failures_total</code></td>
+          <td>compteur</td>
+          <td>
+            Lignes d’audit qui n’ont pas pu être écrites ; la requête qu’elles
+            décrivent a tout de même réussi
+          </td>
+        </tr>
+        <tr>
+          <td><code>mcpd_uptime_seconds</code></td>
+          <td>jauge</td>
+          <td>Secondes écoulées depuis le démarrage de ce processus</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Chaque compteur vaut pour la durée de vie du processus et retombe à zéro au
+    redémarrage : alertez donc sur un taux plutôt que sur un niveau. Les deux
+    qui méritent d’être suivis sont <code>mcpd_signals_rejected_total</code>,
+    qui veut dire qu’on répond non à des émetteurs et qu’ils ne lisent
+    probablement pas la réponse, et <code>mcpd_request_errors_total</code>, qui
+    est par définition la faute de mcpd : un 4xx est celle de l’appelant et n’y
+    est jamais compté.
+  </p>
+  <p>
+    Un <code>mcpd_traces_sampled_out_total</code> qui monte n’est pas une panne.
+    C’est le nombre qui explique un trou dans l’interface quand quelqu’un
+    demande pourquoi son exécution manque.
+  </p>
+  <p>
+    <code>mcpd_signals_over_quota_total</code> est un nombre de la même forme
+    pour l’autre raison qu’un signal n’atterrisse pas : un projet a atteint son
+    plafond par minute. Ces refus sont aussi comptés dans
+    <code>mcpd_signals_rejected_total</code> : suivez donc celui-ci pour
+    distinguer une flotte que l’on limite d’une flotte qui envoie des données
+    mal formées. Voir <a href={href('/docs/configuration')} class="link">Configuration</a>
+    pour ce que couvre le plafond.
+  </p>
+  <p>
+    <code>mcpd_signals_unbounded_total</code> est le nombre inverse : les
+    signaux gardés parce qu’aucun plafond ne couvrait le projet qu’ils
+    nommaient. Des plafonds écrits seulement sous <code>projects</code> bornent
+    les projets qu’ils nomment, donc un émetteur qui en nomme un autre passe à
+    côté. Ces signaux sont comptés plutôt que refusés, parce que refuser un
+    projet que personne n’a écrit ferait tomber les données d’un déploiement mis
+    à niveau sans changer sa configuration. Une valeur non nulle veut dire qu’il
+    faut poser un <code>--quota-per-minute</code> de premier niveau à côté de
+    ceux par projet.
+  </p>
+  <p>
+    Le plafond couvre toutes les portes par lesquelles une ligne peut entrer :
+    les quatre endpoints d’ingestion, les endpoints à un seul enregistrement
+    pour le score et le retour, et <code>POST /v1/api/score</code>, dont les
+    scores sont calculés puis facturés sur le même compteur avant d’être
+    stockés. Ce qui ne rentre pas sous le plafond y est signalé score par score
+    dans la liste <code>skipped</code> de la réponse plutôt qu’écrit au-delà.
+  </p>
+  <p>
+    <code>mcpd_audit_write_failures_total</code> compte les lignes d’audit qui
+    n’ont pas pu être écrites. La requête que chaque ligne décrivait a tout de
+    même réussi et a tout de même rendu ses données, et c’est le principe : une
+    écriture d’audit ne fait jamais échouer la lecture qu’elle décrit. Une
+    valeur non nulle veut donc dire que des lectures de payloads stockés ont eu
+    lieu dont le journal d’audit ne peut pas rendre compte : traitez-la comme un
+    signal d’intégrité plutôt que de disponibilité.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="prometheus"
+    samples={[{ lang: 'curl', label: 'prometheus.yml', shiki: 'yaml', code: scrape }]}
+  />
+
+  <h2>Arrêt</h2>
+  <p>
+    mcpd traite <code>SIGTERM</code> et <code>SIGINT</code>. Sur l’un comme sur
+    l’autre, il cesse d’accepter de nouvelles connexions et laisse les requêtes
+    en vol se terminer avant que le processus ne sorte.
+  </p>
+  <p>
+    Traiter <code>SIGTERM</code> en particulier est ce qui fait marcher cela
+    sous un orchestrateur. Kubernetes envoie <code>SIGTERM</code> et attend la
+    fin du délai de grâce avant <code>SIGKILL</code> ; un conteneur qui n’écoute
+    que <code>SIGINT</code> est tué plutôt qu’arrêté, et le lot qui était au
+    milieu d’une transaction est perdu.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="un arrêt propre"
+    lines={[
+      { out: 'mcpd 0.1.0 listening on http://0.0.0.0:4317' },
+      { out: '  storage     sqlite at /data/mcpd.db' },
+      { out: 'retention removed 12480 rows older than 30 days', tone: 'note' },
+      { out: 'received termination signal', tone: 'warn' },
+      { out: 'shutting down', tone: 'ok' },
+    ]}
+  />
+
+  <p>
+    Ce que mcpd ne peut pas sauver en sortant, c’est tout ce qui attend encore
+    dans la file d’un émetteur. Les SDK gardent les spans en mémoire et les
+    exportent sur un worker : un processus qui sort sans appeler
+    <code>shutdown()</code> perd donc tout ce qui n’était pas encore parti. Cet
+    arrêt-là est à réussir du côté de l’agent, pas du daemon.
+  </p>
+
+  <h2>Sauvegardes</h2>
+  <p>
+    Tout le stockage tient dans un fichier SQLite à <code>--data</code>. Il
+    tourne en mode WAL : sur le disque, vous trouverez donc
+    <code>mcpd.db</code> à côté de <code>mcpd.db-wal</code> et de
+    <code>mcpd.db-shm</code>. Copier le <code>.db</code> seul pendant que le
+    processus tourne vous donne un fichier auquel il manque tout ce qui est
+    encore dans le journal d’écriture anticipée.
+  </p>
+  <p>
+    Prenez la sauvegarde par SQLite, qui lit un instantané cohérent pendant que
+    mcpd continue d’écrire :
+  </p>
+
+  <Command
+    class="my-6"
+    label="sauvegarde à chaud"
+    command={`sqlite3 /data/mcpd.db ".backup '/backup/mcpd-$(date +%F).db'"`}
+  />
+
+  <p>
+    Arrêter le processus d’abord et copier les trois fichiers est tout aussi
+    valable et ne demande aucun binaire <code>sqlite3</code> dans l’image. Il
+    n’y a pas de sous-commande <code>mcpd backup</code> dans cette version, et
+    pas de sauvegarde planifiée : c’est le travail de votre outillage
+    d’instantanés, et prétendre le contraire mettrait un outil à moitié
+    construit sur le chemin critique.
+  </p>
+  <p>
+    La conservation supprime des lignes mais ne réduit pas le fichier. SQLite garde
+    les pages libérées et les réutilise : l’usage disque plafonne donc au lieu
+    de baisser après une grosse suppression. Lancez un <code>VACUUM</code> sur
+    une instance arrêtée si vous avez réellement besoin de récupérer la place.
+  </p>
+
+  <h3>Restauration</h3>
+  <p>
+    Remettre une sauvegarde en place tient en quatre étapes, et l’ordre compte à
+    cause du journal d’écriture anticipée.
+  </p>
+  <ol>
+    <li>
+      Arrêtez le daemon. Une restauration sous un processus en marche est un
+      second écrivain sur le même fichier.
+    </li>
+    <li>Copiez la sauvegarde par-dessus le fichier à <code>--data</code>.</li>
+    <li>
+      Supprimez les fichiers <code>-wal</code> et <code>-shm</code> à côté. Ils
+      appartiennent à la base que vous venez de remplacer, et laissés en place
+      ils seraient rejoués dans celle que vous avez restaurée.
+    </li>
+    <li>
+      Démarrez le daemon, et confirmez qu’il lit le fichier restauré :
+      <code>/readyz</code> répond 200, et une liste de traces sur le projet rend
+      les exécutions que la sauvegarde tenait.
+    </li>
+  </ol>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="restauration, jouée sur un stockage de démonstration"
+    lines={[
+      { cmd: 'kill $(cat mcpd.pid) && cp /backup/mcpd-2026-09-01.db /data/mcpd.db' },
+      { cmd: 'rm -f /data/mcpd.db-wal /data/mcpd.db-shm' },
+      { cmd: 'mcpd --data /data/mcpd.db &' },
+      { cmd: 'curl -s -o /dev/null -w "%{http_code}\\n" localhost:4317/readyz' },
+      { out: '200', tone: 'ok' },
+      { cmd: 'curl -s "localhost:4317/v1/api/traces?project=default&limit=500" | jq ".traces | length"' },
+      { out: '2', tone: 'ok' },
+    ]}
+  />
+
+  <h2>Mises à niveau</h2>
+  <p>
+    Remplacez le binaire ou l’étiquette d’image et relancez-le. Le schéma est
+    appliqué au démarrage, à chaque fois, et il est écrit de façon à ne rien
+    changer quand il tourne sur un fichier déjà à jour. La version appliquée est
+    notée dans une table <code>schema_version</code> à l’intérieur du même
+    fichier, et cette version en est à la version 2.
+  </p>
+  <p>
+    Deux choses à garder en tête. Avancez, ne reculez pas : il n’est pas promis
+    qu’un binaire plus ancien lise un fichier plus récent, donc prenez d’abord
+    la sauvegarde. Et vérifiez <code>spec_version</code> sur
+    <code>/healthz</code> après la mise à niveau si vous figez les versions des
+    SDK, parce que c’est le nombre auquel un client se compare.
+  </p>
+
+  <h2>Où s’arrête une seule instance</h2>
+  <p>
+    Être honnête là-dessus est plus utile qu’un chiffre que nous n’avons pas
+    mesuré. Nous ne publions aucun chiffre de débit, parce qu’il n’en existe
+    aucun dont nous puissions répondre.
+  </p>
+  <ul>
+    <li>
+      <strong>Un seul écrivain.</strong> Le stockage SQLite tient une seule
+      connexion d’écriture derrière un mutex et quatre connexions de lecture. Le
+      mode WAL veut dire qu’une requête de tableau de bord ne bloque jamais
+      l’ingestion, qui serait la panne qui compte, mais toutes les écritures
+      sont sérialisées par cette unique connexion.
+    </li>
+    <li>
+      <strong>Une seule instance par fichier.</strong> Deux processus mcpd
+      pointés sur le même fichier n’est pas un déploiement pris en charge.
+      Exploitez-le en réplique unique avec un volume, pas en service mis à
+      l’échelle horizontalement.
+    </li>
+    <li>
+      <strong>Les deux limites ci-dessus sont celles du stockage
+      embarqué.</strong> Elles cessent de s’appliquer sur ClickHouse, qui est
+      compilé dedans et traité plus bas.
+    </li>
+    <li>
+      <strong>Les payloads sont gros.</strong> Les prompts et les complétions se
+      comptent en kilooctets, pas en octets, et ce sont eux qui rendent mcpd
+      digne d’être exploité. Le stockage grossit avec le volume de texte bien
+      plus vite qu’avec le nombre de spans : mesurez donc avec vos propres
+      payloads plutôt qu’avec un chiffre de spans par seconde.
+    </li>
+    <li>
+      <strong>La conservation couvre les projets que vous avez écrits.</strong> La
+      passe horaire supprime dans chaque projet du bloc <code>projects</code>,
+      chacun sur son propre <code>retention_days</code> là où il en pose un et
+      sur le chiffre global là où il n’en pose pas, plus le projet nommé par
+      <code>--project</code>. Un projet inventé par un émetteur et qui ne figure
+      ni dans l’un ni dans l’autre n’a pas de fenêtre et n’est jamais élagué, ce
+      qui vaut d’être su avant de compter sur la conservation comme mesure de
+      confidentialité.
+    </li>
+  </ul>
+  <p>
+    Quand le volume dépasse l’instance, les leviers, du moins coûteux au plus
+    coûteux, sont : <code>--retention-days</code>, qui borne le fichier ;
+    <code>--sample</code>, qui borne le flux entrant et qui est déterministe, si
+    bien qu’une trace gardée est gardée entière ; et le passage à ClickHouse,
+    qui lève ensemble l’écrivain unique et la réplique unique. Voir
+    <a href={href('/docs/sampling')} class="link">Échantillonnage</a> et
+    <a href={href('/docs/privacy')} class="link">Masquage et conservation</a>.
+  </p>
+
+  <h2>Postgres, quand vous en exploitez déjà un</h2>
+  <p>
+    Pointez mcpd sur une chaîne de connexion Postgres et il stocke là plutôt que
+    dans le fichier embarqué. Le schéma est créé au démarrage.
+  </p>
+
+  <Command
+    class="my-6"
+    title="stocker dans Postgres"
+    command="mcpd serve --postgres-url postgres://mcpd:$PGPASSWORD@db:5432/mcpd"
+  />
+
+  <p>
+    Cela lève les deux mêmes limites que ClickHouse. Les écritures ne passent
+    plus par une seule connexion, donc mcpd tourne en plusieurs répliques
+    derrière un seul service, et il le fait sur une base que la plupart des
+    équipes exploitent, sauvegardent et surveillent déjà.
+  </p>
+  <p>
+    La migration prend un verrou consultatif Postgres et est entièrement sautée
+    quand le schéma est déjà à jour. Plusieurs répliques qui démarrent en même
+    temps sont donc sans danger, et un déploiement progressif ne prend pas de
+    verrou exclusif sur des tables où d’autres répliques écrivent.
+  </p>
+  <p>
+    La recherche plein texte utilise une colonne <code>tsvector</code> générée
+    avec un index GIN, dans la configuration <code>simple</code> : elle met en
+    minuscules et découpe aux frontières de mots, mais ne fait pas de
+    racinisation, si bien que chercher dans un prompt le jeton littéral que vous
+    avez tapé fait ce que vous attendez.
+  </p>
+  <p>
+    Choisissez ClickHouse plutôt que Postgres quand la conservation se mesure
+    en milliards de spans. En dessous, la base que vous exploitez déjà est la
+    meilleure réponse.
+  </p>
+
+  <h2>ClickHouse, quand le fichier n’a plus la bonne forme</h2>
+  <p>
+    Pointez mcpd sur un endpoint HTTP ClickHouse et il stocke là plutôt que dans
+    le fichier embarqué. Le schéma est créé au démarrage : il n’y a donc rien à
+    appliquer à la main.
+  </p>
+
+  <Command
+    class="my-6"
+    title="stocker dans ClickHouse"
+    command={`mcpd serve \\
+  --clickhouse-url http://clickhouse:8123 \\
+  --clickhouse-database mcpd \\
+  --clickhouse-user default --clickhouse-password $CH_PASSWORD`}
+  />
+
+  <p>
+    Les deux contraintes ci-dessus se lèvent d’un coup. Les écritures ne passent
+    plus par une seule connexion, donc mcpd tourne en plusieurs répliques
+    derrière un seul service, et les spans atterrissent dans un
+    <code>MergeTree</code> bâti pour la forme réelle de ces données : beaucoup
+    plus d’écriture que de lecture, et des requêtes qui balaient un intervalle
+    de temps.
+  </p>
+  <p>
+    Choisissez-le quand la conservation se mesure en mois de trafic de
+    production plutôt qu’en disque de portable. En dessous, le fichier embarqué est plus
+    rapide à exploiter, plus rapide à sauvegarder, et c’est une chose de moins à
+    faire tourner. Gardez le fichier tant qu’il ne fait pas mal.
+  </p>
+  <p>
+    Les traces sont un <code>ReplacingMergeTree</code>, parce qu’une projection
+    de trace est recalculée à mesure que ses spans arrivent et que la dernière
+    écriture est la bonne. Des spans arrivés dans le désordre, réessayés ou mis
+    à jour sur place convergent donc vers la bonne réponse au lieu d’accumuler
+    des doublons.
+  </p>
+  <p>
+    Une garantie est ici plus faible que sur les deux autres backends, et c’est
+    celle que vous aurez peut-être à certifier. La suppression sur ClickHouse
+    est une mutation asynchrone : une demande d’effacement est acceptée puis
+    appliquée après coup. SQLite et Postgres suppriment à l’intérieur de la
+    transaction qui a répondu. La réponse dit laquelle des deux a eu lieu, dans
+    <code>deletes_pending</code>. Voir
+    <a href={href('/docs/privacy')} class="link">Masquage et conservation</a>.
+  </p>
+
+  <h2>Vérifier un déploiement</h2>
+  <p>
+    <code>mcpd doctor</code> lit la configuration et le stockage et rapporte ce
+    qui ne va pas, en nommant l’option qui répare chaque point. Il existe parce
+    que les pannes qui mordent vraiment sont silencieuses : rien ne plante, et
+    vous l’apprenez des semaines plus tard.
+  </p>
+
+  <Command
+    class="my-6"
+    title="vérifier un déploiement sans rien contacter d’autre que le stockage"
+    command="mcpd doctor --data /data/mcpd.db --offline"
+    primaryLabel="Hors ligne"
+    secondary={[
+      { label: 'Sans écrire', command: 'mcpd doctor --data /data/mcpd.db --offline --read-only' },
+      { label: 'Une fenêtre plus longue', command: 'mcpd doctor --data /data/mcpd.db --window-days 30' },
+    ]}
+  />
+
+  <p>
+    Trois options appartiennent à la commande elle-même. <code>--offline</code>
+    ne contacte rien d’autre que le stockage : l’endpoint de transfert est donc
+    rapporté comme sauté plutôt que vérifié. <code>--read-only</code> n’écrit
+    rien : la vérification du stockage prouve donc qu’il peut être lu et non
+    qu’il peut être écrit, et elle le dit. <code>--window-days</code> est le
+    nombre de jours d’historique que lisent les vérifications d’activité,
+    d’horloge et de tarifs, sept sauf indication contraire, entre 1 et 36525.
+    Tout le reste de ce qu’elle prend est la configuration du daemon lui-même :
+    elle note donc l’invocation que vous démarreriez.
+  </p>
+  <p>
+    Douze groupes sont notés, dans cet ordre, et le rapport se termine par un
+    décompte de chaque niveau :
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Groupe</th><th>Ce qu’il note</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>storage</code></td>
+          <td>Le stockage répond à un ping, et un span de sonde survit à une écriture, une lecture et une suppression</td>
+        </tr>
+        <tr>
+          <td><code>runs</code></td>
+          <td>Le stockage des exécutions répond, combien de versions de définition et d’exécutions en cours il tient, et si la surface d’exécution demande une clé sur une adresse que d’autres peuvent atteindre. En lecture seule : le doctor ne réclame jamais une étape ni ne déclenche une échéance</td>
+        </tr>
+        <tr>
+          <td><code>keys</code></td>
+          <td>Chaque portée, avec son héritage rendu explicite, pour que le cas où aucune clé d’administration n’est posée et où chaque clé de lecture supprime donc aussi soit sur la page plutôt que dans la documentation</td>
+        </tr>
+        <tr>
+          <td><code>identity</code></td>
+          <td>L’en-tête de sujet d’audit, et si la plage autorisée à le poser est assez étroite pour être crue</td>
+        </tr>
+        <tr>
+          <td><code>projects</code></td>
+          <td>Les projets configurés face aux projets qui tiennent des exécutions. Un projet qui n’a jamais reçu de span est presque toujours une faute de frappe dans un nom</td>
+        </tr>
+        <tr>
+          <td><code>retention</code></td>
+          <td>Jusqu’où remontent les données de chaque projet, et si quoi que ce soit les supprimera un jour</td>
+        </tr>
+        <tr>
+          <td><code>limits</code></td>
+          <td>Les plafonds d’ingestion par projet et les fractions d’échantillonnage</td>
+        </tr>
+        <tr>
+          <td><code>forwarding</code></td>
+          <td>L’endpoint de transfert, en y postant un lot OTLP sans aucun span dedans</td>
+        </tr>
+        <tr>
+          <td><code>judge</code></td>
+          <td>Le bloc du juge, en configuration seulement</td>
+        </tr>
+        <tr>
+          <td><code>monitors</code></td>
+          <td>Les moniteurs et les objectifs, et les signaux qu’ils lisent</td>
+        </tr>
+        <tr>
+          <td><code>clock</code></td>
+          <td>Les exécutions des deux extrémités de l’historique de chaque projet face à l’horloge de cette machine, parce qu’un émetteur dont l’horloge retarde se classe sous chaque exécution honnête et n’apparaîtrait jamais sur une page des plus récentes</td>
+        </tr>
+        <tr>
+          <td><code>pricing</code></td>
+          <td>Les spans de modèle récents face à la grille tarifaire, pour que soit nommé un modèle que rien ne sait tarifer</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    <code>identity</code> et <code>limits</code> sont les deux plus récemment
+    ajoutés, et les deux n’étaient pas notés pour la même raison : rien chez eux
+    ne plante. Un journal d’audit sans sujet enregistre ce qui a été fait et
+    jamais qui l’a fait. Une fraction d’échantillonnage hors de 0.0 à 1.0 est
+    refusée pour <code>--sample</code> et n’a jamais été vérifiée dans un bloc de
+    projet, si bien qu’un projet pouvait en porter une et le daemon la faire
+    tourner. Un plafond posé par projet sans plafond de premier niveau à côté
+    laisse sans aucun plafond tout projet que personne n’a écrit, et c’est
+    l’émetteur qui choisit le nom du projet.
+  </p>
+
+  <h3>Sauté ne veut pas dire ok</h3>
+  <p>
+    Une vérification qui n’a pas été jouée dit <strong>skipped</strong>, jamais
+    ok. Cette distinction est tout l’intérêt de la commande : un sous-système
+    absent de la configuration que vous lui avez donnée n’est pas un
+    sous-système en bonne santé, et rapporter les deux de la même façon rendrait
+    le doctor le plus sûr de lui précisément quand on lui aurait remis le
+    mauvais fichier. La ligne de résumé compte les vérifications sautées à part
+    et le dit en toutes lettres, si bien qu’une exécution ayant vérifié deux de
+    ses quatorze constats ne peut pas se lire comme un certificat de bonne
+    santé.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="comment se termine une exécution sur un déploiement neuf"
+    lines={[
+      { cmd: 'mcpd doctor --data /data/mcpd.db | tail -4' },
+      { out: '2 ok, 9 skipped, 2 warnings, 1 fault', tone: 'warn' },
+      { out: 'A skipped check proved nothing: it was not run, or there was nothing there' },
+      { out: 'to run it against. Only the 2 ok were verified.' },
+      { out: 'A fault is something broken or open. Exiting 2.', tone: 'warn' },
+    ]}
+  />
+
+  <h3>Un stockage occupé n’est pas un stockage cassé</h3>
+  <p>
+    La sonde de stockage est la seule vérification qui a besoin du verrou
+    d’écriture. Tout ce qui est en dessous lit, et les lecteurs ne font pas la
+    queue derrière un écrivain. Une écriture de sonde qui perd la course à ce
+    verrou est rapportée comme <strong>skipped</strong> : elle est tentée trois
+    fois, et si les trois attendent le verrou et abandonnent, le rapport dit que
+    l’écriture n’a pas été vérifiée, et pourquoi.
+  </p>
+  <p>
+    Cela compte parce que le stockage embarqué n’accepte qu’un écrivain, et
+    qu’un déploiement sous ingestion réelle tient ce verrou presque en
+    permanence. Rapporter la contention comme une faute faisait échouer un
+    déploiement précisément quand le déploiement était sain et occupé. Les
+    pannes que la sonde existe pour attraper se nomment chacune elles-mêmes et
+    aucune ne dit « verrouillé » : un montage en lecture seule, un disque plein
+    et un rôle sans <code>INSERT</code> restent des fautes, tout comme un verrou
+    corrompu, qui dit « locking protocol » et qui est un vrai dégât.
+  </p>
+
+  <h3>Le code de sortie</h3>
+  <p>
+    Il sort avec un code non nul sur une faute, pour pouvoir bloquer un
+    déploiement. Un avertissement n’est pas une faute : il sort avec zéro et
+    attend qu’une personne le lise. Une configuration est une faute plutôt qu’un
+    avertissement, et il vaut mieux le savoir avant de câbler cela dans un
+    pipeline : une portée de lecture ouverte sur une adresse qui n’est pas de
+    bouclage, qui remet chaque prompt stocké à quiconque peut atteindre le port.
+    Une portée d’ingestion ouverte sur la même adresse reste un avertissement,
+    parce que des lignes inutiles sont ce que la conservation enlève et qu’une
+    divulgation ne se reprend pas. Une plage d’identité de confiance qui
+    contient tout l’internet est notée de la même façon, pour la même raison :
+    n’importe quelle adresse pourrait alors poser l’en-tête et être enregistrée
+    comme la personne qu’il nomme.
+  </p>
+
+  <h2>Les réglages à vérifier avant qu’il soit joignable</h2>
+  <p>
+    Quand il écoute une adresse qui n’est pas de bouclage, mcpd journalise au
+    démarrage un avertissement par surface ouverte à un appelant qui ne devrait
+    pas l’atteindre, et chaque avertissement nomme les options à poser. Il
+    avertit plutôt que de refuser de démarrer, parce que refuser casserait le
+    chemin qui mène de rien à une première trace. Cela reste un avertissement
+    sur un vrai trou : une API de lecture ouverte remet chaque prompt stocké
+    à quiconque peut atteindre le port.
+  </p>
+
+  <Command
+    class="my-6"
+    command="mcpd --data /data/mcpd.db --ingest-key $INGEST_KEY --read-key $READ_KEY --execute-key $EXECUTE_KEY --worker-key $WORKER_KEY --admin-key $ADMIN_KEY --retention-days 30"
+  />
+
+  <p>
+    Sans les trois dernières clés, la clé d’ingestion et la clé de lecture
+    atteignent aussi la surface des exécutions, et la clé de lecture supprime
+    aussi. Le détail complet sur chaque clé, et sur tout le reste de ce que vous
+    pouvez poser, est dans <a href={href('/docs/configuration')} class="link">Configuration</a>.
+  </p>
+</Doc>

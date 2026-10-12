@@ -1,0 +1,312 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Regresyon testi"
+  description="Ters giden bir üretim çalıştırmasını kalıcı bir test vakasına çevirin, yerleşik puanlayıcıları saklanmış çalıştırmalar üzerinde çalıştırın, iki ajan sürümünü örneklem boyutlarıyla karşılaştırın."
+  lede="Salı günü bozulan çalıştırma, sonraki her sürümün geçmesi gereken vaka olur."
+  og="docs"
+>
+  <h2>Kapatmak için var olan döngü</h2>
+  <p>
+    Bir ajan gerçek bir soruda başarısız olur. Biri bunu elle yeniden üretir, bir
+    prompt'u değiştirir ve durum düzelmiş görünür. Üç hafta sonra aynı soruda yine
+    başarısız olur, çünkü onu saklayan hiçbir şey yoktur.
+  </p>
+  <p>
+    Veri kümesi onu saklar. Başarısız çalıştırmayı yakalayın; artık bir anekdot
+    olmaktan çıkar ve bir girdisi, elinizde varsa beklenen bir yanıtı ve geldiği
+    trace'e giden bir işaretçisi olan bir vaka olur. Sonraki her sürüm ona karşı
+    çalışır.
+  </p>
+
+  <h2>Bir çalıştırmayı yakalamak</h2>
+  <p>
+    Çalıştırmayı arayüzde ya da API üzerinden bulun, sonra trace kimliğini veri
+    kümesine verin.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="başarısız bir çalıştırmayı vaka olarak yakala"
+    command={`curl -X POST localhost:4317/v1/api/datasets/$DATASET/capture \\
+  -H 'content-type: application/json' \\
+  -d '{"trace_ids": ["b3d9e71a4c0f428eb6a5d2317f90c684"]}'`}
+  />
+
+  <p>
+    Yakalanan vaka <code>source_trace_id</code> alanını saklar; böylece aylar
+    sonra ona sebep olan çalıştırmayı açıp girdiye bakarak tahmin yürütmek
+    yerine gerçekte ne olduğunu okuyabilirsiniz.
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <h2>Çalıştırmanın kendi yanıtı, beklenen yanıt değildir</h2>
+  <p>
+    <code>use_output_as_expected</code> varsayılan olarak kapalıdır ve önemli
+    olan kısım bu varsayılandır. Yakalamaya değer çalıştırmalar genellikle ters
+    gidenlerdir; yanlış bir yanıtı referans olarak kaydetmek de hatayı
+    kalıcılaştırır: sonraki her sürüm o hatayı yeniden üretme becerisine göre
+    ölçülür.
+  </p>
+  <p>
+    Zaten beğendiğiniz bir davranışı yerinde tutmak için doğru sonuçlanmış
+    çalıştırmaları yakalarken bunu açın. Bir başarısızlığı yakalarken kapalı
+    bırakın ve beklenen yanıtı kendiniz yazın.
+  </p>
+
+  <h2>Yerleşik puanlayıcılar</h2>
+  <p>
+    mcpd on üç deterministik puanlayıcıyla gelir: saklanmış bir çalıştırmayı
+    okuyup bir sayı döndüren sıradan kod. Hiçbir maliyetleri yoktur, hiçbir
+    zaman bir model çağırmazlar ve iki kez aynı yanıtı verirler; bir regresyon
+    testinin ihtiyaç duyduğu, bir yargıç modelde ise bulunmayan özellik budur.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Puanlayıcı</th><th>Ne zaman geçer</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>answered</code></td><td>Çalıştırma boş olmayan bir yanıt üretti.</td></tr>
+      <tr><td><code>no_errors</code></td><td>Çalıştırmadaki hiçbir span başarısız olmadı.</td></tr>
+      <tr><td><code>exact_match</code></td><td>Yanıt beklenenin aynısı.</td></tr>
+      <tr><td><code>contains</code></td><td>Yanıt, istenen dizeyi içeriyor.</td></tr>
+      <tr><td><code>json_valid</code></td><td>Yanıt JSON olarak ayrıştırılıyor.</td></tr>
+      <tr><td><code>latency_budget</code></td><td>Çalıştırma, milisaniye cinsinden bir bütçenin içinde bitti.</td></tr>
+      <tr><td><code>cost_budget</code></td><td>Çalıştırma, belirlenen tutardan fazlaya mal olmadı.</td></tr>
+      <tr><td><code>no_tool_loop</code></td><td>Hiçbir araç aynı girdiyle iki kez çağrılmadı.</td></tr>
+      <tr><td><code>tool_efficiency</code></td><td>Çalıştırma, araç çağrısı bütçesinin içinde kaldı.</td></tr>
+      <tr><td><code>not_a_refusal</code></td><td>Yanıt bir ret ya da özür değil.</td></tr>
+      <tr><td><code>no_leaked_secret</code></td><td>Yanıtta hiçbir anahtar, token ya da kimlik bilgisi geçmiyor.</td></tr>
+      <tr><td><code>span_present</code></td><td>Çalıştırma, istenen türde ya da adda bir span kaydetti.</td></tr>
+      <tr><td><code>tool_succeeded</code></td><td>İstenen araç çalıştı ve en az bir çağrısı düzgün bitti.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>GET /v1/api/scorers</code> aynı listeyi bir <code>needs_config</code>
+    bayrağıyla döndürür. Beklenen bir yanıta ihtiyaç duyan ama kendisine
+    verilmeyen bir puanlayıcı tahmin etmek yerine puan üretmez ve bu durum
+    bildirilir.
+  </p>
+
+  <h2>Notu bir model verdiğinde</h2>
+  <p>
+    Bazı soruları hiçbir deterministik kod yanıtlayamaz. Bir yanıtın soruyu
+    gerçekten karşılayıp karşılamadığı, bir özetin anlamı koruyup korumadığı, bir
+    üslubun yerinde olup olmadığı: bunlar bir okuyucu ister ve ucuz okuyucu bir
+    modeldir.
+  </p>
+  <p>
+    Yargıçlı puanlama siz yapılandırana kadar kapalıdır ve yargıçlı bir
+    puanlayıcı siz adını vermedikçe hiç çalışmaz. İki varsayılan da aynı
+    nedenle vardır: not verme, okuduğu her çalıştırma için para harcar ve bunu
+    sessizce yapan bir özellik, varlığını bir faturada öğrendiğiniz özelliktir.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "judge": {
+    "endpoint": "http://localhost:11434/v1",
+    "model": "qwen2.5:14b",
+    "api_key": "",
+    "timeout_seconds": 30,
+    "criteria": {
+      "answer_relevance": "Does the answer address the question that was asked?",
+      "no_hedging": "Does the answer commit, rather than hedge?"
+    }
+  }
+}`}</code></pre>
+
+  <p>
+    İstek, OpenAI chat-completions biçimindedir; bu bir sağlayıcı tercihi
+    değildir: Ollama, vLLM, llama.cpp, LM Studio, OpenRouter ve barındırılan
+    sağlayıcıların hepsi bunu kabul eder, yani aynı yapılandırma hem
+    dizüstünüzdeki bir modele hem de üretimdeki bir ağ geçidine ulaşır. Anahtar
+    istemeyen yerel bir model için <code>api_key</code> alanını boş bırakın.
+    Sıcaklık sıfırdır, çünkü her seferinde farklı yanıt veren bir yargıç kendisiyle
+    karşılaştırılamaz, ki puanların tek işi budur.
+  </p>
+  <p>
+    Ölçütler her istekte gönderilmek yerine yapılandırılır. Ürettiği her puanın
+    üzerinde bir puanlayıcı kimliği saklanır ve sonraki bir karşılaştırma buna göre
+    gruplar; her çağrının hem kimliği hem soruyu kendi uydurmasına izin vermek de
+    kimsenin güvenemeyeceği bir sütun kurardı.
+  </p>
+  <p>
+    Yapılandırılmış ölçütler <code>GET /v1/api/scorers</code> içinde görünmez. O
+    endpoint yalnızca yerleşik on üç puanlayıcıyı listeler, başka bir şey
+    listelemez; dolayısıyla puanlayıcı menüsünü ondan kuran bir istemci sizin
+    ölçütlerinizi sunmayacaktır. Daemon'un bunları size geri söylediği tek yer,
+    bilinmeyen bir puanlayıcı kimliği için aldığınız hatadır; o hata yerleşik
+    olanlarla yapılandırılmış ölçütleri bir arada listeler.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="son çalıştırmada yargıçlı bir puanlayıcı çalıştır"
+    command={`curl -X POST localhost:4317/v1/api/score \\
+  -H 'content-type: application/json' \\
+  -d '{"limit": 1, "scorers": ["answer_relevance"]}'`}
+  />
+
+  <p>
+    <code>timeout_seconds</code>, tek bir puanlama çağrısının bağlanmadan
+    yanıtın son baytına kadar ne kadar sürebileceğidir: varsayılan 30, aralık 1
+    ile 300. Bunu aşan çağrı anahtarı adlandırarak puan üretmez ve mcpd bir
+    yanıtın en fazla 1 MiB'ını okur.
+  </p>
+  <p>
+    Her yargıçlı puanlayıcı, çalıştırma başına bir model çağrısıdır ve istek
+    <code>--request-timeout-seconds</code> içinde bitmek zorundadır. Bu yüzden
+    bir istek, her çağrı <code>timeout_seconds</code> süresinin tamamını
+    kullansa bile bu süreye sığacak kadar çalıştırmayı puanlar. Varsayılan 30 ve
+    30 ile tek bir yargıçlı puanlayıcıda bu bir çalıştırmadır.
+    <code>trace_ids</code> ya da <code>limit</code> içinde daha fazlasını
+    isteyen bir istek, hiçbir model çağrılmadan sınırı adlandıran bir 400 ile
+    reddedilir. <code>limit</code> verilmezse istek, sığdığı kadar son
+    çalıştırmayı puanlar. Tek istekte daha fazlasını puanlamak için
+    <code>--request-timeout-seconds</code> değerini yükseltin. Her yargıçlı
+    puan, model yanıt verir vermez saklanır; böylece yarıda kesilen bir istek
+    bitirdiği puanları korur.
+  </p>
+
+  <h3>Tahmin etmek yerine puan üretmez</h3>
+  <p>
+    Türetmediği bir sayıyı döndüren bir yargıç, hiç yargıç olmamasından
+    kötüdür, çünkü kanıt gibi görünür. Bu yüzden aşağıdakilerin her biri,
+    nedeniyle birlikte <code>skipped</code> içinde bildirilir ve hiçbiri bir
+    puan üretmez.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Ne oldu</th><th>mcpd ne yapar</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Çalıştırma hiçbir yanıt kaydetmedi</td>
+        <td>Puan üretmez. Yanıtı olmayan bir çalıştırma ilgililikte düşük puan almış olmaz, hiç ölçülmemiştir.</td>
+      </tr>
+      <tr>
+        <td>Model düz metinle yanıtladı</td>
+        <td>Puan üretmez ve yanıtı alıntılar. Kod bloğuna ya da bir cümlenin içine sarılmış JSON yine de okunur.</td>
+      </tr>
+      <tr>
+        <td>Model ölçeğin dışında yanıt verdi</td>
+        <td>Puan üretmez. Bir üzerinden verilen bir yedi, onda dokuz demek değildir; sayıyı sınıra çekmek de bir sayı uydurmak olurdu.</td>
+      </tr>
+      <tr>
+        <td>Modele ulaşılamadı</td>
+        <td>Puan üretmez, durum kodunu ve gövdeyi verir. Hız sınırı bir nedendir, sıfır değil.</td>
+      </tr>
+      <tr>
+        <td>Yanıt 1 MiB'tan büyüktü</td>
+        <td>Gerisini okumadan puan üretmez. Bir karar birkaç yüz bayttır, o boyutta bir yanıt karar değildir.</td>
+      </tr>
+      <tr>
+        <td>İsteğin süresi çağrı için zaman bırakmadı</td>
+        <td>Modeli çağırmadan reddeder. Geçiş, 503 yerine süre içinde bitirdiği puanlarla yanıt verir.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Yargıçlı her puan, modeli kendi <code>scorer_version</code> alanına
+    kaydeder. İki farklı yargıçtan gelen iki puan karşılaştırılabilir değildir
+    ve kayıtta bunu söyleyen alan budur.
+  </p>
+
+  <h2>Puanlama olaydan sonra olur</h2>
+  <p>
+    <code>POST /v1/api/score</code>, puanlayıcıları hâlihazırda saklanmış
+    çalıştırmalar üzerinde çalıştırır. Hiçbir şey satır içinde değerlendirilmez.
+    İstek yolundaki bir değerlendirme, kendi gecikmesini yargıladığı şeyin
+    üzerine ekler ve hata fırlatan bir değerlendirme hiçbir zaman bir
+    kullanıcının isteğini düşürmemelidir.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="son yüz çalıştırmayı puanla"
+    command={`curl -X POST localhost:4317/v1/api/score \\
+  -H 'content-type: application/json' \\
+  -d '{"project": "support-desk", "limit": 100, "config": {"max_ms": 4000}}'`}
+  />
+
+  <p>
+    Yanıt, yazdığı puanları ve bunlardan ayrı olarak puan üretmeyen her
+    puanlayıcıyı nedeniyle birlikte taşır. Yanıt veremeyen bir puanlayıcı, bir
+    sayı döndürenden daha ilginçtir, o yüzden mcpd bunu asla yutmaz. Projenin
+    alım tavanı da bu kapıya kadar gelir: taramanın hesapladığı, projeyi
+    <code>--quota-per-minute</code> sınırının üstüne çıkaracak bir puan
+    saklanmaz; tavanın ötesine yazılmak ya da sessizce atılmak yerine bunu
+    söyleyerek <code>skipped</code> içinde listelenir.
+  </p>
+  <p>
+    Hiçbir şey saklamadan bir taramanın ne üreteceğini görmek için
+    <code>"dry_run": true</code> gönderin.
+  </p>
+  <p>
+    Bir taramanın hangi çalıştırmaları okuyacağına <code>trace_ids</code>,
+    <code>from</code> ve <code>limit</code> karar verir. Tam olarak belirli
+    çalıştırmaları puanlamak için onları <code>trace_ids</code> içinde
+    adlandırın. Boş bırakırsanız tarama, projedeki en yeni <code>limit</code>
+    kadar çalıştırmayı en yeniden başlayarak alır; <code>from</code> da o sayfayı
+    sınırlar: <code>from</code> ile gönderilen bir tarama yalnızca o anda ya da
+    sonrasında başlayan çalıştırmaları okur, ki bir dağıtımdan sonraki her şeyi
+    kimlik listelemeden puanlamanın yolu budur.
+  </p>
+
+  <h2>İki sürümü karşılaştırmak</h2>
+  <p>
+    Karşılaştırmak istediğiniz her sürüm için bir deney kaydedin, puanlarını o
+    deneyin kimliğiyle etiketleyin ve mcpd'den farkı isteyin.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="yeni prompt işe yaradı mı"
+    command="curl 'localhost:4317/v1/api/experiments/compare?baseline=v3&candidate=v4'"
+  />
+
+  <p>
+    Yanıt, her iki taraftaki örneklem boyutuyla birlikte puanlayıcı başına bir
+    fark ve bir <code>decidable</code> bayrağıdır. Yirmi gözlemin altında mcpd,
+    bir hareket bildirmek yerine karşılaştırmanın karara bağlanamayacağını
+    söyler.
+  </p>
+  <p>
+    Bu bilerek kaba bir kuraldır, anlamlılık testi değildir. Önlediği hata,
+    yaygın olanıdır: dört çalıştırmada kımıldayan, sayısı yazılmadan basılan,
+    sonuç diye okunup yayına alınan bir ortalama. Sayıları farkın yanına basmak,
+    gürültünün bulgu sanılmasını durduran şeydir.
+  </p>
+
+  <h2>Bunun çalışacağı yer</h2>
+  <p>
+    Hepsi HTTP API'sidir, yani döngünün yeri CI'dır: başarısızlıkları oluştukça
+    yakalayın, test takımınızın ürettiği çalıştırmaları puanlayın, derlemeyi bir
+    deney olarak kaydedin ve karara bağlanabilir bir karşılaştırmada
+    <code>regressed</code> değeri true dönerse işi başarısız sayın.
+  </p>
+
+  <h2>Sırada</h2>
+  <ul>
+    <li>
+      Bir puanın yanında durduğu iki sinyal:
+      <a href={urlFor('/docs/evaluation', locale)} class="link">Puanlar ve geri bildirim</a>.
+    </li>
+    <li>
+      Üretimde bir puanlayıcının ortalamasını izlemek:
+      <a href={urlFor('/docs/alerting', locale)} class="link">İzleyiciler ve uyarılar</a>.
+    </li>
+    <li>
+      Her endpoint ve her alan:
+      <a href={urlFor('/docs/reference/api', locale)} class="link">HTTP API</a>.
+    </li>
+  </ul>
+</Doc>

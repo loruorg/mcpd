@@ -1,0 +1,454 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import Conformance from '@/components/Conformance.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const loc = localeOf(Astro.url.pathname)
+const link = (route: string) => urlFor(route, loc)
+---
+
+<Doc
+  title="Entegrasyon"
+  description="Çalışan bir mcpd'yi kullanmanın üç yolu: tek başına HTTP API, altı SDK'dan biri, ya da bir ajanın çağırdığı MCP sunucusu. Her yolun size neye mal olduğu ve karşılığında ne verdiği."
+  lede="Bir yerde bir daemon çalışıyor. Başka her şeyin ona ulaşmasının üç yolu ve aralarında nasıl seçim yapacağınız."
+  og="docs"
+>
+  <p>
+    mcpd'nin tek bir kapısı, o kapıdan geçmenin de üç yolu var. Aşağıdakilerin
+    hepsi aynı HTTP yüzeyiyle konuşur: SDK'lar onun üstüne konmuş bir
+    kolaylıktır, MCP sunucusu ise onun bir istemcisidir.
+  </p>
+
+  <h2>Tek port, dört yüzey</h2>
+  <p>
+    Tek bir süreç bunların hepsini tek portta sunar, varsayılan olarak 4317.
+    Sidecar yok, yanında çalıştırılacak bir collector yok, arayüz için ayrı bir
+    statik dosya sunucusu yok.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Yol</th><th>Ne olduğu</th><th>Anahtar</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>/v1/traces</code>, <code>/v1/logs</code>, <code>/v1/metrics</code></td>
+        <td>OpenTelemetry alımı. Uygulamanızda mcpd'ye özgü tek satır kod olmadan, herhangi bir OTel SDK'sı.</td>
+        <td>Alım</td>
+      </tr>
+      <tr>
+        <td><code>/v1/ingest</code></td>
+        <td>mcpd'nin kendi alımı. Bir yığın, altı sinyalin herhangi bir karışımını ve veri modelinin tamamını taşır; bir istek de bir yığın akışı taşır.</td>
+        <td>Alım</td>
+      </tr>
+      <tr>
+        <td><code>/v1/api/…</code></td>
+        <td>Sorgu API'si. Arayüz de SDK'lar da yalnızca buradan okur.</td>
+        <td>Okuma, yazma, admin, execute veya worker; her endpoint kendisi bildirir</td>
+      </tr>
+      <tr>
+        <td><code>/</code></td>
+        <td>İkili dosyanın içine derlenmiş operatör arayüzü.</td>
+        <td>İşaretleme için gerekmez; verisi sorgu API'sinden geçer</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    İki yol daha, <code>/healthz</code> ve <code>/readyz</code>, kimlik
+    doğrulaması istemez; böylece bir yoklama onlara ulaşabilir. Bir endpoint'e
+    erişilip erişilmediğini araştırırken buradan başlayın:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="orada mı"
+    lines={[
+      { cmd: 'curl -s "$MCPD/healthz"' },
+      { out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0",…}', tone: 'ok' },
+      { cmd: 'curl -s "$MCPD/readyz"' },
+      { out: 'storage is not reachable: …', tone: 'warn' },
+      { out: '# readyz depoya da dokunur, yani buradaki bir 503 daemon ayakta' },
+      { out: '# ama arkasındaki veritabanı değil demektir.' },
+    ]}
+  />
+
+  <h2>SDK olmadan HTTP API</h2>
+  <p>
+    Dilinizde bir HTTP istemcisi varsa mcpd ile konuşabilir. Kaydolunacak bir
+    şey, önceden açılacak bir proje ve el sıkışma yoktur. Her SDK aşağıdaki
+    isteklerin üstüne konmuş bir kolaylıktır; bu yolu seçtiğinizde gruplama,
+    yeniden deneme ve kimlik üretimi sizde kalır, onları da kendiniz yaparsınız.
+  </p>
+
+  <h3>Bir çalıştırmayı yazmak</h3>
+  <p>
+    <code>POST /v1/ingest</code> tek bir yığın alır. Bir yığın; span'leri,
+    log'ları, metrikleri, puanları, geri bildirimleri ve yön notlarını
+    birlikte taşıyabilir. mcpd'nin kendi kapısının OTLP'ninkinin yanında var
+    olma sebebi de budur: altı sinyal aynı trace ve span kimliklerini paylaşır,
+    dolayısıyla hepsini tek istekte göndermek, ikinci bir aramaya gerek kalmadan
+    ilişkilerini korur.
+  </p>
+
+  <p>
+    O endpoint'e üç biçim ulaşır ve hangisi olduğunu içerik türü söyler. Hiçbir
+    şey baytlardan çıkarılmaz, yani bir dizginin içine yeni satır eklemek bir
+    gövdenin anlamını asla değiştiremez.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>İçerik türü</th><th>Gövde</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>application/json</code></td>
+          <td>Tek bir yığın nesnesi, her SDK'nın gönderdiği budur</td>
+        </tr>
+        <tr>
+          <td><code>application/json</code></td>
+          <td>Yığın nesnelerinden bir dizi, elinde birkaç tane olan bir gönderen için</td>
+        </tr>
+        <tr>
+          <td><code>application/x-ndjson</code></td>
+          <td>Satır başına bir yığın, tümü birden tutulmak yerine gövde geldikçe okunur. <code>application/jsonl</code> aynı anlama gelir</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Her öğe kendi başına bir yığındır: bir <code>ingest_key</code> taşıdığında
+    kendi işleminde saklanır, böylece yeniden gönderilen bir akış tek bir yığın
+    olarak değil satır satır tanınır; anahtarsız öğeler ise birlikte saklanır.
+    Bir satır okunamıyorsa ya da istek bir bütün olarak iki sınırdan birini
+    aşıyorsa isteğin tamamı reddedilir ve hiçbir şey saklanmaz. Yanıt, hepsini
+    kapsayan tek bir <code>IngestResult</code>'tır.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <CodeSwitcher class="not-prose my-6" only={['curl']} region="trace" title="tek bir yığın" />
+
+  <p>İsteğin doğru yapması gereken dört şey:</p>
+  <ul>
+    <li>
+      <strong>Kimlikler OpenTelemetry biçimindedir.</strong> Bir trace için 32,
+      bir span için 16 küçük harfli onaltılık karakter, hiçbiri tamamen sıfır
+      olamaz. Başka bir şey, çalıştırdığınız diğer bütün araçlarla ilişkilendirmeyi
+      bozar.
+    </li>
+    <li>
+      <strong><code>ingest_key</code> yeniden denemeyi güvenli kılar.</strong>
+      Bir yığın için sabit kalan bir idempotency anahtarıdır; böylece tekrar
+      gönderim tanınır ve iki kez yazılmak yerine yinelenen olarak sayılır.
+    </li>
+    <li>
+      <strong>Anahtar bir başlıkta gider.</strong>
+      <code>Authorization: Bearer …</code> ya da <code>X-Mcpd-Key</code>. Alım
+      bir alım anahtarı ister, o da yalnızca daemon'da tanımlı anahtar varsa.
+    </li>
+    <li>
+      <strong>Yığınların sınırları vardır.</strong> Varsayılan olarak 32 MiB
+      gövde ve 10.000 sinyal; ikisi de <code>--max-body-bytes</code> ve
+      <code>--max-batch-signals</code> ile ayarlanır. Sinyal sınırı isteğin
+      tamamını sayar, yani aynı sinyalleri satırlara bölmek bu sınırı aşmanızı
+      sağlamaz. Büyük bir şey için <code>content-encoding: gzip</code> gönderin.
+    </li>
+  </ul>
+  <p>
+    Yanıt her sinyal için ne olduğunu bildirir:
+    <code>{'{"accepted":2,"rejected":0,"duplicate":0}'}</code>, reddedilen her
+    şeyin sırasını ve sebebini veren bir <code>errors</code> dizisiyle birlikte.
+    OTLP endpoint'leri bunun yerine OTLP'nin kendi biçiminde, reddedilen sayısını
+    taşıyan bir <code>partialSuccess</code> nesnesiyle yanıt verir, çünkü bir
+    OpenTelemetry gönderenin okuduğu budur.
+  </p>
+
+  <h3>Geri okumak</h3>
+  <CodeSwitcher class="not-prose my-6" only={['curl']} region="query" title="okuma" />
+
+  <p>
+    Filtreler birleşir, sayfalama imleçle yapılır ve <code>project</code>
+    yazılmadığında daemon'ın varsayılan projesi kullanılır. Saklanan payload'lar
+    üzerinde tam metin araması <code>q</code> parametresiyle yapılır; "modelin şunu
+    söylediği çalıştırmayı bul" isteğini bir grep değil de bir sorgu hâline getiren
+    odur.
+  </p>
+  <p>
+    mcpd'nin kendi ürettiği bir hata, makinenin okuyabileceği sabit bir
+    <code>error</code> kodu, sorunu çözecek kişi için yazılmış bir
+    <code>message</code> ve tek bir parametre hatalıysa bir <code>field</code>
+    taşıyan JSON olarak döner. Koda göre dallanın, mesajı gösterin.
+  </p>
+  <p>
+    Bir hata türü bu biçimde değildir ve öyle olduğunu varsayan bir istemci
+    yanıtı ayrıştıramaz. Endpoint'in beklediği türe çözülemeyen bir istek
+    gövdesi, mcpd kodu çalışmadan önce web çerçevesi tarafından reddedilir;
+    yanıt <code>422</code>, <code>content-type: text/plain</code> ve
+    <code>missing field `scorer_id`</code> gibi bir mesajdır. Hiç JSON olmayan
+    gövde sözdizimi ise yine düz metin olarak <code>400</code> alır. İki durumda
+    da dallanılacak bir <code>error</code> kodu yoktur. Bu, türü belirtilmiş bir
+    gövde alan her endpoint için geçerlidir: <code>POST /v1/api/scores</code>,
+    <code>/v1/api/feedback</code>, <code>/v1/api/score</code>,
+    <code>/v1/api/datasets</code>, onun <code>items</code> ve
+    <code>capture</code> yolları ve <code>/v1/api/experiments</code>. Alım
+    kapıları gövdeyi kendileri okur, bu yüzden <code>/v1/ingest</code> ve OTLP
+    yolları JSON biçiminde yanıt verir. Bir 4xx üzerindeki JSON olmayan gövdeyi
+    kendi kodunuzdan gelen bozuk bir istek sayın ve metin olarak okuyun.
+  </p>
+
+  <h2>SDK'lar</h2>
+  <p>
+    Altı dil: <a href={link('/docs/sdks/typescript')} class="link">TypeScript</a>,
+    <a href={link('/docs/sdks/python')} class="link">Python</a>,
+    <a href={link('/docs/sdks/rust')} class="link">Rust</a>,
+    <a href={link('/docs/sdks/go')} class="link">Go</a>,
+    <a href={link('/docs/sdks/kotlin')} class="link">Kotlin</a> ve
+    <a href={link('/docs/sdks/elixir')} class="link">Elixir</a>. Her biri
+    olabildiği yerde kendi diline uygun, önemli olan yerde ise aynıdır.
+    TypeScript hızlı başlangıcını okumuş biri Kotlin'inkini önceden kestirebilir.
+  </p>
+  <p>Ham HTTP'ye göre kazandıklarınız:</p>
+  <ul>
+    <li>Gruplama ve arka planda bir worker, yani bir span kaydetmek kuyruğa ekleyip geri döner.</li>
+    <li>429 ve yeniden denemeye değer 5xx kodlarında beklemeli yeniden deneme, bozuk kalacak bir 4xx'te ise hiç denememe.</li>
+    <li>Kimlik üretimi, bağlam taşıma ve gelirken ayrıştırılıp giderken yayılan W3C <code>traceparent</code>, böylece bir trace servis sınırını aşar.</li>
+    <li>Daemon'ınkiyle aynı belirtimden üretilen türler, yani bir alan SDK'da başka, depoda başka bir anlama gelemez.</li>
+  </ul>
+  <p>
+    Her dilde geçerli üç söz vardır ve bir SDK'yı yoğun bir kod yoluna koymayı
+    güvenli kılan da onlardır. Ölçümleme asla hata fırlatmaz: erişilemeyen bir
+    daemon en fazla aralıkta bir kez loglanır ve yutulur. Asla engellemez: ağ işi worker'da
+    olur, yani ajanınızın gecikmesi mcpd'nin ayakta olmasına bağlı değildir.
+    Kuyruğu da sınırlıdır: dolduğunda en eski span'ler düşürülür ve bir sayaç
+    artar, çünkü sınırsız bir tampon bir ağ kesintisini bellek yetmezliğiyle
+    sonlanan bir sürece çevirir.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="init" title="bağlanma" />
+
+  <p>
+    Argümansız kurulan bir istemci yerel bir daemon'a karşı çalışır. Her şey kod
+    içinden ya da ortam değişkeniyle ayarlanabilir, kod önceliklidir; değişken adları
+    her dilde aynıdır, böylece iki servis arasında kopyalanan bir değer, ikisi
+    farklı dillerde yazılmış olsa da çalışmayı sürdürür:
+    <code>MCPD_ENDPOINT</code>, <code>MCPD_API_KEY</code>,
+    <code>MCPD_PROJECT</code>, <code>MCPD_ENVIRONMENT</code>,
+    <code>MCPD_SERVICE_NAME</code>, <code>MCPD_SERVICE_VERSION</code>,
+    <code>MCPD_SAMPLE</code> ve <code>MCPD_ENABLED</code>.
+    <code>MCPD_ENABLED=false</code> her çağrıyı, hâlâ geçerli nesneler döndüren
+    bir boş işleme çevirir; böylece bir test takımı hiçbir koda dokunmadan
+    mcpd'yi kapatabilir.
+  </p>
+
+  <h3>Birbirlerinin yerine geçerler ve bu sınanır</h3>
+  <p>
+    Birim testleri her SDK'nın kendi yazarlarının kastettiğini yaptığını
+    kanıtlar. Altısının birbiriyle uyuştuğuna dair hiçbir şey kanıtlamaz. Bu
+    yüzden uygunluk takımı, tek bir canlı daemon'a karşı her dilden bir tane
+    olmak üzere aynı kanonik çalıştırmayı yazar, buna aynı çalıştırmayı yalnızca
+    <code>curl</code> ile gönderen yedinci bir kanal ekler ve geri gelenin yapıca
+    birebir aynı olduğunu doğrular:
+  </p>
+
+  <Conformance class="not-prose my-8" />
+
+  <p>
+    Yeni bir servis için dil seçiyorsanız, "trace'ler elimizdekilerle aynı
+    görünecek mi" sorusunun yanıtı budur.
+  </p>
+
+  <h3>Diliniz bu altısından biri değilse</h3>
+  <p>
+    Bir OpenTelemetry SDK'sını <code>/v1/traces</code> adresine yöneltin, yeni
+    kod yazmanız gerekmez. mcpd bir OTLP alıcısıdır ve hem OpenTelemetry'nin
+    <code>gen_ai.*</code> uzlaşımını hem de OpenInference'ın <code>llm.*</code>
+    uzlaşımını eşler, yani halihazırdaki ölçümlemeniz doğru yere düşer.
+    <a href={link('/docs/opentelemetry')} class="link">OpenTelemetry</a> sayfasına
+    bakın.
+  </p>
+
+  <h2>Bir yapay zekâ ajanından, MCP üzerinden</h2>
+  <p>
+    Üçüncü yol bir servis için değil bir ajan içindir: trace'leri kodunuzun
+    okuması yerine, bir kodlama ya da destek ajanı onları sizin adınıza okur ve
+    onlara dair bir soruyu yanıtlar. "Son çalıştırma neden başarısız oldu", "bu
+    hafta bir puanlayıcının düşük not verdiği çalıştırmaları göster", "bu oturum ne
+    kadara mal oldu". mcpd bunu Model Context Protocol üzerinden sunar.
+  </p>
+
+  <h3>Üç araç</h3>
+  <p>
+    Otuz değil, üç. Bunlar tek bir incelemenin üç hamlesidir: hangi çalıştırma,
+    içinde ne oldu ve bu tek bir çalıştırma mı yoksa hepsi mi.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Araç</th><th>Yanıtladığı soru</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>find_runs</code></td>
+        <td>
+          Hangi çalıştırma. Her biri bir satır: kimlik, yaş, durum, süre, maliyet,
+          adım. Duruma, modele, kullanıcıya, oturuma veya serbest metne göre
+          filtreleyin; en yavaşları almak için süreye göre sıralayın. Varsayılan
+          olarak son 24 saat.
+        </td>
+      </tr>
+      <tr>
+        <td><code>get_run</code></td>
+        <td>
+          Ne olduğu. Şelale görünümü, başarısız olan adım ve sebebi, prompt'lar ve
+          tamamlamalar, log'lar, puanlar. Payload'lar sınırlanır, böylece tek bir
+          çalıştırma bir bağlam penceresini dolduramaz.
+        </td>
+      </tr>
+      <tr>
+        <td><code>run_stats</code></td>
+        <td>
+          Tek bir çalıştırma ya da hepsi. Bir pencere boyunca maliyet, hata oranı,
+          gecikme ve token; modele, ada, duruma, ortama veya kullanıcıya göre
+          gruplanır. Yüzde 40 hata oranı, okuduğunuz çalıştırmanın sorun olmadığı
+          anlamına gelir.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Sonuçlar JSON yerine metin olarak döner; bu, kimin bağlamının harcandığına
+    dair bilinçli bir seçimdir. Kırk span nesnesinin çoğu noktalama işaretidir;
+    aynı çalıştırma şelale olarak çizildiğinde birkaç yüz token tutar ve ajan
+    biçimini görebilir.
+  </p>
+
+  <h3>Nasıl kurulduğu</h3>
+  <p>
+    MCP sunucusu ikinci bir servis değil, aynı ikili dosyanın bir alt komutudur.
+    <code>mcpd mcp</code> olarak çalışır, standart giriş ve çıkış üzerinden
+    JSON-RPC konuşur ve kendine ait veri tutmaz. Açılacak bir port, ayakta
+    tutulacak bir süreç ve dağıtılacak bir şey yoktur: ajan host'u, bir konuşma
+    gerektirdiğinde onu bir alt süreç olarak başlatır, sonra da durdurur.
+  </p>
+  <p>
+    Tuttuğu tek şey bir daemon bağlantısıdır. Her araç çağrısı, yukarıda anlatılan
+    aynı sorgu API'sine bir istek olur; aynı okuma anahtarı ve aynı proje
+    kapsamıyla, yani bir ajan kendisine verilen anahtarın ulaşamadığı bir projeye
+    ulaşamaz. Bir ajana bu sunucuyu vermenin etki alanı, ona o anahtarı
+    vermenin etki alanıyla tam olarak aynıdır; bir sunucu yapılandırmadan önce
+    denetleyeceğiniz özellik de budur.
+  </p>
+  <p>
+    Araç kümesi bilerek küçüktür. Geniş bir yüzey modeli kötü seçim yapmaya iter
+    ve bir ajanın davranışına dair soruların çoğu çalıştırmaları listelemeye,
+    birini açmaya ve bir pencere üzerinde sayısal bir soru sormaya indirgenir. Bir
+    istemci güncel kümeyi, burada yazılıp geride kalabilecek bir listeden değil,
+    protokolün kendi <code>tools/list</code> çağrısından öğrenir.
+  </p>
+
+  <h3>Bir istemciyi yapılandırmak</h3>
+  <p>
+    Bir MCP host'u sunucuyu bir komut, birkaç argüman ve bir ortamla başlatır.
+    Tam dosya ve tam anahtar mcpd'nin değil host'un işidir, o yüzden onun
+    belgelerine bakın; sizden istediği üç değer her yerde aynıdır.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Host'un istediği</th><th>Değer</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Komut</td><td>Host'un çalıştırabileceği bir yolda duran <code>mcpd</code> ikili dosyası.</td></tr>
+      <tr>
+        <td>Argümanlar</td>
+        <td>
+          <code>mcp</code> alt komutu. Ortam yerine argüman geçmeyi yeğleyen bir
+          host için <code>--endpoint</code>, yani sorgulanacak daemon, bir de
+          <code>--api-key</code>, yani onun için bir okuma anahtarı alır.
+        </td>
+      </tr>
+      <tr>
+        <td>Ortam</td>
+        <td>
+          Aynı iki değer, <code>MCPD_ENDPOINT</code> ve
+          <code>MCPD_API_KEY</code> olarak. Endpoint varsayılan olarak
+          <code>http://127.0.0.1:4317</code>'dir ve daemon'da tanımlı anahtar
+          yoksa anahtar yazılmayabilir.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <Command
+    class="not-prose my-6"
+    label="host'un çalıştırdığı"
+    command="MCPD_ENDPOINT=https://mcpd.internal MCPD_API_KEY=$READ mcpd mcp"
+    primaryLabel="Ortam olarak"
+    secondary={[
+      { label: 'Seçenek olarak', command: 'mcpd mcp --endpoint https://mcpd.internal --api-key $READ' },
+      { label: 'Docker ile', command: 'docker run -i --rm -e MCPD_ENDPOINT -e MCPD_API_KEY ghcr.io/mcpd/mcpd mcp' },
+    ]}
+  />
+
+  <p>O anahtarı verirken akılda tutulacak üç şey.</p>
+  <ul>
+    <li>
+      Ajana bir <code>ingest</code> anahtarı değil, bir <code>read</code>
+      anahtarı verin. Kapsamlar, span yazmaya yarayan bir kimlik bilgisinin aynı
+      zamanda saklanmış her prompt'a erişim anlamına gelmemesi için vardır.
+    </li>
+    <li>
+      Anahtarı bir projeyle sınırlayın. Üst düzeyde yapılandırılmış bir anahtar
+      daemon'daki her projeye ulaşır.
+    </li>
+    <li>
+      Siz bir <code>admin</code> listesi tanımlayana kadar bir okuma anahtarının
+      trace silebildiğini bilin; admin kapsamı tanımsızken okuma listesine geri
+      düşer. Kendisine hiç admin listesi verilmemiş bir daemon'da okuma anahtarı
+      tutan bir ajan bir çalıştırmayı silebilir.
+    </li>
+  </ul>
+  <p>Üçü de <a href={link('/docs/security')} class="link">Güvenlik</a> sayfasında.</p>
+
+  <h2>Hangisini kullanmalı</h2>
+  <table>
+    <thead>
+      <tr><th>Yol</th><th>Ne zaman</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>HTTP</td>
+        <td>Dilinizin SDK'sı yoksa, bir kabuktan ya da bir işten gönderiyorsanız ya da hiç bağımlılık istemiyorsanız.</td>
+      </tr>
+      <tr>
+        <td>Bir SDK</td>
+        <td>Bir uygulamayı ölçümlüyorsanız, yani gruplama, yeniden deneme ve hiç hata fırlatmamak bağımlılıktan daha değerliyse.</td>
+      </tr>
+      <tr>
+        <td>OpenTelemetry</td>
+        <td>Zaten OTel yayıyorsanız ve kütüphane eklemektense bir URL değiştirmeyi yeğliyorsanız.</td>
+      </tr>
+      <tr>
+        <td>MCP</td>
+        <td>Saklanmış çalıştırmalar hakkında soruları, zamanlı çalışan bir kod değil bir insan bir ajana soruyorsa.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Bunlar karışır. TypeScript SDK'sıyla yayan bir filo, <code>curl</code> ile
+    puan gönderen gecelik bir iş ve hepsini MCP üzerinden geri okuyan bir ajan
+    üç dağıtım değil, tek bir dağıtımdır.
+  </p>
+
+  <h2>Sonraki</h2>
+  <ul>
+    <li>Neyin saklandığı ve kimin okuyabildiği: <a href={link('/docs/security')} class="link">Güvenlik</a>.</li>
+    <li>Var olan bir OTel kurulumunu mcpd'ye yöneltmek: <a href={link('/docs/opentelemetry')} class="link">OpenTelemetry</a>.</li>
+    <li>Belirtimden üretilen her endpoint: <a href={link('/docs/reference/api')} class="link">HTTP API</a>.</li>
+    <li>Bilmeye değer sorgular: <a href={link('/docs/searching')} class="link">Çalıştırma bulma</a>.</li>
+  </ul>
+</Doc>

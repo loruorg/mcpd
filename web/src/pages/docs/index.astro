@@ -1,0 +1,201 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import Command from '@/components/Command.astro'
+import Unreleased from '@/components/Unreleased.astro'
+---
+
+<Doc
+  title="Overview"
+  description="mcpd is a free, open-source daemon for AI agents: durable runs held between steps, and observability for every step. One process, storage compiled in, OpenTelemetry in, no framework to adopt."
+  lede="A process you run beside your agent, not a library your agent is built around. It holds the run between steps and records each one. This page is the shape of the whole thing in one read."
+  og="docs"
+>
+  <h2>One process</h2>
+  <p>
+    mcpd does two things with one process. It holds a durable run between its
+    steps: the cursor, the retries, the timers and the waits, while your own
+    code, in any language, does the work inside each step. And it receives what
+    your agent did, stores it, and gives it back to you as runs you can read.
+    It is one binary with SQLite linked into it. There is no database to stand
+    up, no collector to run alongside it, and no account anywhere.
+  </p>
+  <p>
+    The daemon listens on port <code>4317</code> and serves five things from
+    that single port:
+  </p>
+  <ul>
+    <li>
+      OTLP ingest at <code>/v1/traces</code>, <code>/v1/logs</code> and
+      <code>/v1/metrics</code>, so an existing OpenTelemetry setup needs no new
+      code.
+    </li>
+    <li>
+      Native ingest at <code>/v1/ingest</code>, which carries the parts of the
+      model OTLP has no place for, including scores and human feedback.
+    </li>
+    <li>
+      The read API under <code>/v1/api</code>, which the interface and the SDKs
+      both use. There is no private API behind the one you get.
+    </li>
+    <li>
+      The run surface under <code>/v1/api/runs</code>, <code>/v1/api/events</code>
+      and <code>/v1/api/steps</code>: definitions, runs, the events that answer
+      a wait, and the protocol a worker speaks. See
+      <a href="/docs/workflows" class="link">Workflows</a>.
+    </li>
+    <li>The operator interface at <code>/</code>, embedded in the binary.</li>
+  </ul>
+  <p>
+    One port is a deployment decision rather than a shortcut. A collector, a
+    database and a UI is three things to run, three things to upgrade, and three
+    places a trace can be lost between.
+  </p>
+
+  <Command
+    class="not-prose mt-8"
+    label="The whole install, once released"
+    command="docker run -p 4317:4317 ghcr.io/mcpd/mcpd"
+  />
+  <Unreleased class="not-prose mb-8 mt-3" />
+
+  <h2>What it deliberately is not</h2>
+  <p>
+    Most of the value here comes from what mcpd refuses to do. Each refusal
+    removes a reason you would have to change your agent.
+  </p>
+  <ul>
+    <li>
+      <strong>Not a framework.</strong> mcpd does not pick your model and does
+      not wrap your provider client. It holds a run between steps and leaves
+      everything inside a step to your code, so your code calls a model the same
+      way after you adopt mcpd as it did before. mcpd is never in your agent's
+      request path to a model. It can call one itself, which is a different
+      thing: those calls are offline, over traces already stored, opt in and off
+      by default, and none is made until you have given the daemon an endpoint, a
+      model name and a key. A judged scorer is one; see
+      <a href="/docs/testing" class="link">Regression testing</a>.
+    </li>
+    <li>
+      <strong>Not in the request path.</strong> It never sits between your agent
+      and a provider. Nothing your users see depends on mcpd being up, because
+      nothing your users see passes through it.
+    </li>
+    <li>
+      <strong>Not a service.</strong> The daemon calls nothing by default.
+      There is no telemetry, no licence check and no vendor endpoint. The only
+      outbound traffic it will ever make is what you configure: a
+      <code>--forward-endpoint</code>, a monitor's webhook, or a judge model.
+      Set none of those and your prompts never leave the machine you ran it on.
+    </li>
+    <li>
+      <strong>Not a required dependency.</strong> If you delete mcpd from your
+      infrastructure, the only thing that stops is the recording.
+    </li>
+  </ul>
+
+  <h2>The six signals</h2>
+  <p>
+    mcpd stores six kinds of thing, and stores them together. Spans are what
+    ran. Logs are the lines a run emitted. Metrics are numbers over time. Scores
+    are a machine's judgement of a run. Feedback is a person's. An aspect note
+    is one sentence a model wrote about a run once it had finished.
+  </p>
+  <p>
+    Keeping them in one store is the whole point. Every signal carries the trace
+    id and span id it belongs to, so the question "what did the model actually
+    say in the run this customer complained about, and what did it cost" is one
+    query rather than four tools and a timestamp you have to match by eye.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <p>
+    Scores and feedback are kept apart on purpose. A scorer's 0.8 and a person's
+    thumbs-down measure different things, and averaging them together produces a
+    number that means nothing.
+  </p>
+
+  <h2>Why a daemon and not a framework</h2>
+  <p>
+    Framework observability is good, and it arrives attached to the framework.
+    To be seen, an agent is expected to have been built with it, usually in one
+    language. That is a fair trade for a new project and an impossible one for
+    an agent that already exists and already works. Framework workflows are the
+    same trade: durable, as long as every step is written in the framework's
+    language and runs inside its process.
+  </p>
+  <p>
+    A daemon inverts both. A workflow's graph is data the daemon holds; its
+    step bodies are code your process holds, claimed one lease at a time
+    through an HTTP protocol any language can speak. Nowhere in that exchange
+    does the daemon see a model, a prompt or a credential. See
+    <a href="/docs/workflows" class="link">Workflows</a> and
+    <a href="/docs/workers" class="link">Workers</a>.
+  </p>
+  <p>
+    A daemon inverts the trade. mcpd speaks OTLP, which is a protocol rather
+    than a dependency, so it records agents written in any language, with any
+    framework, including ones written before mcpd existed. If your agent already
+    exports OpenTelemetry, pointing
+    <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> at mcpd is the entire integration.
+  </p>
+  <p>
+    The SDKs exist because OTLP has no vocabulary for a prompt, a completion, a
+    token count or a score, and those are the fields you came for. Using one is
+    a choice, not a condition. All six behave identically: recording a span
+    appends to a bounded queue and returns, network work happens on a background
+    worker, and nothing in the instrumentation path ever throws. Observability
+    that can take down the system it observes is worse than none.
+  </p>
+
+  <h2>One binary, two deployments</h2>
+  <p>
+    The container you run on a laptop is the container that runs as a Deployment
+    on someone's cluster. Retention, redaction, sampling and API keys are flags
+    on that same binary, not a different build and not a licence tier. There is
+    no feature that exists only in a version you cannot have.
+  </p>
+  <p>
+    The defaults are set for the laptop, which means ingest and reads are open
+    when no keys are configured. mcpd warns loudly at startup when it is
+    listening on a non-loopback address in that state. It starts anyway, because
+    refusing to would break the five-minute path for the person it is aimed at,
+    but silence would be irresponsible.
+  </p>
+
+  <h2>Where to go next</h2>
+  <ul>
+    <li>
+      Running it now:
+      <a href="/docs/quickstart" class="link">Quickstart</a> gets a trace from
+      your own agent on screen, or
+      <a href="/docs/install" class="link">Install</a> covers every route in.
+    </li>
+    <li>
+      Learning the vocabulary:
+      <a href="/docs/concepts" class="link">Concepts</a> defines trace, span,
+      kind and correlation, which the rest of the documentation assumes.
+    </li>
+    <li>
+      Holding a run between steps:
+      <a href="/docs/workflows" class="link">Workflows</a>, then
+      <a href="/docs/workers" class="link">Workers</a> and
+      <a href="/docs/runs" class="link">Runs</a>.
+    </li>
+    <li>
+      Already have OpenTelemetry:
+      <a href="/docs/opentelemetry" class="link">the OTLP path</a> in full,
+      including what mcpd infers from standard attributes.
+    </li>
+    <li>
+      Running it for other people:
+      <a href="/deploy" class="link">Docker and Kubernetes</a>, then
+      <a href="/docs/privacy" class="link">Redaction and retention</a>.
+    </li>
+  </ul>
+  <p>
+    mcpd is Apache-2.0 licensed. The protocol in, the format out and the licence
+    around it are all open, so leaving is as cheap as arriving.
+  </p>
+</Doc>

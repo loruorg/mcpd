@@ -1,0 +1,367 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (href: string) => urlFor(href, code)
+
+const guard = `let run = mcpd.trace("support agent");
+{
+    let step = run.child_of("retrieve", SpanKind::Retrieval);
+    step.set_input("order 5512");
+    // Bu adım ne yapıyorsa. Span kapanış süslü parantezinde biter; erken bir
+    // dönüşte, bir ? işaretinde ve bir panikte de biter.
+}
+run.end();`
+
+const taskLocal = `// Bir span'i açmak onu geçerli span yapmaz. scope() yapar.
+let run = mcpd.trace("support agent");
+run.scope(async {
+    lookup(&mcpd).await;
+})
+.await;
+run.end();
+
+async fn lookup(mcpd: &Mcpd) {
+    // Bu fonksiyona hiçbir üst geçirilmedi, yine de çalıştırmanın altına
+    // yerleşir; çünkü onu task-local taşır.
+    let step = mcpd.span("lookup_order", SpanKind::ToolCall);
+    step.set_output(serde_json::json!({ "status": "shipped" }));
+}`
+
+const propagation = `// Giden: başlığı isteğin üzerine koyun.
+let header = span.traceparent();
+
+// Gelen: yeni bir trace başlatmak yerine çağıranın trace'ini sürdürün.
+// Bulunmayan ya da bozuk bir başlık, başarısız olmak yerine yeni bir trace başlatır.
+let run = mcpd.trace_from("charge card", inbound_header, SpanKind::AgentRun);`
+
+const payload = `generation.set_model("claude-sonnet-4", "anthropic");
+generation.set_usage(TokenUsage {
+    input_tokens: Some(412),
+    output_tokens: Some(96),
+    ..TokenUsage::default()
+});
+// Ya da döküm önemli değilse:
+generation.set_tokens(412, 96);
+
+// Mesaj zorunludur. "Bir şey başarısız oldu" ile bir şey yapılamaz.
+tool.set_error("sms gateway timed out after 5s");
+
+// Ya da elinizdeki hatayı kaydedin; mesajını ve türünü ondan okur.
+tool.record_error(&err);`
+
+const shutdown = `#[tokio::main]
+async fn main() {
+    let mcpd = Mcpd::new();
+
+    // ... çalıştırma ...
+
+    // Bunu yok saymak makul bir varsayılandır: bir gözlemlenebilirlik hatası
+    // uygulama hatası değildir. Loglamak bir satıra mal olur.
+    if let Err(e) = mcpd.shutdown().await {
+        eprintln!("mcpd could not export: {e}");
+    }
+}`
+---
+
+<Doc
+  title="Rust"
+  description="Rust için mcpd SDK'sı: drop edilince biten bir RAII span koruyucusu, bağlam için tokio task-local'ı ve hata döndürmeyen, hiçbir şeyde panik etmeyen ölçümleme."
+  lede="Span, drop edildiğinde biten bir koruyucudur; erken bir dönüş ya da bir hata onu açık bırakamaz. Bağlam bir tokio task-local'ında taşınır."
+  og="docs"
+>
+  <h2>Kurulum</h2>
+  <p>
+    SDK dışa aktarımı arka plandaki bir tokio görevinde yapar, yani bir runtime
+    bulmayı bekler. Runtime olmadan da çalışır; o zaman siz
+    <code>flush()</code> çağırana kadar hiçbir şey gönderilmez. Bu, senkron bir
+    araç için doğru davranıştır ama uzun ömürlü bir servisin isteyeceği şey
+    değildir.
+  </p>
+
+  <Command
+    command="cargo add mcpd-sdk"
+    primaryLabel="SDK'nın kendisi"
+    secondary={[{ label: "Crate'te yoksa bir runtime", command: 'cargo add tokio --features macros,rt-multi-thread' }]}
+  />
+
+  <h2>İstemciyi oluşturma</h2>
+  <p>
+    Süreç başına bir istemci. <code>Mcpd::new()</code> ortamı okur ve hiçbir şey
+    ayarlanmamışken yerel bir mcpd ile konuşur. Oluşturma hiçbir zaman başarısız
+    olmaz: mcpd'nin kullanamayacağı bir yapılandırma istemciyi devre dışı
+    bırakır ve nedenini loglar; çünkü bir gözlemlenebilirlik çağrısı, bir
+    programın hatasını ele almak zorunda kalacağı bir şey değildir.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="init" title="bağlanma" />
+
+  <p>
+    <code>Config::from_env()</code> çağrısından sonra builder üzerinde verilen
+    her şey ortama üstün gelir.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Alan</th><th>Ortam değişkeni</th><th>Varsayılan</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>api_key</code></td><td><code>MCPD_API_KEY</code></td><td>yok</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>yok</td></tr>
+      <tr><td><code>service_name</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>yok</td></tr>
+      <tr><td><code>service_version</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>yok</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>batch_size</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flush_interval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2s</code></td></tr>
+      <tr><td><code>max_queue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10s</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capture_payloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>log_level</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Ayrıştırılamayan bir ayar bir uyarıyla atlanır ve varsayılan kullanılır;
+    çünkü bir dağıtımın ortamındaki bir yazım hatası programı durdurmamalıdır.
+    <code>enabled = false</code> her çağrıyı, yine de geçerli nesneler döndüren
+    boş bir işleme çevirir; kimlikler yine düzgün biçimlidir ve
+    <code>traceparent</code> yine taşınır, yani bir test sınadığı koda
+    dokunmadan mcpd'yi kapatabilir.
+  </p>
+
+  <h2>Bir çalıştırmayı kaydetme</h2>
+  <p>
+    <code>Span</code> bir RAII koruyucusudur. Drop edildiğinde sona erer;
+    Rust'ta kapsamlı biçim budur: bir blok, bir kapsam ya da fonksiyonun sonu.
+    <code>end()</code> çağrısını kendiniz yapmak da aynı şeyi yapar. Koruyucunun
+    varlık nedeni, erken bir dönüşün ya da bir paniğin bir span'i açık ve
+    bitmemiş bırakamamasıdır.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="span bir koruyucudur"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: guard }]}
+  />
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="trace" title="bir çalıştırmayı kaydetme" />
+
+  <h2>Bağlam</h2>
+  <p>
+    Bir sürecin içinde bağlam, bir tokio task-local'ında taşınır. Bir span'i
+    elde tutmak onu geçerli span yapmaz: <code>Span::scope</code> task-local'ı
+    bir future için, <code>Span::sync_scope</code> ise bir closure için ayarlar.
+    İkisinin de içinde <code>Mcpd::span</code> sürmekte olan çalıştırmaya
+    bağlanır, yani birkaç katman aşağıdaki bir yardımcı fonksiyon, üst span
+    kendisine verilmeden doğru yere yerleşir. Üst span zaten elinizdeyse
+    <code>Span::child_of</code> açık seçenektir.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="task-local"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: taskLocal }]}
+  />
+
+  <p>
+    Süreçler arasında bağlam, W3C <code>traceparent</code> başlığında taşınır.
+    Örnekleme bayrağı da onunla birlikte gider, böylece bir trace'in iki yarısı
+    trace'in saklanıp saklanmadığı konusunda uyuşur.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="servis sınırının ötesinde"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: propagation }]}
+  />
+
+  <h2>Model, kullanım ve hatalar</h2>
+  <p>
+    mcpd alım sırasında token sayılarını fiyatlandırır, dolayısıyla trace'te
+    gördüğünüz maliyet size faturalanan maliyettir. Bir hatayı kaydetmek aynı
+    hamlede span'in durumunu <code>error</code> yapar, yani ikisi hiçbir zaman
+    çelişemez; mesaj da seçime bağlı değil, zorunlu bir argümandır.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="bir span neler taşır"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: payload }]}
+  />
+
+  <p>
+    Geri kalan ayarlayıcılar şunlardır: <code>set_input</code>,
+    <code>set_output</code>, <code>set_attributes</code>,
+    <code>set_metadata</code>, <code>set_tags</code>, <code>set_entity</code>,
+    <code>set_session</code>, <code>set_user</code>, <code>set_status</code> ve
+    <code>set_error_detail</code>. Hepsi <code>&amp;self</code> alır, yani bir
+    span ödünç alındığı her yerden doldurulabilir.
+  </p>
+
+  <h2>Payload'lar, sink'ler ve bitmiş span'ler</h2>
+  <p>
+    <code>Config::with_capture_payloads(false)</code> prompt'ları ve
+    tamamlamaları sürecin içinde tutar: span'ler yine zamanlamasını, durumunu,
+    token kullanımını, modelini, ilişkilendirmesini ve hatalarını taşır,
+    <code>input</code> ile <code>output</code> ise kuyruğa varmadan atılır. Bir
+    span, <code>span.capture_payloads(..)</code> ile istemcinin kararını kendisi
+    için iki yönde de geçersiz kılar.
+  </p>
+  <p>
+    Exporter her yığını istemcinin sink'ine verir. Varsayılan olan HTTP
+    taşıyıcısıdır; <code>Config::with_sink</code>, yığınları bellekte tutan ve
+    böylece bir testin kaydedileni sunucu olmadan doğrulamasını sağlayan bir
+    <code>RecordingSink</code> ya da sinyal başına tek bir JSON satırı yazan bir
+    <code>ConsoleSink</code> alır. Başarısız olan bir sink, aralık başına bir kez
+    bildirilen ve asla fırlatılmayan başarısız bir dışa aktarımdır.
+    <code>mcpd.stats()</code> şunları yanıtlar: <code>queued</code>,
+    <code>dropped</code>, <code>capacity</code>, <code>exported</code>,
+    <code>failed</code> ve <code>rejected</code>.
+  </p>
+  <p>
+    <code>mcpd.record(span)</code>, çoktan bitmiş bir span'i kimlikleri, üstü,
+    başlangıcı ve bitişiyle birlikte, bir adaptörün ya da bir içe aktarmanın
+    elinde nasılsa öyle kuyruğa alır: üstü, zamanları ve örneklemesi hiç
+    değiştirilmeden. Bozuk bir kayıt atılır ve <code>rejected</code> olarak
+    sayılır. <code>span.set_external_parent</code>, mcpd olmayan bir izleme
+    sisteminden gelen bir üstü yalnızca ilişkilendirme için taşır.
+  </p>
+
+  <h2>Kalıcı çalıştırmalar</h2>
+  <p>
+    Daemon'ın kalıcı çalıştırmalarını da aynı istemci karşılar.
+    <code>Workflow::new</code> tanımı kurar ve adım gövdelerini async closure
+    olarak saklar; bir <code>Worker</code> bu tanımı kaydeder, lease'ler için
+    uzun yoklama yapar ve her birini bir görev üzerinde karşılar;
+    <code>start_run</code>, <code>watch_run</code>, <code>publish_event</code>
+    ve diğerleri çalıştırma yüzeyini bire bir yansıtır. Bir gövde, adımın
+    bütçesi içinde yeniden denenmek için <code>StepFailure::retryable</code>
+    döndürür ve <code>StepContext</code> üzerinden kendi adımının altına span
+    kaydeder. Böyle açılan her span ve altına yerleşen her span, bittiğinde
+    kendi kullanımını adıma ekler; böylece daemon, gövde token'ları elle
+    toplamadan trace'in gösterdiğini fiyatlandırır. <code>set_usage</code> açık
+    geçersiz kılmadır. Builder'ın <code>on_lease</code>,
+    <code>on_step_start</code>, <code>on_step_end</code> ve
+    <code>on_conflict</code> hook'ları ile <code>worker.stats()</code>, worker'ı
+    içeriden gözlemlenebilir kılar.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['rust']} example="workflow" region="workflow" title="bir iş akışı" />
+  <p>
+    Her yapının ne yaptığı, lease protokolü ve çalıştırma API'si şu sayfalarda:
+    <a href={linkTo('/docs/workflows')} class="link">İş akışları</a>,
+    <a href={linkTo('/docs/workers')} class="link">Worker'lar</a> ve
+    <a href={linkTo('/docs/runs')} class="link">Çalıştırmalar</a>.
+  </p>
+
+  <h2>Puanlar ve geri bildirim</h2>
+  <p>
+    <code>Scale</code> zorunlu bir argümandır, seçime bağlı değil. Aralığı
+    bildirilmemiş çıplak bir 0.9 hiçbir şeyle karşılaştırılamaz ve biri grafiği
+    okuduğunda bunun ne anlama geldiğini sormak için artık çok geçtir. Alışılmış
+    olanı, 0.0 ile 1.0 arasındaki <code>Scale::UNIT</code>. Geri bildirim bir
+    insanın yargısıdır ve puandan ayrı tutulur; çünkü ikisi farklı sorulara
+    yanıt verir ve asla birlikte ortalanmamalıdır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="score" title="puan ve geri bildirim" />
+
+  <h2>Flush ve kapatma</h2>
+  <p>
+    Kayıt, bellekteki bir kuyruğa ekler ve döner. <code>flush()</code> kuyrukta
+    bekleyeni gönderir; <code>shutdown()</code> flush eder, worker'ı
+    durdurur ve iki kez çağrılması güvenlidir. İkisi de beklenebilir ve ikisi de
+    son dışa aktarım hatasını döndürür, böylece onu loglayabilirsiniz.
+  </p>
+  <p>
+    Kısa ömürlü bir süreç bunlardan birini çağırmalıdır. Kapatmadan çıkan bir
+    ikili dosya, span'leri hâlâ bellekteyken çıkar; serverless bir fonksiyonda
+    ise runtime, handler döner dönmez süreci dondurur, yani arka plandaki göreve
+    bir daha sıra gelmez.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="kapatma"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: shutdown }]}
+  />
+
+  <p>
+    Başarısız bir flush yüzünden kaybolan sinyaller yeniden kuyruğa alınmaz.
+    Taşıyıcı zaten yeniden denemiştir; başarısızlıkta kendini yeniden dolduran
+    bir kuyruk da bir kesintinin bellek yetersizliğinden ölüme dönüşme yoludur.
+  </p>
+
+  <h2>Güvenebilecekleriniz</h2>
+  <p>
+    Daemon durdurulmuşken örnek program sonuna kadar çalışır, yapamadığı şeyi
+    yazar ve sıfır ile çıkar.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="daemon çalışmazken"
+    lines={[
+      { cmd: 'cargo run -p mcpd-sdk --example quickstart' },
+      { out: '    Finished `dev` profile [unoptimized + debuginfo]' },
+      { out: '     Running `target/debug/examples/quickstart`' },
+      { out: 'mcpd could not export: export failed: mcpd could not be reached', tone: 'warn' },
+      { out: 'could not read the trace back: mcpd could not be reached', tone: 'warn' },
+      { cmd: 'echo $?' },
+      { out: '0', tone: 'ok' },
+    ]}
+  />
+
+  <ul>
+    <li>
+      Hiçbir ölçümleme çağrısı hata döndürmez ve panik etmez. Erişilemeyen bir
+      mcpd, bir serileştirme hatası ya da dolu bir kuyruk, flush aralığı başına
+      en çok bir kez <code>tracing</code> üzerinden loglanır ve yutulur.
+      Gözlemlenebilirlik, gözlediği şeyi asla devirmemelidir.
+    </li>
+    <li>
+      Kayıt hiçbir zaman bloklamaz. Dışa aktarım arka plandaki bir tokio
+      görevinde olur, yani ajanınızın gecikmesi mcpd'nin hızlı ya da ayakta
+      olmasına bağlı değildir.
+    </li>
+    <li>
+      Kuyruk <code>max_queue</code> ile sınırlıdır. Dolduğunda en eski sinyaller
+      atılır ve <code>mcpd.stats().dropped</code> bunları sayar. En eskiyi
+      atmak, bellek yetersizliğinden ölmekten daha küçük bir başarısızlıktır.
+    </li>
+    <li>
+      1.0 altındaki örnekleme rastgele değil, trace id'sine göre
+      belirlenimlidir; böylece bir filodaki her süreç aynı trace hakkında aynı
+      kararı verir ve servis sınırını aşan bir trace hiçbir zaman yarım
+      kaydedilmez.
+    </li>
+    <li>
+      Bir span başladığında dışa aktarılır, bittiğinde güncellenir; böylece
+      yolun ortasında çöken bir çalıştırma yine de okunabilir kalır.
+    </li>
+  </ul>
+
+  <h2>Geri okuma</h2>
+  <p>
+    Okumayı da aynı istemci yapar. Her metot bir HTTP endpoint'ini yansıtır ve
+    üretilmiş tipleri döndürür; bu tipler spesifikasyondan
+    <code>mcpd-core</code> yoluyla gelir ve <code>mcpd_sdk::model</code> olarak
+    yeniden dışa aktarılır. Okumalar bir <code>Result</code> döndürür, çünkü
+    beklediğiniz ve yanıtlanamayan bir sorgu haber değeri taşır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="query" title="arama ve analiz" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">Çalıştırma bulma</a>
+    filtreleri eksiksiz anlatır.
+    <a href={linkTo('/docs/reference/data-model')} class="link">Veri modeli</a>
+    bu tiplerin taşıdığı her alanı listeler.
+  </p>
+</Doc>

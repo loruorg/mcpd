@@ -1,0 +1,135 @@
+---
+/**
+ * A durable run, as the daemon holds it: a cursor walking a graph of steps.
+ *
+ * The argument the drawing makes is the division of labour. The line, the
+ * stations and the wait are the daemon's; the bodies of the claimable steps are
+ * the worker's, and the cursor only moves past a station once a worker has
+ * reported it. So the packet dwells at each claimable step for as long as a
+ * body would take, and dwells longest at the wait, where no process is alive
+ * at all.
+ *
+ * Every label and every station is static markup. Only the cursor and the tint
+ * a station takes while it is the current one move, and with motion reduced
+ * the cursor is hidden and every station rests lit, which is the finished run.
+ */
+interface Props {
+  class?: string
+}
+const { class: className = '' } = Astro.props
+
+/* x is the station's centre on a 0..720 viewBox; the line runs 40..680, so the
+   packet's position along it is (x - 40) / 640. */
+const stations = [
+  { id: 'classify', x: 110, kind: 'task', owner: 'your process' },
+  { id: 'draft', x: 270, kind: 'agent', owner: 'your process' },
+  { id: 'approval', x: 430, kind: 'wait_event', owner: 'the daemon alone' },
+  { id: 'send', x: 590, kind: 'task · at_most_once', owner: 'your process' },
+]
+const at = (x: number) => ((x - 40) / 640).toFixed(3)
+
+/* One timeline, 10 seconds, shared by the cursor and the station tints, so the
+   tint cannot light a station the cursor has not reached. The cursor pauses at
+   every station; the wait's pause is the long one. */
+const keyTimes = '0;0.08;0.2;0.3;0.42;0.5;0.78;0.86;0.96;1'
+const keyPoints = [
+  '0', at(110), at(110), at(270), at(270), at(430), at(430), at(590), at(590), '1',
+].join(';')
+/* When each station is lit, on the same clock: the interval the cursor dwells there. */
+const dwell: Record<string, [number, number]> = {
+  classify: [0.08, 0.2],
+  draft: [0.3, 0.42],
+  approval: [0.5, 0.78],
+  send: [0.86, 0.96],
+}
+const tint = (id: string) => {
+  const [a, b] = dwell[id]!
+  return {
+    keyTimes: `0;${a};${a + 0.01};${b};${b + 0.01};1`,
+    values: '0;0;0.22;0.22;0;0',
+  }
+}
+---
+
+<div class={`panel overflow-hidden ${className}`}>
+  <div class="grid gap-px bg-scribe">
+    {/* The caption above and the drawing below, at full width, because the
+        drawing is the argument: beside a text column it shrank to a strip
+        whose labels could not be read in a documentation column. */}
+    <div class="flex flex-wrap items-baseline gap-x-8 gap-y-1 bg-panel-2 px-5 py-3.5">
+      <p class="legend text-ink-2">The cursor</p>
+      <p class="max-w-[64ch] text-[0.8125rem] leading-snug text-ink-3">
+        The daemon holds the run between steps: where it is, what each step
+        answered, what it is waiting for and until when. A worker holds one
+        step at a time, and only while it runs. During a wait no process is
+        alive at all.
+      </p>
+    </div>
+
+    <div class="relative bg-panel-2 px-4 py-5 sm:px-8">
+      <svg
+        class="h-auto w-full"
+        style="min-height: 170px"
+        viewBox="0 0 720 210"
+        preserveAspectRatio="xMidYMid meet"
+        fill="none"
+        role="img"
+        aria-label="A run's cursor moving through four steps: classify and draft, served by a worker; approval, a wait held by the daemon; and send, served by a worker."
+      >
+        <defs>
+          <path id="mcpd-run-line" d="M40,90 L680,90" />
+        </defs>
+
+        <use href="#mcpd-run-line" stroke="var(--color-scribe)" stroke-width="1" />
+
+        {stations.map((s) => {
+          const t = tint(s.id)
+          const wait = s.kind.startsWith('wait')
+          return (
+            <g>
+              {/* The station. A wait is drawn open, because nothing runs inside it. */}
+              <rect
+                x={s.x - 60} y="70" width="120" height="40"
+                fill={wait ? 'var(--color-panel-2)' : 'var(--color-well)'}
+                stroke="var(--color-scribe)"
+                stroke-dasharray={wait ? '4 3' : undefined}
+              />
+              {/* The tint it takes while it is the current step, on the cursor's clock. */}
+              <rect x={s.x - 60} y="70" width="120" height="40" fill="var(--color-amber)" fill-opacity="0" class="mcpd-run-tint">
+                <animate attributeName="fill-opacity" dur="10s" repeatCount="indefinite" calcMode="linear" keyTimes={t.keyTimes} values={t.values} />
+              </rect>
+              <text x={s.x} y="90" text-anchor="middle" dominant-baseline="central" fill="var(--color-ink)" style="font-family:var(--font-data);font-size:15px">{s.id}</text>
+              <text x={s.x} y="130" text-anchor="middle" dominant-baseline="central" fill="var(--color-ink-3)" style="font-family:var(--font-data);font-size:13px">{s.kind}</text>
+              <text x={s.x} y="176" text-anchor="middle" dominant-baseline="central" fill={wait ? 'var(--color-ink-2)' : 'var(--color-ink-3)'} style="font-family:var(--font-display);font-size:12px;letter-spacing:.14em;text-transform:uppercase">{s.owner}</text>
+            </g>
+          )
+        })}
+
+        {/* The retry loop on the last step: an attempt that fails retryable
+            comes back to the same station. Static, because it is a fact about
+            the graph and not a moment in this run. */}
+        <path d="M620,70 C620,48 560,48 560,70" stroke="var(--color-scribe)" stroke-width="1" />
+        <path d="M560,70 L556,63 M560,70 L565,64" stroke="var(--color-scribe)" stroke-width="1" />
+        <text x="590" y="40" text-anchor="middle" dominant-baseline="central" fill="var(--color-ink-3)" style="font-family:var(--font-data);font-size:13px">retry</text>
+
+        {/* The cursor. It starts already on the line, so the first painted
+            frame has it moving and never parked at the origin. */}
+        <circle r="4" fill="var(--color-amber)" class="mcpd-run-cursor">
+          <animateMotion dur="10s" repeatCount="indefinite" calcMode="linear" keyTimes={keyTimes} keyPoints={keyPoints} begin="-1s">
+            <mpath href="#mcpd-run-line" />
+          </animateMotion>
+        </circle>
+      </svg>
+    </div>
+  </div>
+</div>
+
+<style>
+  /* With motion reduced the cursor is hidden and every station rests lit: the
+     drawing then reads as the finished run, which is complete on its own. */
+  @media (prefers-reduced-motion: reduce) {
+    .mcpd-run-cursor { display: none; }
+    .mcpd-run-tint { fill-opacity: 0.14 !important; }
+    .mcpd-run-tint animate { display: none; }
+  }
+</style>

@@ -1,0 +1,322 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Unreleased from '@/components/Unreleased.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { Code } from 'astro:components'
+import { panelTheme } from '@/lib/shiki-theme'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* The compose file is written here rather than read from an example program,
+   because it is configuration for the reader's machine and not code that CI
+   compiles. Every key in it maps to a flag on the daemon. It is shown as one
+   file with no language tabs, because there is only one language it can be. */
+const compose = `services:
+  mcpd:
+    image: ghcr.io/mcpd/mcpd:latest
+    restart: unless-stopped
+    ports:
+      - "4317:4317"
+    volumes:
+      - mcpd-data:/data
+    environment:
+      MCPD_DATA: /data/mcpd.db
+      MCPD_PROJECT: default
+      # À définir avant que ce port ne soit joignable par quelqu’un d’autre.
+      # MCPD_INGEST_KEYS: key-for-your-agents
+      # MCPD_READ_KEYS: key-for-your-team
+      # MCPD_RETENTION_DAYS: 30
+
+volumes:
+  mcpd-data:
+`
+
+/* Internal links stay written as English routes and are localised here. A
+   route whose French page is not written yet resolves to the English page
+   rather than to a French URL with nothing behind it. */
+const code = localeOf(Astro.url.pathname)
+const url = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+---
+
+<Doc
+  title="Installation"
+  description="Toutes les façons d’installer mcpd : l’image Docker, un fichier compose, le chart Helm, un binaire de version publiée, et une compilation depuis les sources. Puis la vérification sur /healthz."
+  lede="mcpd est un binaire unique avec le stockage compilé dedans, si bien que l’installer revient à poser ce binaire quelque part et à le lancer. Prenez la voie ci-dessous qui correspond le mieux à votre façon de faire tourner les choses."
+  og="docs"
+>
+  <h2>Docker</h2>
+  <Unreleased class="not-prose my-6" />
+  <p>
+    L’image publiée est la voie la plus courte, et celle que suppose le reste de
+    la documentation.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    command="docker run -p 4317:4317 -v mcpd-data:/data -e MCPD_DATA=/data/mcpd.db ghcr.io/mcpd/mcpd"
+  />
+
+  <p>
+    Le volume compte. mcpd écrit une base SQLite au chemin que nomme
+    <code>MCPD_DATA</code>, et un conteneur sans volume emporte vos traces
+    quand il s’arrête. Nommer le chemin explicitement coûte un indicateur et
+    retire la question de savoir où le fichier est passé.
+  </p>
+  <p>
+    Chaque indicateur a une variable d’environnement, donc tout ce que vous pouvez
+    passer en ligne de commande, vous pouvez aussi le régler avec
+    <code>-e</code>. Fixez un tag plutôt que de suivre <code>latest</code> dans
+    tout ce qui compte pour vous. L’image est construite pour
+    <code>linux/amd64</code> et <code>linux/arm64</code>, et Docker récupère
+    celle qui correspond à votre machine.
+  </p>
+
+  <h2>Docker Compose</h2>
+  <p>
+    Le même conteneur, mis par écrit. C’est la forme à prendre quand mcpd est
+    posé à côté de votre application sur un seul hôte.
+  </p>
+
+  <div class="not-prose panel-raised mcpd-yaml my-6 overflow-hidden">
+    <div class="border-b border-scribe-2 bg-panel-1 px-3.5 py-2.5">
+      <span class="legend text-ink-3">compose.yaml</span>
+    </div>
+    <div class="scroll-x bg-well p-4 text-[0.8125rem] leading-[1.65]">
+      <Code code={compose} lang="yaml" theme={panelTheme as any} />
+    </div>
+  </div>
+
+  <p>
+    Les trois clés commentées sont celles à remplir avant que ceci n’atteigne un
+    réseau où se trouve quelqu’un d’autre. Sans aucune clé définie, l’ingestion
+    et les lectures sont ouvertes toutes les deux, ce qui est correct sur votre
+    portable et faux partout ailleurs.
+    <a href={url('/deploy')} class="link">Déploiement</a> indique ce qu’il faut
+    régler et pourquoi.
+  </p>
+
+  <h2>Kubernetes</h2>
+  <p>
+    Chaque version pousse le chart dans le même registre que l’image, comme
+    artefact OCI, il n’y a donc pas de dépôt à ajouter d’abord. Le chart refuse
+    de s’installer sans une clé d’ingestion et une clé de lecture, alors générez
+    les deux d’abord.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    command="helm install mcpd oci://ghcr.io/mcpd/charts/mcpd -n mcpd --create-namespace --set keys.ingest=$INGEST_KEY --set keys.read=$READ_KEY"
+    secondary={[
+      { label: 'Générer les clés', command: 'export INGEST_KEY=$(openssl rand -hex 32) READ_KEY=$(openssl rand -hex 32)' },
+    ]}
+  />
+
+  <p>
+    mcpd traite <code>SIGTERM</code> et s’arrête proprement, et c’est ce que
+    Kubernetes envoie. Il expose <code>/healthz</code> pour la sonde de vivacité
+    et <code>/readyz</code> pour la sonde de disponibilité, et les deux diffèrent
+    à dessein : la vivacité ne touche jamais au stockage, si bien qu’une base
+    lente ne peut pas faire redémarrer le pod en boucle. Les valeurs, les sondes
+    et la forme du Deployment sont sur
+    <a href={url('/deploy')} class="link">Docker et Kubernetes</a>.
+  </p>
+
+  <h2>Un binaire de version publiée</h2>
+  <p>
+    Chaque version joint une archive pour Linux sur x86_64 et arm64, statique et
+    compilée contre musl, si bien qu’il n’y a pas de libc à faire correspondre,
+    et pour macOS sur Apple silicon et Intel. Un fichier <code>SHA256SUMS</code>
+    et une attestation de provenance de compilation les accompagnent.
+    Décompressez l’archive de votre machine et lancez <code>./mcpd</code> ; sans
+    argument, il démarre le daemon.
+  </p>
+  <p>
+    Il n’y a pas de <code>cargo install mcpd</code>. Rien n’est publié sur
+    crates.io, et une crate compilée depuis le registre ne pourrait pas porter
+    l’interface, qui est construite avec npm et compilée dans le binaire. Avec
+    une chaîne d’outils Rust, compilez plutôt depuis les sources.
+  </p>
+
+  <h2>Depuis les sources</h2>
+  <p>
+    Clonez le dépôt et lancez la compilation de distribution. Elle emploie
+    l’optimisation complète à l’édition de liens et une seule unité de
+    génération de code, ce qui compile plus lentement et produit le binaire le
+    plus petit et le plus rapide. Passez par <code>make</code> plutôt que par
+    <code>cargo</code> directement : l’interface est compilée dans le binaire, et
+    <code>make dist</code> la construit d’abord, ce qu’un simple
+    <code>cargo build</code> sur un clone tout neuf n’a aucun moyen de faire.
+    Cette étape demande Node et npm sur la machine, en plus de la chaîne
+    d’outils Rust.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    command="git clone https://github.com/mcpd/mcpd && cd mcpd && make dist"
+    primaryLabel="Compilation de distribution"
+    secondary={[{ label: 'Compilation rapide', command: 'make build' }]}
+  />
+
+  <p>
+    Le binaire est écrit dans <code>target/dist/mcpd</code>, ou
+    <code>target/release/mcpd</code> si vous avez pris la voie rapide. Utilisez
+    <code>make build</code> pendant que vous travaillez sur mcpd lui-même, et
+    <code>make dist</code> pour tout ce que vous comptez faire tourner.
+  </p>
+
+  <h2>Où vont les données</h2>
+  <p>
+    <code>--data</code> est le chemin du fichier SQLite, et il vaut
+    <code>./mcpd.db</code> par défaut, dans le répertoire de travail. Les
+    répertoires parents sont créés pour vous.
+  </p>
+  <p>
+    Passer <code>:memory:</code> garde tout en mémoire et n’écrit rien sur le
+    disque. C’est le bon choix pour une suite de tests, pour une démonstration
+    sur la machine de quelqu’un d’autre, et pour toute exécution dont vous
+    préférez ne pas laisser traîner les prompts. Le stockage disparaît avec le
+    processus, et c’est le but.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="Ne rien laisser derrière"
+    command="mcpd --data :memory:"
+    primaryLabel="En mémoire"
+    secondary={[
+      { label: 'Semer une exécution d’exemple', command: 'mcpd demo --data :memory:' },
+      { label: 'Ailleurs', command: 'mcpd --data /var/lib/mcpd/mcpd.db' },
+    ]}
+  />
+
+  <p>
+    <code>mcpd demo</code> remplit le stockage avec une exécution en échec
+    réaliste puis se met à servir, si bien que l’interface a quelque chose dedans
+    la première fois que vous l’ouvrez.
+  </p>
+
+  <h2>Vérifiez ce qu’il fera avant de le lancer</h2>
+  <p>
+    <code>mcpd config</code> affiche la configuration à laquelle cette invocation
+    aboutit, puis s’arrête. Indicateurs, variables d’environnement et valeurs par
+    défaut finissent dans un seul relevé : vous voyez laquelle l’a emporté sans rien
+    démarrer.
+  </p>
+
+  {/* Every line the binary prints, with nothing set. `make check` compares the
+      labels with the binary's own output, because this cast once stopped at
+      sixteen lines after the binary had grown to twenty-nine. */}
+  <TerminalCast
+    class="not-prose my-8"
+    title="configuration résolue"
+    lines={[
+      { cmd: 'mcpd config' },
+      { out: 'listen          0.0.0.0:4317' },
+      { out: 'storage         sqlite at ./mcpd.db' },
+      { out: 'config file     none' },
+      { out: 'log format      text' },
+      { out: 'project         default' },
+      { out: 'projects        none' },
+      { out: 'retention       forever' },
+      { out: 'ingest auth     open', tone: 'warn' },
+      { out: 'read auth       open', tone: 'warn' },
+      { out: 'write auth      open', tone: 'warn' },
+      { out: 'admin auth      open', tone: 'warn' },
+      { out: 'execute auth    open', tone: 'warn' },
+      { out: 'worker auth     open', tone: 'warn' },
+      { out: 'signup          off' },
+      { out: 'runs            sqlite at ./mcpd.runs.db' },
+      { out: 'run settings    lease_ttl_ms 30000, reclaim_window_ms 30000, stall_window_ms 300000, idempotency_window_ms 86400000, park_ttl_ms 86400000, max_depth 8, max_step_repeats 16' },
+      { out: 'identity        off' },
+      { out: 'client ip       peer address' },
+      { out: 'sampling        keep everything' },
+      { out: 'quota           unlimited' },
+      { out: 'redaction       on', tone: 'ok' },
+      { out: 'redact key      built in, which is public; set --redact-key', tone: 'warn' },
+      { out: 'cors            same-origin only' },
+      { out: 'timeout         30s per request' },
+      { out: 'limits          32 MiB per request, 10000 signals per batch' },
+      { out: 'derived         duration and token metrics' },
+      { out: 'aspects         off' },
+      { out: 'monitors        none' },
+      { out: 'objectives      none' },
+      { out: 'judge           off' },
+      { out: 'forwarding      off' },
+    ]}
+  />
+
+  <h2>Vérifiez l’installation</h2>
+  <p>
+    <code>/healthz</code> répond à la question de savoir s’il tourne vraiment. Il
+    ne lit jamais le stockage, donc il reste rapide et reste honnête sur le
+    processus plutôt que sur le disque.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="vérification"
+    lines={[
+      { cmd: 'curl -s localhost:4317/healthz' },
+      {
+        out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0","uptime_seconds":8,"storage":"sqlite"}',
+        tone: 'ok',
+      },
+      { cmd: 'curl -s -o /dev/null -w "%{http_code}\\n" localhost:4317/readyz' },
+      { out: '200', tone: 'ok' },
+    ]}
+  />
+
+  <p>
+    <code>spec_version</code> est la version du modèle de données que cette
+    compilation met en œuvre. Un client peut la lire et refuser de parler à un
+    serveur qu’il ne comprend pas, ce qui vaut mieux qu’envoyer un lot qui sera
+    rejeté champ par champ.
+  </p>
+  <p>
+    <code>/readyz</code> est l’autre moitié. Il interroge le stockage et répond
+    <code>503</code> quand le stockage est injoignable, si bien qu’un répartiteur
+    de charge cesse d’envoyer des lectures à une instance qui ne peut pas les
+    servir. Prenez <code>/healthz</code> pour la vivacité et <code>/readyz</code>
+    pour la disponibilité, jamais le même pour les deux.
+  </p>
+  <p>
+    Ouvrez ensuite <a href="http://localhost:4317" class="link" rel="noopener">
+      localhost:4317</a
+    > et vous avez l’interface sous les yeux.
+  </p>
+
+  <h2>Ensuite</h2>
+  <ul>
+    <li>
+      Envoyez-lui une trace depuis votre propre agent :
+      <a href={url('/docs/quickstart')} class="link">Prise en main</a>.
+    </li>
+    <li>
+      Apprenez les mots qu’emploie le reste de la documentation :
+      <a href={url('/docs/concepts')} class="link">Concepts</a>.
+    </li>
+    <li>
+      Chaque indicateur et variable d’environnement dans un seul tableau :
+      <a href={url('/docs/configuration')} class="link">Configuration</a>.
+    </li>
+    <li>
+      Avant que quelqu’un d’autre puisse atteindre le port :
+      <a href={url('/deploy')} class="link">Docker et Kubernetes</a>.
+    </li>
+  </ul>
+</Doc>
+
+<style>
+  /* Shiki emits its own <pre>. Strip its box so the recessed well shows
+     through, and set the data face, exactly as the language switcher does. */
+  .mcpd-yaml :global(pre.astro-code),
+  .mcpd-yaml :global(pre.astro-code code) {
+    font-family: var(--font-data);
+  }
+  .mcpd-yaml :global(pre.astro-code) {
+    background: transparent;
+    margin: 0;
+    padding: 0;
+  }
+</style>

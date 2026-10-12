@@ -1,0 +1,263 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import RunCursor from '@/components/RunCursor.astro'
+import { exampleLanguages } from '@/lib/snippets'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const langs = exampleLanguages('workflow')
+const loc = localeOf(Astro.url.pathname)
+const link = (route: string) => urlFor(route, loc)
+---
+
+<Doc
+  title="Workflows"
+  description="Un workflow durable dans mcpd : la définition que le daemon parcourt, les neuf constructions, templates et gardes, nouvelles tentatives et effets, et le builder qui l’écrit en six langages."
+  lede="Un workflow, ce sont des données que le daemon détient et des corps que le daemon ne voit jamais. Cette page traite des données : ce qu’une définition peut dire, et ce que chaque construction fait faire au daemon."
+  og="docs"
+>
+  <h2>La répartition du travail</h2>
+  <p>
+    Une exécution durable a deux propriétaires. Le daemon possède l’exécution
+    entre les étapes : le curseur, le journal, le budget de nouvelles
+    tentatives, les timers et les attentes. Votre processus possède tout ce qui
+    se passe à l’intérieur d’une étape : le modèle que vous appelez, le prompt
+    que vous envoyez, les outils que vous exécutez, les secrets que vous
+    détenez. Rien de tout cela n’est remis au daemon, et il n’exécute jamais un
+    modèle à votre place.
+  </p>
+  <p>
+    Un workflow arrive donc en deux parties depuis un seul fichier. Le graphe va
+    au daemon sous forme de définition, un document que le daemon parcourt. Les
+    corps d’étape restent dans votre processus, dans le langage où vous les avez
+    écrits, pour qu’un <a href={link('/docs/workers')} class="link">worker</a>
+    les serve. Il n’y a rien à déployer sur le daemon, et un corps peut changer
+    sans que la définition change en quoi que ce soit.
+  </p>
+
+  <RunCursor class="not-prose my-8" />
+
+  <h2>En écrire un</h2>
+  <p>
+    Le builder produit les deux parties. <code>document()</code> est la
+    définition, et chaque appel à <code>step</code> ou à <code>agent</code>
+    garde son corps de côté pour le worker. Chaque SDK a le même builder avec
+    les mêmes neuf constructions : un workflow écrit dans un langage se lit de
+    la même façon dans un autre, et le daemon stocke le même document quel que
+    soit celui qui l’a écrit.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" example="workflow" region="workflow" only={langs} title="un workflow de support" />
+
+  <p>
+    Trois traits de cet exemple donnent la forme de tout workflow. L’entrée d’une
+    étape est un template que le daemon évalue à chaque tentative, si bien que
+    <code>draft</code> lit ce que <code>classify</code> a répondu sans qu’aucun
+    des deux corps connaisse l’autre. Une garde décide si un nœud s’exécute :
+    une question part telle quelle, un bug attend une personne. Et la dernière
+    étape est en <code>at_most_once</code> avec une politique de nouvelles
+    tentatives, la combinaison qu’exige un effet de bord : le daemon réessaie
+    après une défaillance passagère, et il n’exécute jamais un corps deux fois
+    sans qu’on le lui ait dit.
+  </p>
+
+  <h2>Les constructions</h2>
+  <p>
+    Neuf, et chaque SDK les a toutes les neuf. Deux sont réclamables, c’est-à-dire
+    servies par un worker ; les autres appartiennent au daemon.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Construction</th><th>Qui l’exécute</th><th>Ce qu’elle fait</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>task</code></td>
+        <td>Un worker</td>
+        <td>Du travail réclamable. Le worker exécute le code qu’il a enregistré sous cet identifiant.</td>
+      </tr>
+      <tr>
+        <td><code>agent</code></td>
+        <td>Un worker</td>
+        <td>La même chose sur le réseau, consignée comme un tour d’agent : votre propre boucle, avec autant d’appels de modèle qu’il faut, comme une seule étape durable. La trace et l’interface la distinguent d’une tâche ordinaire.</td>
+      </tr>
+      <tr>
+        <td><code>sleep</code></td>
+        <td>Le daemon</td>
+        <td>Un délai d’un certain nombre de millisecondes. Aucun processus n’est vivant pendant ce temps.</td>
+      </tr>
+      <tr>
+        <td><code>sleep_until</code></td>
+        <td>Le daemon</td>
+        <td>Un délai jusqu’à un instant évalué à partir d’un template, par exemple une date de facturation portée par l’entrée.</td>
+      </tr>
+      <tr>
+        <td><code>wait_event</code></td>
+        <td>Le daemon</td>
+        <td>Une pause jusqu’à l’arrivée d’un événement portant ce nom et cette clé, ou jusqu’au passage de l’échéance. La clé est évaluée par exécution, si bien qu’une attente vise une commande et une seule.</td>
+      </tr>
+      <tr>
+        <td><code>parallel</code></td>
+        <td>Les deux</td>
+        <td>Des branches nommées, chacune une étape réclamable, toutes sur disque avant qu’aucune ne soit proposée. L’exécution repart quand la dernière branche se termine.</td>
+      </tr>
+      <tr>
+        <td><code>foreach</code></td>
+        <td>Les deux</td>
+        <td>Une étape réclamable par élément du tableau situé à un chemin, bornée par <code>max_items</code> et, si vous le demandez, par le nombre d’étapes simultanées. Les sorties reviennent en tableau, dans l’ordre des éléments.</td>
+      </tr>
+      <tr>
+        <td><code>loop</code></td>
+        <td>Les deux</td>
+        <td>Une boucle bornée sur une étape réclamable. <code>until</code> est évalué après chaque itération et peut y mettre fin plus tôt.</td>
+      </tr>
+      <tr>
+        <td><code>subworkflow</code></td>
+        <td>Le daemon</td>
+        <td>Une exécution fille d’une autre définition, avec son propre journal. Sa sortie devient la sortie de cette étape, et annuler le parent l’annule.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Une branche, un corps de foreach et un corps de loop sont chacun une étape
+    réclamable. Un corps qui a besoin de plusieurs étapes est un subworkflow,
+    ce qui garde chaque journal plat : une exécution est une liste, jamais un
+    arbre de listes.
+  </p>
+
+  <h2>Templates et gardes</h2>
+  <p>
+    Un template est du JSON portant des références <code>${'${path}'}</code>
+    dans ses chaînes. Le daemon l’évalue à la création d’une tentative, à
+    partir de ce que l’exécution détient à cet instant : <code>input</code>,
+    l’entrée de l’exécution ; <code>steps.&lt;id&gt;</code>, ce qu’une étape
+    antérieure a répondu, avec <code>.output</code>, <code>.status</code> et
+    <code>.error</code> ; <code>run</code>, l’identifiant et la corrélation de
+    l’exécution ; et, à l’intérieur d’un foreach ou d’un loop,
+    <code>item</code>, <code>index</code> et <code>iter.index</code>. Une
+    référence qui occupe toute la chaîne garde son type, si bien que
+    <code>"${'${steps.classify.output}'}"</code> remet à l’étape suivante un
+    objet, et non une chaîne qui en contient un.
+  </p>
+  <p>
+    Une garde est un prédicat sur les mêmes chemins : <code>eq</code>,
+    <code>ne</code>, <code>lt</code>, <code>lte</code>, <code>gt</code>,
+    <code>gte</code>, <code>in</code>, <code>exists</code> et
+    <code>matches</code>, combinés par <code>all</code>, <code>any</code> et
+    <code>not</code>. Une garde fausse écrit le nœud comme <code>skipped</code>
+    et l’exécution repart. Un chemin absent rend toute comparaison fausse au
+    lieu de lever une erreur, parce qu’une exécution qui meurt sur un champ
+    manquant est une exécution que personne ne peut mener à terme.
+  </p>
+  <p>
+    Le daemon valide le document au moment où il est stocké. Une garde qui nomme
+    un chemin que rien ne peut produire, un template qui lit une étape déclarée
+    plus loin, un foreach sur autre chose qu’un chemin, un identifiant qui ne
+    respecte pas <code>^[a-z][a-z0-9_]*$</code> : chacun est refusé avec un 400
+    qui nomme le champ. Les champs inconnus sont refusés eux aussi, si bien
+    qu’une garde mal orthographiée est une erreur et non une exécution qui saute
+    sa garde.
+  </p>
+  <p>
+    Chaque durée a un plafond aussi bien qu’un plancher.
+    <code>run_timeout_ms</code>, <code>step_timeout_ms</code>, les
+    <code>initial_ms</code> et <code>max_ms</code> d’une politique de nouvelles
+    tentatives, le <code>ms</code> d’un sleep et le <code>timeout_ms</code>
+    d’une attente valent chacun au plus <code>315360000000</code>, soit
+    3650 jours, et une valeur plus longue est refusée avec un 400 qui nomme le
+    champ, le plafond et la valeur que vous avez envoyée. Une échéance plus
+    lointaine ne tiendrait pas dans l’horloge sur laquelle le daemon la stocke.
+  </p>
+
+  <h2>Nouvelles tentatives, effets et échec</h2>
+  <p>
+    Un corps qui échoue dit au daemon comment, avec une classe.
+    <code>retryable</code> justifie une nouvelle tentative, et le daemon en fait
+    une tant que dure le budget <code>retry</code> du nœud, en respectant le
+    backoff du nœud et en attendant au moins le <code>retry_after_ms</code> que
+    le corps a demandé, lui-même soumis au même plafond de 3650 jours que toute
+    autre durée. <code>fatal</code> et <code>invalid_input</code> ne sont pas
+    réessayés. <code>unservable</code> veut dire que ce worker ne détient
+    pas la définition ou l’étape, et la tentative retourne dans la file pour un
+    autre worker sans dépenser le budget. Un corps qui lève autre chose est
+    <code>fatal</code>.
+  </p>
+  <p>
+    <code>max_attempts</code> compte toutes les tentatives, y compris la
+    première : la valeur par défaut de un veut donc dire aucune nouvelle
+    tentative. Une fois le budget épuisé, <code>on_error</code> tranche.
+    <code>fail_run</code>, la valeur par défaut, met fin à l’exécution avec le
+    message de l’étape comme erreur ; <code>continue</code> marque l’étape en
+    échec et repart, de sorte qu’une garde ultérieure peut lire
+    <code>steps.&lt;id&gt;.status</code> et la contourner.
+  </p>
+  <p>
+    <code>effect</code> dit ce que coûterait un corps exécuté en double. Sous
+    <code>at_least_once</code>, la valeur par défaut, un bail perdu remet la
+    tentative en file et le corps peut tourner une nouvelle fois. Sous
+    <code>at_most_once</code>, le worker doit poster <code>started</code> avant
+    le corps, et une tentative démarrée dont le bail est perdu échoue au lieu de
+    tourner à nouveau. Réservez-le à l’étape qui envoie l’e-mail ou débite la
+    carte, et donnez à ce corps l’<code>idempotency_key</code> du bail à
+    transmettre au tiers : elle est stable d’une tentative à l’autre de la même
+    étape, si bien qu’une nouvelle tentative après une réponse perdue est
+    reconnue de l’autre côté aussi.
+  </p>
+
+  <h2>Les versions</h2>
+  <p>
+    Une définition est immuable une fois stockée. Postez le même corps à nouveau
+    et vous récupérez la même version ; postez un corps différent sous une
+    version qui existe et le daemon refuse avec un 409, car une exécution qui
+    a épinglé cette version verrait sinon sa définition changer. Omettez la
+    version et le daemon attribue le numéro suivant, ce que fait un worker au
+    démarrage.
+    Une exécution épingle la version avec laquelle elle a commencé et ne la
+    résout jamais à nouveau : un déploiement qui stocke la version 3 termine les
+    exécutions en version 2 telles qu’elles avaient été écrites.
+  </p>
+
+  <h2>Les limites</h2>
+  <p>
+    Une définition peut déclarer <code>max_steps</code>,
+    <code>run_timeout_ms</code> et <code>max_cost_usd</code>. Le daemon impute
+    chaque tentative à la première, l’âge de l’exécution à la deuxième, et la
+    consommation tarifée que les étapes déclarent à la troisième, puis il
+    termine l’exécution en <code>timed_out</code> ou en <code>failed</code> au
+    plafond, en nommant le plafond comme erreur. Une
+    boucle qui ne converge pas et une étape d’agent qui ne cesse pas de dépenser
+    sont le même problème pour le daemon, et la même limite arrête les deux.
+  </p>
+
+  <h2>Ce que le daemon garde</h2>
+  <p>
+    L’entrée d’une exécution, son état, sa sortie, et l’entrée et la sortie de
+    chaque étape sont gardés dans le stockage des exécutions exactement tels
+    qu’ils ont été envoyés. Ils ne sont pas masqués : ce sont les données de
+    travail du workflow lui-même, une étape ultérieure les relit, et une valeur
+    que le masquage aurait réécrite changerait ce que fait l’exécution. Les
+    spans qu’une exécution écrit dans le stockage des traces sont masqués comme
+    tout autre span. La conservation et l’effacement atteignent aussi le
+    stockage des exécutions, pour les exécutions terminées.
+    <a href={`${link('/docs/runs')}#storage`} class="link">Exécutions</a> dit
+    exactement ce que chacun supprime.
+  </p>
+
+  <h2>Ensuite</h2>
+  <ul>
+    <li>
+      Servir les corps, et le protocole que parle un worker :
+      <a href={link('/docs/workers')} class="link">Workers</a>.
+    </li>
+    <li>
+      Démarrer, observer, signaler et annuler une exécution :
+      <a href={link('/docs/runs')} class="link">Exécutions</a>.
+    </li>
+    <li>
+      Le document lui-même, champ par champ :
+      <a href="https://github.com/mcpd/mcpd/blob/main/spec/definition.schema.json" class="link">definition.schema.json</a>,
+      et le contrat qui l’engage dans
+      <a href="https://github.com/mcpd/mcpd/blob/main/internal/run-contract-v1.md" class="link">run-contract-v1.md</a>.
+    </li>
+  </ul>
+</Doc>

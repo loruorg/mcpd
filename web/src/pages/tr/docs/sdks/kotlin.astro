@@ -1,0 +1,394 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (href: string) => urlFor(href, code)
+
+const install = `dependencies {
+    implementation("dev.mcpd:mcpd-kotlin:0.1.0")
+}`
+
+const scoped = `// Bloğun değeri span'in değeridir, yani ölçümleme sizi kodu onun çevresinde
+// yeniden kurmaya zorlamaz.
+val answer = mcpd.span("retrieve_context", SpanKind.RETRIEVAL) { span ->
+    span.setInput(query)
+    val docs = index.search(query)
+    span.setOutput(docs.map { it.id })
+    span.setAttribute("retrieval.hits", docs.size)
+    docs
+}`
+
+const manual = `val run = mcpd.trace("nightly_reindex", SpanKind.WORKFLOW_RUN, tags = listOf("batch"))
+try {
+    reindex()
+    run.end()
+} catch (e: Exception) {
+    run.setError(e)
+    run.end()
+}`
+
+const nesting = `mcpd.span("support_agent", SpanKind.AGENT_RUN) { run ->
+    // draft'a hiçbir şey geçilmez. Kaç suspend çağrı aşağıda olursa olsun,
+    // çalıştırmayı coroutine bağlamından bulur.
+    run.setOutput(draft(question))
+}
+
+suspend fun draft(question: String): String =
+    mcpd.span("draft_answer", SpanKind.MODEL_GENERATION) { generation ->
+        generation.setInput(question)
+        "..."
+    }`
+
+const propagation = `// Giden: başlığı bir sonraki servise verin.
+request.header("traceparent", span.traceparent())
+
+// Gelen: yeni bir trace başlatmak yerine o trace'i sürdürün.
+mcpd.span("checkout", traceparent = headers["traceparent"]) { span ->
+    charge(span)
+}`
+
+const payload = `generation.setModel("gpt-4o", provider = "openai")
+generation.setUsage(inputTokens = 1_180, outputTokens = 96)
+
+// setError elinizdeki throwable'ı alır; mesaj, sınıf ve yığın izinin hepsi
+// ondan gelir.
+tool.setError(e, retryable = true)
+
+// Ya da doğrudan bir mesaj; iki durumda da mesaj zorunludur.
+tool.setError("the shipping service returned 503")`
+
+const surface = `// Prompt'ları ve tamamlamaları sürecin içinde tutun: span yine zamanlamasını,
+// durumunu, kullanımını, modelini, ilişkilendirmesini ve hatalarını taşır.
+val quiet = Mcpd(McpdConfig(capturePayloads = false))
+quiet.span("draft_answer", input = question, capturePayloads = true) { }  // bu tutulur
+
+// Başka bir izleyicinin bitirdiği bir span, verildiği gibi kuyruğa girer: üstü,
+// zamanları ve örneklemesi değiştirilmez. Bozuk bir kimlik atılır ve sayılır,
+// hiç fırlatılmaz.
+mcpd.record(finishedSpan)
+
+// Kaydedileni sunucu olmadan doğrulayın.
+val recorder = RecordingSink()
+val local = Mcpd(McpdConfig(sink = recorder))
+local.span("support_agent") { run -> run.setUsage(inputTokens = 12, outputTokens = 3) }
+local.flush()
+check(recorder.spans.single().usage?.inputTokens == 12L)
+
+// queued, dropped, capacity, exported, failed, rejected.
+val stats = local.stats()`
+
+const shutdown = `// Bir JVM servisi: çıkarken kapatın.
+Runtime.getRuntime().addShutdownHook(Thread { mcpd.close() })
+
+// Kısa ömürlü bir worker: use ile kullanın, kapanış süslü parantezinde kapanır.
+Mcpd(McpdConfig(project = "batch")).use { mcpd ->
+    mcpd.span("reindex") { run -> reindex(run) }
+}`
+---
+
+<Doc
+  title="Kotlin"
+  description="Kotlin için mcpd SDK'sı: coroutine bağlamında tutulan etkin span, doğru ele alınan yapısal eşzamanlılık ve iptal, hiçbir zaman hata fırlatmayan ölçümleme."
+  lede="Önce coroutine. Etkin span coroutine bağlamında durur, iptal bir başarısızlık olarak değil iptal olarak kaydedilir ve buradaki hiçbir şey ajanınıza hata fırlatmaz."
+  og="docs"
+>
+  <h2>Kurulum</h2>
+  <p>
+    Kotlin 2.4 ile derlenir, JVM 17 veya üstü gerekir. Tek bağımlılıklar
+    kotlinx coroutines ve serialization. HTTP işini JDK'nın kendi istemcisi
+    yapar, yani HTTP konusunda zaten bir tercihi olan bir servise hiçbir şey
+    eklenmez.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="build.gradle.kts"
+    samples={[{ lang: 'kotlin', label: 'Gradle', shiki: 'kotlin', code: install }]}
+  />
+
+  <h2>İstemciyi oluşturma</h2>
+  <p>
+    Süreç başına bir örnek. <code>McpdConfig</code> alanlarının her biri
+    varsayılanını bir ortam değişkeninden okur ve kodda da verilebilir, böylece
+    aynı kod tek bir düzenleme olmadan hem geliştirmede hem üretimde çalışır.
+    Argümansız <code>Mcpd()</code>, yerel bir mcpd ile çalışır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="init" title="bağlanma" />
+
+  <p>Kod ortam değişkenine, ortam değişkeni de varsayılana üstün gelir.</p>
+
+  <table>
+    <thead>
+      <tr><th>Alan</th><th>Ortam değişkeni</th><th>Varsayılan</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>apiKey</code></td><td><code>MCPD_API_KEY</code></td><td>yok</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>yok</td></tr>
+      <tr><td><code>serviceName</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>yok</td></tr>
+      <tr><td><code>serviceVersion</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>yok</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capturePayloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>logLevel</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      <tr><td><code>batchSize</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flushInterval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2s</code></td></tr>
+      <tr><td><code>maxQueue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10s</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>enabled = false</code>, her kayıt çağrısını yine de geçerli span'ler
+    döndüren boş bir işleme çevirir; böylece testlerde sınanan koda dokunmadan
+    mcpd kapatılabilir. Okumalar yine sunucuya gider: bir sorgu, çağıranın
+    yanıtını beklediği bir şeydir ve boş bir yanıt yalan olurdu.
+  </p>
+
+  <h2>Bir çalıştırmayı kaydetme</h2>
+  <p>
+    <code>span</code> alışılmış biçimdir. Span'i kapatır, bloğun çağırdığı her
+    şey için onu etkin span yapar ve blok ne döndürdüyse onu döndürür. Hata
+    fırlatan bir blok, istisnayı taşıyan bir <code>error</code> span'i bırakır ve
+    istisnayı olduğu gibi yeniden fırlatır.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="kapsamlı biçim"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: scoped }]}
+  />
+
+  <p>
+    İptal edilen bir blok farklıdır ve farklı kaydedilir. Çağıranı ya da bir
+    zaman aşımı tarafından terk edilen bir coroutine, span'i <code>error</code>
+    yerine <code>cancelled</code> olarak kapatır; çünkü bilerek yapılan bir
+    terk, işlemin başarısızlığı değildir ve trace listesinde öyle okunmamalıdır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="trace" title="bir çalıştırmayı kaydetme" />
+
+  <p>Blok yapısı size uymuyorsa span'i kendiniz başlatıp kendiniz kapatın.</p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="bloksuz"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: manual }]}
+  />
+
+  <h2>Bağlam</h2>
+  <p>
+    Etkin span, coroutine bağlamının bir ögesidir; yani thread'i değil
+    coroutine'i izler. Birkaç katman aşağıdaki bir suspend fonksiyon, hiçbir
+    çağıran ona bir üst vermeden doğru üst span'in altında bir alt span açar ve
+    aynı dispatcher üzerindeki iki çalıştırma birbirinin span'lerini hiç görmez.
+    Etkin span'i <code>mcpd.currentSpan()</code> ile okuyun, başlığını ise
+    <code>mcpd.traceparent()</code> ile alın.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="iç içe geçme"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: nesting }]}
+  />
+
+  <p>
+    Servisler arasında bağlam, örnekleme kararını da birlikte taşıyan W3C
+    <code>traceparent</code> başlığında gider; böylece bir trace hiçbir zaman
+    yarım kaydedilmez. Bozuk bir başlık, onu taşıyan isteği başarısız kılmak
+    yerine yeni bir trace başlatır.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="servis sınırının ötesinde"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: propagation }]}
+  />
+
+  <h2>Model, kullanım ve hatalar</h2>
+  <p>
+    mcpd alım sırasında token sayılarını maliyete çevirir, dolayısıyla trace'te
+    gördüğünüz rakam size faturalanan rakamdır. Bir hatayı kaydetmek aynı
+    hamlede span'in durumunu <code>error</code> yapar ve her zaman bir mesaj
+    bulunur: "bir şey başarısız oldu" ile kimse bir şey yapamaz.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="bir span neler taşır"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: payload }]}
+  />
+
+  <p>
+    Geri kalanlar <code>setInput</code>, <code>setOutput</code>,
+    <code>setMetadata</code>, <code>setAttribute</code>,
+    <code>setAttributes</code>, <code>setTags</code>,
+    <code>setCorrelation</code> ve <code>addLink</code>; ayrıca açık bir alt span
+    için <code>child</code>, bir zaman noktası için <code>event</code>. Hepsi her
+    thread'den güvenle çağrılabilir ve hiçbiri hata fırlatmaz. Başka bir izleme
+    sisteminin ağacına ait bir span, onu <code>externalParentSpanId</code> ile
+    adlandırır; bu değer ilişkilendirme için taşınır ve mcpd'nin kendi ağacında
+    hiçbir zaman üst olarak kullanılmaz.
+  </p>
+
+  <h2>Payload'lar, sink'ler ve bitmiş span'ler</h2>
+  <p>
+    <code>capturePayloads = false</code>, <code>input</code> ve
+    <code>output</code> alanlarını sürecin içinde tutar: kayıt kuyruğa varmadan
+    atılırlar, böylece bir flush sırasında hassas hiçbir şey dışarı çıkmaz; tek
+    bir span bunu kendisi için geçersiz kılabilir. Exporter her yığını bir
+    <code>Sink</code> nesnesine verir: varsayılan olarak HTTP taşıyıcısına, bir
+    test için yığınları bellekte tutan bir <code>RecordingSink</code> nesnesine
+    ya da sinyal başına tek bir JSON satırı yazan bir <code>ConsoleSink</code>
+    nesnesine. Hata fırlatan bir sink, aralık başına bir kez bildirilen ve
+    çağırana asla iletilmeyen başarısız bir yığın demektir.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="yakala, kaydet, doğrula"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: surface }]}
+  />
+
+  <h2>Kalıcı çalıştırmalar</h2>
+  <p>
+    Daemon'ın kalıcı çalıştırmalarını da aynı istemci karşılar.
+    <code>Workflow</code> tanımı kurar ve adım gövdelerini suspend lambda olarak
+    saklar; bir <code>Worker</code> bu tanımı kaydeder, lease'ler için uzun
+    yoklama yapar ve her birini bir coroutine üzerinde karşılar;
+    <code>startRun</code>, <code>watchRun</code>, <code>publishEvent</code> ve
+    diğerleri ise istemci üzerinde çalıştırma yüzeyini bire bir yansıtan
+    uzantılardır. Bir gövde, adımın bütçesi içinde yeniden denenmek için
+    <code>RetryableException</code> fırlatır ve <code>StepContext</code>
+    üzerinden kendi adımının altına span kaydeder. Bağlam üzerinden açılan her
+    span, bittikçe kendi kullanımını adımınkine ekler; böylece model çağrılarını
+    kaydeden bir gövde token'ları hiç elle toplamaz. <code>setUsage</code> ise
+    span'lerin topladığını geçersiz kılar. Bir <code>Worker</code>,
+    <code>onError</code> yanında dört isteğe bağlı hook alır
+    (<code>onLease</code>, <code>onStepStart</code>, <code>onStepEnd</code>,
+    <code>onConflict</code>) ve <code>stats()</code> çağrısını yanıtlar:
+    talepler, yolda olan gövdeler, tamamlamalar, sınıfına göre başarısızlıklar,
+    nedenine göre çakışmalar ve karşılanamayan lease'ler.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} example="workflow" region="workflow" title="bir iş akışı" />
+  <p>
+    Her yapının ne yaptığı, lease protokolü ve çalıştırma API'si şu sayfalarda:
+    <a href={linkTo('/docs/workflows')} class="link">İş akışları</a>,
+    <a href={linkTo('/docs/workers')} class="link">Worker'lar</a> ve
+    <a href={linkTo('/docs/runs')} class="link">Çalıştırmalar</a>.
+  </p>
+
+  <h2>Puanlar ve geri bildirim</h2>
+  <p>
+    <code>min</code> ve <code>max</code> zorunlu parametrelerdir. Yedi, on
+    üzerinden çok iyidir ama yüz üzerinden kötüdür; yani ölçeği bildirilmemiş
+    bir sayı hiçbir şeyle karşılaştırılamaz. Geri bildirim bir insanın
+    yargısıdır ve puandan ayrı durur; çünkü ikisi farklı sorulara yanıt verir ve
+    asla birlikte ortalanmamalıdır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="score" title="puan ve geri bildirim" />
+
+  <p>
+    Loglar ve metrikler etkin span'e bağlanır, böylece bir grafikteki sıçrama
+    onu doğuran çalıştırmayı açar.
+  </p>
+
+  <h2>Flush ve kapatma</h2>
+  <p>
+    Kayıt, bellekteki sınırlı bir kuyruğa ekler ve döner; yığınlamayı,
+    sıkıştırmayı ve göndermeyi bir worker coroutine'i yapar.
+    <code>flush()</code> kuyrukta bekleyeni gönderir ve bekler.
+    <code>shutdown()</code> worker'ı durdurur, kalanı gönderir ve iki kez
+    çağrılması güvenlidir. Son dışa aktarım iptal edilemez biçimde çalışır;
+    çünkü kapatmaya genellikle iptal sırasında bir <code>finally</code>
+    bloğundan gelinir ve sürecin neden gittiğini açıklayan yığın da o son
+    yığındır.
+  </p>
+  <p>
+    <code>Mcpd</code> bir <code>AutoCloseable</code> olduğu için hem
+    <code>use</code> hem de bir kapatma hook'u işe yarar. İkisini de çağırmayan
+    serverless bir fonksiyon ya da kısa ömürlü bir worker son yığınını kaybeder,
+    çünkü runtime handler döner dönmez zamanlamayı durdurur.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="kapatma"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: shutdown }]}
+  />
+
+  <h2>Geri aldıklarınız</h2>
+  <p>
+    Okuma metotları HTTP API'yi bire bir yansıtır ve üretilmiş tipleri döndürür.
+    Hata fırlatan tek metotlar bunlardır ve <code>McpdException</code>
+    fırlatırlar: yanıtını beklediğiniz bir sorgu, yutulacak bir şey değildir.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="çalıştırmayı geri okuma"
+    lines={[
+      { cmd: 'gradle run' },
+      { out: '> Task :run' },
+      { out: 'support_agent: 4 spans, ok', tone: 'ok' },
+      { out: '  agent_run support_agent 79ms' },
+      { out: '  model_generation plan_answer 41ms' },
+      { out: '  tool_call lookup_order 16ms' },
+      { out: '  tool_call estimate_delivery 11ms shipping service returned 503 for order 41', tone: 'warn' },
+    ]}
+  />
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="query" title="arama ve analiz" />
+
+  <h2>Güvenebilecekleriniz</h2>
+  <ul>
+    <li>
+      Ölçümleme hiçbir zaman hata fırlatmaz. Başarısız bir dışa aktarım,
+      erişilemeyen bir sunucu ya da serileştirilemeyen bir değer,
+      <code>java.util.logging</code> üzerinden 30 saniyede en çok bir kez
+      bildirilir, geri kalanında yutulur. Gözlemlenebilirlik, gözlediği şeyi
+      asla devirmemelidir.
+    </li>
+    <li>
+      Kayıt bloklamaz, yani servisinizin gecikmesi mcpd'nin hızlı ya da ayakta
+      olmasına hiç bağlı değildir.
+    </li>
+    <li>
+      Bellek sınırlıdır. Kuyruk <code>maxQueue</code> kadar sinyal tutar; bunun
+      ötesinde en eskiler atılır ve sayılır; bu sayı <code>droppedSignals</code>
+      alanından ve <code>stats()</code> içinden okunur. Sınırsız bir tampon, bir
+      ağ kesintisini bellek yetersizliğinden ölüme çevirir.
+    </li>
+    <li>
+      Örnekleme kararı bir kez, kökte verilir ve aşağıya kalıtılır.
+    </li>
+    <li>
+      Bir span hem başladığında hem bittiğinde dışa aktarılır, yani yolun
+      ortasında çökmüş bir çalıştırma yine de görünür olur. Bir span, başlangıç
+      kaydı gönderilmeden önce biterse kayıt yerinde güncellenir ve yalnızca bir
+      tanesi gönderilir.
+    </li>
+    <li>
+      Yığınlar 1 KiB üzerinde gzip ile sıkıştırılır ve yeniden denemeyi atlatan
+      bir idempotency anahtarı taşır; böylece sunucu kaydettikten sonra zaman
+      aşımına uğrayan bir istek iki kez sayılamaz.
+    </li>
+    <li>
+      Süreler monotonik bir saatten ölçülür, yani bir NTP sıçraması negatif bir
+      süre üretemez.
+    </li>
+  </ul>
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">Çalıştırma bulma</a>
+    filtreleri eksiksiz anlatır.
+    <a href={linkTo('/docs/reference/data-model')} class="link">Veri modeli</a>
+    bu tiplerin taşıdığı her alanı listeler.
+  </p>
+</Doc>

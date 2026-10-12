@@ -1,0 +1,196 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import RunCursor from '@/components/RunCursor.astro'
+import { exampleLanguages } from '@/lib/snippets'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const langs = exampleLanguages('workflow')
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="运行"
+  description="mcpd 里的一次持久化运行：怎样幂等地启动它，事件流水以及怎样跟随它，事件与等待，取消，定时器与上限，还有一次运行在它的 trace 里出现在哪里。"
+  lede="一次运行是一行记录、一个游标、一份尝试的流水、一组截止时间和一组挂起。这一页讲的是你能对它做什么，以及它回过头来告诉你什么。"
+  og="docs"
+>
+  <h2>启动一次运行</h2>
+  <p>
+    一次运行从一个定义 id 和一份输入开始。如果这个定义带 schema，守护进程会用它
+    校验输入，然后锁定已存的最高版本，生成这次运行和它的 trace，并把存下来的运行
+    返回给你。从这一刻起，这次运行就自己往前走：守护进程把它的步骤派给 worker，
+    走完它的睡眠和等待，并把发生的事写进事件流水。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" example="workflow" region="run" only={langs} title="启动、答复、跟随" />
+
+  <p>
+    任何可能被重试的调用方，都应该带上一个 <code>idempotency_key</code>。在这次
+    运行还被保留着的期间，它在一个项目内是唯一的；同一个调用重试时，得到的是
+    同一次运行，而不是启动第二次。这样一来，触发了两次的 webhook，或者重启了的
+    任务执行器，都不会有任何代价。
+  </p>
+
+  <RunCursor class="not-prose my-8" />
+
+  <h2>事件流水</h2>
+  <p>
+    对一次运行的每一次改变，都是一个带序号的事件，序号从零开始，中间不留空档：
+    运行启动了，游标移动了，某个步骤被租出、开始、完成或失败了，运行等待又恢复
+    了，运行结束了。每个事件都带一份由它的种类决定形状的载荷。事件流水就是这次
+    运行的历史，也是界面画出来的那个东西。
+  </p>
+  <p>
+    你可以用 <code>after</code> 一页一页地读它，也可以带上
+    <code>Accept: text/event-stream</code> 把事件端点一直开着，每个事件一提交
+    就收到。一个停下来又重新开始的客户端，把它见过的最后一个序号传上去，就一条
+    也不会漏。每个 SDK 的 <code>watch</code> 都替你做这件事，并在运行结束时
+    结束；<code>wait</code> 则一路跟着流水走到底，把输出交回来，或者在运行没有
+    成功时，交回一个带着这次运行的、有类型的失败。
+  </p>
+
+  <h2>事件与等待</h2>
+  <p>
+    一个 <code>wait_event</code> 步骤会把运行挂在那里，直到一个名字和渲染出来的
+    键都对得上的事件到来。事件只从一道门进来：
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="答复一次等待"
+    command={`curl -X POST http://localhost:4317/v1/api/events \\
+  -H 'content-type: application/json' \\
+  -d '{"project":"support","event":"approved","key":"Q-42","payload":{"by":"ops"},"event_id":"hook-1"}'`}
+  />
+
+  <p>
+    答复是三种结果之一。<code>delivered</code>：有一次运行正在等待，并在同一个
+    事务里收下了这个事件，所以等你读到回执时，运行已经往前走了。
+    <code>parked</code>：没有运行在等待，这个事件被留住，交给之后才打开、并且
+    声明接受留住事件的等待。<code>duplicate</code>：这个 <code>event_id</code>
+    之前见过，什么也没有写入。任何可能触发两次的东西，都请自己带上 id。
+  </p>
+  <p>
+    一个到了截止时间的等待，按它的 <code>on_timeout</code> 说的做：失败，然后
+    由它的 <code>on_error</code> 来决定；或者不带输出地继续往下走。要直接发给
+    某一次运行，走它自己打开的那个等待，用
+    <code>POST /v1/api/runs/{'{run}'}/signal</code>；它接收同样的请求体，但不带
+    键，因为这次运行本身就是地址。
+  </p>
+
+  <h2>取消</h2>
+  <p>
+    <code>POST /v1/api/runs/{'{run}'}/cancel</code> 结束一次运行，以及它下面的
+    每一个子运行。正在执行中的步骤不会在网络层上被打断：worker 要到下一次心跳
+    才知道运行已经结束，它的上下文会通知步骤主体，而步骤主体之后再提交的任何东西，
+    都会以 <code>run_terminal</code> 被拒绝。取消一次已经结束的运行不改变任何
+    东西，只是把这次运行照原样返回。
+  </p>
+
+  <h2>定时器与上限</h2>
+  <p>
+    睡眠、等待的截止时间、重试的退避和租约到期，全都是守护进程持有的定时器。
+    它们按守护进程的时钟触发，一秒一次，所以一百毫秒的
+    <code>retry_after_ms</code> 会被当作至少这么久，而不是恰好这么久。守护进程
+    重启不会丢掉其中任何一个；它们都是数据行，运行从那一行继续。任何时长都不能
+    超过 3650 天；worker 送来的更长的 <code>retry_after_ms</code> 会以 400 被
+    拒绝。晚于 2262 年的 <code>sleep_until</code> 会被当作永远不会到期。
+  </p>
+  <p>
+    一个定义的 <code>max_steps</code>、<code>run_timeout_ms</code> 和
+    <code>max_cost_usd</code> 会在触到上限时结束这次运行，并把这个上限写成错误。
+    成本是各个步骤上报的用量所定出的价钱之和，用的是给 span 定价的同一套价目表，
+    所以一个上报了自己 token 数的智能体步骤，一完成就会记到这次运行的预算上。
+  </p>
+
+  <h2>运行在它的 trace 里</h2>
+  <p>
+    每一次运行同时也是一条 trace。守护进程为这次运行开一个根 span，为每一次
+    尝试再开一个 span，带上这个步骤的输入和输出；如果步骤主体通过步骤上下文记录了
+    自己的 span，那些 span 会挂在它下面。于是一个智能体步骤里的模型调用，就位于
+    那个步骤之下、那次运行之下；而适用于任何 trace 的搜索、成本核算和评分器，
+    原封不动地适用于一次运行的 trace。这些 span 走的是 SDK 的 span 所走的同一条
+    摄取路径，所以它们以同样的方式被采样、脱敏、定价和转发。token 记在花掉它们的
+    那些模型 span 上；
+    步骤 span 在自己的属性里带上定过价的总和，所以一条 trace 的合计对每个 token
+    只数一次。运行带着它的 <code>trace_id</code>，界面把两者链在一起。
+  </p>
+  <p>
+    守护进程按自己的时钟，通过一个 outbox 写出这些 span，时机在产生它们的那一行
+    提交之后。某个步骤刚完成的那一刻读到的 trace，可能还没有带上这个步骤的
+    span；而这次运行自己的详情永远有。
+  </p>
+
+  <h2>把运行读回来</h2>
+  <p>
+    <code>GET /v1/api/runs</code> 列出一个项目的运行，最近更新的排在最前，可以
+    按状态或定义过滤。<code>GET /v1/api/runs/{'{run}'}</code>
+    是这次运行，以及关于它的一切持久内容：每一次尝试及其租约持有者、各个时间、
+    错误和用量；仍然待触发的定时器；仍然开着的等待。界面的
+    <a href={`${linkTo('/app')}?screen=workflows`} class="link">工作流屏</a>
+    就是把这个端点画出来，旁边配着实时的事件流水。
+  </p>
+  <p>
+    这两个端点都会交回这次运行收到的东西，所以两者都会记进审计日志，分别记作
+    <code>list_runs</code> 和 <code>get_run</code>；事件流水
+    （<code>list_run_events</code>，每个请求记一次，流式请求也包括在内）、原因
+    回溯（<code>get_step_cause</code>）和取消（<code>cancel_run</code>）也一样。
+    一次被拒绝的读取，记在拥有这次运行的项目名下。worker 的调用不记录；见
+    <a href={linkTo('/docs/workers')} class="link">Worker</a>。
+  </p>
+
+  <h2 id="storage">存储</h2>
+  <p>
+    运行存放在 trace 存储旁边、属于它们自己的 SQLite 文件里，路径是
+    <code>&lt;data&gt;.runs.&lt;ext&gt;</code>，除非 <code>--runs-data</code>
+    另有指定；而 <code>--runs-data off</code> 会把整个运行接口关掉，此时每一个
+    运行端点都返回 503。请把它和 trace 存储一起备份；<code>mcpd doctor</code>
+    会把它当作独立的一组来评分。
+  </p>
+  <p>
+    运行存储按载荷发来时的原样保存它们。一次运行的输入、状态、输出和关联信息，
+    每个步骤的输入、输出和错误，每个事件的载荷，以及还在等待写进 trace 存储的
+    那些 span 载荷，都不经脱敏地存下；一次运行的关联信息里的 <code>user_id</code>
+    也不做哈希。这是有意的：它们是工作流的工作状态，后面的步骤会把它们读回去，
+    而一个被脱敏器改写过的值会改变这次运行的行为。守护进程写进 trace 存储的
+    span，经过的脱敏和标识符哈希与 SDK 发来的 span 相同，所以 trace 存储里存的
+    是脱敏后的副本。请把运行文件当作持有你的步骤收到过的一切，并据此保护和备份它。
+  </p>
+  <p>
+    保留期也作用于运行存储。修剪 trace 存储的那次每小时的清理，也会按同一个
+    按项目的窗口，删除根运行在截止点之前结束的每一次运行，连同它的子运行，以及
+    为它们存下的一切：尝试、事件、截止时间、等待、排队中的 span，以及这些运行
+    消费掉的事件。一次还没有结束的运行永远不会被删除，不管它有多旧。定义会被
+    保留。
+  </p>
+  <p>
+    擦除也作用于它。<code>DELETE /v1/api/subjects/{'{user_id}'}</code> 会删除
+    这个项目里每一次已经结束、并且关联信息带着那个 <code>user_id</code> 的运行，
+    按你启动这次运行时给的原样匹配，连同它整棵子运行树以及为它们存下的一切，并把
+    数量报告为 <code>runs_erased</code>。这个人的一次还没有结束的运行会被完整地
+    留下，计入 <code>runs_in_flight</code>，并在回复的 <code>note</code> 里写明：
+    取消它，或者等它结束，然后再发一次擦除请求。为一次还没走到它的等待的运行留住
+    的事件，是按它的关联键、而不是按某个人来索引的，所以擦除够不到它；它会在过期
+    时被删除，也就是 24 小时之后。回复的其余部分见
+    <a href={linkTo('/docs/privacy')} class="link">脱敏与保留期</a>。
+  </p>
+
+  <h2>接下来</h2>
+  <ul>
+    <li>
+      一个定义能说些什么：
+      <a href={linkTo('/docs/workflows')} class="link">工作流</a>。
+    </li>
+    <li>
+      把步骤真正跑起来的那个进程：
+      <a href={linkTo('/docs/workers')} class="link">Worker</a>。
+    </li>
+    <li>
+      每一个运行端点，都由规范生成：
+      <a href={linkTo('/docs/reference/api#runs')} class="link">HTTP API，Runs</a>。
+    </li>
+  </ul>
+</Doc>

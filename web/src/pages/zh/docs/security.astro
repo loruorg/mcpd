@@ -1,0 +1,531 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="安全"
+  description="部署后的 mcpd 存下了什么，哪些东西会离开这台机器、又由哪个设置决定，密钥、作用域和项目租户怎样工作，脱敏能做到哪一步，以及 mcpd 没有哪些控制手段。"
+  lede="用一页回答一次安全评审。什么被留下，什么被送去别处，谁能读到它，以及 mcpd 没有哪些控制手段。"
+  og="docs"
+>
+  <p>
+    下面的每一句，都取自守护进程自己的源码，以及生成整个 API 的
+    <code>spec/mcpd.spec.json</code>。凡是某项控制手段并不存在的地方，这一页会
+    直接说出来，而不是把这个缺口留给你在一份问卷里发现。
+  </p>
+
+  <h2>mcpd 存下什么</h2>
+  <p>
+    mcpd 会存下你的智能体对话的原文。这正是它存在的意义，一次评审也应当从这里
+    开始。一个 <code>model_generation</code> 类型的 span 带着 <code>input</code>
+    和 <code>output</code>：发给模型的那段提示词原文，以及返回来的那段文本原文。
+    对多数用户来说，这是他们手上最敏感的数据。
+  </p>
+  <p>六种信号里，会存下自由文本的字段是这些：</p>
+  <table>
+    <thead>
+      <tr><th>信号</th><th>它带着的内容</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Span</td>
+        <td><code>input</code>、<code>output</code>、<code>attributes</code>、<code>metadata</code>，以及错误消息</td>
+      </tr>
+      <tr><td>日志</td><td>消息本身，以及结构化的 <code>fields</code></td></tr>
+      <tr><td>指标</td><td><code>labels</code></td></tr>
+      <tr><td>评分</td><td><code>reason</code>，以及 <code>metadata</code></td></tr>
+      <tr><td>反馈</td><td>自由文本的 <code>comment</code>，以及 <code>metadata</code></td></tr>
+      <tr><td>方面注释</td><td>那句话本身，也就是 <code>text</code></td></tr>
+    </tbody>
+  </table>
+  <p>
+    除了载荷之外，每一种信号还带着一组关联字段，把一次运行和你系统里的其余部分
+    连起来：项目、环境、服务名和版本、会话、线程、用户、资源、运行、请求、实验
+    和发布。<code>user_id</code> 在写入时会被哈希，除非你把脱敏关掉。其余字段
+    照原样存下，所以只要你往其中任何一个里放了身份信息，就请把它当成一个能认出
+    某个人的字段来对待。
+  </p>
+  <p>
+    token 计数和一个成本数字在摄取时算出，并和这次运行一起存下。关于这次模型
+    调用的任何信息，都不会去向供应商取。
+  </p>
+
+  <h3>写到哪里去</h3>
+  <p>
+    只有一个后端，在启动时选定。默认是位于 <code>./mcpd.db</code> 的一个内嵌
+    SQLite 文件，用 <code>--data</code> 指定。全文索引就在同一个文件里，所以这份
+    存储是一个文件，备份是它，要保护的也是它。<code>--postgres-url</code> 或者
+    <code>--clickhouse-url</code> 会改成把数据放进一个由你自己运行的数据库。
+  </p>
+  <p>
+    持久化运行开启时，存放在第一个文件旁边的第二个 SQLite 文件里，无论 trace
+    存储是哪一种。它把每一次运行的输入、状态、输出和关联信息，以及每个步骤的
+    输入、输出和错误，按发来时的原样保存：不经脱敏，<code>user_id</code> 也不做
+    哈希，因为后面的步骤会把它们读回去，而一个被改写过的值会改变这次运行的行为。
+    一次运行写进 trace 存储的 span，和其他任何 span 一样会被脱敏。请像保护 trace
+    存储那样保护这个运行文件，或者保护得更严。保留期和按主体擦除都作用于它，
+    针对的是已经结束的运行；见
+    <a href={linkTo('/docs/runs#storage')} class="link">运行</a>。
+  </p>
+  <p>
+    mcpd 不会加密它写下的东西。静态加密在内嵌存储上是卷的职责，在另外两种上是
+    数据库的职责。
+  </p>
+
+  <h2>什么会离开这台机器</h2>
+  <p>
+    在默认配置下，什么也不会。守护进程只在四个地方发出站请求，而且每一个在你
+    配置它之前都是关着的。没有更新检查，没有用量上报，也没有任何形式的遥测。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>目的地</th><th>发出去的是什么</th><th>关着，除非</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>存储后端</td>
+        <td>mcpd 存下的一切，走你自己的连接。</td>
+        <td>你设置了 <code>--postgres-url</code> 或 <code>--clickhouse-url</code>。默认存储是一个本地文件，完全不需要网络。</td>
+      </tr>
+      <tr>
+        <td>转发</td>
+        <td>
+          每一个存下的 span，都会作为 OTLP JSON 重新发往
+          <code>&#123;endpoint&#125;/v1/traces</code>。这里面包含载荷：
+          <code>input</code> 和 <code>output</code> 会作为
+          <code>input.value</code> 和 <code>output.value</code> 属性发出去，
+          各自截断在 32 KiB。已经脱敏过的值仍然是脱敏后的样子，哈希过的
+          <code>user_id</code> 转发出去的也是那个哈希值。
+        </td>
+        <td>你设置了 <code>--forward-endpoint</code>，或者在配置文件里写了一个 <code>forward</code> 块。</td>
+      </tr>
+      <tr>
+        <td>监视器与目标的 webhook</td>
+        <td>
+          一份固定的 JSON 请求体：监视器或目标的 id 和名称、项目、条件、它盯着
+          什么、阈值、读数、样本数、一行细节和一个时间戳。里面没有任何提示词或
+          补全文本。
+        </td>
+        <td>配置文件里某个监视器或目标写了 <code>webhook</code>。</td>
+      </tr>
+      <tr>
+        <td>裁判模型</td>
+        <td>
+          评判标准，加上这次运行的问题和它的答案，各自截断在 4,000 个字符，POST
+          到 <code>&#123;endpoint&#125;/chat/completions</code>。这是唯一一条会把
+          存下的提示词和补全文本发给模型供应商的路径。
+        </td>
+        <td>配置文件里的 <code>judge</code> 块写明了一个端点、一个模型和至少一条标准，并且有调用方按名字要了那个评分器。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    二进制文件在 <code>/</code> 上提供的那个界面，是编译进去的。它的字体、样式和
+    脚本都来自同一个源，它不会发出任何第三方请求。
+  </p>
+
+  <h2>密钥与作用域</h2>
+  <p>
+    认证方式是 API 密钥。没有账号，没有会话，也没有登录。一把密钥通过
+    <code>Authorization: Bearer …</code> 或者 <code>X-Mcpd-Key</code> 请求头
+    出示，比较之前两边都会用 SHA-256 哈希，所以无论是配置的密钥有多长，还是第一
+    个不对的字符在哪个位置，都不会从耗时上被看出来。
+  </p>
+  <p>一共六个作用域，按它们给出的触及范围排列：</p>
+  <table>
+    <thead>
+      <tr><th>作用域</th><th>它允许什么</th><th>为什么它自成一个作用域</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ingest</code></td>
+        <td>写入信号。什么也读不了。</td>
+        <td>这把密钥住在每一个会发出 span 的容器里，包括那些跑着第三方代码的容器。它绝不能同时把每一段存下的提示词也打开。</td>
+      </tr>
+      <tr>
+        <td><code>read</code></td>
+        <td>读取存下的信号。</td>
+        <td>提示词就在读取这一侧。</td>
+      </tr>
+      <tr>
+        <td><code>write</code></td>
+        <td>改动存下的数据：评分、反馈、数据集、实验和确认。</td>
+        <td>其中几个处理器在经手时会读到载荷。把一次生产环境的运行采进数据集，就要读这次运行的 input 和 output，这比发出一个 span 要多。</td>
+      </tr>
+      <tr>
+        <td><code>execute</code></td>
+        <td>启动、取消运行，给运行发信号，以及向运行发布事件。</td>
+        <td>启动一次运行要花钱，也会触及你的系统。一把能记一个评分的密钥，不该同时能发起工作。</td>
+      </tr>
+      <tr>
+        <td><code>worker</code></td>
+        <td>领取步骤，并报告它们的结果。</td>
+        <td>这是运行步骤主体的那个进程里的密钥。领取一个步骤会交回这个步骤的 input 和之前每一步的 output，所以它会读到载荷，它不该同时能启动运行或修改已存的数据。</td>
+      </tr>
+      <tr>
+        <td><code>admin</code></td>
+        <td>销毁数据，以及读取审计日志。</td>
+        <td>删除不是读取。</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    某个端点要哪个作用域，是在规范里逐个端点声明的，并发布在生成出来的
+    <a href={linkTo('/docs/reference/api')} class="link">HTTP API</a> 参考里，
+    所以“这个端点需要什么”只有一个答案，而不是每份文档一个。
+  </p>
+
+  <h3>回退，以及它对你手上已有的密钥意味着什么</h3>
+  <p>
+    没有设置的 <code>write</code> 列表会回退到 <code>ingest</code> 列表，没有
+    设置的 <code>admin</code> 列表会回退到 <code>read</code> 列表。没有设置的
+    <code>execute</code> 和 <code>worker</code> 列表会回退到 <code>write</code>
+    列表，而它也没设置时，就落到 <code>ingest</code> 列表上。正是这一点，让一次
+    升级不会把每一个在这些更窄的作用域出现之前就配好的部署的访问权全部吊销。
+    另外，admin 密钥也能用于 <code>execute</code> 和 <code>worker</code>，这样
+    运维者可以手动推动一次运行。合在一起，它们意味着，在一个只持有一把 ingest
+    密钥和一把 read 密钥的守护进程上：
+  </p>
+  <ul>
+    <li>那把 ingest 密钥也能附加评分和反馈、启动运行、领取步骤，并且</li>
+    <li>那把 read 密钥也能删除 trace，并通过 admin 的回退启动运行、领取步骤。</li>
+  </ul>
+  <p>
+    所以在你设置 <code>--admin-key</code> 之前，一把 read 密钥就是一把删除密钥；
+    在你设置 <code>--execute-key</code>、<code>--worker-key</code> 和
+    <code>--admin-key</code> 之前，这两把密钥都能触及运行接口。发放密钥的时候请
+    按这个前提来。没有任何东西会自己收窄。每个作用域都有自己的参数：
+    <code>--ingest-key</code>、<code>--read-key</code>、<code>--write-key</code>、
+    <code>--admin-key</code>、<code>--execute-key</code> 和
+    <code>--worker-key</code>，每一个都接受一个列表；它们也都可以在配置文件里按
+    项目设置。
+  </p>
+
+  <h3>一把密钥都没有时，每个作用域都是敞开的</h3>
+  <p>
+    这个默认是有意为之：在笔记本上第一次运行，不该先要一份凭据。它同时也是一个
+    暴露在外的实例上最危险的一件事，所以当守护进程绑定到一个非回环地址时，它会在
+    启动时为每一个向不该触及它的调用方敞开的接口记一条告警。每条告警都写明是哪个
+    接口，以及关上它的参数。在你暴露一个端口之前，先运行
+    <code>mcpd config</code>：它会打印这次调用最终解析出的配置，然后退出。它每个
+    作用域一行，并会指明某个作用域回退到了哪个列表，所以
+    <code>admin auth      key required (read keys)</code>
+    这一行告诉你：那些 read 密钥仍然能删除。
+    <a href={linkTo('/deploy')} class="link">Docker 与 Kubernetes</a> 展示了它的
+    输出。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="在可达之前就关好"
+    command={'mcpd --ingest-key "$INGEST" --read-key "$READ"'}
+    primaryLabel="参数"
+    secondary={[
+      { label: '六个作用域都设', command: 'mcpd --ingest-key "$I" --read-key "$R" --write-key "$W" --execute-key "$E" --worker-key "$K" --admin-key "$A"' },
+      { label: '用环境变量', command: 'MCPD_INGEST_KEYS=… MCPD_READ_KEYS=… mcpd' },
+      { label: '先检查一下', command: 'mcpd config' },
+    ]}
+  />
+
+  <h3>项目就是租户边界</h3>
+  <p>
+    在顶层配置的一把密钥，能访问每一个项目。改为列在配置文件 <code>projects</code>
+    块下某个具名项目里的密钥，只能访问那一个项目，并且每个项目按作用域各持有
+    自己的列表。同一把密钥可以出现在好几个项目下面，平台团队正是这样持有一把
+    覆盖自己所运维范围的密钥，而不必持有整台服务器。
+  </p>
+  <p>在写入这条路径上，检查是按信号做的，不是按请求做的：</p>
+  <ul>
+    <li>
+      一个批次里可以写好几个项目。凡是所写项目为这把密钥触及不到的信号，都会被
+      丢弃，并在响应里作为被拒绝的项连同原因一起报出来，所以一支指错了项目的
+      机群，从它本来就在读的那份响应里就能被发现。批次里剩下的部分照常存下。
+    </li>
+  </ul>
+  <p>
+    在读取这条路径上，每一个写明了项目的端点，都会拿它去核对这把密钥的授权：
+    trace、span、日志、指标、评分、反馈、分析、数据集、实验和审计日志。数据集
+    里的条目是用数据集的 id 来寻址的，守护进程会先查出这个数据集归哪个项目所有，
+    再拿密钥去核对，所以一把打不开这个项目的密钥，也读不到从它那里采集来的用例。
+    一个并不存在的 id，被拒绝的方式和一个密钥触及不到的 id 完全一样，所以这个
+    端点不能被用来试探哪些 id 是存在的。有三个端点不带项目，任何持有 read 作用域的密钥都能访问，
+    无论它被限定在哪些项目上：项目列表、评分器目录，以及存储的能力集合
+    （<code>GET /v1/api/capabilities</code>）。项目列表会按密钥的授权过滤，所以
+    一把限定在某个项目上的密钥，只看得到它能触及的项目。在共享实例上，项目名
+    往往就是团队名或者客户名。监视器状态和目标状态本来也在这个列表里，现在改为
+    按密钥的项目授权过滤，这本来就该如此：一个监视器写明了它监视哪个项目，并且
+    带着它要投递到的 webhook。
+    API 只返回这个 webhook 的主机名，因为 webhook 的 URL 往往本身就是凭据。
+  </p>
+
+  <h3>一次拒绝会说清它是两个问题里的哪一个</h3>
+  <p>
+    密钥缺失或者不被认识，是 401；密钥被认识，但这个端点或这个项目不接纳它，
+    是 403。这样区分是为了运维：401 让你去某份凭据里找拼写错误，403 则告诉你
+    凭据是对的，错的是授权。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="四种拒绝"
+    lines={[
+      { cmd: 'curl -sw "%{http_code} " "$MCPD/v1/api/traces?project=acme"' },
+      { out: '401  this endpoint needs an API key; send it as `Authorization: Bearer <key>`', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $TYPO"' },
+      { out: '401  that key is not one this daemon knows', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $INGEST"' },
+      { out: '403  that key is not valid for reading', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $BILLING_READ"' },
+      { out: '403  that key does not reach the project "acme"', tone: 'warn' },
+    ]}
+  />
+
+  <p>
+    最后那条消息，无论这个项目存不存在都是同一句。确认哪些项目名是真的，是一处
+    小小的泄露，而在一个共享的守护进程上，那些名字就是你客户的名字。
+  </p>
+
+  <h3>审计日志</h3>
+  <p>
+    把一份存下的载荷交出 mcpd，会被记录下来，每一次删除也会，所以“谁读过这次
+    运行”是有答案的。一行记录带着：什么时候、哪把密钥、什么动作、哪个项目、
+    它指名了哪个 trace 或哪个数据集，以及这次请求是被服务了还是被拒绝了。
+    <code>GET /v1/api/audit</code> 把它读回来，最新的在最前，需要
+    <code>admin</code> 作用域。
+  </p>
+  <p>
+    记录下来的动作有十八个：<code>get_trace</code>、<code>list_spans</code>、
+    <code>list_logs</code>、<code>list_feedback</code>、
+    <code>list_dataset_items</code>、<code>capture_into_dataset</code>、
+    <code>read_trace_aspect_notes</code>、<code>get_theme</code>、<code>get_theme_flow</code>、<code>list_theme_history</code>、<code>list_theme_examples</code>、
+    <code>delete_trace</code>、<code>erase_subject</code>，以及五个关于持久化
+    运行的：<code>list_runs</code>、<code>get_run</code>、
+    <code>list_run_events</code>、<code>get_step_cause</code> 和
+    <code>cancel_run</code>。分界线是载荷，不是请求。列出 trace 返回的是一份由
+    名称、各个时间、token 计数和成本构成的投影，里面没有提示词也没有补全，所以它
+    不被记录；而打开其中一条 trace 会被记录，因为文本就在那里。列出持久化运行
+    会被记录，因为列表里的每一次运行都带着按发来时原样保存的输入、输出和状态。
+    对一次运行的一次被拒绝的读取，记在拥有这次运行的项目名下。
+  </p>
+  <p>
+    worker 的调用不被记录：领取一个步骤、声明它已经开始、心跳、complete 和
+    fail。一份租约确实带着这个步骤的输入和它之前那些步骤的输出，但 worker 循环
+    每分钟要领取很多次，每次领取记一行，会把人做的读取淹没。请把
+    <code>worker</code> 密钥当作一把能读到它所服务的那些运行的每一份载荷的密钥。
+    启动一次运行也不被记录；重新提交一个仍被保留着的幂等键，得到的回答是那个键
+    启动的那次运行，所以请把 <code>execute</code> 密钥当作一把能读到它所启动的
+    那些运行的密钥。
+  </p>
+  <p>评审者应当知道的五条性质：</p>
+  <ul>
+    <li>
+      <strong>密钥本身从不被写下来。</strong>主体是这把密钥的一段截断过的
+      SHA-256 摘要，它能把一把密钥和另一把区分开，却不为它存下一个可用于校验的
+      凭据。在一个敞开的守护进程上，一次不带密钥的请求会记为
+      <code>anonymous</code>。
+    </li>
+    <li>
+      <strong>人是从你的入口网关来的，否则就没有。</strong>mcpd 没有用户账号，
+      所以单靠它自己，一行记录把一个动作归给一把密钥，而不是归给一个人。只有在
+      <code>--trusted-identity-header</code> 和 <code>--trusted-proxy-cidr</code>
+      两个都设置了的时候，<code>subject</code> 字段才带着一个身份，否则它是空的，
+      而空正是默认。mcpd 从不自己确立这个身份；它记录的是一个由你指名的地址所
+      声称的东西。
+    </li>
+    <li>
+      <strong>一次拒绝同样会被记录。</strong>这一行在 403 返回之前就写下去了，
+      因为在另一个团队的项目上一次被拒绝的尝试，正是审计日志存在的理由。读取
+      这份日志本身不被记录：那会让它在没有任何载荷被读过的情况下不断增长，而且
+      那一行说不出任何持有 admin 密钥的人还不知道的事。
+    </li>
+    <li>
+      <strong>它记录哪把密钥，以及可选地记录是谁。</strong>密钥以一段截断过的
+      摘要存下，从不存密钥本身，所以这份日志不是凭据堆积的地方。它回答的是
+      “某把 admin 密钥删掉了这个”，而不是“具体是哪个人”，因为 mcpd 没有身份
+      提供方。如果你想要第二个答案，就把你的入口网关本来
+      就在设置的那个请求头，以及允许设置它的那些地址交给它：
+      <code>--trusted-identity-header x-forwarded-user</code> 配上
+      <code>--trusted-proxy-cidr 10.42.0.0/16</code>。两半缺一不可。一个请求头
+      是任何能连到这个端口的人都能发的字符串，所以 mcpd 只从你指名的地址读它；
+      来自其他地方的请求会照常被服务，它那一行不带 subject，这是诚实的答案，
+      好过一个猜测。两个参数都不设时，任何 subject 都不会被记录，而这正是默认。
+    </li>
+    <li>
+      <strong>保留期不会修剪它。</strong>保留期的清理会移除 span、日志、指标、
+      trace、评分、反馈、方面注释和已经结束的持久化运行。它不动审计日志，因为一份和它所描述的数据一同过期的日志，
+      说不出是谁读过那些被删掉的数据。
+    </li>
+    <li>
+      <strong>它从不让它所描述的那次请求失败。</strong>写不下去的一行会被记进
+      日志，并在 <code>/metrics</code> 上计入
+      <code>mcpd_audit_write_failures_total</code>，而那次读取照常返回。一份能
+      拖垮读取路径的审计日志，比它所防范的风险更糟，所以请盯住那个计数器，而不是
+      指望请求失败来告诉你。
+    </li>
+  </ul>
+
+  <h3>密钥管不到的地方</h3>
+  <ul>
+    <li>
+      <strong>界面。</strong><code>/</code> 上的那份标记，谁能连到这个端口就发给谁。
+      它背后的数据不是：它发出的每一次请求都要走查询 API，遇到的是同一批密钥。
+      守护进程里没有登录页。
+    </li>
+    <li>
+      <strong>探针和 <code>/metrics</code>。</strong>它们有意不做认证，因为一个
+      kubelet 和一个抓取器带不了密钥。它们上报状态、版本、运行时长、存储后端的
+      名字和各项计数，从不上报载荷。
+    </li>
+    <li>
+      <strong>来源。</strong>查询 API 和探针的响应带着
+      <code>Access-Control-Allow-Origin: *</code>，所以任何来源的浏览器页面都
+      可以调用它们。mcpd 不用 cookie，也不用任何环境凭据，所以这样一个页面照样
+      得持有一把密钥：一条宽松的来源策略不会替它拿到密钥。
+    </li>
+  </ul>
+
+  <h2>脱敏能做什么，不能做什么</h2>
+  <p>
+    脱敏默认开启，并在写入之前运行，是摄取流水线的第三级。一个被规则命中的值
+    从来不会到达数据库，这和一个事后被删掉的值是不同的保证，而这个区别正是审计
+    人员会问的那一个。它做不到的是把这些字节挡在网络之外：规则运行的时候，它们
+    早已越过网络了。要做到那一点，各个 SDK 带着
+    <code>MCPD_CAPTURE_PAYLOADS=false</code>，它会在一个 span 入队之前就丢掉
+    <code>input</code> 和 <code>output</code>，而把这个 span 上的其他一切留下。
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    一条规则是一组小写子串加上一个模式。当一个键的名字转成小写后包含其中之一，
+    它就被命中。被命中的值会被遮蔽、被部分遮蔽、用带密钥的摘要哈希，或者丢弃。
+    当被命中的键持有一个对象时，它下面的一切也会被脱敏，无论子键叫什么名字；
+    而一个以 JSON 数字发来的密文，和一个以字符串发来的一样对待。完整的规则表在
+    <a href={linkTo('/docs/privacy')} class="link">脱敏与保留期</a>。
+  </p>
+  <p>
+    接下来是它的边界，一次评审会问到它，而且再多配置也去不掉。
+    <strong>规则匹配的是字段名，不是值的形态。</strong>一把用户粘在句子中间的
+    API 密钥，如果它到达时挂在一个叫 <code>content</code> 或 <code>question</code>
+    的字段下，流水线里没有任何东西会命中它。字段名是无辜的，于是这个值被完整
+    存了下来。
+  </p>
+  <p>因此脱敏挡住的是一件具体的事：</p>
+  <ul>
+    <li>它挡住的是凭据和标识符的结构化采集，也就是一份凭据到达时，就装在一个以它自己是什么来命名的字段里。</li>
+    <li>它不扫描自由文本，它也不是一个内容分类器。</li>
+    <li>它不会凭形态或者熵来识别一个密文。</li>
+    <li>它不碰一个 span 的名称，也不碰一条日志记录的消息。那些是用来分组的标识符，不是载荷，改写它们会把分组破坏掉。不要用客户的邮箱地址去拼一个 span 的名称。</li>
+    <li>它不碰运行存储。一次持久化运行的载荷是它的工作状态，按发来时的原样保存；只有一次运行写进 trace 存储的那些 span 会被脱敏。</li>
+  </ul>
+  <p>
+    确实有一项控制手段是按形态工作的，而它是事后发现，不是事前预防：内置的
+    <code>no_leaked_secret</code> 评分器会给<em>答案</em>里带有疑似凭据的
+    token 的运行扣分，依据是已知的前缀，或者一长串大小写混排的字母数字。它评的
+    是一次已经存下的运行。它什么也不移除，它不读提示词，而且只有你要它时它才会
+    运行。请把它当成一条得知这件事已经发生了的途径，而不是脱敏的第二道防线。
+  </p>
+  <p>
+    有两条上限，无论规则是否命中都适用。任何单个字符串超过 128 KiB，都会在一个
+    字符边界上被截断并留下标记；遍历在 32 层深度处停止。这两条的存在，是为了让
+    一份失控的文档没法决定你数据库的大小，也没法把一个 CPU 钉住。
+  </p>
+  <p>
+    <code>--no-redact</code> 会把整条流水线关掉，只有在上游已经做了脱敏时这才
+    说得通。凡是脱敏要哈希一个标识符的地方，请设置 <code>--redact-key</code>：
+    内置的那把密钥是公开源码里的一个常量，而标识符来自很小的取值空间，所以一份
+    不带密钥的摘要可以靠逐个猜候选值反推出来。
+  </p>
+
+  <h2>保留期与擦除</h2>
+  <p>
+    <code>--retention-days</code> 会删除超过那么多天的信号。不写它就什么都不会被
+    删掉，而这是对的默认：一个会悄悄丢掉上个月 trace 的工具，只会在最糟糕的时刻
+    被发现。
+  </p>
+  <p>
+    这次清理由守护进程内部一个每小时的定时器来跑，从不在某位用户的请求里跑。它
+    覆盖 <code>projects</code> 块里写到的每一个项目，各自用自己的
+    <code>retention_days</code>（如果它设了），否则用全局的那个数字，再加上默认
+    项目。一个在任何地方都没有设窗口的项目，完全不会被修剪。
+  </p>
+  <p>
+    针对某一个人的请求，<code>DELETE /v1/api/subjects/{'{user_id}'}?project=…</code>
+    会移除这个项目里记在这个人名下的每一次运行，连同挂在它们上面的 span、日志、
+    指标、评分和反馈，并按信号分别返回一个计数。这个标识符在被匹配之前会用同一把
+    密钥哈希，所以这次请求对哈希过的标识符也有效，你不必自己去哈希什么；响应还会
+    说明，有多少个存下的标识符，其形式是这次请求匹配不到的。要移除的是一次运行
+    而不是一个人，就用 <code>DELETE /v1/api/traces/{'{trace_id}'}</code>，它在
+    一个事务里移除这次运行和挂在它上面的一切。两者都需要 <code>admin</code>
+    作用域，两者都会被记进审计日志。
+    <a href={linkTo('/docs/privacy')} class="link">脱敏与保留期</a>
+    逐步讲了这次擦除请求，以及它能保证什么、不能保证什么。
+  </p>
+
+  <h2>mcpd 不做什么</h2>
+  <p>
+    下面这些在这个构建里都不存在。把它们列出来，是因为一次评审到后面才发现它们，
+    比一次评审在这里读到它们要糟得多。
+  </p>
+  <table>
+    <thead>
+      <tr><th>mcpd 里没有的</th><th>改用什么</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>TLS 终止。</strong>mcpd 讲的是明文 HTTP。提示词和补全会完整地穿过那一段链路。</td>
+        <td>在你的入口网关或者服务网格里终止 TLS，并且让守护进程的端口远离任何不受信任的网络。</td>
+      </tr>
+      <tr>
+        <td><strong>SSO。</strong>没有身份提供方集成，没有 OIDC，没有 SAML，也没有登录页。</td>
+        <td>把界面放到你本来就在运行的那个身份代理后面。一个人的身份，就是那个代理所确立的东西。</td>
+      </tr>
+      <tr>
+        <td><strong>SCIM。</strong>没有用户或用户组的开通，因为 mcpd 没有用户账号这个概念。</td>
+        <td>在代理那一层开通。在 mcpd 内部，单位是一把密钥，往一个列表里加或者从中删。</td>
+      </tr>
+      <tr>
+        <td><strong>六个作用域之外的角色。</strong>授权就是一个作用域加一个项目列表。没有按端点的角色，也没有用户组。</td>
+        <td>按密钥和按项目来分隔。如果某个区分很重要，就把它做成一个项目。</td>
+      </tr>
+      <tr>
+        <td><strong>确立一个人是谁。</strong>审计日志可以记下一个 subject，但 mcpd 从不自己推断调用方是谁。它记录的是你的入口网关所声称的东西，而且只从一个由你指名的地址接受。</td>
+        <td>设置 <code>--trusted-identity-header</code> 和 <code>--trusted-proxy-cidr</code>，让你的代理本来就在设置的那个请求头到达审计记录。没有它们，一行记录把一个动作归给一把密钥，而每个团队发一把密钥，就把那段摘要的范围收窄了。</td>
+      </tr>
+      <tr>
+        <td><strong>密钥生命周期。</strong>密钥是启动时读取的一些列表。没有过期，没有轮换计划，也没有按密钥的配额。确实存在的上限是按项目的：<code>--quota-per-minute</code> 限定一个项目在一分钟内可以存下多少条信号，无论是哪把密钥发来的。</td>
+        <td>配置好几把密钥，每个团队或每支机群一把，这样吊销一把是改个配置再重启，而不是把所有会发 span 的东西重新部署一遍。如果某支机群需要自己的上限，就把它做成自己的项目。</td>
+      </tr>
+      <tr>
+        <td><strong>静态加密。</strong>mcpd 写的是普通文件或者普通数据行。</td>
+        <td>加密那个卷，或者用一个自己会加密的数据库。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>上报问题</h2>
+  <p>
+    疑似漏洞请发到 <strong>hi@mcpd.sh</strong>，主题里带上“Security”，不要发到
+    公开的 issue。仓库里的 <code>SECURITY.md</code> 写明了范围，以及一份好的报告
+    应当包含什么。一个有人自己选择暴露出去的、未认证的实例，是一个写在文档里的
+    默认，而不是一个漏洞。任何能绕过一把<em>确实</em>配置了的密钥、绕过一条配置
+    了的脱敏规则，或者跨过项目边界的东西，才是。
+  </p>
+
+  <h2>接下来</h2>
+  <ul>
+    <li>规则表、四种模式和带密钥的哈希：<a href={linkTo('/docs/privacy')} class="link">脱敏与保留期</a>。</li>
+    <li>在一个端口可达之前该设置什么：<a href={linkTo('/deploy')} class="link">Docker 与 Kubernetes</a>。</li>
+    <li>每一个参数和环境变量：<a href={linkTo('/docs/configuration')} class="link">配置</a>。</li>
+    <li>从代码或者从一个智能体连到一个已部署的实例：<a href={linkTo('/docs/integrating')} class="link">集成</a>。</li>
+  </ul>
+</Doc>

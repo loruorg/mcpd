@@ -1,0 +1,174 @@
+# What mcpd accepts from its dependency tree.
+#
+# Why this file exists: two questions get asked about a binary before anyone is
+# allowed to run it. "Does it carry a known vulnerability?" and "what am I
+# agreeing to by shipping it?" Neither is answerable by reading this
+# repository, because almost none of the code in the released binary was
+# written here. It arrives through Cargo.lock. This file is the policy
+# cargo-deny applies to that graph, and `cargo deny check` is the answer.
+#
+# The four checks are separate on purpose:
+#
+#   advisories  a published RustSec finding against a version in the lock file
+#   licenses    the licence of every crate compiled into the binary
+#   bans        crates and crate versions this project will not carry
+#   sources     where a crate is allowed to come from
+#
+# Run all four:
+#
+#   cargo deny --all-features check
+#
+# .github/workflows/supply-chain.yml runs the same command on every push and
+# once a week, because most advisory findings appear on a day nobody touched
+# the repository.
+
+[graph]
+# The ClickHouse and Postgres backends are Cargo features, and they are the
+# ones that reach a network. A default-features scan would not see the
+# dependencies that matter most here.
+all-features = true
+
+# Only the targets mcpd actually ships, which are the four in release.yml plus
+# the Linux host CI builds on. The consequence is worth stating: a crate that
+# is only ever a Windows dependency is not checked by this file, because no
+# mcpd artefact contains one. If a Windows target is ever released, add it
+# here in the same change.
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+[advisories]
+# No advisory is ignored. An entry here is a decision to ship a known finding,
+# so it needs a reason in the entry itself and a date by which someone looks
+# again:
+#
+#   { id = "RUSTSEC-0000-0000", reason = "why, and when this is revisited" }
+#
+# The list is empty, which is the only state in which this file makes no claim
+# on your behalf. Anything added to it is mcpd shipping a finding on purpose,
+# and the entry is where a reader finds out why.
+ignore = []
+
+# A yanked version is one the author withdrew after this lock file pinned it.
+# That is stronger than a warning deserves: whatever the reason for the yank,
+# the version you are building is one nobody should be installing.
+yanked = "deny"
+
+# Which crates are checked against RustSec's unmaintained advisories: every one
+# in the tree, not only the workspace's direct dependencies. An unmaintained
+# crate is not a vulnerability, and this is the strict setting, so be clear
+# about what it costs. cargo-deny has no lint level for these, so a new
+# unmaintained advisory against anything transitive fails the check on the next
+# unrelated pull request. That is the intended trade: being told is the point,
+# and carrying one deliberately means an `ignore` entry above with a reason
+# somebody wrote down, rather than a setting that quietly reported nothing.
+unmaintained = "all"
+
+[licenses]
+# Every licence below is permissive: attribution, and nothing that reaches back
+# into what you build on top. There is no copyleft licence in this list, and
+# that is the point of the list. If a dependency introduces one, this check
+# fails and somebody makes a decision, rather than the obligation arriving in a
+# release nobody read.
+#
+# Each entry is here because a crate in the current tree needs it. Nothing is
+# allowed speculatively, so the check fails on a licence this project has not
+# considered rather than quietly accepting it.
+allow = [
+    # mcpd's own crates, and most of the tree.
+    "Apache-2.0",
+    "MIT",
+    # ring and rustls-webpki. ring is "Apache-2.0 AND ISC", so both halves have
+    # to be allowed for it to resolve at all.
+    "ISC",
+    # subtle, and the half of matchit's "MIT AND BSD-3-Clause" that MIT does
+    # not cover. matchit's router is a port of Go code that carries its own
+    # BSD licence.
+    "BSD-3-Clause",
+    # The ICU crates under icu_*, plus tinystr, litemap, writeable, yoke,
+    # zerovec and their kin. Unicode-3.0 is the Unicode licence, permissive,
+    # and unicode-ident combines it with MIT OR Apache-2.0.
+    "Unicode-3.0",
+    # foldhash, the hasher behind hashbrown, and zlib-rs, the deflate
+    # implementation flate2 and miniz_oxide 0.9 build on. The zlib licence is
+    # attribution and a request not to misrepresent the origin, nothing more.
+    "Zlib",
+    # borrow-or-share, under fluent-uri, which jsonschema uses to resolve
+    # references. MIT-0 is MIT with the attribution clause removed.
+    "MIT-0",
+]
+
+# CDLA-Permissive-2.0 is a data licence, not a code licence, and it is here for
+# exactly one crate: webpki-roots, which is the Mozilla CA root store compiled
+# in so a static binary can verify TLS without a system trust store. Allowing a
+# data licence for the whole tree would say something this project does not
+# mean, so it is scoped to the crate that needs it.
+exceptions = [
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+]
+
+# One crate in the tree, r-efi, offers "MIT OR Apache-2.0 OR LGPL-2.1-or-later".
+# It needs no entry here and gets none: the expression is a choice, cargo-deny
+# takes MIT from the allow list above, and no LGPL obligation attaches. It is
+# named here so that nobody reading a licence report has to work out on their
+# own why an LGPL string in the tree is not a finding.
+
+[licenses.private]
+# The workspace crates publish under Apache-2.0 and are checked like any other.
+ignore = false
+
+[bans]
+# Two versions of one crate is a maintenance signal, not a vulnerability: the
+# advisories check reports a finding against every version present, so nothing
+# hides behind a duplicate. Denying duplicates outright would fail this repo's
+# CI on a dependency it does not control, so it warns and someone reads it.
+#
+# What it is warning about today, and why, so a reviewer does not have to
+# derive it: the Postgres backend pulls postgres-protocol, which has moved to
+# the 0.11 line of the RustCrypto stack while mcpd-core is still on 0.10. That
+# is where sha2, digest, block-buffer, crypto-common, cpufeatures, rand,
+# rand_core and getrandom each appear twice. Both copies are compiled into the
+# released binary, because the postgres feature is on by default. The other two
+# are ordinary transitive skew: syn and fallible-iterator. Cargo.lock also
+# carries two versions of wasi and of windows-sys; the targets list above prunes
+# both, because nothing mcpd ships compiles them.
+multiple-versions = "warn"
+
+# A `*` version requirement accepts whatever is published next, which makes the
+# lock file the only thing standing between this build and a stranger's future
+# release. Nothing in this workspace uses one, and this keeps it that way.
+wildcards = "deny"
+
+highlight = "all"
+
+deny = [
+    # mcpd links rustls, and the release binary is static musl with no system
+    # OpenSSL in the image to patch. A dependency that pulls OpenSSL back in
+    # would break that quietly: the build would still succeed on a developer's
+    # machine with libssl installed, and the container would gain a library
+    # with its own advisory stream. Fail here instead.
+    { crate = "openssl", reason = "mcpd uses rustls; see reqwest's default-features = false" },
+    { crate = "openssl-sys", reason = "an OpenSSL link breaks the static musl build and adds a runtime to patch" },
+    { crate = "native-tls", reason = "the same, one layer up" },
+]
+
+# The same rule stated where it is likeliest to be undone. reqwest is
+# configured with default-features = false in the workspace manifest, and
+# turning either of these features on is how OpenSSL comes back.
+[[bans.features]]
+crate = "reqwest"
+deny = ["default-tls", "native-tls"]
+
+[sources]
+# Every crate comes from crates.io. A git dependency has no immutable version
+# and no yank mechanism, so a compromised branch is a compromised build with
+# nothing in the lock file to notice. There is no git dependency in this tree
+# and this is what keeps one from arriving without a conversation.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -1,0 +1,651 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+---
+
+<Doc
+  title="Redaction and retention"
+  description="The redaction rules mcpd applies before it writes anything, the four modes, why the hash is keyed, and how stored data expires or is erased on request."
+  lede="What never gets stored, and what stops being stored. Redaction runs before the write, because a secret deleted afterwards was still written down."
+  og="docs"
+>
+  <h2>Redaction runs before storage</h2>
+  <p>
+    Prompts and completions are the most valuable thing mcpd holds and the most
+    dangerous. Redaction is stage three of the ingest pipeline, ahead of the
+    write, so a value a rule matches never reaches the database at all.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    The ordering is the whole point. A value scrubbed after the fact has still
+    been on disk, in the write-ahead log, and quite possibly in last night's
+    backup. Never written is a different guarantee from deleted later, and it
+    is the only one you can state plainly to somebody who asks.
+  </p>
+  <p>
+    Redaction is on by default. A tool that only protects you once you have
+    configured it protects nobody. <code>--no-redact</code>, or
+    <code>MCPD_NO_REDACT</code>, turns it off, which is sensible only when
+    something upstream already redacts.
+  </p>
+  <p>
+    Redaction is the daemon's end of the wire. The SDKs hold the other end:
+    <code>MCPD_CAPTURE_PAYLOADS=false</code>, or <code>capture_payloads</code>
+    in code, keeps prompts and completions in the process. A span still
+    arrives with its timing, status, usage, model, correlation and errors, and
+    <code>input</code> and <code>output</code> are dropped before they are
+    queued, so they never cross the network. A team that must not send the
+    bytes at all sets that, and a span that holds nothing sensitive can opt
+    back in for itself.
+  </p>
+
+  <h2>The default rules</h2>
+  <p>
+    A rule is a set of lowercase substrings and a mode. A key matches when its
+    name, lowercased, contains any of them. Matching on a substring is why
+    <code>X-API-Key</code>, <code>authorization</code> and
+    <code>customer_email</code> are all caught without every casing and prefix
+    being listed.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Mode</th><th>Key names that match</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>mask</code></td>
+        <td>
+          <code>api_key</code>, <code>apikey</code>, <code>api-key</code>,
+          <code>secret</code>, <code>password</code>, <code>passwd</code>,
+          <code>access_token</code>, <code>refresh_token</code>,
+          <code>id_token</code>, <code>bearer</code>,
+          <code>authorization</code>, <code>auth_token</code>,
+          <code>private_key</code>, <code>client_secret</code>,
+          <code>session_token</code>, <code>credential</code>,
+          <code>signature</code>, <code>x-api-key</code>
+        </td>
+      </tr>
+      <tr>
+        <td><code>partial</code></td>
+        <td>
+          <code>email</code>, <code>phone</code>, <code>ssn</code>,
+          <code>credit_card</code>, <code>card_number</code>, <code>iban</code>
+        </td>
+      </tr>
+      <tr>
+        <td><code>hash</code></td>
+        <td><code>user_id</code>, <code>userid</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    When a matched key holds an object or an array, everything underneath it is
+    redacted too. <code>{'{"credential": {"value": "hunter2", "note": "prod"}}'}</code>
+    loses both fields, not only the one whose name looked dangerous.
+  </p>
+  <p>
+    The limit is worth stating plainly: rules match <strong>key names, not
+    values</strong>. An API key a user pasted into the middle of a prompt,
+    stored under a key called <code>content</code>, is not matched by anything
+    here. Redaction stops the structured capture of credentials and identifiers.
+    It is not a content scanner, and treating it as one will disappoint you.
+  </p>
+
+  <h2>The four modes</h2>
+  <table>
+    <thead>
+      <tr><th>Mode</th><th>What happens to the value</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>drop</code></td>
+        <td>The key is removed entirely, as if it was never sent.</td>
+      </tr>
+      <tr>
+        <td><code>mask</code></td>
+        <td>The value is replaced with <code>[redacted]</code>.</td>
+      </tr>
+      <tr>
+        <td><code>partial</code></td>
+        <td>
+          The first two and last two characters survive, joined by an ellipsis:
+          <code>alice@example.com</code> becomes <code>al…om</code>. Enough to
+          recognise a value you already know, not enough to use. A value of six
+          characters or fewer is masked entirely instead, because keeping four
+          of five characters discloses most of it.
+        </td>
+      </tr>
+      <tr>
+        <td><code>hash</code></td>
+        <td>
+          The value is replaced with <code>sha256:</code> and the first twelve
+          bytes of a keyed SHA-256 digest, as twenty-four hex characters.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    The built-in rules use three of the four. Nothing is dropped by default:
+    <code>drop</code> is there for a rule you add, where even the presence of a
+    field is more than you want to keep.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="what came back out"
+    lines={[
+      { cmd: 'curl -s "$MCPD/v1/api/traces/$TRACE" | jq .spans[0].input' },
+      { out: '{' },
+      { out: '  "question": "Where is my order A-1042?",' },
+      { out: '  "api_key": "[redacted]",', tone: 'note' },
+      { out: '  "email": "al…om",', tone: 'note' },
+      { out: '  "user_id": "sha256:9f2c1b7d4a08e5c3f6b1d0a4"', tone: 'note' },
+      { out: '}' },
+    ]}
+  />
+
+  <h2>Why the hash is keyed</h2>
+  <p>
+    Hashing keeps a field useful. Equal inputs give equal digests under one key,
+    so you can still group by a redacted user id, count how many distinct people
+    hit a failure, and follow one of them across a session, without holding who
+    they are.
+  </p>
+  <p>
+    Unkeyed, that property is a hole. Identifiers come from small, guessable
+    spaces, and anyone with the digest and this source can hash candidates until
+    one matches. The key is what makes the digest unrecoverable rather than
+    merely inconvenient.
+  </p>
+  <p>
+    The built-in key is a constant in the source, so it is public. Set your own
+    in any deployment that hashes anything.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="a deployment that hashes and expires"
+    command={'mcpd --redact-key "$MCPD_REDACT_KEY" --retention-days 30'}
+    secondary={[
+      { label: 'as environment', command: 'MCPD_REDACT_KEY=… MCPD_RETENTION_DAYS=30 mcpd' },
+      { label: 'redaction off', command: 'mcpd --no-redact' },
+    ]}
+  />
+
+  <p>
+    Rotating the key breaks the link on purpose. Every digest changes, so rows
+    written before the rotation can no longer be joined to rows written after
+    it. That is what rotation is for, and it is also what it costs. Rotate when
+    you want the link severed, not on a schedule out of habit.
+  </p>
+  <p>
+    Read the second half of that cost before you rotate. Erasure by subject
+    matches the stored digest, so every row written under the old key is beyond
+    the reach of a deletion request from the moment the new key is in force.
+    mcpd cannot tell you that this is what happened, because nothing records
+    which key wrote which row. All it can do is refuse to let the resulting zero
+    pass as an answer, and the section on a zero below is that refusal.
+  </p>
+
+  <h2>Every signal, not only spans</h2>
+  <p>
+    A secret leaks as readily through a log line as through a prompt, so the
+    same redactor runs over all six signals on the way in:
+  </p>
+  <ul>
+    <li>Spans: <code>input</code>, <code>output</code>, <code>attributes</code> and <code>metadata</code>.</li>
+    <li>Logs: the structured <code>fields</code>.</li>
+    <li>Metrics: the <code>labels</code>.</li>
+    <li>Scores: the <code>metadata</code>.</li>
+    <li>Feedback: the <code>metadata</code>, and the free-text <code>comment</code>.</li>
+    <li>Aspect notes: the sentence in <code>text</code>.</li>
+  </ul>
+  <p>
+    A span's name and a log record's message are not passed through the
+    redactor. They are identifiers, not payloads, and rewriting them would break
+    grouping. Do not build a span name out of a customer's email address.
+  </p>
+
+  <h3>The run store is not redacted</h3>
+  <p>
+    Durable runs are the exception, and it is deliberate. The run store keeps a
+    run's input, state, output and correlation, and every step's input, output
+    and error, exactly as they were sent, with <code>user_id</code> unhashed.
+    They are the workflow's working state: a later step reads them back, and a
+    value the redactor had rewritten would change what the run does. The spans
+    a run writes into the trace store take the ordinary ingest path, so the
+    trace store holds them redacted and hashed like any other span. Retention
+    and erasure both reach the run store, as the sections below say, and every
+    read of a run through the API is recorded in the audit log.
+  </p>
+
+  <h2>Long strings and deep documents</h2>
+  <p>
+    Two bounds apply to everything, whether or not a rule matched.
+  </p>
+  <p>
+    Any single string longer than 128 KiB is truncated, with
+    <code>… [N bytes truncated]</code> appended so the reader knows the value is
+    incomplete rather than short. The cut lands on a character boundary, never
+    inside a multi-byte codepoint. One runaway prompt should not decide the size
+    of your database.
+  </p>
+  <p>
+    Walking stops at a depth of 32, and anything below that is replaced with
+    <code>[too deeply nested]</code>. A pathological or self-referencing
+    document arriving at an open ingest port cannot pin a CPU.
+  </p>
+
+  <h2>Retention</h2>
+  <p>
+    <code>--retention-days</code>, or <code>MCPD_RETENTION_DAYS</code>, deletes
+    signals older than that many days. Omit it and nothing is ever deleted.
+    Keeping data by default is the right way round: a tool that silently
+    discarded last month's traces would be discovered at the worst moment.
+  </p>
+  <p>
+    The pass runs on an hourly timer inside the daemon, not at query time. A
+    retention sweep can delete a great many rows, and that work must never land
+    inside somebody's request. Each pass removes, in one transaction, the spans,
+    logs, metrics and trace rows whose <code>received_at</code> is older than
+    the cutoff, and the scores, feedback and aspect notes whose own timestamp
+    is, then logs how many rows went. Full-text index entries are cleared first,
+    while the rows that name them still exist, so nothing is orphaned.
+  </p>
+  <p>
+    The same pass, on the same window, trims the run store. It deletes every
+    durable run whose root ended before the cutoff, with its child runs and
+    everything stored for them, in batches so that workers are not held up
+    while it works. A run that has not ended is never deleted, however long it
+    has been waiting. Definitions are not trimmed.
+  </p>
+  <p>
+    The pass covers the project named by <code>--project</code> and every
+    project in the <code>projects</code> block of the config file, not only the
+    default. A project that sets its own <code>retention_days</code> there is
+    swept on that figure, and the rest are swept on the daemon's. A project in
+    neither place, one a sender named on its own, has no window and is never
+    trimmed. That matters when one daemon serves several teams: a team that
+    agreed to keep thirty days does not silently keep them because another
+    team's setting was the only one the sweep read, and a team nobody wrote
+    down keeps everything.
+  </p>
+
+  <h2>An erasure request about a person</h2>
+  <p>
+    <code>DELETE /v1/api/subjects/{'{user_id}'}</code> answers a request about
+    one person in one call. Send the identifier the way your instrumentation set
+    it. The daemon applies the same hashing it applied at ingest, so a
+    deployment that hashes <code>user_id</code> does not need you to hash it
+    first.
+  </p>
+  <p>
+    The unit of erasure is the run, not the row. Only a root span usually
+    carries a <code>user_id</code>, and the child spans are the ones holding the
+    prompt and the completion, so deleting the rows that name the subject would
+    leave the payload standing. A run is in scope when its trace projection
+    names the subject or when any of its spans does, and then the whole run
+    goes:
+  </p>
+  <ul>
+    <li>Every span of that run, with the inputs and outputs it carried.</li>
+    <li>The logs, metrics, scores, feedback and aspect notes hanging off it.</li>
+    <li>
+      Signals that name a <code>span_id</code> and no <code>trace_id</code>. A
+      score or a log line pinned to one step of the subject's run is reached
+      through the span ids of the runs in scope, not only through their trace
+      ids.
+    </li>
+    <li>
+      Log lines recorded against the person with no run to hang on, matched on
+      their own <code>user_id</code>.
+    </li>
+    <li>
+      Feedback the person wrote, matched on <code>author_id</code>, wherever it
+      hangs. That row holds their own prose, and it can hang on somebody else's
+      run, which is where it used to survive.
+    </li>
+    <li>
+      Dataset cases captured from a run in scope. Those are emptied rather than
+      deleted. The next section but one says why.
+    </li>
+    <li>
+      On a daemon that serves durable runs, every run that has ended whose
+      correlation carries the <code>user_id</code>, matched as you started the
+      run with it because the run store keeps it unhashed, with its whole tree
+      of child runs and everything the run store holds for them. A run of that
+      person that has not ended is not touched: deleting it would corrupt the
+      workflow it is part of. It is counted in <code>runs_in_flight</code> and
+      named in <code>note</code>, so you can cancel it, or let it end, and send
+      the request again.
+    </li>
+  </ul>
+  <p>
+    The run store is erased first. A run's spans wait in its outbox until they
+    are written into the trace store, so erasing the runs first deletes any
+    span still waiting, and the trace store erasure then removes the ones
+    already written.
+  </p>
+
+  <h3>What the reply carries</h3>
+  <p>
+    A count per signal, two counts for the run store, and six fields beside
+    them carrying what a count cannot: what was deliberately left behind, and
+    whether a small number can be read as "nothing about this person is stored
+    here". <code>deleted</code> is the total of the six signal counts; the run
+    counts and <code>aspect_notes_erased</code> are reported beside it, not
+    added into it.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="one request, one person"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq' },
+      { out: '{' },
+      { out: '  "project": "checkout",' },
+      { out: '  "traces": 1,', tone: 'note' },
+      { out: '  "spans": 2,', tone: 'note' },
+      { out: '  "logs": 1,', tone: 'note' },
+      { out: '  "metrics": 0,', tone: 'note' },
+      { out: '  "scores": 1,', tone: 'note' },
+      { out: '  "feedback": 1,', tone: 'note' },
+      { out: '  "deleted": 6,' },
+      { out: '  "runs_erased": 1,', tone: 'note' },
+      { out: '  "runs_in_flight": 0,' },
+      { out: '  "dataset_items_erased": 1,', tone: 'warn' },
+      { out: '  "aspect_notes_erased": 0,' },
+      { out: '  "datasets": [' },
+      { out: '    "checkout-regressions"' },
+      { out: '  ],' },
+      { out: '  "deletes_pending": false,' },
+      { out: '  "unmatchable_identifiers": 0,' },
+      { out: '  "note": "1 captured dataset cases were emptied in place rather', tone: 'warn' },
+      { out: '           than deleted, so a regression test is not destroyed', tone: 'warn' },
+      { out: '           without anyone being told. They hold no payload any', tone: 'warn' },
+      { out: '           more."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Field</th><th>What it tells you</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>runs_erased</code></td>
+          <td>
+            Durable runs deleted from the run store, child runs included. Not
+            counted in <code>deleted</code>. Absent when the daemon serves no
+            runs
+          </td>
+        </tr>
+        <tr>
+          <td><code>runs_in_flight</code></td>
+          <td>
+            The person's durable runs left whole because they have not ended.
+            <code>note</code> names the runs to cancel. Absent when the daemon
+            serves no runs
+          </td>
+        </tr>
+        <tr>
+          <td><code>dataset_items_erased</code></td>
+          <td>
+            Captured cases emptied in place. They are not counted in
+            <code>deleted</code>, because the rows are still there
+          </td>
+        </tr>
+        <tr>
+          <td><code>aspect_notes_erased</code></td>
+          <td>
+            Aspect notes deleted. Not counted in <code>deleted</code>, which
+            totals the six signal counts printed above it
+          </td>
+        </tr>
+        <tr>
+          <td><code>datasets</code></td>
+          <td>Which datasets those cases sit in, so you can go and look at them</td>
+        </tr>
+        <tr>
+          <td><code>deletes_pending</code></td>
+          <td>
+            True when the backend applies the deletes after answering, so the
+            counts say what matched rather than what has already left the disk
+          </td>
+        </tr>
+        <tr>
+          <td><code>unmatchable_identifiers</code></td>
+          <td>
+            Stored identifiers in this project that are in a form this request
+            could not have matched
+          </td>
+        </tr>
+        <tr>
+          <td><code>note</code></td>
+          <td>
+            Why the numbers above may not be the whole answer. Absent when they
+            are
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Captured cases are emptied, not deleted</h3>
+  <p>
+    A dataset case captured from production holds a verbatim copy of the input,
+    so erasing the run and leaving the copy would leave the person's words in
+    the dataset. Deleting the case outright is a harm of a different kind:
+    somebody captured that run to keep a bug from coming back, and destroying
+    their regression test without a word is not a decision mcpd should make on
+    its own.
+  </p>
+  <p>
+    So the payload is overwritten and the row survives. The case reads
+    <code>{'{"erased": true}'}</code> where its input and metadata were, its
+    link back to the source run is cleared, and the reply names how many cases
+    and which datasets. The case is visibly empty, which is something an
+    operator can act on.
+  </p>
+  <p>
+    One case is out of reach entirely, and tenancy is the reason. A case
+    captured into a dataset that belongs to <em>another</em> project is not
+    emptied and is not counted. The call is authorised for one project and touches one project, and
+    an erasure that reached across that boundary would be a way to learn what is
+    in a dataset you cannot read. Erase the person from that project too, with a
+    key that reaches it.
+  </p>
+
+  <h3>What it does not do</h3>
+  <p>
+    It touches one project. <code>?project=</code> names it and the daemon's
+    default project is used when you leave it out. A key that does not reach
+    that project is refused with a 403 and nothing is deleted. Rows for the
+    same person in a project the key cannot open are neither touched nor
+    counted, so a count can never disclose that the subject exists somewhere
+    else. Erasing a person from several projects is one call per project, with
+    a key that reaches each.
+  </p>
+  <p>
+    A subject with nothing stored is a 200 carrying zeroes, not a 404. The
+    state you asked for holds, and a 404 would answer a question nobody is
+    entitled to ask: whether that person exists anywhere this key can see. It is
+    also why a repeat after a timeout is safe. The second call reports the
+    smaller counts of a second pass rather than an error.
+  </p>
+  <p>
+    It is not a way to erase a person from your own systems. mcpd deletes what
+    mcpd stored. Anything you forwarded to another OTLP endpoint has to be
+    erased there too, and mcpd does not know what happened to it.
+  </p>
+
+  <h3>Keys and the record of it</h3>
+  <p>
+    Erasure needs an admin key when keys are configured, and falls back to the
+    read keys when no admin key is set, so an existing deployment keeps the
+    reach it had. It is written to the audit log with the action, the project
+    and a digest of the key that asked, and a refused attempt is recorded the
+    same way. Where <code>user_id</code> is hashed, the digest is what the row
+    names: the audit log outlives the data it describes, so writing the raw
+    identifier there would leave the name the person asked you to remove in a
+    table retention does not sweep.
+  </p>
+  <p>
+    One run at a time is still there.
+    <code>DELETE /v1/api/traces/{'{trace_id}'}</code> removes a single run and
+    everything attached to it, in one transaction, returning the number of rows
+    deleted.
+  </p>
+
+  <h2>A zero from an erasure is the value to distrust</h2>
+  <p>
+    A zero is what an operator repeats to a person as "we hold nothing about
+    you", and it is the one number this endpoint cannot prove. Stored
+    identifiers are hashed with the redaction key, and nothing records which key
+    hashed which row, so a zero can equally mean the key moved after those rows
+    were written. mcpd cannot tell the two apart. What it can do is never hand
+    back a bare zero that reads like the first one.
+  </p>
+  <p>
+    Here is the same subject, erased under a redaction key that has been rotated
+    since the run was recorded. The counts are all zero and the row is still
+    there:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="after a rotation, the same request matches nothing"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq "{deleted, unmatchable_identifiers, note}"' },
+      { out: '{' },
+      { out: '  "deleted": 0,', tone: 'warn' },
+      { out: '  "unmatchable_identifiers": 0,' },
+      { out: '  "note": "Nothing matched. Stored identifiers are hashed with', tone: 'warn' },
+      { out: '           the redaction key, so this means no stored identifier', tone: 'warn' },
+      { out: '           hashes to this subject under the key in force now. It', tone: 'warn' },
+      { out: '           does not mean nothing about this person was ever', tone: 'warn' },
+      { out: '           stored: rows written under a different redaction key', tone: 'warn' },
+      { out: '           cannot be matched by this endpoint."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <p>
+    What the note can prove depends on the project. When nothing in it is
+    attributed to anybody, there is no row a key change could be hiding, and the
+    note says exactly that instead. Otherwise a zero is unproven: restore the
+    redaction key those rows were written under and repeat the request.
+  </p>
+  <p>
+    It reports rather than refuses, and that is a deliberate trade. Refusing
+    would break a repeat after a timeout, it would make the reply for "never
+    seen" differ from the reply for "erased an hour ago" and turn the endpoint
+    into a way to ask whether a person is known to a project, and it would block
+    every erasure in a deployment whose redaction setting ever changed,
+    including the ones that correctly matched nothing.
+  </p>
+
+  <h3>Identifiers this request could not have matched</h3>
+  <p>
+    A rotation is invisible. A change to <em>whether</em> identifiers are hashed
+    at all is not, and <code>unmatchable_identifiers</code> is what mcpd can see.
+    A hashed identifier is recognisable by its <code>sha256:</code> prefix, so
+    the store counts how many of the identifiers it holds are in the opposite
+    form to the one this request carried: plaintext rows against a hashed
+    request, or the reverse. Those rows were written under a different redaction
+    setting, they may belong to the subject, and this request cannot address
+    them.
+  </p>
+
+  <p>
+    The count runs on every erasure, not only on a zero, and the reply below is
+    why. This project was written to with redaction on, then written to again
+    with it off. The request matched the newer rows and deleted them, and the
+    two older identifiers are hashed, so this request could never have addressed
+    them. A count that stopped at <code>deleted</code> would have read as a
+    complete answer:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="a partial erasure, which is the case worth catching"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq "{deleted, unmatchable_identifiers, note}"' },
+      { out: '{' },
+      { out: '  "deleted": 2,' },
+      { out: '  "unmatchable_identifiers": 2,', tone: 'warn' },
+      { out: '  "note": "2 stored identifiers in this project are in a form', tone: 'warn' },
+      { out: '           this request could not match, so rows written under a', tone: 'warn' },
+      { out: '           different redaction setting were not searched and rows', tone: 'warn' },
+      { out: '           about this person may remain. Restore the redaction', tone: 'warn' },
+      { out: '           setting those rows were written under and repeat the', tone: 'warn' },
+      { out: '           request."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <p>
+    The count is over every identifier the project holds, not over the subject's
+    own rows, so those two may belong to somebody else entirely. That is the
+    most it can say. What it rules out is reading a successful-looking erasure
+    as a complete one.
+  </p>
+
+  <h2>The guarantee is not the same on all three backends</h2>
+  <p>
+    SQLite and Postgres delete inside the transaction that answered you. When
+    the reply arrives the rows are gone, and <code>deletes_pending</code> is
+    <code>false</code>.
+  </p>
+  <p>
+    ClickHouse does not. Deletion there is an asynchronous mutation: the server
+    accepts the statement and applies it in the background, so the reply says
+    what matched rather than what has already left the disk. Those erasures come
+    back with <code>deletes_pending</code> set to <code>true</code>, which is
+    mcpd telling you the weaker of the two guarantees is the one in force. The
+    dataset cases are the exception on that backend. They are rewritten under
+    their own key rather than mutated, so the emptied case is what any read
+    returns from the moment the reply is sent. A mutation would have left the
+    old text readable until it finished.
+  </p>
+  <p>
+    If you have to certify to somebody that the data is gone by a given moment,
+    that is the difference to write down. On ClickHouse, confirm the mutation
+    completed on the server before you answer.
+  </p>
+
+  <h2>Before the port is reachable</h2>
+  <p>
+    Redaction protects the values inside a trace. It does nothing about who can
+    read the trace. mcpd warns at startup when it binds a non-loopback address
+    with open ingest or an open read API, because stored prompts and completions
+    are then readable by anyone who can reach the port. Set
+    <code>--ingest-key</code> and <code>--read-key</code> first, and read
+    <a href="/deploy" class="link">Docker and Kubernetes</a>.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>
+      Keeping less in the first place:
+      <a href="/docs/sampling" class="link">Sampling</a>.
+    </li>
+    <li>
+      Every flag and environment variable:
+      <a href="/docs/configuration" class="link">Configuration</a>.
+    </li>
+    <li>
+      Probes, backups and upgrades:
+      <a href="/docs/operations" class="link">Running it</a>.
+    </li>
+  </ul>
+</Doc>

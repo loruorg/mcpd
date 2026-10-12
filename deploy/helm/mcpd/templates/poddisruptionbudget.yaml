@@ -1,0 +1,42 @@
+{{/*
+  The review question this answers: "what happens to ingest while a node is
+  drained?"
+
+  Off by default, and it refuses to render over a single replica. That is
+  every release that keeps an SQLite file in the pod (the embedded signal
+  store, or the run store), and any release with replicaCount 1. A budget over
+  one pod is not a safety net: minAvailable 1 blocks every voluntary eviction,
+  so a node drain hangs and a cluster upgrade stalls behind it, while
+  maxUnavailable 1 permits every eviction and protects nothing. Neither is what
+  someone turning this on wants, so the chart says so rather than rendering an
+  object that quietly does the wrong thing.
+*/}}
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- if or (include "mcpd.localState" .) (le (int .Values.replicaCount) 1) }}
+{{- fail "podDisruptionBudget.enabled is true, but the Deployment runs one replica. A budget over a single pod either blocks every node drain (minAvailable) or allows every one (maxUnavailable). More than one replica needs externalStore.type set (postgres or clickhouse), runs.enabled=false and replicaCount 2 or more. Otherwise leave podDisruptionBudget.enabled false." }}
+{{- end }}
+{{- $min := .Values.podDisruptionBudget.minAvailable }}
+{{- $max := .Values.podDisruptionBudget.maxUnavailable }}
+{{- if and $min $max }}
+{{- fail "podDisruptionBudget.minAvailable and podDisruptionBudget.maxUnavailable are both set. Kubernetes accepts one or the other. Clear whichever you did not mean by setting it to an empty string." }}
+{{- end }}
+{{- if not (or $min $max) }}
+{{- fail "podDisruptionBudget.enabled is true but neither minAvailable nor maxUnavailable is set, which is a budget that constrains nothing. Set one of them." }}
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "mcpd.fullname" . }}
+  labels:
+    {{- include "mcpd.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "mcpd.selectorLabels" . | nindent 6 }}
+  {{- with $min }}
+  minAvailable: {{ . }}
+  {{- end }}
+  {{- with $max }}
+  maxUnavailable: {{ . }}
+  {{- end }}
+{{- end }}

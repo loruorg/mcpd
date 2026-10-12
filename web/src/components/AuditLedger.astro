@@ -1,0 +1,139 @@
+---
+/**
+ * The audit ledger.
+ *
+ * The one instrument on this page aimed at the person who has to sign off on
+ * mcpd rather than the person who will use it. It answers the question that
+ * decides those reviews: not "is the data safe" but "can you show me who
+ * reached it, including the people who were turned away".
+ *
+ * Every row here is a shape the daemon actually writes. `principal` is a
+ * truncated SHA-256 of the key and never the key itself; a refusal is recorded
+ * exactly like a success, which is the row that matters and the reason this is
+ * a ledger rather than a list of reads.
+ *
+ * The motion is a recording head passing down the left edge. It changes the
+ * tone of a 2px rule and nothing else: every row is fully painted in the
+ * markup, so a dead animation engine, a backgrounded tab or a screenshot pass
+ * leaves a complete ledger rather than an empty frame waiting for a script.
+ */
+
+interface Props {
+  /** Seconds for one pass of the recording head. */
+  period?: number
+  class?: string
+}
+
+const { period = 9, class: className = '' } = Astro.props
+
+/**
+ * Rows in the order the daemon would have written them, newest last.
+ *
+ * The refusal is third rather than last on purpose: a refusal buried at the
+ * bottom reads as the exception the example was built to show, and one in the
+ * middle of ordinary traffic reads as what it is.
+ */
+const ROWS = [
+  { at: '14:02:11', who: 'a3f9c2e1b7d4', act: 'get_trace', proj: 'checkout', res: 'ok' },
+  { at: '14:02:11', who: 'a3f9c2e1b7d4', act: 'list_spans', proj: 'checkout', res: 'ok' },
+  { at: '14:04:38', who: '7c1e08b53a9f', act: 'list_dataset_items', proj: 'billing', res: 'refused' },
+  { at: '14:07:02', who: 'd52a4f8c0e63', act: 'capture_into_dataset', proj: 'checkout', res: 'ok' },
+  { at: '14:11:55', who: 'd52a4f8c0e63', act: 'delete_trace', proj: 'checkout', res: 'ok' },
+  { at: '14:19:20', who: '7c1e08b53a9f', act: 'list_feedback', proj: 'billing', res: 'ok' },
+]
+
+const N = ROWS.length
+/** One slice per row, plus one so the head rests before it starts again. */
+const STEP = 100 / (N + 1)
+---
+
+<figure class={`panel-raised min-w-0 ${className}`}>
+  <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-4 pt-3.5 pb-3">
+    <p class="legend">Audit log</p>
+    <p class="data text-[0.6875rem] text-ink-3">GET /v1/api/audit</p>
+  </div>
+
+  <div class="seam min-w-0 overflow-x-auto scroll-x">
+    <table class="w-full border-collapse sm:min-w-[38rem]">
+      <thead>
+        <tr>
+          <th class="legend px-4 py-2 text-left font-normal text-ink-3">Time</th>
+          <th class="legend px-3 py-2 text-left font-normal text-ink-3 max-sm:hidden">Principal</th>
+          <th class="legend px-3 py-2 text-left font-normal text-ink-3">Action</th>
+          <th class="legend px-3 py-2 text-left font-normal text-ink-3 max-sm:hidden">Project</th>
+          <th class="legend px-4 py-2 text-right font-normal text-ink-3">Result</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          ROWS.map((r, i) => (
+            <tr class="mcpd-row border-t border-scribe-2" style={`--row:${i}`}>
+              <td class="relative py-2 pr-3 pl-4">
+                {/* The recording head. A 2px rule with fixed bounds, so its ends
+                    never round or travel; only its tone changes. */}
+                <span class="mcpd-head absolute top-0 bottom-0 left-0 w-[2px] bg-ink-4" />
+                <span class="data text-[0.75rem] whitespace-nowrap text-ink-2">{r.at}</span>
+              </td>
+              <td class="px-3 py-2 max-sm:hidden">
+                <span class="data text-[0.75rem] whitespace-nowrap text-ink-3">{r.who}</span>
+              </td>
+              <td class="px-3 py-2">
+                <span class="data text-[0.75rem] whitespace-nowrap text-ink">{r.act}</span>
+              </td>
+              <td class="px-3 py-2 max-sm:hidden">
+                <span class="text-[0.8125rem] whitespace-nowrap text-ink-2">{r.proj}</span>
+              </td>
+              <td class="px-4 py-2 text-right">
+                <span
+                  class="data text-[0.75rem]"
+                  style={`color:${r.res === 'ok' ? 'var(--color-olive)' : 'var(--color-oxide)'}`}
+                >
+                  {r.res}
+                </span>
+              </td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+
+  <div class="seam flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-4 py-3">
+    <p class="text-[0.8125rem] leading-snug text-ink-2">
+      A refusal is recorded like a read. The principal is a digest of the key,
+      never the key. Retention never trims this table.
+    </p>
+    <p class="data text-[0.75rem] text-ink-3">18 actions</p>
+  </div>
+
+  <figcaption class="sr-only">
+    An audit log with six entries, each showing the time, a truncated digest of
+    the key that acted, the action, the project and the result. One entry, a
+    read of another project's dataset items, is recorded as refused.
+  </figcaption>
+</figure>
+
+{/* Generated from the row count, so adding a row cannot leave the head passing
+    over a ledger that is longer than its own timing. */}
+<style is:inline set:html={`
+  .mcpd-row .mcpd-head {
+    animation: mcpd-ledger ${period}s steps(1, end) infinite;
+    animation-delay: calc(var(--row) * ${(period / (N + 1)).toFixed(3)}s);
+  }
+
+  /* Resting tone, briefly lit, then resting again. The rule is painted in the
+     markup and never disappears, so nothing on this panel depends on the
+     animation running. */
+  @keyframes mcpd-ledger {
+    0%                          { background-color: var(--color-ink-4); }
+    ${(STEP * 0.5).toFixed(2)}%   { background-color: var(--color-ink-4); }
+    ${(STEP * 0.55).toFixed(2)}%  { background-color: var(--color-olive); }
+    ${(STEP * 1.6).toFixed(2)}%   { background-color: var(--color-olive); }
+    ${(STEP * 1.7).toFixed(2)}%   { background-color: var(--color-ink-4); }
+    100%                        { background-color: var(--color-ink-4); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mcpd-row .mcpd-head { animation: none; }
+  }
+`}></style>

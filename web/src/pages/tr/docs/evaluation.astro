@@ -1,0 +1,299 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Puanlar ve geri bildirim"
+  description="mcpd makine değerlendirmesini ve insan yargısını nasıl kaydeder, ikisini neden ayrı saklar ve bir puanlayıcının düşük puan verdiği çalıştırmaları hangi sorgu bulur."
+  lede="Puan, bir makinenin ne düşündüğüdür. Geri bildirim, bir insanın ne düşündüğüdür. mcpd bunları iki ayrı sinyal olarak tutar ve asla ikisinin ortalamasını almaz."
+  og="docs"
+>
+  <h2>Tek bir sayı değil, iki sinyal</h2>
+  <p>
+    <strong>Puan</strong> bir makine değerlendirmesidir: bir yargıç model, bir
+    düzenli ifade, bir birim testi, bir çalıştırma hakkında sayı üretebilen her
+    şey. <strong>Geri bildirim</strong> kaydı ise bir insanın yargısıdır:
+    ürününüzdeki bir başparmak aşağı, bir gözden geçirenin puanı, düzeltilmiş
+    bir yanıt.
+  </p>
+  <p>
+    İkisi de bir <code>trace_id</code> ya da bir <code>span_id</code> üzerine
+    iliştirilir, ikisi de kendi başına birer sinyal olarak gelir ve ikisi de
+    kendi tablosunda saklanır. Asla birleştirilmezler. Konuyla ilgililik için
+    0.9 veren bir yargıç da başparmağı aşağı çeviren bir müşteri de doğru
+    söyler; aralarındaki uyuşmazlık, o çalıştırmadaki en işe yarar şeydir.
+    Ortalama tam olarak bunu siler ve elinizde kimsenin bir şey yapamayacağı bir
+    sayı bırakır.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>Puan kendi ölçeğini bildirir</h2>
+  <p>
+    <code>min</code> ve <code>max</code> puanın parçasıdır. Onlar olmadan değer
+    yorumlanamaz: 0.86 sayısı 0 ile 1 arası bir ölçekte iyi bir sonuç, 0 ile 5
+    arası bir ölçekte kötü bir sonuç ya da küçüğün daha iyi olduğu bir uzaklık
+    olabilir. Altı ay sonra, aynı projede iki puanlayıcı varken, kimse hangisi
+    olduğunu ayırt edemez. Spesifikasyon bunları 0 ve 1 olarak varsayar ve
+    her SDK bunları çağrı yerinde ister, böylece varsayılan yanlışlıkla kabul
+    edilmez.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Alan</th><th>Ne işe yarar</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>scorer_id</code></td>
+        <td>Bunu hangi puanlayıcının ürettiği, örneğin <code>answer_relevance</code>. Zorunludur.</td>
+      </tr>
+      <tr>
+        <td><code>scorer_version</code></td>
+        <td>Bir puan yalnızca aynı sürümden gelen başka bir puanla karşılaştırılır. Bir yargıcın istemini değiştirdiğinizde eskisinin devamı değil, yeni bir puanlayıcı elde edersiniz.</td>
+      </tr>
+      <tr>
+        <td><code>value</code></td>
+        <td>Sayı.</td>
+      </tr>
+      <tr>
+        <td><code>min</code>, <code>max</code></td>
+        <td>Sayının üzerinde durduğu, bildirilmiş ölçek.</td>
+      </tr>
+      <tr>
+        <td><code>label</code></td>
+        <td>Puanlayıcı sayının yanında bir tane üretiyorsa, kategorik sonuç.</td>
+      </tr>
+      <tr>
+        <td><code>reason</code></td>
+        <td>Gerekçe. Bir yargıç model için bu onun açıklamasıdır ve puanı sihir olmaktan çıkarıp tartışılabilir kılan şey budur.</td>
+      </tr>
+      <tr>
+        <td><code>source</code></td>
+        <td>Canlı, çevrimdışı, deney ya da elle.</td>
+      </tr>
+      <tr>
+        <td><code>score_trace_id</code></td>
+        <td>Puanlama çalıştırmasının kendi trace'i, böylece şüpheli bir puan da başka her çalıştırma gibi açılıp okunabilir.</td>
+      </tr>
+      <tr>
+        <td><code>cost</code></td>
+        <td>Puanı üretmenin maliyeti.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Bir puan kaydetmek</h2>
+  <p>
+    SDK yardımcısı bir puanı tıpkı bir span'i sıraya koyduğu gibi sıraya koyar,
+    yani çağrı bloklamaz ve hata fırlatamaz. <code>traceId</code> verilmezse
+    etkin span'in trace'ine iliştirilir.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="score" title="puan ve geri bildirim" />
+
+  <p>
+    HTTP üzerinden bu, gövdesinde bir <code>Score</code> taşıyan
+    <code>POST /v1/api/scores</code> isteğidir. Bir puan, hakkında olduğu
+    <code>trace_id</code> ya da <code>span_id</code> değerini adlandırmak
+    zorundadır; hiçbir şeye iliştirilmemiş bir puan, asla bulunamayacağı bir
+    yere yazılmak yerine 400 ile geri çevrilir. <code>score_id</code> alanını
+    boş dize olarak gönderin, sunucu bir tane üretir.
+  </p>
+
+  <h2>Bir puanın nereden geldiği</h2>
+  <p>
+    <code>source</code> alanı <code>scorer_id</code> alanından ayrıdır, çünkü
+    aynı puanlayıcı birden çok bağlamda çalışır ve bu bağlamlar
+    karşılaştırılabilir değildir. Geçen haftanın trafiğini bugünün yargıcıyla
+    yeniden puanlamak, kalitenin arttığının kanıtı olmaz.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Kaynak</th><th>Anlamı</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>live</code></td><td>Çevrimiçi üretildi, izlenen çalıştırma sürerken.</td></tr>
+      <tr><td><code>offline</code></td><td>Daha sonra, saklanmış trace'ler puanlanarak üretildi.</td></tr>
+      <tr><td><code>experiment</code></td><td>Bir veri kümesine karşı yürütülen bir deneyle üretildi.</td></tr>
+      <tr><td><code>manual</code></td><td>API ya da arayüz üzerinden bir kişi tarafından girildi.</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Bir SDK üzerinden yazılan puan varsayılan olarak <code>live</code> olur.
+    Diğer üçü için değeri kendiniz verin.
+  </p>
+
+  <h2>Puanlama para harcar, o yüzden kaydedilir</h2>
+  <p>
+    Yargıçlı bir değerlendirme genellikle bir model çağrısı daha demektir. Her
+    üretim çalıştırmasını büyük bir yargıçla puanlamak, trafiğe hizmet
+    etmekten daha pahalıya gelebilir ve bu, insanların geç fark ettiği bir
+    faturadır. Bu yüzden bir <code>Score</code> kaydı, bir span'inkiyle aynı
+    biçimde bir <code>cost</code> taşır: para birimi, girdi ve çıktı ayrımı ve
+    rakamı üreten fiyat kitabı. Puanı HTTP API'si ya da yerel bir alım
+    yığınıyla yazarken bu alanı doldurun.
+  </p>
+  <p>
+    <code>score_trace_id</code> aynı fikrin diğer yarısıdır. Puanlama
+    çalıştırmasının kendisini izleyin, kimliği de puanın üzerine gelsin;
+    böylece her şeye düşük puan vermeye başlayan bir yargıç açılabilir,
+    okunabilir ve bozuk olduğu gösterilebilir.
+  </p>
+
+  <h2>İnsan geri bildirimi</h2>
+  <p>
+    Geri bildirim kendi ürününüzden yazılır. Kişinin gerçekten bastığı denetimin
+    içinden çağırın, yargı da tepki verdikleri yanıtı üreten tam o trace'in
+    üzerine düşsün. <code>kind</code> alanı <code>value</code> alanının
+    biçimini belirler.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Tür</th><th><code>value</code></th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>thumbs</code></td><td><code>up</code> ya da <code>down</code>.</td></tr>
+      <tr><td><code>rating</code></td><td>Üretenin bildirdiği bir ölçek üzerinde bir sayı.</td></tr>
+      <tr><td><code>correction</code></td><td>Doğru yanıt, metin olarak.</td></tr>
+      <tr><td><code>tag</code></td><td>Bir kümeden seçilmiş bir etiket.</td></tr>
+      <tr><td><code>comment</code></td><td>Puan iliştirilmemiş serbest metin.</td></tr>
+    </tbody>
+  </table>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="ürününüzden gelen bir başparmak aşağı"
+    samples={[
+      {
+        lang: 'typescript',
+        label: 'TypeScript',
+        shiki: 'typescript',
+        code: `// traceId yok: etkin span'in trace'ine iliştirilir.
+mcpd.feedback({
+  kind: 'thumbs',
+  value: 'down',
+  comment: 'Named the wrong depot.',
+  authorKind: 'end_user',
+})`,
+      },
+      {
+        lang: 'curl',
+        label: 'cURL',
+        shiki: 'bash',
+        code: `curl -s -X POST "$MCPD/v1/api/feedback" \\
+  -H 'content-type: application/json' \\
+  -d "{
+    \\"feedback_id\\": \\"\\",
+    \\"trace_id\\": \\"$TRACE\\",
+    \\"kind\\": \\"thumbs\\",
+    \\"value\\": \\"down\\",
+    \\"comment\\": \\"Named the wrong depot.\\",
+    \\"author_kind\\": \\"end_user\\",
+    \\"timestamp\\": \\"$NOW\\",
+    \\"correlation\\": { \\"project\\": \\"default\\" }
+  }"`,
+      },
+    ]}
+  />
+
+  <p>
+    Maskeleme anahtar adlarına bakarak eşleşir ve bir yargıya iliştirdiğiniz
+    <code>metadata</code> üzerinde de çalışır. <code>author_id</code>
+    gönderdiğiniz gibi saklanır, o yüzden e-posta adresi yerine takma bir kimlik
+    gönderin. Bakınız
+    <a href={urlFor('/docs/privacy', locale)} class="link">Maskeleme ve saklama</a>.
+  </p>
+
+  <h2>Kötü yanıtları bulan sorgu</h2>
+  <p>
+    Puanlar bunun içindir. <code>has_score</code> bir puanlayıcıyı adlandırır,
+    <code>score_below</code> da eşiği koyar; trace listesi de o puanlayıcının
+    eşiğin altına düşürdüğü çalıştırmaları döndürür. Karşılaştırma katıdır, yani
+    <code>score_below=0.5</code> tam olarak 0.5 alan bir çalıştırmayı dışarıda
+    bırakır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="query" title="kötü puan alan çalıştırmaları bulma" />
+
+  <p>
+    <code>score_below</code> yalnızca yanında <code>has_score</code> varken bir
+    anlam taşır: puanlayıcısı adlandırılmamış bir eşik, hiçbir şeyin eşiğidir.
+    İkisi de <code>GET /v1/api/traces</code> parametresidir, dolayısıyla
+    oradaki diğer bütün filtrelerle birleşirler. Tek bir modelden gelen, üretim
+    ortamındaki, son bir gün içindeki kötü yanıtlar tek bir istektir.
+  </p>
+
+  <h2>Geri okumak</h2>
+  <p>
+    <code>GET /v1/api/scores</code> makine değerlendirmelerini listeler;
+    <code>scorer_id</code>, <code>source</code>, <code>trace_id</code>,
+    <code>experiment_id</code>, <code>min_value</code>, <code>max_value</code>
+    alanlarına ve bir zaman aralığına göre filtreli, imleçle sayfalanır.
+    <code>source</code> değeri <code>live</code>, <code>offline</code>,
+    <code>experiment</code> ya da <code>manual</code> olur; yargıcın kendi
+    puanlarını bir kişinin yazdıklarından ayrı okumanın yolu budur.
+    <code>GET /v1/api/feedback</code> bir <code>trace_id</code> alır ve o
+    çalıştırmaya verilen yargıları döndürür. Bir çalıştırma adlandırmadan bir
+    projenin tüm geri bildirimini listelemek bu sürümde uygulanmamıştır ve
+    endpoint bunu açıkça söyler: <code>trace_id</code> olmadan, parametreyi
+    adlandıran bir 400 ile geri çevirir. Eskiden boş bir liste döndürüyordu, ki
+    bu da sanki kimse hiçbir şeyi yargılamamış gibi okunuyordu.
+  </p>
+  <p>
+    Puan listesi <code>order</code> almaz: en yeniden başlar ve imleci tek yönde
+    karşılaştırır. Çalıştırma ve span listeleri alır, bu yüzden burada sessizce
+    kabul edilip atılmak yerine adıyla geri çevrilir. Aynısı, birkaç SDK
+    istemcisinin bir geri bildirim sorgusunda ayarlamanıza izin verdiği
+    <code>kind</code>, <code>from</code>, <code>to</code> ve
+    <code>cursor</code> filtreleri için de geçerlidir. Dördü de hiçbir zaman
+    uygulanmıyordu ve artık dördü de geri çevriliyor.
+  </p>
+  <p>
+    Bir çalıştırmayı ve ona iliştirilmiş her şeyi tek seferde okumak için
+    ekleri adıyla isteyin:
+    <code>GET /v1/api/traces/{'{trace_id}'}?include=scores,feedback</code>,
+    loglar da dahil olsun isterseniz <code>include=all</code>.
+  </p>
+
+  <h2>Trace listesi ne taşır, ne taşımaz</h2>
+  <p>
+    Saklanan her trace iki özet taşır, böylece listenin birleştirmeye ihtiyacı
+    olmaz. Biri <em>puanlayıcı başına</em> ortalama değerdir:
+    <code>answer_relevance</code> içinde bir ortalama,
+    <code>groundedness</code> içinde ayrı bir ortalama. Diğeri <em>tür
+    başına</em> geri bildirim sayısıdır: üç başparmak, bir düzeltme. Ortalama
+    değil sayım, çünkü bir başparmak yukarı ile bir düzeltmenin ortalaması bir
+    nicelik değildir.
+  </p>
+  <p>
+    Genel bir kalite puanı yoktur ve olmayacaktır. Bir yargıç modeli, bir
+    düzenli ifadeyi ve bir müşterinin başparmak aşağısını birleştiren tek bir
+    rakam, birimi olmayan ve tartışılamayan bir sayı olurdu. mcpd size parçaları
+    gösterir, kararı size bırakır.
+  </p>
+
+  <h2>Sırada</h2>
+  <ul>
+    <li>
+      Filtreleyebileceğiniz her şey:
+      <a href={urlFor('/docs/searching', locale)} class="link">Çalıştırma bulma</a>.
+    </li>
+    <li>
+      Bir maliyet rakamının nelerden oluştuğu:
+      <a href={urlFor('/docs/cost', locale)} class="link">Maliyet muhasebesi</a>.
+    </li>
+    <li>
+      Bir yazar kimliği saklanmadan önce ne olur:
+      <a href={urlFor('/docs/privacy', locale)} class="link">Maskeleme ve saklama</a>.
+    </li>
+  </ul>
+</Doc>

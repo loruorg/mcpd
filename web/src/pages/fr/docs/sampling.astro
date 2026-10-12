@@ -1,0 +1,221 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import StripChart from '@/components/StripChart.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Échantillonnage"
+  description="Les cinq stratégies d’échantillonnage de mcpd, pourquoi la décision se prend à la racine, pourquoi le hachage déterministe met une flotte d’accord, et ce que garde l’échantillonnage en queue."
+  lede="Garder une fraction des traces, sans garder une fraction de chacune."
+  og="docs"
+>
+  <h2>La décision se prend une seule fois, à la racine</h2>
+  <p>
+    Une trace est gardée ou jetée en entier. La décision est prise au démarrage
+    du span racine et héritée par chaque enfant : une exécution n’est donc
+    jamais enregistrée à moitié.
+  </p>
+  <p>
+    C’est la règle dont tout le reste découle. Une trace à laquelle il manque
+    30 % de ses spans au hasard ne se lit pas comme une trace échantillonnée.
+    Elle se lit comme un bug du système que vous observez : un appel d’outil qui
+    n’a apparemment jamais eu lieu, un appel de modèle sans parent, un trou là
+    où devrait être la recherche. Vous y passerez un après-midi avant de
+    comprendre que le trou est votre outil d’observabilité et pas votre agent.
+  </p>
+
+  <h2>Le défaut garde tout</h2>
+  <p>
+    Sans échantillonnage configuré, la politique est <code>always</code>, et
+    c’est le bon défaut tant que le volume ne dit pas le contraire.
+    L’échantillonnage se paie avec l’exécution que vous voudrez lire. Ne payez
+    ce prix que si le stockage ou la bande passante vous y obligent.
+  </p>
+
+  <h2>Les cinq stratégies</h2>
+  <table>
+    <thead>
+      <tr><th>Stratégie</th><th>Comportement</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>always</code></td>
+        <td>Tout garder. Le défaut.</td>
+      </tr>
+      <tr>
+        <td><code>never</code></td>
+        <td>Ne rien garder.</td>
+      </tr>
+      <tr>
+        <td><code>ratio</code></td>
+        <td>Garder une fraction fixe, tirée au hasard une fois par trace, à la racine.</td>
+      </tr>
+      <tr>
+        <td><code>deterministic</code></td>
+        <td>Garder une fraction fixe, décidée en hachant l’identifiant de trace. Chaque collecteur arrive à la même réponse sans parler à aucun autre.</td>
+      </tr>
+      <tr>
+        <td><code>tail</code></td>
+        <td>Reporter la décision à la fin de la trace, puis garder chaque erreur et chaque exécution lente, quel que soit le taux.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Définir un taux</h2>
+  <p>
+    <code>--sample</code>, ou <code>MCPD_SAMPLE</code>, prend une fraction de
+    0.0 à 1.0 et configure la stratégie déterministe. Une valeur hors de cet
+    intervalle arrête le daemon au démarrage, avec un message qui nomme ce que
+    vous avez passé. Elle n’est pas ramenée dans les bornes, parce qu’un taux
+    mal tapé qui devient discrètement 1.0 se découvre un mois plus tard sur la
+    facture de stockage.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="garder une trace sur dix"
+    command="mcpd --sample 0.1"
+    primaryLabel="En option"
+    secondary={[
+      { label: 'en environnement', command: 'MCPD_SAMPLE=0.1 mcpd' },
+      { label: 'confirmer ce qu’il a lu', command: 'mcpd config' },
+    ]}
+  />
+
+  <p>
+    Chaque SDK lit la même fraction, sous <code>sample</code> dans la
+    configuration du client ou <code>MCPD_SAMPLE</code> dans l’environnement.
+    Échantillonner dans le client coûte moins cher : un span non échantillonné
+    n’est jamais mis en file ni exporté, donc il ne coûte aucune bande passante.
+    Échantillonner dans le daemon vous coûte l’aller-retour mais garde le taux
+    en un seul endroit, ce que vous voulez quand une douzaine de services
+    rapportent dans une même instance.
+  </p>
+  <p>
+    Sur les cinq stratégies, le daemon atteint <code>always</code> et
+    <code>deterministic</code> : <code>--sample</code> et le
+    <code>sample</code> d’un projet dans le fichier de configuration règlent
+    tous deux la stratégie déterministe. <code>never</code>,
+    <code>ratio</code> et <code>tail</code> sont implémentées dans le type de
+    politique et ne sont joignables ni par une option ni par le fichier de
+    configuration dans cette version.
+  </p>
+
+  <h2>Pourquoi le hachage met une flotte d’accord</h2>
+  <p>
+    Faites tourner plusieurs instances de mcpd derrière un répartiteur de charge
+    et les spans d’une même trace n’arrivent pas tous sur la même. Un
+    échantillonneur qui tire à pile ou face par instance, ou par span, garderait
+    une partie d’une trace et jetterait le reste, ce qui est exactement la panne
+    que la première règle existe pour éviter.
+  </p>
+  <p>
+    La stratégie déterministe projette l’identifiant de trace sur toute la plage
+    64 bits et garde la trace quand cette valeur tombe sous le seuil
+    qu’implique le taux. Chaque instance calcule le même nombre à partir du même
+    identifiant : elles sont donc toutes d’accord, sans état partagé, sans
+    protocole de coordination et sans rien qui puisse se désynchroniser. Le même
+    identifiant donne aussi la même réponse lors d’une nouvelle tentative, donc
+    un lot rejoué ne peut pas arriver à moitié.
+  </p>
+  <p>
+    Deux détails rendent cette projection honnête. Elle lit les seize
+    <em>derniers</em> caractères hexadécimaux de l’identifiant : OpenTelemetry
+    exige que les identifiants de trace soient aléatoires, mais certains
+    producteurs dérivent les premiers octets d’un horodatage, et un
+    échantillonneur qui les lirait se corrélerait à l’heure de la journée au
+    lieu d’échantillonner. Quand l’identifiant n’est pas hexadécimal du tout,
+    elle se replie sur un vrai hachage, avec un mélange final, au lieu de
+    dégénérer en tout garder : le taux obtenu reste ainsi proche de celui que
+    vous avez demandé.
+  </p>
+
+  <h2>Dans les SDK, une décision prise en amont l’emporte</h2>
+  <p>
+    Quand un SDK continue une trace à partir d’un <code>traceparent</code> W3C
+    entrant, il reprend l’indicateur <code>sampled</code> avec les identifiants
+    et n’applique pas son propre taux. Cela vaut dans les deux sens :
+    l’indicateur posé garde la trace quel que soit le taux local, et
+    l’indicateur à zéro la jette quel que soit le taux local.
+  </p>
+  <p>
+    Le daemon ne le fait pas dans cette version. Quand un span arrive par OTLP,
+    le daemon garde son octet trace-flags dans l’attribut
+    <code>mcpd.otlp.flags</code>, mais son échantillonneur ne le lit pas. Un
+    daemon configuré avec un taux applique ce taux à chaque trace, quoi que dise
+    l’indicateur.
+  </p>
+  <p>
+    L’autre solution est pire qu’elle n’en a l’air. Si chaque service appliquait
+    son propre taux, une trace qui en traverse quatre serait gardée par deux et
+    jetée par deux, et ce que vous auriez à la fin n’est pas une trace
+    distribuée. C’est un ensemble de trous qui en a la forme.
+  </p>
+
+  <h2>L’échantillonnage en queue garde les exécutions qui valent la lecture</h2>
+  <p>
+    Un échantillonneur en tête décide avant de rien savoir. Il est bon marché,
+    et il est aveugle : à un dixième, il garde aussi un dixième des échecs. Les
+    traces que vous ouvrez vraiment sont les rares, et la rareté est exactement
+    ce qu’un échantillonneur par ratio traite le plus mal.
+  </p>
+
+  {/* The pen stands 200 units in rather than at the component's default. An
+      article column is 662px wide at every desktop size here, and the default
+      arm stands at 760, so this chart had never once drawn its pen: the one
+      element that makes a recorder a recorder was outside the field at every
+      width, including a phone's. */}
+  <StripChart class="not-prose my-8" height={260} pen={200} />
+
+  <p>
+    Voilà à quoi ressemble un enregistrement de latence : une ligne de base
+    plate et une poignée d’excursions. Le volume est dans la ligne de base et
+    les réponses sont dans les excursions. L’échantillonnage en queue retient la
+    trace jusqu’à sa fin, puis la garde si quoi que ce soit y a échoué, la garde
+    si elle a duré plus longtemps que le seuil que vous avez fixé, et applique
+    sinon le même hachage déterministe que plus haut. Garder les erreurs est
+    actif par défaut, parce que les traces dont vous avez le plus besoin sont
+    les rares, et qu’un échantillonneur par ratio est le plus susceptible de les
+    jeter.
+  </p>
+  <p>
+    Le coût, c’est la mise en tampon. Un échantillonneur en queue doit garder en
+    mémoire chaque trace inachevée jusqu’à pouvoir décider, ce qui en fait un
+    choix délibéré et non le défaut. Comme plus haut, la stratégie
+    <code>tail</code> est implémentée dans le type de politique et n’est
+    joignable ni par une option ni par le fichier de configuration dans cette
+    version ; le chemin
+    d’ingestion du daemon applique la décision prise en tête.
+  </p>
+
+  <h2>Savoir ce qui a été jeté</h2>
+  <p>
+    Chaque span que l’échantillonneur écarte incrémente
+    <code>mcpd_traces_sampled_out_total</code>, exporté sur
+    <code>/metrics</code> au format texte de Prometheus. Notez le taux quelque
+    part où votre équipe le lit. Une trace manquante avec un taux
+    d’échantillonnage documenté est une explication ; une trace manquante sans
+    explication est un ticket de support, et la personne qui l’ouvre est en
+    général vous.
+  </p>
+
+  <h2>La suite</h2>
+  <ul>
+    <li>
+      L’autre façon de stocker moins :
+      <a href={urlFor('/docs/privacy', code)} class="link">Masquage et conservation</a>.
+    </li>
+    <li>
+      Toutes les options et variables d’environnement :
+      <a href={urlFor('/docs/configuration', code)} class="link">Configuration</a>.
+    </li>
+    <li>
+      Lire <code>/metrics</code> et le reste des signaux propres au daemon :
+      <a href={urlFor('/docs/operations', code)} class="link">Exploitation</a>.
+    </li>
+  </ul>
+</Doc>

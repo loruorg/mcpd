@@ -1,0 +1,371 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+const scoped = `# 同期も非同期も同じオブジェクト。どちらも抜けるときにスパンを終了し、
+# ブロックが例外を出していればそれを記録する。
+with mcpd.trace("nightly_summariser") as run:
+    with mcpd.span("fetch", kind=SpanKind.TOOL_CALL) as step:
+        step.set_output({"documents": 42})
+
+async with mcpd.trace("agent") as run:
+    async with mcpd.span("generate", kind=SpanKind.MODEL_GENERATION) as generation:
+        generation.set_output(await model.complete(prompt))
+    await mcpd.aflush()`
+
+const nesting = `def draft(question: str) -> str:
+    # 何も渡していない。それでもスパンは実行の下に入る。アクティブなスパンは
+    # contextvars.ContextVar で、この呼び出しがブロックの中にあるから。
+    with mcpd.span("draft", kind=SpanKind.MODEL_GENERATION) as generation:
+        generation.set_input(question)
+        return "..."
+
+
+with mcpd.trace("support_agent") as run:
+    run.set_output(draft("where is my order?"))`
+
+const propagation = `# 送信側: アクティブなスパンを次のサービスに渡す。
+requests.post(url, headers={"traceparent": mcpd.traceparent()}, json=payload)
+
+# 受信側: 新しいトレースを始めず、そのトレースを続ける。
+with mcpd.trace("handler", traceparent=request.headers.get("traceparent")) as run:
+    ...`
+
+const payload = `generation.set_model("gpt-4o-mini", provider="openai")
+generation.set_usage(input_tokens=812, output_tokens=96, cache_read=128)
+
+# 自分で捕まえて、自分で扱いを決めた失敗。
+generation.set_error("the provider timed out", kind="TimeoutError", retryable=True)
+
+# スパンの中の一点。それ自体は長さを持たない。
+generation.event("first_token")`
+
+const sinks = `from mcpd import Mcpd, RecordingSink
+
+sink = RecordingSink()
+mcpd = Mcpd(sink=sink)
+with mcpd.trace("answer") as run:
+    run.set_usage(input_tokens=12)
+mcpd.flush()
+assert sink.spans[0].usage.input_tokens == 12
+print(mcpd.stats())  # queued, dropped, capacity, exported, failed, rejected`
+
+const serverless = `def handler(event, context):
+    with mcpd.trace("answer") as run:
+        run.set_input(event["body"])
+        answer = agent(event["body"])
+        run.set_output(answer)
+
+    # この時点でバッチはまだメモリの中。ハンドラーが戻った瞬間にランタイムが
+    # このプロセスを凍結し、ワーカースレッドは二度と動かない。
+    mcpd.flush()
+    return {"statusCode": 200, "body": answer}`
+---
+
+<Doc
+  title="Python"
+  description="Python 向けの mcpd SDK。同期と非同期のコンテキストマネージャー、contextvars による伝播、必須の依存はゼロ、そして例外を投げない計装。"
+  lede="同期のコードにも非同期のコードにも使えるコンテキストマネージャー、contextvars で持つアクティブなスパン、そして必須の依存は 1 つもありません。"
+  og="docs"
+>
+  <h2>インストール</h2>
+  <p>
+    Python 3.9 以降で動きます。必須の依存は、意図的に 1 つもありません。
+    エクスポーターは標準ライブラリの <code>urllib</code> と <code>gzip</code> だけで
+    動くので、mcpd を入れてもロックファイルには何も増えず、エージェントがすでに
+    依存しているものと衝突することもありません。
+  </p>
+
+  <Command
+    command="pip install mcpd"
+    primaryLabel="標準ライブラリだけ"
+    secondary={[{ label: 'httpx エクストラ付き', command: 'pip install "mcpd[httpx]"' }]}
+  />
+
+  <p>
+    <code>httpx</code> エクストラが足すのは、コネクションの再利用だけです。
+    なくても SDK の動きは変わりません。
+  </p>
+
+  <h2>クライアントの構築</h2>
+  <p>
+    クライアントは 1 プロセスに 1 つです。どの引数も環境変数から読めるので、
+    同じコードを書き換えずに開発環境でも本番環境でも動かせます。引数なしの
+    <code>Mcpd()</code> は <code>http://localhost:4317</code> のデーモンに接続
+    します。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="init" title="接続" />
+
+  <p>コードが環境変数より優先され、環境変数が既定値より優先されます。</p>
+
+  <table>
+    <thead>
+      <tr><th>引数</th><th>環境変数</th><th>既定値</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>api_key</code></td><td><code>MCPD_API_KEY</code></td><td>なし</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>なし</td></tr>
+      <tr><td><code>service_name</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>なし</td></tr>
+      <tr><td><code>service_version</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>なし</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capture_payloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>log_level</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      <tr><td><code>batch_size</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flush_interval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2.0</code> 秒</td></tr>
+      <tr><td><code>max_queue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10.0</code> 秒</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>enabled=False</code> にすると、記録の呼び出しはすべて何もしなくなり
+    ますが、返るオブジェクトは有効なままです。テスト対象のコードを変えずに、
+    テストのあいだ mcpd を止められます。<code>capture_payloads=False</code> に
+    すると、プロンプトと補完はプロセスの中に留まります。スパンは所要時間、
+    ステータス、使用量、モデル、相関、エラーとともに記録され、
+    <code>input</code> と <code>output</code> はキューに入る前に捨てられます。
+    個々のスパンは開始時のフィールドに <code>capture_payloads=True</code> を
+    書けば別の扱いにでき、逆も同じです。
+  </p>
+
+  <h2>実行の記録</h2>
+  <p>
+    <code>mcpd.trace(name)</code> は実行を開始し、<code>mcpd.span(name)</code> は
+    そのときアクティブなものの下にステップを開始します。どちらもコンテキスト
+    マネージャーです。ブロックを抜けるときにスパンを終了し、例外が出ていれば
+    それを記録したうえで、例外はそのまま通します。観測されることで、あなた自身の
+    エラー処理が変わることはありません。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="trace" title="実行の記録" />
+
+  <p>
+    <code>with</code> ブロックを使わない場合は、<code>run.end()</code> を自分で
+    呼んでください。どちらの書き方でもスパンは開始時にエクスポートされるので、
+    終わらなかったスパンは、終わらなかったスパンとして見えます。たいていは
+    それが探しているものです。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="同期と非同期"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: scoped }]}
+  />
+
+  <h2>コンテキスト</h2>
+  <p>
+    アクティブなスパンは <code>contextvars.ContextVar</code> です。
+    <code>await</code> をまたいでタスクの中まで付いていき、スレッドをまたいで
+    漏れることはありません。3 フレーム下のヘルパー関数でも、呼び出し側が引数を
+    引き回さずに、正しい親の子を開けます。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="入れ子"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: nesting }]}
+  />
+
+  <p>出てくるのは、所要時間とペイロードの付いたツリーです。</p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>
+    サービスの間では、コンテキストは W3C の <code>traceparent</code> ヘッダーで
+    運ばれます。形式の壊れたヘッダーは、それを運んできたリクエストを失敗させる
+    のではなく、新しいトレースを始めます。受け取った側は、サンプリングしないと
+    いう判断にも従います。あるサービスは残し、別のサービスは捨てるようなものは、
+    トレースとは呼べないからです。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="サービス境界をまたぐ"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: propagation }]}
+  />
+
+  <h2>モデル、使用量、エラー</h2>
+  <p>
+    mcpd は取り込み時にトークン数から料金を計算するので、トレースに出るコストは
+    実際に請求されたコストになります。プロバイダーが返した値をそのまま報告して
+    ください。<code>set_error</code> は文字列でも例外でも受け取り、同時に
+    <code>status</code> を <code>error</code> にし、メッセージを必ず埋めます。
+    「何かが失敗した」では、打つ手が決まりません。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="スパンが持つもの"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: payload }]}
+  />
+
+  <p>
+    ほかのセッターは <code>set_input</code>、<code>set_output</code>、
+    <code>set_metadata</code>、<code>set_attributes</code>、
+    <code>set_tags</code>、<code>set_entity</code>、<code>set_cost</code>、
+    <code>set_status</code>、<code>add_link</code> です。どれもスパンを返し、
+    どれもスパンの開始時にキーワード引数として渡せます。
+    <code>external_parent_span_id=</code> は mcpd 以外のトレーシングシステムの
+    親を指しますが、相関のために運ばれるだけで、親子関係には使われません。
+  </p>
+
+  <h2>ペイロード、シンク、完了済みスパン</h2>
+  <p>
+    シンクは、吐き出されたバッチの行き先です。既定は HTTP トランスポート
+    です。<code>RecordingSink</code> はすべてのバッチをメモリに保持するので、
+    テストはサーバーなしで計装が記録した内容を検証できます。
+    <code>ConsoleSink</code> は、シグナル 1 件につき JSON を 1 行、標準エラー
+    出力に書きます。例外を投げるシンクはバッチの失敗として数えられ、報告される
+    だけで、あなたのコードに例外が出ることはありません。<code>stats()</code> は、
+    クライアントが作られてから何をしたかを返します。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="記録内容の検証"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: sinks }]}
+  />
+
+  <p>
+    <code>mcpd.record(span)</code> は、すでに終了した <code>SpanRecord</code> を、
+    手元にある id、親、時刻のままキューに入れます。別のトレーシングシステムの
+    アダプターや一括インポートが持っているのが、これです。親を付け替えたり、
+    時刻を打ち直したり、サンプリングをやり直したりはしません。形式の壊れた
+    レコードは捨てられ、<code>stats().rejected</code> に数えられます。例外は
+    投げません。
+  </p>
+
+  <h2>永続実行</h2>
+  <p>
+    同じクライアントがデーモンの永続実行も扱います。<code>workflow()</code> が
+    定義を組み立て、ステップの本体を呼び出しとして、あるいはデコレーターとして
+    保持します。<code>Worker</code> がそれを登録し、スレッドプール上でリースを
+    ロングポーリングして 1 件ずつ処理します。<code>mcpd.runs</code>、
+    <code>mcpd.events</code>、<code>mcpd.definitions</code> は実行の API を
+    1 対 1 で写しています。本体は <code>class_="retryable"</code> を付けた
+    <code>StepFailure</code> を投げるとステップの予算の範囲でリトライされ、
+    <code>StepContext</code> を通して自分のステップの下にスパンを記録します。
+    それらのスパンが使った分が、そのステップの使用量です。トークンは各スパンの
+    終了時に合計され、最後に見えたモデルが採用されるので、デーモンはトレースに
+    出ているとおりにステップの料金を計算します。<code>ctx.set_usage</code> は
+    それをフィールドごとに上書きします。<code>Worker</code> は
+    <code>on_error</code> のほかに 4 つのフック（<code>on_lease</code>、
+    <code>on_step_start</code>、<code>on_step_end</code>、
+    <code>on_conflict</code>）を取り、<code>worker.stats()</code> は取得した
+    リース数、実行中の本体数、完了数、クラス別の失敗数、理由別の競合数、処理
+    できなかったリース数を数えます。
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['python']} example="workflow" region="workflow" title="ワークフロー" />
+  <p>
+    それぞれの構成要素の働き、リースのプロトコル、実行の API は
+    <a href={linkTo('/docs/workflows')} class="link">ワークフロー</a>、
+    <a href={linkTo('/docs/workers')} class="link">ワーカー</a>、
+    <a href={linkTo('/docs/runs')} class="link">実行</a>のページにあります。
+  </p>
+
+  <h2>スコアとフィードバック</h2>
+  <p>
+    <code>min</code> と <code>max</code> はキーワード専用で、既定はあり
+    ません。スケールの宣言がない裸の数値は何とも比べられないので、あとから
+    推測するのではなく、呼び出し側でスケールを書かせます。フィードバックは人の
+    判断であり、スコアとは別に保たれます。2 つは別の問いに答えるものなので、
+    まとめて平均してはいけません。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="score" title="スコアとフィードバック" />
+
+  <p>
+    どちらもトレースを指定しなければ、アクティブなスパンのトレースに付きます。
+    ログとメトリクスも同じなので、チャート上のスパイクから、それを起こした実行を
+    開けます。
+  </p>
+
+  <h2>フラッシュとシャットダウン</h2>
+  <p>
+    記録はメモリ上のキューに追加して戻るだけで、HTTP はデーモンスレッドが担い
+    ます。<code>flush()</code> は待っているものを送り、タイムアウトまでに送れ
+    なければ <code>False</code> を返します。<code>shutdown()</code> はフラッシュ
+    してワーカーを止め、トランスポートを解放します。どちらも何度呼んでも結果は
+    同じです。イベントループの中では <code>aflush()</code> と
+    <code>ashutdown()</code> を呼びます。同じ処理を、ループを止めずに行います。
+  </p>
+  <p>
+    サーバーレス関数では、これがどこよりも重要になります。ハンドラーが戻った
+    瞬間にランタイムがプロセスを凍結し、ワーカースレッドは二度と動かないので、
+    キューに残っていたバッチは失われます。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="サーバーレスのハンドラー"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: serverless }]}
+  />
+
+  <p>
+    クライアントは <code>atexit</code> フックも登録するので、シャットダウンを
+    忘れた普通のスクリプトでも最後のバッチは届きます。このフックは
+    <code>os._exit()</code> や致命的なシグナルでは動かないので、安全網であって
+    代わりにはなりません。
+  </p>
+
+  <h2>保証されること</h2>
+  <ul>
+    <li>
+      計装は例外を投げません。記録の呼び出しはすべて保護されており、失敗は
+      1 間隔につき多くても 1 回ログに出て、そのまま飲み込まれます。可観測性が、
+      観測している相手を落としてはいけません。例外は読み出しの呼び出しだけで、
+      こちらは例外を投げます。待っているクエリは、話が別だからです。
+    </li>
+    <li>
+      記録はブロックしません。エージェントのレイテンシが、mcpd の速さや、mcpd が
+      動いているかどうかに左右されることはありません。
+    </li>
+    <li>
+      メモリには上限があります。保持するシグナルは <code>max_queue</code> 件、
+      既定は 8192 件です。いっぱいになると古いものから捨てられ、
+      <code>mcpd.dropped</code> がその数を数え、1 間隔につき 1 回警告をログに
+      出します。上限のないバッファは、ネットワーク障害をメモリ不足による強制
+      終了に変えてしまいます。
+    </li>
+    <li>
+      サンプリングの判断はルートでトレース id から一度だけ行われ、すべての子に
+      引き継がれます。受け取った <code>traceparent</code> が常に優先されます。
+    </li>
+    <li>
+      スパンは開始時にエクスポートされ、終了時に更新されるので、途中でクラッシュ
+      した実行も見えます。
+    </li>
+    <li>
+      タイムスタンプは <code>time.time_ns()</code> から取り、9 桁の UTC として
+      送ります。ローカル時刻では、分散トレースは読めなくなります。
+    </li>
+  </ul>
+
+  <h2>読み出し</h2>
+  <p>
+    読み出しのメソッドは HTTP API を写したもので、生成された型を返します。
+    同期的に動き、失敗すると <code>McpdError</code> を投げます。
+    <code>from_</code> と <code>to</code> は <code>datetime</code> のほか、
+    <code>-15m</code>、<code>-1h</code>、<code>-7d</code> のような短縮形も
+    受け取ります。非同期のコードでは、<code>asyncio.to_thread</code> でループの
+    外に出して呼んでください。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="query" title="検索と分析" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">実行を探す</a>に、フィルターの
+    全体があります。<a href={linkTo('/docs/reference/data-model')} class="link">データモデル</a>
+    には、これらの型が持つすべてのフィールドが並んでいます。
+  </p>
+</Doc>

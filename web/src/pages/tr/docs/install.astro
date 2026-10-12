@@ -1,0 +1,314 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Unreleased from '@/components/Unreleased.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { Code } from 'astro:components'
+import { panelTheme } from '@/lib/shiki-theme'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* İç bağlantılar İngilizce route olarak yazılır ve burada yerelleştirilir.
+   Türkçesi henüz yazılmamış bir route, arkasında hiçbir şey olmayan bir Türkçe
+   adrese değil, İngilizce sayfaya gider. */
+const code = localeOf(Astro.url.pathname)
+const url = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+
+/* The compose file is written here rather than read from an example program,
+   because it is configuration for the reader's machine and not code that CI
+   compiles. Every key in it maps to a flag on the daemon. It is shown as one
+   file with no language tabs, because there is only one language it can be. */
+const compose = `services:
+  mcpd:
+    image: ghcr.io/mcpd/mcpd:latest
+    restart: unless-stopped
+    ports:
+      - "4317:4317"
+    volumes:
+      - mcpd-data:/data
+    environment:
+      MCPD_DATA: /data/mcpd.db
+      MCPD_PROJECT: default
+      # Bu porta sizden başkası erişebilir hâle gelmeden önce bunları ayarlayın.
+      # MCPD_INGEST_KEYS: key-for-your-agents
+      # MCPD_READ_KEYS: key-for-your-team
+      # MCPD_RETENTION_DAYS: 30
+
+volumes:
+  mcpd-data:
+`
+---
+
+<Doc
+  title="Kurulum"
+  description="mcpd'yi kurmanın bütün yolları: Docker imajı, bir compose dosyası, Helm chart'ı, bir sürüm ikili dosyası ve kaynaktan derleme. Sonra /healthz üzerinden yanıt verdiğini doğrulayın."
+  lede="mcpd, depolaması içine derlenmiş tek bir ikili dosyadır; kurmak, o dosyayı bir yere koyup başlatmak demektir. Aşağıdaki yollardan, işleri zaten nasıl çalıştırdığınıza uyanı seçin."
+  og="docs"
+>
+  <h2>Docker</h2>
+  <Unreleased class="not-prose my-6" />
+  <p>
+    Yayımlanan imaj en kısa yoldur ve belgelerin geri kalanının varsaydığı
+    yoldur.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    command="docker run -p 4317:4317 -v mcpd-data:/data -e MCPD_DATA=/data/mcpd.db ghcr.io/mcpd/mcpd"
+  />
+
+  <p>
+    Volume önemlidir. mcpd, <code>MCPD_DATA</code> ile belirtilen yola bir SQLite
+    veritabanı yazar; volume'suz bir konteyner durduğunda trace'lerinizi de
+    götürür. Yolu açıkça yazmak bir seçeneğe mal olur ve dosyanın nereye gittiği
+    sorusunu ortadan kaldırır.
+  </p>
+  <p>
+    Her seçeneğin bir ortam değişkeni vardır; komut satırında geçebildiğiniz her
+    şeyi <code>-e</code> ile de verebilirsiniz. Önemli bir kurulumda
+    <code>latest</code> etiketini izlemeyin, bir sürüm etiketi sabitleyin. İmaj
+    <code>linux/amd64</code> ve <code>linux/arm64</code> için derlenir; Docker
+    makinenize uyanı çeker.
+  </p>
+
+  <h2>Docker Compose</h2>
+  <p>
+    Aynı konteyner, yazıya dökülmüş hâli. mcpd uygulamanızın yanında tek bir
+    sunucuda duracaksa kullanılacak biçim budur.
+  </p>
+
+  <div class="not-prose panel-raised mcpd-yaml my-6 overflow-hidden">
+    <div class="border-b border-scribe-2 bg-panel-1 px-3.5 py-2.5">
+      <span class="legend text-ink-3">compose.yaml</span>
+    </div>
+    <div class="scroll-x bg-well p-4 text-[0.8125rem] leading-[1.65]">
+      <Code code={compose} lang="yaml" theme={panelTheme as any} />
+    </div>
+  </div>
+
+  <p>
+    Yoruma alınmış üç anahtar, bu kurulum başkalarının da bulunduğu bir ağa
+    çıkmadan önce doldurulacak olanlardır. Hiçbir anahtar ayarlanmamışken alım
+    da okuma da açıktır; bu, dizüstünüzde doğru, başka her yerde yanlıştır.
+    Neyin neden ayarlanacağını
+    <a href={url('/deploy')} class="link">Dağıtım</a> anlatır.
+  </p>
+
+  <h2>Kubernetes</h2>
+  <p>
+    Her sürüm chart'ı imajla aynı kayıt defterine bir OCI artefaktı olarak iter,
+    bu yüzden önce eklenecek bir depo yoktur. Chart, bir alım anahtarı ve bir
+    okuma anahtarı olmadan kurulmayı reddeder; ikisini önce üretin.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    command="helm install mcpd oci://ghcr.io/mcpd/charts/mcpd -n mcpd --create-namespace --set keys.ingest=$INGEST_KEY --set keys.read=$READ_KEY"
+    secondary={[
+      { label: 'Anahtarları üretin', command: 'export INGEST_KEY=$(openssl rand -hex 32) READ_KEY=$(openssl rand -hex 32)' },
+    ]}
+  />
+
+  <p>
+    mcpd, Kubernetes'in gönderdiği <code>SIGTERM</code> sinyalini karşılar ve
+    düzgünce kapanır. Canlılık için <code>/healthz</code>, hazırlık için
+    <code>/readyz</code> sunar ve ikisi bilerek farklıdır: canlılık depolamaya
+    hiç dokunmaz, böylece yavaş bir veritabanı pod'u bir döngüye sokup yeniden
+    başlatamaz. Değerler, yoklamalar ve Deployment'ın biçimi
+    <a href={url('/deploy')} class="link">Docker ve Kubernetes</a> sayfasında.
+  </p>
+
+  <h2>Bir sürüm ikili dosyası</h2>
+  <p>
+    Her sürüme x86_64 ve arm64 Linux için birer arşiv ile Apple silicon ve Intel
+    macOS için birer arşiv eklenir. Linux arşivleri musl ile derlenmiş statik
+    dosyalardır, bu yüzden eşleştirilecek bir libc yoktur. Yanlarında bir
+    <code>SHA256SUMS</code> dosyası ve bir derleme kaynağı tasdiki (build
+    provenance attestation) gelir. Makinenize uyan arşivi açın ve
+    <code>./mcpd</code> komutunu çalıştırın; argümansız çalıştırmak daemon'u
+    başlatır.
+  </p>
+  <p>
+    <code>cargo install mcpd</code> yoktur. crates.io'da yayımlanmış bir şey
+    yoktur ve kayıt defterinden derlenen bir crate arayüzü taşıyamaz: arayüz npm
+    ile oluşturulur ve ikili dosyanın içine derlenir. Bir Rust araç zinciriniz varsa
+    bunun yerine kaynaktan derleyin.
+  </p>
+
+  <h2>Kaynaktan</h2>
+  <p>
+    Depoyu klonlayın ve dağıtım derlemesini çalıştırın. Tam bağlama zamanı
+    optimizasyonu ve tek bir kod üretim birimi kullanır; derlemesi daha yavaştır
+    ama daha küçük ve daha hızlı ikili dosyayı verir. Doğrudan <code>cargo</code>
+    yerine <code>make</code> üzerinden gidin: arayüz ikili dosyanın içine
+    derlenir ve <code>make dist</code> önce onu derler; taze bir klon üzerinde
+    düz bir <code>cargo build</code> bu adımı yapamaz. Bu adım için makinede Rust
+    araç zincirinin yanı sıra Node ve npm de gerekir.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    command="git clone https://github.com/mcpd/mcpd && cd mcpd && make dist"
+    primaryLabel="Dağıtım derlemesi"
+    secondary={[{ label: 'Daha hızlı derleme', command: 'make build' }]}
+  />
+
+  <p>
+    İkili dosya <code>target/dist/mcpd</code> yoluna yazılır; hızlı yolu
+    seçtiyseniz <code>target/release/mcpd</code> yoluna. mcpd'nin kendi üzerinde
+    çalışırken <code>make build</code>, çalıştırmayı düşündüğünüz her şey için
+    <code>make dist</code> kullanın.
+  </p>
+
+  <h2>Veri nereye gider</h2>
+  <p>
+    <code>--data</code>, SQLite dosyasının yoludur; varsayılan değeri çalışma
+    dizinindeki <code>./mcpd.db</code> dosyasıdır. Üst dizinler sizin için
+    oluşturulur.
+  </p>
+  <p>
+    <code>:memory:</code> vermek her şeyi bellekte tutar ve diske hiçbir şey
+    yazmaz. Bu; bir test takımı için, başkasının makinesindeki bir gösterim için
+    ve prompt'larını geride bırakmak istemediğiniz her çalıştırma için doğru
+    seçimdir. Depo süreçle birlikte kaybolur, amaç da budur.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="Geride bir şey bırakmayın"
+    command="mcpd --data :memory:"
+    primaryLabel="Bellekte"
+    secondary={[
+      { label: 'Örnek bir çalıştırma ekleyin', command: 'mcpd demo --data :memory:' },
+      { label: 'Başka bir yer', command: 'mcpd --data /var/lib/mcpd/mcpd.db' },
+    ]}
+  />
+
+  <p>
+    <code>mcpd demo</code>, depoyu gerçekçi ve başarısız bir çalıştırmayla
+    doldurur ve sonra sunmaya başlar; böylece arayüzü ilk açtığınızda içinde bir
+    şey olur.
+  </p>
+
+  <h2>Başlatmadan önce ne yapacağına bakın</h2>
+  <p>
+    <code>mcpd config</code>, bu çağrının çözümlendiği yapılandırmayı yazdırır ve
+    çıkar. Seçenekler, ortam değişkenleri ve varsayılan değerler tek bir listede
+    toplanır; böylece hiçbir şey başlatmadan hangisinin kazandığını görürsünüz.
+  </p>
+
+  {/* Every line the binary prints, with nothing set. `make check` compares the
+      labels with the binary's own output, because this cast once stopped at
+      sixteen lines after the binary had grown to twenty-nine. */}
+  <TerminalCast
+    class="not-prose my-8"
+    title="çözümlenen yapılandırma"
+    lines={[
+      { cmd: 'mcpd config' },
+      { out: 'listen          0.0.0.0:4317' },
+      { out: 'storage         sqlite at ./mcpd.db' },
+      { out: 'config file     none' },
+      { out: 'log format      text' },
+      { out: 'project         default' },
+      { out: 'projects        none' },
+      { out: 'retention       forever' },
+      { out: 'ingest auth     open', tone: 'warn' },
+      { out: 'read auth       open', tone: 'warn' },
+      { out: 'write auth      open', tone: 'warn' },
+      { out: 'admin auth      open', tone: 'warn' },
+      { out: 'execute auth    open', tone: 'warn' },
+      { out: 'worker auth     open', tone: 'warn' },
+      { out: 'signup          off' },
+      { out: 'runs            sqlite at ./mcpd.runs.db' },
+      { out: 'run settings    lease_ttl_ms 30000, reclaim_window_ms 30000, stall_window_ms 300000, idempotency_window_ms 86400000, park_ttl_ms 86400000, max_depth 8, max_step_repeats 16' },
+      { out: 'identity        off' },
+      { out: 'client ip       peer address' },
+      { out: 'sampling        keep everything' },
+      { out: 'quota           unlimited' },
+      { out: 'redaction       on', tone: 'ok' },
+      { out: 'redact key      built in, which is public; set --redact-key', tone: 'warn' },
+      { out: 'cors            same-origin only' },
+      { out: 'timeout         30s per request' },
+      { out: 'limits          32 MiB per request, 10000 signals per batch' },
+      { out: 'derived         duration and token metrics' },
+      { out: 'aspects         off' },
+      { out: 'monitors        none' },
+      { out: 'objectives      none' },
+      { out: 'judge           off' },
+      { out: 'forwarding      off' },
+    ]}
+  />
+
+  <h2>Kurulumu doğrulayın</h2>
+  <p>
+    <code>/healthz</code>, “gerçekten çalışıyor mu” sorusunun yanıtıdır.
+    Depolamadan hiç okumaz; bu yüzden hızlı kalır ve diske değil sürece dair
+    dürüst kalır.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="doğrulama"
+    lines={[
+      { cmd: 'curl -s localhost:4317/healthz' },
+      {
+        out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0","uptime_seconds":8,"storage":"sqlite"}',
+        tone: 'ok',
+      },
+      { cmd: 'curl -s -o /dev/null -w "%{http_code}\\n" localhost:4317/readyz' },
+      { out: '200', tone: 'ok' },
+    ]}
+  />
+
+  <p>
+    <code>spec_version</code>, bu derlemenin uyguladığı veri modeli sürümüdür.
+    Bir istemci bunu okuyup anlamadığı bir sunucuyla konuşmayı reddedebilir; bu,
+    alan alan reddedilecek bir yığın göndermekten iyidir.
+  </p>
+  <p>
+    <code>/readyz</code> öteki yarıdır. Depolamayı yoklar ve depoya
+    erişilemediğinde <code>503</code> yanıtı verir; böylece bir yük dengeleyici,
+    okuma isteklerini karşılayamayan bir kopyaya göndermeyi bırakır. Canlılık
+    için <code>/healthz</code>, hazırlık için <code>/readyz</code> kullanın;
+    ikisi için asla aynısını kullanmayın.
+  </p>
+  <p>
+    Sonra <a href="http://localhost:4317" class="link" rel="noopener">
+      localhost:4317</a
+    > adresini açın; karşınızda arayüz olacak.
+  </p>
+
+  <h2>Sırada</h2>
+  <ul>
+    <li>
+      Kendi ajanınızdan bir trace gönderin:
+      <a href={url('/docs/quickstart')} class="link">Hızlı başlangıç</a>.
+    </li>
+    <li>
+      Belgelerin geri kalanının kullandığı sözcükleri öğrenin:
+      <a href={url('/docs/concepts')} class="link">Kavramlar</a>.
+    </li>
+    <li>
+      Her seçenek ve ortam değişkeni tek bir tabloda:
+      <a href={url('/docs/configuration')} class="link">Yapılandırma</a>.
+    </li>
+    <li>
+      Porta başkası erişebilir hâle gelmeden önce:
+      <a href={url('/deploy')} class="link">Docker ve Kubernetes</a>.
+    </li>
+  </ul>
+</Doc>
+
+<style>
+  /* Shiki emits its own <pre>. Strip its box so the recessed well shows
+     through, and set the data face, exactly as the language switcher does. */
+  .mcpd-yaml :global(pre.astro-code),
+  .mcpd-yaml :global(pre.astro-code code) {
+    font-family: var(--font-data);
+  }
+  .mcpd-yaml :global(pre.astro-code) {
+    background: transparent;
+    margin: 0;
+    padding: 0;
+  }
+</style>

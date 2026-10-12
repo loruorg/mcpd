@@ -1,0 +1,279 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import Annunciator from '@/components/Annunciator.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+/* 英語のルートを、この言語で組み直します。 */
+const code = localeOf(Astro.url.pathname)
+const to = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="モニターとアラート"
+  description="mcpd がエラー率、レイテンシ、コスト、スコア平均を裏で見張るしくみ。モニターがラッチする理由、実行の少ない窓が継続中のアラートを解除しない理由、そして遷移時に POST する webhook の本文。"
+  lede="見張る価値のある条件を、実際に見張ります。mcpd はタイマーで評価し、見つけたものをラッチし、一度だけ知らせます。"
+  og="docs"
+>
+  <h2>モニターとは何か</h2>
+  <p>
+    モニターは、mcpd がタイマーで自分自身に投げかける、保存された問いです。
+    このプロジェクトのエラー率は直近 5 分で 5 パーセントを超えているか。この
+    スコアラーの平均は、取り決めた数値を下回っていないか。読むのは
+    インターフェースが読むのと同じストレージなので、モニターが主張できるのは
+    自分でも調べられたことだけです。
+  </p>
+  <p>
+    モニターは、設定するまで無効です。mcpd がしきい値を推測することはあり
+    ません。誰も選んでいないしきい値は、誰も信用しないしきい値だからです。
+  </p>
+
+  <Annunciator class="not-prose my-8" />
+
+  <h2>ラッチします</h2>
+  <p>
+    条件が続いている間、評価のたびに発報するモニターは 1 日でミュートされ、
+    ミュートされたモニターは、監視できているように見えるぶん、モニターが
+    無いより悪くなります。だから mcpd は状態ではなく遷移を報告します。
+    まずいほうへ入るときに一度、抜けるときに一度、その間は何も言いません。
+  </p>
+
+  <h2>静けさは回復ではありません</h2>
+  <p>
+    ここが、守らないと障害という代償を払うことになるルールです。トラフィック
+    が止まると、窓の中の実行が少なすぎて判断できなくなります。素直な実装は
+    「異常なし」と報告し、アラートを解除します。しかし、リクエストをさばかなく
+    なったエージェントは、回復ではなく障害そのものです。
+  </p>
+  <p>
+    実行が少なすぎる窓は、継続中のアラートをそのままの位置に残します。
+    モニターが正常に戻るのは、十分な標本を伴う測定値がしきい値の内側に
+    返ってきたときだけです。
+  </p>
+  <p>
+    同じ理屈が <code>min_samples</code> を決めています。静かな 1 時間に
+    1 件だけ実行が失敗すれば、それはエラー率 100 パーセントですが、mcpd は
+    それを障害とは呼びません。既定は 20 です。
+  </p>
+
+  <h2>監視できるもの</h2>
+  <table>
+    <thead>
+      <tr><th>監視項目</th><th>測るもの</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>error_rate</code></td>
+        <td>窓の中の失敗した実行を、実行の総数で割った値。</td>
+      </tr>
+      <tr>
+        <td><code>latency_p95</code></td>
+        <td>実行時間の 95 パーセンタイル、ミリ秒。</td>
+      </tr>
+      <tr>
+        <td><code>cost</code></td>
+        <td>窓の中の総支出。通貨は価格表のもの。</td>
+      </tr>
+      <tr>
+        <td><code>score_mean</code></td>
+        <td>
+          <code>scorer_id</code> で指定した 1 つのスコアラーの平均。
+          レイテンシのグラフでは見えない品質の低下を捕まえるのが、これです。
+        </td>
+      </tr>
+      <tr>
+        <td><code>trace_count</code></td>
+        <td>窓の中の実行数。<code>below</code> と組み合わせると、無言になったパイプラインを捕まえられます。</td>
+      </tr>
+      <tr>
+        <td><code>step_count_divergence</code></td>
+        <td>ウィンドウ内で、自分の定義にしては珍しい数のステップを踏んだ実行。測る対象の単位でしきい値を持たない、ここで唯一の監視です。トレースではなく永続実行を読みます。</td>
+      </tr>
+      <tr>
+        <td><code>run_repetition</code></td>
+        <td>実行がどれだけ自分を繰り返したか。ウィンドウ内の各実行について、自分の定義のひとつのノードに対して行った試行回数の最大値をとり、その平均を読みます。1 はどのノードも二度は動かなかったという意味です。トレースではなく永続実行を読みます。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>しきい値では問いが合わないときの目標</h2>
+  <p>
+    モニターは、いまエラー率が 5 パーセントを超えているかを問います。SLO は
+    もっと役に立つことを問います。約束した目標を割り込みそうか、そしてどれ
+    くらいの速さでそこへ向かっているか、です。
+  </p>
+  <p>
+    この違いが効くのは、しきい値では 2 分間の揺らぎとゆっくりした漏れを
+    区別できず、その 2 つは正反対の対応を求めるからです。漏れを捕まえられる
+    ほど厳しくすれば、揺らぎで午前 3 時に呼び出されます。揺らぎでは起きない
+    ほど緩くすれば、漏れは 1 週間続きます。
+  </p>
+
+  <h3>予算と、その消費速度</h3>
+  <p>
+    30 日で <code>0.995</code> という目標は、実行の 0.5 パーセントまでは
+    失敗してよい、という意味です。その 0.5 パーセントがエラー予算です。
+    バーンレート 1 はそれをちょうど 30 日で使い切り、バーンレート 10 は
+    3 日で使い切ります。
+  </p>
+  <p>
+    mcpd はバーンを 2 つの窓で同時に測り、両方が一致したときだけ発報します。
+    直近 1 時間で <span class="data">14.4x</span> より速く、<em>かつ</em>
+    直近 6 時間で <span class="data">6x</span> より速い、という条件です。
+    これが 2 つの場合を分けます。5 分間の停止は 1 時間の数値を動かしますが
+    6 時間の数値は動かせないので、呼び出しは起きません。午後じゅう続いて
+    いる漏れは、両方を動かします。
+  </p>
+  <p>
+    頼りにする前に知っておくこと。99.5% の目標では、このしきい値は
+    エラー率およそ 7.2% にあたります。5% の失敗率が続いていれば、予算は
+    10 倍の速さで減り、早々に尽きますが、誰も起こされません。そのためには
+    <code>budget_remaining</code> を見てください。もっと早く知りたいなら、
+    <code>score_mean</code> か <code>error_rate</code> のモニターを併せて
+    置いてください。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "slos": [
+    {
+      "id": "support-availability",
+      "name": "99.5% of support runs succeed over 30 days",
+      "project": "support-desk",
+      "objective": 0.995,
+      "window_days": 30,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    <code>GET /v1/api/slos</code> は、各目標を成功率、残っている予算の割合、
+    そして 2 つのバーンレートとともに返します。
+    <code>POST /v1/api/slos/&#123;id&#125;/ack</code> は 1 つを確認応答します。
+    ラッチと確認応答の振る舞いはモニターとまったく同じで、判断するには
+    薄すぎる窓が、継続中のアラートを解除することはありません。
+  </p>
+  <p>
+    <code>budget_remaining</code> は、予算を使いすぎるとゼロで止まらずに
+    負の値になります。ゼロと「目標を 100 倍割り込んだ」は違う状況であり、
+    この数値がどちらかを伝えます。
+  </p>
+
+  <h2>設定のしかた</h2>
+  <p>
+    モニターはコマンドラインではなく JSON ファイルに置きます。しきい値、窓、
+    比較はフラグに収まりませんし、コードと同じようにレビューされるべき
+    ものだからです。このファイルは Kubernetes の ConfigMap としてそのまま
+    マウントできます。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitor_interval_seconds": 60,
+  "monitors": [
+    {
+      "id": "support-error-rate",
+      "name": "Support agent error rate above 5%",
+      "project": "support-desk",
+      "watch": "error_rate",
+      "compare": "above",
+      "threshold": 0.05,
+      "window_seconds": 300,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    },
+    {
+      "id": "relevance-regression",
+      "name": "Answer relevance fell below 0.8",
+      "project": "support-desk",
+      "watch": "score_mean",
+      "scorer_id": "answer_relevance",
+      "compare": "below",
+      "threshold": 0.8,
+      "window_seconds": 3600
+    }
+  ]
+}`}</code></pre>
+
+  <Command
+    class="not-prose my-6"
+    title="モニターを有効にして起動する"
+    command="mcpd serve --config-file ./mcpd.json"
+  />
+
+  <p>
+    知らないキーは無視されるのではなく起動を失敗させます。
+    <code>threshold</code> の打ち間違いで何も監視しなくなるのが、起こりうる
+    最悪の結果なので、mcpd は声に出して拒否します。
+  </p>
+  <p>
+    <code>"enabled": false</code> にすれば、モニターの定義を残したまま評価
+    だけを止められます。いくつが有効かは <code>mcpd config</code> が表示
+    します。
+  </p>
+
+  <h2>遷移の届け先</h2>
+  <p>
+    どの遷移も、モニターの id、プロジェクト、しきい値、測定値を構造化された
+    項目としてログに残すので、ログ基盤は文章を解析せずに振り分けられます。
+    すでにログ基盤を運用しているなら、連携はそれで全部です。
+  </p>
+  <p>
+    モニターに <code>webhook</code> を与えると、mcpd は遷移を POST もします。
+    本文はあえて汎用にしてあります。Slack、PagerDuty、Opsgenie、そして
+    どのワークフローツールも受信 webhook を受け付けますし、どれか 1 つに
+    合わせて整形すれば、やがて古びるベンダー連携の束を抱えることになります。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitor_id": "support-error-rate",
+  "name": "Support agent error rate above 5%",
+  "project": "support-desk",
+  "condition": "tripped",
+  "watch": "error_rate",
+  "threshold": 0.05,
+  "value": 0.5,
+  "samples": 40,
+  "detail": "error rate is 0.5000, threshold above 0.0500, over 40 run(s)",
+  "at": "2026-08-28T02:13:54.687391446Z"
+}`}</code></pre>
+
+  <p>
+    配信に失敗した場合はログに残して破棄します。再送しようとすれば、評価の
+    ループを止めるか、永続的な送信キューが必要になります。静かに遅れていく
+    通知経路は、届かなかったことが見えている経路より悪いのです。
+  </p>
+
+  <h2>読み取りと確認応答</h2>
+  <p>
+    <code>GET /v1/api/monitors</code> は、ラッチした状態、最後の測定値、
+    そしていつ発報したかとともに、すべてのモニターを返します。
+  </p>
+  <p>
+    <code>POST /v1/api/monitors/&#123;id&#125;/ack</code> は 1 つを確認応答
+    します。確認応答は、条件が解消したふりをせずに遷移の通知だけを黙らせ
+    ます。モニターは違反が続いている間は確認応答済みのままで、数値が戻れば
+    自分で正常に戻ります。ミュートを解除し忘れる人は誰もいません。
+  </p>
+  <p>
+    モニターの状態はメモリーに保持され、起動のたびに測定値から組み直され
+    ます。永続化していないのは、すでに回復したアラートを再起動が蘇らせる
+    ほうが、再起動が評価し直すより悪い失敗だからです。
+  </p>
+
+  <h2>次に</h2>
+  <ul>
+    <li>
+      <code>score_mean</code> のモニターが見るスコアラー：
+      <a href={to('/docs/testing')} class="link">回帰テスト</a>。
+    </li>
+    <li>
+      どのモニターも覆わない、mcpd 自身の健全性：
+      <a href={to('/docs/operations')} class="link">運用</a>。
+    </li>
+    <li>
+      すべてのフラグとファイル設定：
+      <a href={to('/docs/configuration')} class="link">設定</a>。
+    </li>
+  </ul>
+</Doc>

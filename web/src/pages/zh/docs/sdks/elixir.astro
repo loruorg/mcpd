@@ -1,0 +1,222 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="Elixir"
+  description="面向 Elixir 的 mcpd SDK：worker 是一个 GenServer，span 树由进程字典拼起来，而且完全没有依赖，因为 OTP 已经自带了 JSON 编解码器和 HTTP 客户端。"
+  lede="worker 用一个 GenServer，上下文靠进程，而你的依赖树里不会多出任何东西。"
+  og="docs"
+>
+  <h2>安装</h2>
+  <p>
+    把它加到 <code>mix.exs</code> 里。它不会带来别的任何东西。
+  </p>
+
+  <pre><code class="language-elixir">{`defp deps do
+  [{:mcpd, "~> 0.1"}]
+end`}</code></pre>
+
+  <p>
+    这就是全部的依赖列表，而且是有意为之。OTP 27 自带一个 JSON 编解码器
+    （<code>:json</code>）和一个 HTTP 客户端（<code>:inets</code>），所以一个
+    以观察你的系统为职责的库，不必成为你的系统构建发生变化的原因。另外五个
+    SDK 在各自的语言里做的是同样的承诺。
+  </p>
+
+  <h2>构造客户端</h2>
+  <p>
+    每个选项都回退到它对应的环境变量，而代码优先。不带参数的
+    <code>Mcpd.start_link()</code> 和一个本地的守护进程通信。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="init" title="连接" />
+
+  <p>
+    把它放进你的监督树里，它的行为和其他任何一个 worker 一样：
+  </p>
+
+  <pre><code class="language-elixir">{`children = [
+  {Mcpd, project: "support-desk", environment: "production"}
+]
+
+Supervisor.start_link(children, strategy: :one_for_one)`}</code></pre>
+
+  <h2>记录一次运行</h2>
+  <p>
+    <code>span</code> 是一个宏，所以一次运行就是一个块，而它的值就是这个块的值。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="trace" title="记录一次运行" />
+
+  <p>
+    宏必须先 require 才能调用，这是这门语言的规则，不是这里的选择。
+    <code>use Mcpd</code> 会替你做这件事：
+  </p>
+
+  <pre><code class="language-elixir">{`defmodule MyAgent do
+  use Mcpd
+
+  def answer(mcpd, question) do
+    Mcpd.span mcpd, "agent", kind: :agent_run, input: question do
+      do_the_work(question)
+    end
+  end
+end`}</code></pre>
+
+  <p>
+    如果主体本来就是一个函数而不是一个块，请改调
+    <code>Mcpd.with_span/4</code>。它是同一件事，只是不用宏。
+  </p>
+
+  <h2>这棵树自己拼起来</h2>
+  <p>
+    活动的 span 存在进程字典里，而在 Elixir 里，这恰恰是对的存放处，不是一条
+    捷径。在这里，进程就是并发的单位，所以同时处理的两个请求看不到对方的 span，
+    也不需要把什么东西一路穿过每一个函数，才能把这棵树保持在一起。
+  </p>
+  <p>
+    在往下三层调用的地方开出来的一个子 span，自己就能找到它的父级：
+  </p>
+
+  <pre><code class="language-elixir">{`Mcpd.span mcpd, "agent", kind: :agent_run do
+  plan(mcpd)          # opens a child of "agent" without being told
+end
+
+defp plan(mcpd) do
+  Mcpd.span mcpd, "plan_answer", kind: :model_generation, model: "gpt-4o" do
+    call_the_model()
+  end
+end`}</code></pre>
+
+  <p>
+    有一个后果值得知道：在 <code>Task.async</code> 里面开的 span 会开一条新的
+    trace，因为那是另一个进程。请用 <code>Mcpd.traceparent/0</code> 和
+    <code>Mcpd.continue/2</code> 把这条 trace 递过去，这一对也正是你跨越一个
+    HTTP 边界时会用的。
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>什么都不阻塞，什么都不抛出</h2>
+  <p>
+    记录一个 span，就是给 worker 发一条消息然后返回。网络工作发生在那个 worker
+    上，所以你的智能体的延迟，从不取决于 mcpd 快不快、活没活着，或者压根有没有
+    在跑。
+  </p>
+  <p>
+    块里抛出的异常，会作为一个错误记在这个 span 上，然后原样再抛出去。mcpd 的
+    职责是看见发生了什么，绝不是替你的代码决定要拿它怎么办。
+  </p>
+  <p>
+    队列有上限，装满时最旧的信号会被丢弃。这个方向是选出来的：守护进程不可达
+    时，最新的那些信号讲的是现在正在发生什么，而等它回来之后，有人想要的正是
+    这些。<code>Mcpd.stats/1</code> 回答这个客户端做过什么：
+    <code>queued</code>、<code>dropped</code>、<code>capacity</code>、
+    <code>exported</code>、<code>failed</code> 和 <code>rejected</code>。
+  </p>
+
+  <p>
+    <code>log_level:</code>，或者 <code>MCPD_LOG_LEVEL</code>，为
+    <code>Mcpd.log/4</code> 设一个下限。默认是 <code>debug</code>，也就是全都
+    留下。低于这个下限的一行，会在记录被构造出来之前就丢掉，所以在一个生产部署
+    里，一行 debug 日志只花一次比较。这个下限只管日志；span、指标、评分和反馈
+    都不受影响。
+  </p>
+
+  <h2>把载荷留在进程里</h2>
+  <p>
+    <code>capture_payloads: false</code>，或者
+    <code>MCPD_CAPTURE_PAYLOADS=false</code>，把提示词和补全留在原地。span
+    照样发出去，带着它的时间、状态、用量、模型、关联信息和错误；
+    <code>input:</code>、<code>output:</code> 以及一个块捕获到的值，会在进入
+    队列之前就被丢掉，所以没有敏感内容会排进队列，一次刷出也带不走任何敏感
+    内容。单个 span 可以用 <code>capture_payloads: true</code> 说自己不一样。
+  </p>
+
+  <h2>断言你记下了什么</h2>
+  <p>
+    sink 就是一个批次被排空之后去的地方。默认是 HTTP 传输层；
+    <code>Mcpd.Sink.Recorder</code> 把每个批次留在内存里，于是一个测试不需要
+    守护进程，就能把接入代码记下的 span、日志、指标、评分和反馈读回来，而
+    <code>Mcpd.Sink.Console</code> 把每个信号打印成一行 JSON 到标准错误。你
+    自己的 sink 实现 <code>Mcpd.Sink</code> 就可以；抛异常的 sink 算一个失败的
+    批次，会被计数、被上报，绝不会抛到调用方那里。
+  </p>
+  <p>
+    <code>Mcpd.record/3</code> 把一个已经结束的 span 按给的样子排进队列：它
+    自己的 id、父级、开始和结束时间，绝不重新指定父级、重新计时或者重新采样。
+    这正是另一套 tracing 系统的适配器，或者一次批量导入手上有的那些东西。id
+    不是 OpenTelemetry 那个形状的记录会被拒绝并计数，而且绝不抛出。任何 span
+    上的 <code>external_parent_span_id:</code> 携带的都是一个来自非 mcpd 的
+    tracing 系统的父级，只用于关联。
+  </p>
+
+  <h2>持久化运行</h2>
+  <p>
+    同一个客户端也服务守护进程的持久化运行。<code>Mcpd.Workflow</code> 构建
+    定义，并把那些步骤主体作为三元函数持有；一个 <code>Mcpd.StepWorker</code>
+    注册它，用长轮询要租约，并在各自的一个进程上逐份服务，而
+    <code>Mcpd.start_run/3</code>、<code>Mcpd.watch_run/3</code>、
+    <code>Mcpd.publish_event/4</code> 以及其余的，与运行接口一一对应。步骤
+    主体抛出带 <code>class: :retryable</code> 的
+    <code>Mcpd.StepException</code>，表示要在这个步骤的预算内重试，并通过
+    <code>Mcpd.StepContext.span/4</code> 把 span 记在自己这个步骤下面。步骤
+    主体关掉的每一个 span，都会把自己的用量加到这个步骤上，看到的最后一个模型
+    胜出，所以守护进程按 trace 显示出来的东西定价；<code>set_usage/2</code>
+    是那个显式的覆盖。worker 上，<code>on_lease</code>、
+    <code>on_step_start</code>、<code>on_step_end</code> 和
+    <code>on_conflict</code> 就在 <code>on_error</code> 旁边，而
+    <code>StepWorker.stats/1</code> 统计它领取了多少、完成了多少、按类别分
+    失败了多少，以及按原因分放弃了多少。
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} example="workflow" region="workflow" title="一个工作流" />
+  <p>
+    每种构造做什么、租约协议和运行 API，在
+    <a href={linkTo('/docs/workflows')} class="link">工作流</a>、
+    <a href={linkTo('/docs/workers')} class="link">Worker</a> 和
+    <a href={linkTo('/docs/runs')} class="link">运行</a>这几页上。
+  </p>
+
+  <h2>评分与反馈</h2>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="score" title="评分与反馈" />
+
+  <h2>把它读回来</h2>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="query" title="读这次运行" />
+
+  <h2>短命的进程必须刷出</h2>
+  <p>
+    一个很快就退出的脚本或者任务，会丢掉所有还没发出去的东西。
+    <code>Mcpd.shutdown/1</code> 先刷出，再停掉 worker，而且调两次也是安全的。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="对着一个本地的守护进程跑这个示例"
+    command={`mcpd serve --data ./mcpd.db
+elixir examples/elixir/quickstart.exs`}
+  />
+
+  <h2>接下来</h2>
+  <ul>
+    <li>
+      这个 SDK 和另外五个共有的每一条行为：
+      <a href="https://github.com/mcpd/mcpd/blob/main/sdks/SDK-CONTRACT.md" class="link">SDK 契约</a>。
+    </li>
+    <li>
+      一个 span 带着什么：
+      <a href={linkTo('/docs/reference/data-model')} class="link">数据模型</a>。
+    </li>
+    <li>
+      事后找到你关心的那次运行：
+      <a href={linkTo('/docs/searching')} class="link">查找一次运行</a>。
+    </li>
+  </ul>
+</Doc>

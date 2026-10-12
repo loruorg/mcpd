@@ -1,0 +1,176 @@
+---
+/**
+ * The specimen run on a recorder drum, in WebGL, with an SVG drawing of the
+ * same drum underneath.
+ *
+ * The SVG is the figure until the canvas has drawn its first frame, and stays
+ * the figure wherever WebGL is not available: the stage never shows an empty
+ * box. The canvas fades in over it; nothing waits on the fade.
+ *
+ * The drum turns slowly on its own, the way a recorder's drum does, and the
+ * reader can drag it or step it from span to span with the arrow keys. The pen
+ * names the span under it, and the waterfall on the same page marks the row.
+ */
+import FigureFrame from '@/components/FigureFrame.astro'
+import { t } from '@/lib/ui-strings'
+import { localeOf } from '@/lib/i18n'
+import * as D from '@/lib/iso/drum'
+
+interface Props {
+  class?: string
+}
+const { class: className = '' } = Astro.props
+const locale = localeOf(Astro.url.pathname)
+const restU = D.penU(D.turnFor(D.REST_MS))
+---
+
+<FigureFrame
+  class={className}
+  title={t('fig.drum.title', locale)}
+  caption={t('fig.drum.caption', locale)}
+  hint={t('fig.drum.hint', locale)}
+  readout={D.readoutAt(restU)}
+>
+  <div
+    class="iso iso-stage mx-auto max-w-[60rem] cursor-grab active:cursor-grabbing"
+    data-fig="drum"
+    data-rest={D.REST_MS}
+    tabindex="0"
+    role="slider"
+    aria-label={t('fig.drum.label', locale)}
+    aria-valuemin="0"
+    aria-valuemax={Math.round(D.msOf(D.U1))}
+    aria-valuenow={D.REST_MS}
+    aria-valuetext={D.readoutAt(restU)}
+  >
+    <svg class="iso-svg mcpd-drum-art" viewBox={`0 0 ${D.WIDTH} ${D.HEIGHT}`} aria-hidden="true" set:html={D.fallbackSvg()} />
+    <canvas class="mcpd-drum-gl" aria-hidden="true"></canvas>
+  </div>
+</FigureFrame>
+
+<style>
+  .mcpd-drum-gl { opacity: 0; transition: opacity 400ms var(--iso-ease); pointer-events: none; }
+  [data-gl] > .mcpd-drum-gl { opacity: 1; }
+  [data-gl] > .mcpd-drum-art { visibility: hidden; transition: visibility 0s 400ms; }
+</style>
+
+<script>
+  import * as D from '@/lib/iso/drum'
+  import { createDrum } from '@/lib/iso/drum-gl'
+  import { live } from '@/lib/iso/live'
+  import { SPECIMEN } from '@/lib/specimen'
+
+  for (const stage of document.querySelectorAll<HTMLElement>('[data-fig="drum"]')) {
+    const canvas = stage.querySelector('canvas')!
+    const readout = stage.closest('figure')?.querySelector<HTMLElement>('[data-readout]')
+    let drum: ReturnType<typeof createDrum> = null
+    try {
+      drum = createDrum(canvas, stage)
+    } catch {
+      drum = null
+    }
+    if (!drum) continue
+
+    const restTurn = D.turnFor(Number(stage.dataset.rest ?? 0))
+    let turn = restTurn
+    let target = restTurn
+    let drift = true
+    let shown = -2
+    let lastText = ''
+    // One full run under the pen in about fourteen seconds.
+    const RATE = -(Math.PI * 2) / 16
+
+    const report = () => {
+      const u = D.penU(turn)
+      const inRun = u >= D.U0 && u <= D.U1
+      const ms = inRun ? Math.round(D.msOf(u)) : -1
+      const sel = inRun ? D.spanAt(ms) : -1
+      const text = D.readoutAt(u)
+      if (text !== lastText) {
+        lastText = text
+        if (readout) readout.textContent = text
+      }
+      if (sel !== shown) {
+        shown = sel
+        dispatchEvent(new CustomEvent('mcpd:specimen', { detail: { index: sel } }))
+        stage.setAttribute('aria-valuenow', String(Math.max(0, ms)))
+        stage.setAttribute('aria-valuetext', text)
+      }
+      return sel
+    }
+
+    const fig = live(stage, {
+      tick(dt, calm) {
+        if (drift && !calm) target += RATE * dt
+        turn = calm ? target : turn + (target - turn) * (1 - Math.exp(-dt / 0.16))
+        const sel = report()
+        drum!.paint(turn, sel, D.penU(turn))
+        // Only now hide the drawing: the canvas has a frame to show in its place.
+        if (!('gl' in stage.dataset)) stage.dataset.gl = ''
+        return !calm && (drift || Math.abs(target - turn) > 1e-4)
+      },
+    })
+
+    let dragging = false
+    let lastX = 0
+    let resume = 0
+    const hold = () => {
+      drift = false
+      clearTimeout(resume)
+      resume = window.setTimeout(() => {
+        drift = true
+        fig.run()
+      }, 3600)
+      fig.touch()
+    }
+    stage.addEventListener('pointerdown', (e) => {
+      dragging = true
+      lastX = e.clientX
+      stage.setPointerCapture(e.pointerId)
+      hold()
+    })
+    stage.addEventListener('pointermove', (e) => {
+      if (!dragging) return
+      // A drag across the stage turns the drum about a third of a turn.
+      target -= ((e.clientX - lastX) / stage.clientWidth) * Math.PI * 0.7
+      lastX = e.clientX
+      hold()
+    })
+    const end = () => (dragging = false)
+    stage.addEventListener('pointerup', end)
+    stage.addEventListener('pointercancel', end)
+    stage.addEventListener('keydown', (e) => {
+      // Arrow keys step from span start to span start, in run order.
+      const starts = [...new Set(SPECIMEN.map((r) => r.at))].sort((a, b) => a - b)
+      const u = D.penU(target)
+      const now = u >= D.U0 && u <= D.U1 ? D.msOf(u) : -1
+      let ms: number | null = null
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') ms = starts.find((s) => s > now + 1) ?? starts[0]!
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') ms = [...starts].reverse().find((s) => s < now - 1) ?? starts[starts.length - 1]!
+      if (e.key === 'Home') ms = starts[0]!
+      if (e.key === 'End') ms = starts[starts.length - 1]!
+      if (ms === null) return
+      e.preventDefault()
+      // Land a little inside the span, and turn the short way round.
+      let next = D.turnFor(ms + 30)
+      while (next - target > Math.PI) next -= Math.PI * 2
+      while (target - next > Math.PI) next += Math.PI * 2
+      target = next
+      hold()
+    })
+    addEventListener('resize', () => fig.touch(), { passive: true })
+    // The canvas holds colours, not tokens, so a theme switch on the page or on
+    // the figure has to be read again before the next frame.
+    const retheme = () => {
+      drum!.readColours()
+      fig.touch()
+    }
+    const watch = new MutationObserver(retheme)
+    watch.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'style'] })
+    watch.observe(stage, { attributes: true, attributeFilter: ['data-theme'] })
+    matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', retheme)
+    fig.touch()
+    // Start drifting straight away, not after the hold a touch implies.
+    drift = !matchMedia('(prefers-reduced-motion: reduce)').matches
+  }
+</script>

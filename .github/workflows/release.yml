@@ -1,0 +1,500 @@
+# Cut a release from a tag: the binaries, the container image, the Helm chart,
+# the checksums and the Go module tag.
+#
+# Why this exists: the whole claim mcpd makes is that deploying it is one
+# binary and one command. That claim is only true if someone can download a
+# binary for their machine and check that it is the one this repository built.
+# Building it by hand on a laptop breaks both halves of that.
+#
+# This workflow does not repeat the test suite. It is driven by a tag, and a
+# tag is expected to point at a commit that ci.yml has already passed on main.
+# ci.yml runs tools/check-consistency.mjs, which holds the chart, the
+# manifests, the compose file and every SDK manifest to the version in
+# Cargo.toml. The one thing checked here first is that the tag and Cargo.toml
+# agree, because a release named after a version the binary does not report
+# is worse than no release.
+#
+# ---------------------------------------------------------------------------
+# What a maintainer must configure
+#
+#   Binaries: nothing. They are built here and attached with the workflow's
+#   own GITHUB_TOKEN.
+#
+#   Container image and chart: nothing to create. Both pushes authenticate as
+#   GITHUB_TOKEN against ghcr.io, which works so long as
+#   Settings > Actions > General > Workflow permissions is not read-only.
+#   GitHub makes a new package private on its first push, and the `public`
+#   job below fails the release until both packages are public, because every
+#   install command in the documentation pulls them without a login. On the
+#   first release, open each package's settings page (the image, and
+#   charts/mcpd), set its visibility to public, link it to this repository so
+#   its access follows the repository, then re-run the failed jobs.
+#
+#   Signing: there is no signing key here, and this workflow does not assume
+#   one exists. Provenance comes from actions/attest-build-provenance, which
+#   signs with a short-lived certificate issued to this workflow's OIDC
+#   identity. There is no private key to hold and no secret to add. If you
+#   later want detached GPG or cosign signatures too, that is the point at
+#   which a key and a secret become necessary.
+#
+#   SDK registries: nothing here publishes to npm, PyPI, crates.io, Maven
+#   Central or Hex. Each needs an account on that registry and a token in this
+#   repository's secrets, and this repository has neither. Adding those steps
+#   means creating the accounts first. The Go SDK needs no registry: the
+#   module proxy serves it from the sdks/go/vX.Y.Z tag this workflow pushes.
+# ---------------------------------------------------------------------------
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+# No cancel-in-progress. A half-cancelled release leaves a tag with some of
+# its artefacts attached, which is the hardest state to recover from.
+concurrency:
+  group: release-${{ github.ref }}
+
+permissions: {}
+
+env:
+  # Matches the container image, so a downloaded binary and a pulled image are
+  # the same build of the same code.
+  CARGO_PROFILE: dist
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tag:
+    name: the tag matches the workspace version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      prerelease: ${{ steps.read.outputs.prerelease }}
+      image: ${{ steps.names.outputs.image }}
+      charts: ${{ steps.names.outputs.charts }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: compare the tag with Cargo.toml
+        id: read
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          # A pre-release tag such as v0.2.0-rc1 carries the same workspace
+          # version as v0.2.0, so compare only the part before the hyphen.
+          base="${version%%-*}"
+          cargo_version="$(python3 -c \
+            "import tomllib;print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")"
+
+          if [ "$base" != "$cargo_version" ]; then
+            echo "::error::Tag ${TAG} is version ${base}, but [workspace.package] version in Cargo.toml is ${cargo_version}. Set the version in Cargo.toml to ${base}, run make check, commit that, then move the tag onto the new commit."
+            exit 1
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if [ "$version" = "$base" ]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Releasing ${version}" >> "$GITHUB_STEP_SUMMARY"
+
+      # The image name comes from the repository this runs in, and every
+      # manifest, the chart and the documentation name one fixed image. A fork
+      # or a renamed repository would push somewhere nobody pulls from, and
+      # the release would look complete. Checked here, before an hour of
+      # builds, against image.repository in the chart's values, which
+      # tools/check-consistency.mjs holds every other mention to.
+      - name: the image and chart names match the ones the manifests use
+        id: names
+        env:
+          REPOSITORY: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${REPOSITORY,,}"
+          documented="$(sed -n 's/^  repository: *//p' deploy/helm/mcpd/values.yaml | head -n 1)"
+          if [ "$image" != "$documented" ]; then
+            echo "::error::This release would push the image as ${image}, but deploy/helm/mcpd/values.yaml, deploy/k8s, deploy/docker and the documentation pull ${documented}. Release from the repository that owns ${documented}, or change image.repository in values.yaml and every file make check then names, and tag again."
+            exit 1
+          fi
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "charts=ghcr.io/${OWNER,,}/charts" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    name: ${{ matrix.target }}
+    needs: tag
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl, so the Linux binaries have no libc to match on the host.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            native: true
+          # ubuntu-24.04-arm is a GitHub-hosted arm64 runner. It is available
+          # to public repositories. On a private repository this entry needs
+          # either a self-hosted arm64 runner or a cross-compiler.
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            native: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            native: true
+          # Built on the arm64 macOS runner. Apple's clang cross-compiles to
+          # x86_64 without extra tooling, which rusqlite's bundled SQLite
+          # needs. The binary cannot be run here, so it is not smoke-tested.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            native: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # musl-gcc, for rusqlite's bundled SQLite. Without a C compiler for the
+      # musl target the build fails in the cc crate, not in cargo, which is a
+      # confusing place to read the error.
+      - name: install the musl toolchain
+        if: contains(matrix.target, 'linux-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y musl-tools
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      # The compiler in the Dockerfile's rust image, to the patch release, so
+      # an archive and the image of one tag come from the same rustc. When
+      # Dependabot moves that image, move this with it.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08-05
+        with:
+          toolchain: 1.98.1
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.target }}
+
+      # The interface is compiled into the binary, so it has to be built
+      # first. `make ui` runs the site build and copies the output into
+      # crates/mcpd-server/ui, which is what include_dir! reads. Skip it and
+      # the binary still links, and serves nothing.
+      #
+      # `npm ci`, as in the Dockerfile: a lock file that no longer matches
+      # package.json stops the release instead of being resolved again into
+      # packages nobody reviewed.
+      - name: build the interface into the server crate
+        run: |
+          set -euo pipefail
+          npm --prefix web ci --no-audit --no-fund
+          make ui
+
+      - name: build
+        env:
+          # musl targets link statically by default; this matches the
+          # Dockerfile so both builds are made the same way.
+          RUSTFLAGS: ${{ contains(matrix.target, 'linux-musl') && '-C target-feature=+crt-static' || '' }}
+        # --locked, as in the Dockerfile: Cargo.lock is what a release is
+        # built from, never a fresh resolve.
+        run: cargo build --locked --profile "$CARGO_PROFILE" --target ${{ matrix.target }} -p mcpd
+
+      - name: it runs
+        if: matrix.native
+        run: ./target/${{ matrix.target }}/dist/mcpd --version
+
+      - name: package
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          stage="mcpd-${VERSION}-${TARGET}"
+          mkdir -p "dist/${stage}"
+          cp "target/${TARGET}/dist/mcpd" "dist/${stage}/mcpd"
+          cp LICENSE README.md "dist/${stage}/"
+          tar -czf "dist/${stage}.tar.gz" -C dist "${stage}"
+          rm -rf "dist/${stage}"
+          ls -l "dist/${stage}.tar.gz"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binaries-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    name: container image
+    needs: tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      # Pushing to ghcr.io as GITHUB_TOKEN.
+      packages: write
+      # Signing the provenance attestation. Neither needs a secret.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: work out the tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ needs.tag.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ needs.tag.outputs.prerelease == 'false' }}
+
+      # Both platforms the release ships binaries for. The Dockerfile runs
+      # every command on the runner's own platform and cross-compiles the
+      # binary, so arm64 needs no emulator here.
+      #
+      # The SBOM and the max-mode provenance are attached to the image index
+      # by BuildKit; the attestation step below adds the signed provenance
+      # that `gh attestation verify` reads.
+      - name: build and push
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: attest the image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ needs.tag.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  chart:
+    name: helm chart
+    # After the image, so the chart never names an image tag that was not
+    # pushed.
+    needs: [tag, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Helm comes with the runner image. Its version is printed so a change
+      # in behaviour can be traced to the runner rather than to the chart.
+      #
+      # The chart's version and appVersion are both the release's, so a
+      # pre-release tag publishes a pre-release chart that pulls the image of
+      # the same tag.
+      - name: package
+        env:
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          helm version
+          helm lint deploy/helm/mcpd --set keys.ingest=a --set keys.read=b
+          bash deploy/helm/test-chart.sh
+          helm package deploy/helm/mcpd --version "$VERSION" --app-version "$VERSION" --destination dist
+          ls -l dist
+
+      - name: push to ghcr.io as an OCI artefact
+        env:
+          CHARTS: ${{ needs.tag.outputs.charts }}
+          VERSION: ${{ needs.tag.outputs.version }}
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
+          helm push "dist/mcpd-${VERSION}.tgz" "oci://${CHARTS}"
+          helm registry logout ghcr.io
+
+      - name: attest the chart
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tgz
+
+  # Every install command in the documentation pulls without a login, and
+  # GitHub makes a new package private. A release whose image or chart answers
+  # `unauthorized` to everyone else is a release nobody can install, so this
+  # asks the registry as an anonymous client and stops the release if it
+  # refuses. This job holds no token at all, which is what makes it anonymous.
+  public:
+    name: the image and chart pull without a login
+    needs: [tag, image, chart]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: pull anonymously
+        env:
+          IMAGE: ${{ needs.tag.outputs.image }}
+          CHARTS: ${{ needs.tag.outputs.charts }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Empty client configurations: no credential can be found, so every
+          # request below is the one a stranger would make.
+          DOCKER_CONFIG="$(mktemp -d)"
+          HELM_REGISTRY_CONFIG="$(mktemp -d)/config.json"
+          export DOCKER_CONFIG HELM_REGISTRY_CONFIG
+          refused=""
+
+          if docker pull --quiet "${IMAGE}:${VERSION}"; then
+            platforms="$(docker manifest inspect "${IMAGE}:${VERSION}" \
+              | jq -r '.manifests[].platform | "\(.os)/\(.architecture)"')"
+            for platform in linux/amd64 linux/arm64; do
+              if ! grep -qx "$platform" <<<"$platforms"; then
+                echo "::error::${IMAGE}:${VERSION} has no ${platform} image, only: ${platforms//$'\n'/ }. The release ships ${platform} binaries, so the image has to match."
+                exit 1
+              fi
+            done
+          else
+            refused="${refused} the image ${IMAGE}"
+          fi
+
+          if ! helm pull "oci://${CHARTS}/mcpd" --version "${VERSION}" --destination "$(mktemp -d)"; then
+            refused="${refused} the chart ${CHARTS}/mcpd"
+          fi
+
+          if [ -n "$refused" ]; then
+            echo "::error::ghcr.io refused an anonymous pull of${refused}. A new package is private. Open its settings page (Packages, on the repository or the organisation), set the visibility to public and link it to this repository, then re-run the failed jobs of this workflow."
+            exit 1
+          fi
+          echo "The image and the chart for ${VERSION} pull without a login." >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: publish the release
+    # The image and the chart are dependencies on purpose. A release whose
+    # notes name a container tag or a chart that was never pushed, or that
+    # nobody but this workflow can pull, sends people to an error.
+    needs: [tag, binaries, image, chart, public]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # Creating the release, attaching files to it, and the Go module tag.
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: collect every archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: binaries-*
+          merge-multiple: true
+
+      # One SHA256SUMS over plain file names, so `sha256sum -c` works in the
+      # directory a person downloaded into.
+      - name: checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ./*.tar.gz | sed 's| \./| |' > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: attest the archives
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+
+      # The Go module lives in sdks/go, and the Go toolchain finds a version of
+      # a module in a subdirectory only by a tag carrying that prefix. The `v*`
+      # tag that started this workflow is not one, so without this step
+      # `go get github.com/mcpd/mcpd/sdks/go@vX.Y.Z` finds nothing.
+      #
+      # Made through the API, on the commit this release is built from. A
+      # re-run finds the tag already there and accepts it only if it points at
+      # the same commit.
+      - name: tag the Go module
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.tag.outputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ref="tags/sdks/go/v${VERSION}"
+          if existing="$(gh api "repos/${REPOSITORY}/git/ref/${ref}" --jq .object.sha 2>/dev/null)"; then
+            if [ "$existing" != "$SHA" ]; then
+              echo "::error::${ref} already exists and points at ${existing}, not at ${SHA}, the commit this release is built from. Delete that tag if it is a mistake, then re-run this job."
+              exit 1
+            fi
+            echo "${ref} already points at ${SHA}"
+          else
+            gh api --method POST "repos/${REPOSITORY}/git/refs" -f "ref=refs/${ref}" -f "sha=${SHA}" > /dev/null
+            echo "created ${ref} at ${SHA}"
+          fi
+
+      - name: create the release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          name: ${{ needs.tag.outputs.version }}
+          prerelease: ${{ needs.tag.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          body: |
+            ## Install
+
+            Container image, for linux/amd64 and linux/arm64:
+
+                docker pull ${{ needs.tag.outputs.image }}:${{ needs.tag.outputs.version }}
+
+            Helm chart:
+
+                helm install mcpd oci://${{ needs.tag.outputs.charts }}/mcpd --version ${{ needs.tag.outputs.version }}
+
+            Or take the archive for your machine below, unpack it, and run
+            `./mcpd serve`.
+
+            The Go SDK is tagged as `sdks/go/v${{ needs.tag.outputs.version }}`.
+            The other SDKs are not published to their registries yet.
+
+            ## Check what you downloaded
+
+            Against the checksums:
+
+                sha256sum -c SHA256SUMS --ignore-missing
+
+            Every archive, the image and the chart carry a build provenance
+            attestation, signed by this workflow with no long-lived key:
+
+                gh attestation verify mcpd-${{ needs.tag.outputs.version }}-<target>.tar.gz --repo ${{ github.repository }}

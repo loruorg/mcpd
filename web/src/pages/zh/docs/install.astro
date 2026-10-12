@@ -1,0 +1,204 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Unreleased from '@/components/Unreleased.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { Code } from 'astro:components'
+import { panelTheme } from '@/lib/shiki-theme'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+/* English routes, rebuilt for this locale. */
+const code = localeOf(Astro.url.pathname)
+const to = (route: string) => urlFor(route, code)
+
+/* The compose file is written here rather than read from an example program,
+   because it is configuration for the reader's machine and not code that CI
+   compiles. Every key in it maps to a flag on the daemon. It is shown as one
+   file with no language tabs, because there is only one language it can be. */
+const compose = `services:
+  mcpd:
+    image: ghcr.io/mcpd/mcpd:latest
+    restart: unless-stopped
+    ports:
+      - "4317:4317"
+    volumes:
+      - mcpd-data:/data
+    environment:
+      MCPD_DATA: /data/mcpd.db
+      MCPD_PROJECT: default
+      # Set these before this port is reachable by anything but you.
+      # MCPD_INGEST_KEYS: key-for-your-agents
+      # MCPD_READ_KEYS: key-for-your-team
+      # MCPD_RETENTION_DAYS: 30
+
+volumes:
+  mcpd-data:
+`
+---
+
+<Doc
+  title="安装"
+  description="安装 mcpd 的每一种方式：Docker 镜像、compose 文件、Helm chart、发布版二进制文件，以及从源码构建。然后验证它在 /healthz 上有应答。"
+  lede="mcpd 是一个把存储编译进去的二进制文件，所以安装它就是把这个文件放到某处，然后启动它。下面哪条路子和你现在的运行方式相符，就选哪条。"
+  og="docs"
+>
+  <h2>Docker</h2>
+  <Unreleased class="not-prose my-6" />
+  <p>发布出来的镜像是进来最短的一条路，文档其余部分也默认你走这条。</p>
+
+  <Command
+    class="not-prose my-6"
+    command="docker run -p 4317:4317 -v mcpd-data:/data -e MCPD_DATA=/data/mcpd.db ghcr.io/mcpd/mcpd"
+  />
+
+  <p>数据卷很重要。mcpd 会在 <code>MCPD_DATA</code> 指定的路径上写一个 SQLite 数据库，而没有数据卷的容器停止时会把你的 trace 一起带走。显式写明这个路径只多一个参数，却省掉了文件到底去了哪里这个问题。</p>
+  <p>每个参数都有对应的环境变量，所以命令行上能传的东西，用 <code>-e</code> 同样能设置。在任何你在意的地方，请固定一个标签，而不是跟着 <code>latest</code> 走。镜像为 <code>linux/amd64</code> 和 <code>linux/arm64</code> 两种平台构建，Docker 会拉取与你的机器相符的那一个。</p>
+
+  <h2>Docker Compose</h2>
+  <p>同一个容器，写成文件。当 mcpd 和你的应用同处一台主机时，用这种形式。</p>
+
+  <div class="not-prose panel-raised mcpd-yaml my-6 overflow-hidden">
+    <div class="border-b border-scribe-2 bg-panel-1 px-3.5 py-2.5">
+      <span class="legend text-ink-3">compose.yaml</span>
+    </div>
+    <div class="scroll-x bg-well p-4 text-[0.8125rem] leading-[1.65]">
+      <Code code={compose} lang="yaml" theme={panelTheme as any} />
+    </div>
+  </div>
+
+  <p>注释掉的那三个键，要在这套东西接上别人也在的网络之前填好。一个密钥都不设置时，摄取和读取都是开放的，这在你自己的机器上是对的，在其他任何地方都是错的。<a href={to('/deploy')} class="link">部署</a>讲了要设置什么，以及为什么。</p>
+
+  <h2>Kubernetes</h2>
+  <p>每次发布都会把 chart 以 OCI 制品的形式推送到与镜像相同的镜像仓库，所以不用先添加仓库。没有摄取密钥和读取密钥时，chart 会拒绝安装，所以请先生成这两个密钥。</p>
+
+  <Command
+    class="not-prose my-6"
+    command="helm install mcpd oci://ghcr.io/mcpd/charts/mcpd -n mcpd --create-namespace --set keys.ingest=$INGEST_KEY --set keys.read=$READ_KEY"
+    secondary={[
+      { label: '生成密钥', command: 'export INGEST_KEY=$(openssl rand -hex 32) READ_KEY=$(openssl rand -hex 32)' },
+    ]}
+  />
+
+  <p>mcpd 会处理 <code>SIGTERM</code> 并优雅退出，而这正是 Kubernetes 发出的信号。它用 <code>/healthz</code> 做存活探针，用 <code>/readyz</code> 做就绪探针，两者的区别是有意的：存活探针从不接触存储，所以一个慢的数据库不会把 Pod 送进重启循环。取值、探针和 Deployment 的形态在 <a href={to('/deploy')} class="link">Docker 与 Kubernetes</a> 一页。</p>
+
+  <h2>发布版二进制文件</h2>
+  <p>每次发布都会附上 x86_64 和 arm64 Linux 的归档，以及 Apple 芯片和 Intel macOS 的归档。Linux 版是基于 musl 构建的静态二进制文件，所以不需要匹配 libc。随附一个 <code>SHA256SUMS</code> 文件和一份构建来源证明。解压与你的机器对应的归档，运行 <code>./mcpd</code>；不带参数时，它会启动守护进程。</p>
+  <p>没有 <code>cargo install mcpd</code>。crates.io 上没有发布任何东西，而从注册表构建的 crate 也带不上界面，因为界面是用 npm 构建、再编译进二进制文件的。如果你有 Rust 工具链，请改为从源码构建。</p>
+
+  <h2>从源码构建</h2>
+  <p>克隆仓库，运行发行版构建。它使用完整的链接时优化和单个代码生成单元，编译更慢，但产出的二进制文件更小也更快。请走 <code>make</code>，不要直接用 <code>cargo</code>：界面是编译进二进制文件里的，<code>make dist</code> 会先把界面构建出来，而在一份全新克隆上直接 <code>cargo build</code> 没有办法做这一步。这一步除了 Rust 工具链，还需要机器上有 Node 和 npm。</p>
+
+  <Command
+    class="not-prose my-6"
+    command="git clone https://github.com/mcpd/mcpd && cd mcpd && make dist"
+    primaryLabel="发行版构建"
+    secondary={[{ label: '更快的构建', command: 'make build' }]}
+  />
+
+  <p>二进制文件写在 <code>target/dist/mcpd</code>，走更快那条路的话则是 <code>target/release/mcpd</code>。开发 mcpd 本身时用 <code>make build</code>，要拿去运行的东西用 <code>make dist</code>。</p>
+
+  <h2>数据放在哪里</h2>
+  <p><code>--data</code> 是 SQLite 文件的路径，默认是工作目录下的 <code>./mcpd.db</code>。上级目录会自动为你创建。</p>
+  <p>传入 <code>:memory:</code> 会把一切留在内存里，不往磁盘写任何东西。测试套件、在别人机器上的演示，以及任何你不愿留下提示词的运行，都该选它。存储随进程一起消失，这正是它的用意。</p>
+
+  <Command
+    class="not-prose my-6"
+    label="不留下任何东西"
+    command="mcpd --data :memory:"
+    primaryLabel="内存中"
+    secondary={[
+      { label: '预置一次示例运行', command: 'mcpd demo --data :memory:' },
+      { label: '换个位置', command: 'mcpd --data /var/lib/mcpd/mcpd.db' },
+    ]}
+  />
+
+  <p><code>mcpd demo</code> 会往存储里填入一次逼真的失败运行，然后开始服务，这样你第一次打开界面时里面就有东西可看。</p>
+
+  <h2>启动之前先看它会做什么</h2>
+  <p><code>mcpd config</code> 会打印这次调用最终解析出的配置，然后退出。参数、环境变量和默认值都落在同一份清单里，你不用启动任何东西就能看出是哪一个生效了。</p>
+
+  {/* Every line the binary prints, with nothing set. `make check` compares the
+      labels with the binary's own output, because this cast once stopped at
+      sixteen lines after the binary had grown to twenty-nine. */}
+  <TerminalCast
+    class="not-prose my-8"
+    title="解析出的配置"
+    lines={[
+      { cmd: 'mcpd config' },
+      { out: 'listen          0.0.0.0:4317' },
+      { out: 'storage         sqlite at ./mcpd.db' },
+      { out: 'config file     none' },
+      { out: 'log format      text' },
+      { out: 'project         default' },
+      { out: 'projects        none' },
+      { out: 'retention       forever' },
+      { out: 'ingest auth     open', tone: 'warn' },
+      { out: 'read auth       open', tone: 'warn' },
+      { out: 'write auth      open', tone: 'warn' },
+      { out: 'admin auth      open', tone: 'warn' },
+      { out: 'execute auth    open', tone: 'warn' },
+      { out: 'worker auth     open', tone: 'warn' },
+      { out: 'signup          off' },
+      { out: 'runs            sqlite at ./mcpd.runs.db' },
+      { out: 'run settings    lease_ttl_ms 30000, reclaim_window_ms 30000, stall_window_ms 300000, idempotency_window_ms 86400000, park_ttl_ms 86400000, max_depth 8, max_step_repeats 16' },
+      { out: 'identity        off' },
+      { out: 'client ip       peer address' },
+      { out: 'sampling        keep everything' },
+      { out: 'quota           unlimited' },
+      { out: 'redaction       on', tone: 'ok' },
+      { out: 'redact key      built in, which is public; set --redact-key', tone: 'warn' },
+      { out: 'cors            same-origin only' },
+      { out: 'timeout         30s per request' },
+      { out: 'limits          32 MiB per request, 10000 signals per batch' },
+      { out: 'derived         duration and token metrics' },
+      { out: 'aspects         off' },
+      { out: 'monitors        none' },
+      { out: 'objectives      none' },
+      { out: 'judge           off' },
+      { out: 'forwarding      off' },
+    ]}
+  />
+
+  <h2>验证安装</h2>
+  <p><code>/healthz</code> 回答的是它到底跑起来了没有。它从不读存储，所以既快，也只如实反映进程本身，而不是磁盘。</p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="验证"
+    lines={[
+      { cmd: 'curl -s localhost:4317/healthz' },
+      {
+        out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0","uptime_seconds":8,"storage":"sqlite"}',
+        tone: 'ok',
+      },
+      { cmd: 'curl -s -o /dev/null -w "%{http_code}\\n" localhost:4317/readyz' },
+      { out: '200', tone: 'ok' },
+    ]}
+  />
+
+  <p><code>spec_version</code> 是这个构建实现的数据模型版本。客户端可以读它，然后拒绝与自己不理解的服务器通信，这好过发出一个会被逐个字段拒绝的批次。</p>
+  <p><code>/readyz</code> 是另一半。它会探一下存储，存储不可达时回答 <code>503</code>，这样负载均衡器就不再把读请求发给一个服务不了它们的实例。存活探针用 <code>/healthz</code>，就绪探针用 <code>/readyz</code>，绝不要两处用同一个。</p>
+  <p>然后打开 <a href="http://localhost:4317" class="link" rel="noopener">localhost:4317</a>，你看到的就是界面。</p>
+
+  <h2>接下来</h2>
+  <ul>
+    <li>从你自己的智能体给它发一条 trace：<a href={to('/docs/quickstart')} class="link">快速开始</a>。</li>
+    <li>认识文档其余部分要用到的词：<a href={to('/docs/concepts')} class="link">概念</a>。</li>
+    <li>每一个参数和环境变量汇成一张表：<a href={to('/docs/configuration')} class="link">配置</a>。</li>
+    <li>在别人能访问到这个端口之前：<a href={to('/deploy')} class="link">Docker 与 Kubernetes</a>。</li>
+  </ul>
+</Doc>
+
+<style>
+  /* Shiki emits its own <pre>. Strip its box so the recessed well shows
+     through, and set the data face, exactly as the language switcher does. */
+  .mcpd-yaml :global(pre.astro-code),
+  .mcpd-yaml :global(pre.astro-code code) {
+    font-family: var(--font-data);
+  }
+  .mcpd-yaml :global(pre.astro-code) {
+    background: transparent;
+    margin: 0;
+    padding: 0;
+  }
+</style>

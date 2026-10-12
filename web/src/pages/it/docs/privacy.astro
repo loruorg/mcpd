@@ -1,0 +1,701 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* I link interni restano scritti come route inglesi e vengono localizzati qui.
+   Una route la cui pagina italiana non è ancora scritta porta alla pagina
+   inglese, invece che a un URL italiano senza niente dietro. */
+const code = localeOf(Astro.url.pathname)
+const url = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+---
+
+<Doc
+  title="Oscuramento e conservazione"
+  description="Le regole di oscuramento che mcpd applica prima di scrivere qualunque cosa, le quattro modalità, perché l’hash ha una chiave, e come i dati archiviati scadono o si cancellano su richiesta."
+  lede="Che cosa non viene mai archiviato, e che cosa smette di esserlo. L’oscuramento gira prima della scrittura, perché un segreto cancellato dopo era comunque stato messo per iscritto."
+  og="docs"
+>
+  <h2>L’oscuramento gira prima dello storage</h2>
+  <p>
+    I prompt e i completion sono la cosa più preziosa che mcpd tiene, e la più
+    pericolosa. L’oscuramento è la terza fase della pipeline di ingest, prima
+    della scrittura, così un valore che una regola intercetta non arriva mai al
+    database.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    L’ordine è tutto il punto. Un valore ripulito a cose fatte è comunque stato
+    su disco, nel write-ahead log e, molto probabilmente, nel backup di ieri
+    notte. Mai scritto è una garanzia diversa da cancellato dopo, ed è l’unica
+    che puoi dichiarare senza giri di parole a chi te la chiede.
+  </p>
+  <p>
+    L’oscuramento è attivo per impostazione predefinita. Uno strumento che ti
+    protegge solo dopo che lo hai configurato non protegge nessuno.
+    <code>--no-redact</code>, oppure <code>MCPD_NO_REDACT</code>, lo spegne,
+    il che ha senso solo quando qualcosa a monte oscura già.
+  </p>
+  <p>
+    L’oscuramento è il capo del filo che sta dal lato del daemon. Gli SDK
+    tengono l’altro: <code>MCPD_CAPTURE_PAYLOADS=false</code>, o
+    <code>capture_payloads</code> nel codice, tiene prompt e completion dentro
+    il processo. Uno span arriva lo stesso con i tempi, lo stato, il consumo, il
+    modello, la correlazione e gli errori, mentre <code>input</code> e
+    <code>output</code> vengono tolti prima di finire in coda, così non
+    attraversano mai la rete. Un team che quei byte non li deve proprio mandare
+    lo imposta, e uno span che non porta niente di delicato può rientrare per
+    conto suo.
+  </p>
+
+  <h2>Le regole predefinite</h2>
+  <p>
+    Una regola è un insieme di sottostringhe minuscole e una modalità. Una
+    chiave corrisponde quando il suo nome, reso minuscolo, contiene una
+    qualunque di quelle. È il confronto sulla sottostringa che fa prendere
+    <code>X-API-Key</code>, <code>authorization</code> e
+    <code>customer_email</code> senza dover elencare ogni maiuscola e ogni
+    prefisso.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Modalità</th><th>Nomi di chiave che corrispondono</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>mask</code></td>
+        <td>
+          <code>api_key</code>, <code>apikey</code>, <code>api-key</code>,
+          <code>secret</code>, <code>password</code>, <code>passwd</code>,
+          <code>access_token</code>, <code>refresh_token</code>,
+          <code>id_token</code>, <code>bearer</code>,
+          <code>authorization</code>, <code>auth_token</code>,
+          <code>private_key</code>, <code>client_secret</code>,
+          <code>session_token</code>, <code>credential</code>,
+          <code>signature</code>, <code>x-api-key</code>
+        </td>
+      </tr>
+      <tr>
+        <td><code>partial</code></td>
+        <td>
+          <code>email</code>, <code>phone</code>, <code>ssn</code>,
+          <code>credit_card</code>, <code>card_number</code>, <code>iban</code>
+        </td>
+      </tr>
+      <tr>
+        <td><code>hash</code></td>
+        <td><code>user_id</code>, <code>userid</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Quando una chiave intercettata contiene un oggetto o un array, viene
+    oscurato anche tutto quello che ci sta sotto.
+    <code>{'{"credential": {"value": "hunter2", "note": "prod"}}'}</code>
+    perde tutti e due i campi, non solo quello dal nome pericoloso.
+  </p>
+  <p>
+    Il limite va detto senza giri di parole: le regole corrispondono a
+    <strong>nomi di chiave, non a valori</strong>. Una chiave API che un utente
+    ha incollato in mezzo a un prompt, archiviata sotto una chiave chiamata
+    <code>content</code>, non viene intercettata da niente qui dentro.
+    L’oscuramento ferma la cattura strutturata di credenziali e identificatori.
+    Non è uno scanner di contenuti, e prenderlo per tale ti deluderà.
+  </p>
+
+  <h2>Le quattro modalità</h2>
+  <table>
+    <thead>
+      <tr><th>Modalità</th><th>Che cosa succede al valore</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>drop</code></td>
+        <td>La chiave viene tolta del tutto, come se non fosse mai stata mandata.</td>
+      </tr>
+      <tr>
+        <td><code>mask</code></td>
+        <td>Il valore viene sostituito con <code>[redacted]</code>.</td>
+      </tr>
+      <tr>
+        <td><code>partial</code></td>
+        <td>
+          Sopravvivono i primi due e gli ultimi due caratteri, uniti da
+          un’ellissi: <code>alice@example.com</code> diventa
+          <code>al…om</code>. Abbastanza per riconoscere un valore che già
+          conosci, non abbastanza per usarlo. Un valore di sei caratteri o meno
+          viene invece mascherato per intero, perché tenerne quattro su cinque
+          ne rivela quasi tutto.
+        </td>
+      </tr>
+      <tr>
+        <td><code>hash</code></td>
+        <td>
+          Il valore viene sostituito con <code>sha256:</code> e i primi dodici
+          byte di un digest SHA-256 con chiave, come ventiquattro caratteri
+          esadecimali.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Le regole integrate ne usano tre su quattro. Per impostazione predefinita
+    non viene scartato niente: <code>drop</code> sta lì per una regola che
+    aggiungi tu, dove anche la sola presenza di un campo è più di quanto tu
+    voglia tenere.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="che cosa è tornato indietro"
+    lines={[
+      { cmd: 'curl -s "$MCPD/v1/api/traces/$TRACE" | jq .spans[0].input' },
+      { out: '{' },
+      { out: '  "question": "Where is my order A-1042?",' },
+      { out: '  "api_key": "[redacted]",', tone: 'note' },
+      { out: '  "email": "al…om",', tone: 'note' },
+      { out: '  "user_id": "sha256:9f2c1b7d4a08e5c3f6b1d0a4"', tone: 'note' },
+      { out: '}' },
+    ]}
+  />
+
+  <h2>Perché l’hash ha una chiave</h2>
+  <p>
+    L’hash tiene utile un campo. Sotto una stessa chiave, input uguali danno
+    digest uguali, quindi puoi ancora raggruppare per un id utente oscurato,
+    contare quante persone distinte hanno incontrato un errore e seguirne una
+    lungo una sessione, senza tenere chi sono.
+  </p>
+  <p>
+    Senza chiave, quella proprietà è un buco. Gli identificatori vengono da
+    spazi piccoli e indovinabili, e chi ha il digest e questo sorgente può
+    calcolare l’hash dei candidati finché uno non corrisponde. È la chiave a
+    rendere il digest irrecuperabile invece che soltanto scomodo.
+  </p>
+  <p>
+    La chiave integrata è una costante nel sorgente, quindi è pubblica. In
+    qualunque deploy che calcoli hash, imposta la tua.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="un deploy che calcola hash e fa scadere"
+    command={'mcpd --redact-key "$MCPD_REDACT_KEY" --retention-days 30'}
+    secondary={[
+      { label: 'come ambiente', command: 'MCPD_REDACT_KEY=… MCPD_RETENTION_DAYS=30 mcpd' },
+      { label: 'oscuramento spento', command: 'mcpd --no-redact' },
+    ]}
+  />
+
+  <p>
+    Ruotare la chiave spezza il collegamento, ed è voluto. Ogni digest cambia,
+    quindi le righe scritte prima della rotazione non si possono più unire a
+    quelle scritte dopo. È a questo che serve una rotazione, ed è anche quello
+    che costa. Ruota quando vuoi il collegamento spezzato, non a scadenza fissa
+    per abitudine.
+  </p>
+  <p>
+    Prima di ruotare, leggi la seconda metà di quel costo. La cancellazione per
+    soggetto confronta il digest archiviato, quindi ogni riga scritta sotto la
+    vecchia chiave è fuori dalla portata di una richiesta di cancellazione dal
+    momento in cui la nuova chiave è in vigore. mcpd non ti può dire che è
+    successo questo, perché niente registra quale chiave ha scritto quale riga.
+    Tutto quello che può fare è non lasciar passare per risposta lo zero che ne
+    esce, e la sezione qui sotto sullo zero è quel rifiuto.
+  </p>
+
+  <h2>Ogni segnale, non solo gli span</h2>
+  <p>
+    Un segreto esce da una riga di log con la stessa facilità con cui esce da un
+    prompt, quindi lo stesso oscuratore gira su tutti e sei i segnali in
+    entrata:
+  </p>
+  <ul>
+    <li>Span: <code>input</code>, <code>output</code>, <code>attributes</code> e <code>metadata</code>.</li>
+    <li>Log: i <code>fields</code> strutturati.</li>
+    <li>Metriche: le <code>labels</code>.</li>
+    <li>Punteggi: i <code>metadata</code>.</li>
+    <li>Feedback: i <code>metadata</code>, e il <code>comment</code> in testo libero.</li>
+    <li>Note di aspetto: la frase, in <code>text</code>.</li>
+  </ul>
+  <p>
+    Il nome di uno span e il messaggio di un record di log non passano
+    dall’oscuratore. Sono identificatori, non payload, e riscriverli romperebbe
+    il raggruppamento. Non costruire il nome di uno span con l’indirizzo email
+    di un cliente.
+  </p>
+
+  <h3>Lo storage delle esecuzioni non è oscurato</h3>
+  <p>
+    Le esecuzioni durevoli sono l’eccezione, ed è voluto. Lo storage delle
+    esecuzioni tiene l’input, lo stato, l’output e la correlazione di
+    un’esecuzione, e l’input, l’output e l’errore di ogni passo, esattamente
+    come sono stati mandati, con <code>user_id</code> senza hash. Sono lo stato
+    di lavoro del workflow: un passo successivo li rilegge, e un valore che
+    l’oscuratore avesse riscritto cambierebbe quello che fa l’esecuzione. Gli
+    span che un’esecuzione scrive nello storage delle tracce seguono il
+    percorso di ingest ordinario, quindi lo storage delle tracce li tiene
+    oscurati e sottoposti a hash come ogni altro span. La conservazione e la
+    cancellazione raggiungono entrambe lo storage delle esecuzioni, come dicono
+    le sezioni qui sotto, e ogni lettura di un’esecuzione attraverso l’API
+    viene registrata nel registro di audit.
+  </p>
+
+  <h2>Stringhe lunghe e documenti profondi</h2>
+  <p>
+    Due limiti valgono per tutto, che una regola abbia corrisposto o no.
+  </p>
+  <p>
+    Qualunque singola stringa più lunga di 128 KiB viene troncata, con
+    <code>… [N bytes truncated]</code> in coda, così chi legge sa che il valore
+    è incompleto e non corto. Il taglio cade su un confine di carattere, mai
+    dentro un codepoint su più byte. Un prompt fuori controllo non deve decidere
+    la dimensione del tuo database.
+  </p>
+  <p>
+    La discesa si ferma a una profondità di 32, e tutto quello che sta sotto
+    viene sostituito con <code>[too deeply nested]</code>. Un documento
+    patologico o autoreferenziale che arriva su una porta di ingest aperta non
+    può inchiodare una CPU.
+  </p>
+
+  <h2>Conservazione</h2>
+  <p>
+    <code>--retention-days</code>, oppure <code>MCPD_RETENTION_DAYS</code>,
+    cancella i segnali più vecchi di quel numero di giorni. Non impostarlo e
+    non viene cancellato mai niente. Tenere i dati per impostazione
+    predefinita è il verso giusto: uno strumento che scartasse in silenzio le
+    tracce del mese scorso lo scopriresti nel momento peggiore.
+  </p>
+  <p>
+    La passata gira su un timer ogni ora dentro il daemon, non al momento della
+    query. Una passata di conservazione può cancellare moltissime righe, e quel
+    lavoro non deve mai finire dentro la richiesta di qualcuno. Ogni passata
+    toglie, in una transazione sola, gli span, i log, le metriche e le righe di
+    traccia il cui <code>received_at</code> è più vecchio del taglio, e i
+    punteggi, i feedback e le note di aspetto il cui timestamp proprio lo è, poi
+    scrive nei log quante righe se ne sono andate. Le voci dell’indice full-text vengono
+    ripulite per prime, mentre le righe che le nominano esistono ancora, così
+    non resta niente orfano.
+  </p>
+  <p>
+    La stessa passata, sulla stessa finestra, sfoltisce lo storage delle
+    esecuzioni. Cancella ogni esecuzione durevole la cui radice è finita prima
+    del taglio, con le sue esecuzioni figlie e tutto quello che è archiviato
+    per loro, a lotti, così i worker non restano bloccati mentre lavora.
+    Un’esecuzione che non è finita non viene mai cancellata, per quanto a lungo
+    abbia aspettato. Le definizioni non vengono sfoltite.
+  </p>
+  <p>
+    La passata copre il progetto nominato da <code>--project</code> e ogni
+    progetto nel blocco <code>projects</code> del file di configurazione, non
+    solo quello predefinito. Un progetto che lì imposta il proprio
+    <code>retention_days</code> viene ripulito su quella cifra, e gli altri sulla
+    cifra del daemon. Un progetto che non sta né in un posto né nell’altro, uno
+    che un mittente ha nominato per conto suo, non ha una finestra e non viene
+    mai sfoltito. Conta quando un solo daemon serve più team: un team che ha
+    concordato di tenere trenta giorni non se ne tiene in silenzio di più perché
+    l’unica impostazione letta dalla passata era quella di un altro team, e un
+    team che nessuno ha messo per iscritto tiene tutto.
+  </p>
+
+  <h2>Una richiesta di cancellazione su una persona</h2>
+  <p>
+    <code>DELETE /v1/api/subjects/{'{user_id}'}</code> risponde in una sola
+    chiamata a una richiesta su una persona. Manda l’identificatore così come lo
+    ha impostato la tua strumentazione. Il daemon applica lo stesso hash che ha
+    applicato all’ingest, quindi un deploy che calcola l’hash di
+    <code>user_id</code> non ti chiede di calcolarlo prima.
+  </p>
+  <p>
+    L’unità di cancellazione è l’esecuzione, non la riga. Di solito solo uno
+    span radice porta un <code>user_id</code>, e sono gli span figli a tenere il
+    prompt e la completion, quindi cancellare le righe che nominano il soggetto
+    lascerebbe in piedi il payload. Un’esecuzione rientra quando la proiezione
+    della sua traccia nomina il soggetto, oppure quando lo nomina uno qualunque
+    dei suoi span, e allora se ne va l’esecuzione intera:
+  </p>
+  <ul>
+    <li>Ogni span di quell’esecuzione, con gli input e gli output che portava.</li>
+    <li>I log, le metriche, i punteggi, i feedback e le note di aspetto che ne dipendono.</li>
+    <li>
+      I segnali che nominano uno <code>span_id</code> e nessun
+      <code>trace_id</code>. Un punteggio o una riga di log appuntati a un solo
+      passo dell’esecuzione del soggetto si raggiungono attraverso gli id di
+      span delle esecuzioni in questione, non solo attraverso i loro id di
+      traccia.
+    </li>
+    <li>
+      Le righe di log registrate a nome della persona senza nessuna esecuzione a
+      cui appendersi, confrontate sul loro <code>user_id</code>.
+    </li>
+    <li>
+      Il feedback che la persona ha scritto, confrontato su
+      <code>author_id</code>, dovunque sia appeso. Quella riga porta la sua
+      prosa, e può stare appesa all’esecuzione di qualcun altro, che è dove
+      prima sopravviveva.
+    </li>
+    <li>
+      I casi di dataset catturati da un’esecuzione in questione. Quelli vengono
+      svuotati invece che cancellati. Perché lo dice la sezione dopo la
+      prossima.
+    </li>
+    <li>
+      Su un daemon che serve esecuzioni durevoli, ogni esecuzione durevole
+      finita la cui correlazione porta il <code>user_id</code>, confrontato
+      nella forma con cui hai avviato l’esecuzione perché lo storage delle
+      esecuzioni lo tiene senza hash, con tutto il suo albero di esecuzioni
+      figlie e tutto quello che lo storage delle esecuzioni tiene per loro.
+      Un’esecuzione di quella persona che non è finita non viene toccata:
+      cancellarla corromperebbe il workflow di cui fa parte. È contata in
+      <code>runs_in_flight</code> e nominata in <code>note</code>, così puoi
+      annullarla, o lasciarla finire, e mandare di nuovo la richiesta.
+    </li>
+  </ul>
+  <p>
+    Lo storage delle esecuzioni viene cancellato per primo. Gli span di
+    un’esecuzione aspettano nel suo outbox finché non vengono scritti nello
+    storage delle tracce, quindi cancellare prima le esecuzioni cancella ogni
+    span ancora in attesa, e la cancellazione nello storage delle tracce toglie
+    poi quelli già scritti.
+  </p>
+
+  <h3>Che cosa porta la risposta</h3>
+  <p>
+    Un conteggio per segnale, due conteggi per lo storage delle esecuzioni, e
+    accanto sei campi che portano quello che un conteggio non può portare: che
+    cosa è stato lasciato indietro di proposito, e se un numero piccolo si può
+    leggere come «di questa persona qui non è archiviato niente».
+    <code>deleted</code> è il totale dei sei conteggi per segnale; i conteggi
+    delle esecuzioni e <code>aspect_notes_erased</code> sono riportati
+    accanto, non sommati dentro.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="una richiesta, una persona"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq' },
+      { out: '{' },
+      { out: '  "project": "checkout",' },
+      { out: '  "traces": 1,', tone: 'note' },
+      { out: '  "spans": 2,', tone: 'note' },
+      { out: '  "logs": 1,', tone: 'note' },
+      { out: '  "metrics": 0,', tone: 'note' },
+      { out: '  "scores": 1,', tone: 'note' },
+      { out: '  "feedback": 1,', tone: 'note' },
+      { out: '  "deleted": 6,' },
+      { out: '  "runs_erased": 1,', tone: 'note' },
+      { out: '  "runs_in_flight": 0,' },
+      { out: '  "dataset_items_erased": 1,', tone: 'warn' },
+      { out: '  "aspect_notes_erased": 0,' },
+      { out: '  "datasets": [' },
+      { out: '    "checkout-regressions"' },
+      { out: '  ],' },
+      { out: '  "deletes_pending": false,' },
+      { out: '  "unmatchable_identifiers": 0,' },
+      { out: '  "note": "1 captured dataset cases were emptied in place rather', tone: 'warn' },
+      { out: '           than deleted, so a regression test is not destroyed', tone: 'warn' },
+      { out: '           without anyone being told. They hold no payload any', tone: 'warn' },
+      { out: '           more."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Campo</th><th>Che cosa ti dice</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>runs_erased</code></td>
+          <td>
+            Le esecuzioni durevoli cancellate dallo storage delle esecuzioni,
+            esecuzioni figlie comprese. Non sono contate in
+            <code>deleted</code>. Assente quando il daemon non serve
+            esecuzioni
+          </td>
+        </tr>
+        <tr>
+          <td><code>runs_in_flight</code></td>
+          <td>
+            Le esecuzioni durevoli della persona lasciate intere perché non
+            sono finite. <code>note</code> nomina le esecuzioni da annullare.
+            Assente quando il daemon non serve esecuzioni
+          </td>
+        </tr>
+        <tr>
+          <td><code>dataset_items_erased</code></td>
+          <td>
+            I casi catturati svuotati sul posto. Non sono contati in
+            <code>deleted</code>, perché le righe ci sono ancora
+          </td>
+        </tr>
+        <tr>
+          <td><code>aspect_notes_erased</code></td>
+          <td>
+            Le note di aspetto cancellate. Non sono contate in
+            <code>deleted</code>, che somma i sei conteggi per segnale stampati
+            sopra
+          </td>
+        </tr>
+        <tr>
+          <td><code>datasets</code></td>
+          <td>In quali dataset stanno quei casi, così puoi andare a guardarli</td>
+        </tr>
+        <tr>
+          <td><code>deletes_pending</code></td>
+          <td>
+            Vero quando il backend applica le cancellazioni dopo averti
+            risposto, quindi i conteggi dicono che cosa ha corrisposto e non che
+            cosa ha già lasciato il disco
+          </td>
+        </tr>
+        <tr>
+          <td><code>unmatchable_identifiers</code></td>
+          <td>
+            Gli identificatori archiviati in questo progetto che sono in una
+            forma che questa richiesta non poteva far corrispondere
+          </td>
+        </tr>
+        <tr>
+          <td><code>note</code></td>
+          <td>
+            Perché i numeri qui sopra potrebbero non essere tutta la risposta.
+            Assente quando lo sono
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>I casi catturati vengono svuotati, non cancellati</h3>
+  <p>
+    Un caso di dataset catturato dalla produzione tiene una copia letterale
+    dell’input, quindi cancellare l’esecuzione e lasciare la copia lascerebbe
+    nel dataset le parole della persona. Cancellare il caso di netto è un danno
+    di un altro tipo: qualcuno ha catturato quell’esecuzione per impedire a un
+    bug di tornare, e distruggere il suo test di regressione senza dire niente
+    non è una decisione che mcpd deve prendere da sé.
+  </p>
+  <p>
+    Quindi il payload viene sovrascritto e la riga sopravvive. Il caso legge
+    <code>{'{"erased": true}'}</code> dove stavano il suo input e i suoi
+    metadata, il suo collegamento all’esecuzione di origine viene azzerato, e la
+    risposta dice quanti casi e quali dataset. Il caso è vuoto in modo visibile,
+    che è una cosa su cui un operatore può intervenire.
+  </p>
+  <p>
+    Un caso resta del tutto fuori portata, e il motivo è la separazione fra
+    tenant. Un caso catturato dentro un dataset che appartiene a un
+    <em>altro</em> progetto non viene svuotato e non viene contato. La chiamata
+    è autorizzata su un progetto e tocca un progetto, e una cancellazione che
+    attraversasse quel confine sarebbe un modo per scoprire che cosa c’è dentro
+    un dataset che non puoi leggere. Cancella la persona anche da quel progetto,
+    con una chiave che lo raggiunge.
+  </p>
+
+  <h3>Che cosa non fa</h3>
+  <p>
+    Tocca un progetto solo. <code>?project=</code> lo nomina, e quando lo lasci
+    fuori si usa il progetto predefinito del daemon. Una chiave che non
+    raggiunge quel progetto viene rifiutata con un 403 e non viene cancellato
+    niente. Le righe della stessa persona in un progetto che la chiave non può
+    aprire non vengono né toccate né contate, quindi un conteggio non può mai
+    rivelare che il soggetto esiste da qualche altra parte. Cancellare una
+    persona da più progetti è una chiamata per progetto, con una chiave che
+    arriva a ognuno.
+  </p>
+  <p>
+    Un soggetto di cui non è archiviato niente è un 200 che porta degli zeri,
+    non un 404. Lo stato che hai chiesto vale lo stesso, e un 404 risponderebbe
+    a una domanda che nessuno ha il diritto di fare: se quella persona esiste in
+    qualunque punto che questa chiave vede. È anche il motivo per cui ripetere
+    la chiamata dopo un timeout è sicuro. La seconda chiamata riporta i
+    conteggi più piccoli di una seconda passata, invece di un errore.
+  </p>
+  <p>
+    Non è un modo per cancellare una persona dai tuoi sistemi. mcpd cancella
+    quello che mcpd ha archiviato. Tutto quello che hai inoltrato a un altro
+    endpoint OTLP va cancellato anche lì, e mcpd non sa che fine ha fatto.
+  </p>
+
+  <h3>Le chiavi, e il registro di tutto questo</h3>
+  <p>
+    La cancellazione richiede una chiave admin quando le chiavi sono
+    configurate, e ricade sulle chiavi di lettura quando nessuna chiave admin è
+    impostata, così un deploy che esiste già tiene la portata che aveva. Viene
+    scritta nel registro di audit con l’azione, il progetto e un digest della
+    chiave che l’ha chiesta, e un tentativo rifiutato viene registrato allo
+    stesso modo. Dove <code>user_id</code> è sottoposto a hash, è il digest che
+    la riga nomina: il registro di audit sopravvive ai dati che descrive, quindi
+    scriverci dentro l’identificatore in chiaro lascerebbe il nome che la
+    persona ti ha chiesto di togliere dentro una tabella che la conservazione
+    non ripulisce.
+  </p>
+  <p>
+    Resta anche la cancellazione di una sola esecuzione per volta.
+    <code>DELETE /v1/api/traces/{'{trace_id}'}</code> toglie una singola
+    esecuzione e tutto quello che ne dipende, in una transazione sola, e
+    restituisce il numero di righe cancellate.
+  </p>
+
+  <h2>Uno zero da una cancellazione è il valore di cui diffidare</h2>
+  <p>
+    Uno zero è quello che un operatore ripete a una persona come «su di lei non
+    teniamo niente», ed è l’unico numero che questo endpoint non può dimostrare.
+    Gli identificatori archiviati hanno l’hash calcolato con la chiave di
+    oscuramento, e niente registra quale chiave ha calcolato l’hash di quale
+    riga, quindi uno zero può voler dire altrettanto bene che la chiave è
+    cambiata dopo che quelle righe erano state scritte. mcpd non distingue i due
+    casi. Quello che può fare è non restituire mai uno zero nudo che si legge
+    come il primo.
+  </p>
+  <p>
+    Ecco lo stesso soggetto, cancellato sotto una chiave di oscuramento ruotata
+    dopo che l’esecuzione era stata registrata. I conteggi sono tutti a zero e
+    la riga è ancora lì:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="dopo una rotazione, la stessa richiesta non corrisponde a niente"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq "{deleted, unmatchable_identifiers, note}"' },
+      { out: '{' },
+      { out: '  "deleted": 0,', tone: 'warn' },
+      { out: '  "unmatchable_identifiers": 0,' },
+      { out: '  "note": "Nothing matched. Stored identifiers are hashed with', tone: 'warn' },
+      { out: '           the redaction key, so this means no stored identifier', tone: 'warn' },
+      { out: '           hashes to this subject under the key in force now. It', tone: 'warn' },
+      { out: '           does not mean nothing about this person was ever', tone: 'warn' },
+      { out: '           stored: rows written under a different redaction key', tone: 'warn' },
+      { out: '           cannot be matched by this endpoint."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <p>
+    Ciò che la nota può dimostrare dipende dal progetto. Quando niente in esso è
+    attribuito a qualcuno, non c’è nessuna riga che un cambio di chiave possa
+    nascondere, e la nota dice esattamente quello. Altrimenti uno zero non è
+    dimostrato: rimetti la chiave di oscuramento sotto cui quelle righe erano
+    state scritte e ripeti la richiesta.
+  </p>
+  <p>
+    Riferisce invece di rifiutare, ed è uno scambio voluto. Rifiutare
+    spezzerebbe la ripetizione dopo un timeout, farebbe differire la risposta di
+    «mai vista» da quella di «cancellata un’ora fa» e trasformerebbe l’endpoint
+    in un modo per chiedere se una persona è nota a un progetto, e bloccherebbe
+    ogni cancellazione in un deploy la cui impostazione di oscuramento sia mai
+    cambiata, comprese quelle che correttamente non corrispondono a niente.
+  </p>
+
+  <h3>Identificatori che questa richiesta non poteva far corrispondere</h3>
+  <p>
+    Una rotazione è invisibile. Un cambiamento su <em>se</em> gli identificatori
+    hanno l’hash calcolato non lo è, e <code>unmatchable_identifiers</code> è
+    quello che mcpd riesce a vedere. Un identificatore con hash si riconosce dal
+    suo prefisso <code>sha256:</code>, quindi lo storage conta quanti degli
+    identificatori che tiene sono nella forma opposta a quella che questa
+    richiesta portava: righe in chiaro contro una richiesta con hash, o il
+    contrario. Quelle righe sono state scritte sotto un’altra impostazione di
+    oscuramento, possono appartenere al soggetto, e questa richiesta non le può
+    indirizzare.
+  </p>
+
+  <p>
+    Il conteggio gira su ogni cancellazione, non solo su uno zero, e la risposta
+    qui sotto è il motivo. Questo progetto ha ricevuto scritture con
+    l’oscuramento acceso, poi altre con l’oscuramento spento. La richiesta ha
+    corrisposto alle righe più nuove e le ha cancellate, e i due identificatori
+    più vecchi hanno l’hash, quindi questa richiesta non avrebbe mai potuto
+    indirizzarli. Un conteggio che si fermasse a <code>deleted</code> si
+    sarebbe letto come una risposta completa:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="una cancellazione parziale, che è il caso da prendere"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq "{deleted, unmatchable_identifiers, note}"' },
+      { out: '{' },
+      { out: '  "deleted": 2,' },
+      { out: '  "unmatchable_identifiers": 2,', tone: 'warn' },
+      { out: '  "note": "2 stored identifiers in this project are in a form', tone: 'warn' },
+      { out: '           this request could not match, so rows written under a', tone: 'warn' },
+      { out: '           different redaction setting were not searched and rows', tone: 'warn' },
+      { out: '           about this person may remain. Restore the redaction', tone: 'warn' },
+      { out: '           setting those rows were written under and repeat the', tone: 'warn' },
+      { out: '           request."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <p>
+    Il conteggio è su ogni identificatore che il progetto tiene, non sulle righe
+    del soggetto, quindi quei due possono appartenere a tutt’altra persona. È il
+    massimo che può dire. Quello che esclude è leggere come completa una
+    cancellazione che sembra riuscita.
+  </p>
+
+  <h2>La garanzia non è la stessa su tutti e tre i backend</h2>
+  <p>
+    SQLite e Postgres cancellano dentro la transazione che ti ha risposto.
+    Quando arriva la risposta le righe non ci sono più, e
+    <code>deletes_pending</code> è <code>false</code>.
+  </p>
+  <p>
+    ClickHouse no. Lì la cancellazione è una mutation asincrona: il server
+    accetta l’istruzione e la applica in background, quindi la risposta dice che
+    cosa ha corrisposto e non che cosa ha già lasciato il disco. Quelle
+    cancellazioni tornano indietro con <code>deletes_pending</code> a
+    <code>true</code>, che è mcpd che ti dice che in vigore c’è la più debole
+    delle due garanzie. Su quel backend i casi di dataset sono l’eccezione.
+    Vengono riscritti sotto la loro chiave invece che mutati, quindi il caso
+    svuotato è quello che qualunque lettura restituisce dal momento in cui la
+    risposta parte. Una mutation avrebbe lasciato il vecchio testo leggibile
+    fino alla fine.
+  </p>
+  <p>
+    Se devi certificare a qualcuno che i dati non ci sono più entro un dato
+    momento, è questa la differenza da mettere per iscritto. Su ClickHouse,
+    conferma che la mutation è finita sul server prima di rispondere.
+  </p>
+
+  <h2>Prima che la porta sia raggiungibile</h2>
+  <p>
+    L’oscuramento protegge i valori dentro una traccia. Non fa niente su chi
+    quella traccia la può leggere. mcpd avverte all’avvio quando si mette in
+    ascolto su un indirizzo che non è di loopback con l’ingest aperto o l’API di
+    lettura aperta, perché i prompt e i completion archiviati sono allora
+    leggibili da chiunque raggiunga la porta. Imposta prima
+    <code>--ingest-key</code> e <code>--read-key</code>, e leggi
+    <a href={url('/deploy')} class="link">Docker e Kubernetes</a>.
+  </p>
+
+  <h2>Poi</h2>
+  <ul>
+    <li>
+      Tenerne di meno fin dall’inizio:
+      <a href={url('/docs/sampling')} class="link">Campionamento</a>.
+    </li>
+    <li>
+      Ogni opzione e ogni variabile d’ambiente:
+      <a href={url('/docs/configuration')} class="link">Configurazione</a>.
+    </li>
+    <li>
+      Probe, backup e aggiornamenti:
+      <a href={url('/docs/operations')} class="link">Gestione</a>.
+    </li>
+  </ul>
+</Doc>

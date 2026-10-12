@@ -1,0 +1,211 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import StripChart from '@/components/StripChart.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Amostragem"
+  description="As cinco estratégias de amostragem do mcpd, por que a decisão é tomada uma vez na raiz, por que o hash determinístico faz uma frota concordar, e como a amostragem de cauda guarda o que vale ler."
+  lede="Guardar uma fração dos traces, sem guardar uma fração de cada um deles."
+  og="docs"
+>
+  <h2>A decisão é tomada uma vez, na raiz</h2>
+  <p>
+    Um trace é guardado ou descartado por inteiro. A decisão é tomada quando o
+    span raiz começa e é herdada por todos os filhos, então uma execução nunca
+    fica registrada pela metade.
+  </p>
+  <p>
+    Essa é a regra da qual todo o resto decorre. Um trace com 30% aleatórios dos
+    seus spans faltando não se lê como um trace amostrado. Ele se lê como um
+    defeito no sistema que você está observando: uma chamada de ferramenta que
+    aparentemente nunca aconteceu, uma chamada de modelo sem pai, um vão onde a
+    recuperação deveria estar. Você vai gastar uma tarde nisso antes de concluir
+    que o vão é a sua ferramenta de observabilidade e não o seu agente.
+  </p>
+
+  <h2>O padrão guarda tudo</h2>
+  <p>
+    Sem amostragem configurada, a política é <code>always</code>, e esse é o
+    padrão certo até o volume dizer o contrário. A amostragem troca fora
+    justamente a execução que você vai querer ler. Pague isso só quando o
+    armazenamento ou a banda obrigarem.
+  </p>
+
+  <h2>As cinco estratégias</h2>
+  <table>
+    <thead>
+      <tr><th>Estratégia</th><th>Comportamento</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>always</code></td>
+        <td>Guarda tudo. O padrão.</td>
+      </tr>
+      <tr>
+        <td><code>never</code></td>
+        <td>Não guarda nada.</td>
+      </tr>
+      <tr>
+        <td><code>ratio</code></td>
+        <td>Guarda uma fração fixa, sorteada uma vez por trace, na raiz.</td>
+      </tr>
+      <tr>
+        <td><code>deterministic</code></td>
+        <td>Guarda uma fração fixa, decidida pelo hash do id do trace. Todo coletor chega à mesma resposta sem falar com nenhum outro.</td>
+      </tr>
+      <tr>
+        <td><code>tail</code></td>
+        <td>Adia a decisão até o trace terminar, e então guarda todo erro e toda execução lenta, seja qual for a taxa.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Definir uma taxa</h2>
+  <p>
+    O <code>--sample</code>, ou <code>MCPD_SAMPLE</code>, recebe uma fração de
+    0.0 a 1.0 e configura a estratégia determinística. Um valor fora dessa faixa
+    faz o daemon parar na inicialização, com uma mensagem que diz o que você
+    passou.
+    Ele não limita o valor à faixa, porque uma taxa digitada errado que vira 1.0
+    em silêncio é descoberta um mês depois, pela conta do armazenamento.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="guardar um trace em cada dez"
+    command="mcpd --sample 0.1"
+    primaryLabel="Como opção"
+    secondary={[
+      { label: 'como ambiente', command: 'MCPD_SAMPLE=0.1 mcpd' },
+      { label: 'confirmar o que ele leu', command: 'mcpd config' },
+    ]}
+  />
+
+  <p>
+    Todo SDK lê a mesma fração, como <code>sample</code> na configuração do
+    cliente ou <code>MCPD_SAMPLE</code> no ambiente. Amostrar no cliente sai
+    mais barato: um span que não foi amostrado nunca entra na fila e nunca é
+    exportado, então ele não custa banda nenhuma. Amostrar no daemon custa a ida
+    e volta, mas mantém a taxa em um lugar só, que é o que você quer quando uma
+    dúzia de serviços reporta para uma mesma instância.
+  </p>
+  <p>
+    Das cinco estratégias, o daemon alcança <code>always</code> e
+    <code>deterministic</code>: <code>--sample</code> e o <code>sample</code>
+    de um projeto no arquivo de configuração definem, os dois, a estratégia
+    determinística. <code>never</code>, <code>ratio</code> e <code>tail</code>
+    estão implementadas no tipo de política e não são alcançáveis por uma opção
+    nem pelo arquivo de configuração nesta versão.
+  </p>
+
+  <h2>Por que o hash faz uma frota concordar</h2>
+  <p>
+    Rode várias instâncias do mcpd atrás de um balanceador de carga e os spans
+    de um mesmo trace não chegam todos na mesma instância. Um amostrador que
+    jogasse uma moeda por instância, ou por span, guardaria parte de um trace e
+    descartaria o resto, que é justamente a falha que a primeira regra existe
+    para evitar.
+  </p>
+  <p>
+    A estratégia determinística mapeia o id do trace sobre a faixa inteira de 64
+    bits e guarda o trace quando esse valor cai abaixo do limiar que a taxa
+    implica. Toda instância calcula o mesmo número a partir do mesmo id, então
+    todas concordam, sem estado compartilhado, sem protocolo de coordenação e
+    sem nada que possa sair de sincronia. O mesmo id também dá a mesma resposta
+    em uma repetição, então um lote reenviado não pode chegar pela metade.
+  </p>
+  <p>
+    Dois detalhes tornam esse mapeamento honesto. Ele lê os dezesseis caracteres
+    hexadecimais <em>finais</em> do id: o OpenTelemetry exige que ids de trace
+    sejam aleatórios, mas alguns produtores derivam os bytes iniciais de um
+    horário, e um amostrador que os lesse ficaria correlacionado com a hora do
+    dia em vez de amostrar. Quando o id não é hexadecimal, ele recua para um
+    hash de verdade, com uma mistura final, em vez de degenerar em guardar tudo,
+    de modo que a taxa efetiva fica perto da taxa que você pediu.
+  </p>
+
+  <h2>Nos SDKs, uma decisão vinda de cima vence</h2>
+  <p>
+    Quando um SDK continua um trace a partir de um <code>traceparent</code> do
+    W3C recebido, ele herda o sinalizador de amostragem junto com os ids e não
+    aplica a própria taxa. Isso vale nos dois sentidos: o sinalizador ligado
+    guarda o trace qualquer que seja a taxa local, e o sinalizador desligado o
+    descarta qualquer que seja a taxa local.
+  </p>
+  <p>
+    O daemon não faz isso nesta versão. Quando um span chega por OTLP, o daemon
+    guarda o byte de trace-flags dele no atributo <code>mcpd.otlp.flags</code>,
+    mas o amostrador do daemon não o lê. Um daemon com uma taxa aplica essa taxa
+    a todo trace, diga o sinalizador o que disser.
+  </p>
+  <p>
+    A alternativa é pior do que parece. Se cada serviço aplicasse a própria
+    taxa, um trace que atravessasse quatro deles seria guardado por dois e
+    descartado por dois, e o que você teria no fim não é um trace distribuído. É
+    um conjunto de buracos com o formato de um.
+  </p>
+
+  <h2>A amostragem de cauda guarda as execuções que valem a leitura</h2>
+  <p>
+    Um amostrador de cabeça decide antes de saber qualquer coisa. Ele é barato e
+    é cego: a um décimo, ele guarda um décimo das falhas também. Os traces que
+    você de fato abre são os raros, e a raridade é exatamente aquilo em que um
+    amostrador por proporção é pior.
+  </p>
+
+  {/* The pen stands 200 units in rather than at the component's default. An
+      article column is 662px wide at every desktop size here, and the default
+      arm stands at 760, so this chart had never once drawn its pen: the one
+      element that makes a recorder a recorder was outside the field at every
+      width, including a phone's. */}
+  <StripChart class="not-prose my-8" height={260} pen={200} />
+
+  <p>
+    É assim que um registro de latência se parece: uma linha de base plana e um
+    punhado de excursões. A linha de base é onde está o volume, e as excursões
+    são onde estão as respostas. A amostragem de cauda segura o trace até ele
+    terminar, e então o guarda se qualquer coisa nele deu erro, guarda se ele
+    durou mais que o limiar que você definiu, e caso contrário aplica o mesmo
+    hash determinístico de antes. Guardar os erros vem ligado por padrão, porque
+    os traces de que você mais precisa são os raros, e um amostrador por
+    proporção é o mais propenso a jogá-los fora.
+  </p>
+  <p>
+    O custo é o buffer. Um amostrador de cauda precisa segurar em memória todo
+    trace inacabado até conseguir decidir, e é por isso que ele é uma escolha
+    deliberada e não o padrão. Como acima, a estratégia de cauda está
+    implementada no tipo de política e não é alcançável por uma opção
+    nem pelo arquivo de configuração nesta versão; o caminho de ingestão do daemon aplica a decisão de cabeça.
+  </p>
+
+  <h2>Saber o que foi descartado</h2>
+  <p>
+    Todo span que o amostrador descarta incrementa
+    <code>mcpd_traces_sampled_out_total</code>, exportado em
+    <code>/metrics</code> no formato de texto do Prometheus. Anote a taxa em
+    algum lugar que o seu time leia. Um trace ausente com uma taxa de amostragem
+    documentada é uma explicação; um trace ausente sem explicação é um chamado
+    de suporte, e quem abre esse chamado costuma ser você.
+  </p>
+
+  <h2>A seguir</h2>
+  <ul>
+    <li>
+      O outro jeito de armazenar menos:
+      <a href={urlFor('/docs/privacy', locale)} class="link">Ocultação e retenção</a>.
+    </li>
+    <li>
+      Cada opção e variável de ambiente:
+      <a href={urlFor('/docs/configuration', locale)} class="link">Configuração</a>.
+    </li>
+    <li>
+      Ler o <code>/metrics</code> e o resto dos sinais do próprio daemon:
+      <a href={urlFor('/docs/operations', locale)} class="link">Como executar</a>.
+    </li>
+  </ul>
+</Doc>

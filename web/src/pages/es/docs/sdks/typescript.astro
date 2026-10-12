@@ -1,0 +1,415 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+
+const nesting = `// Anything the callback starts nests under it. No handle is passed down.
+await mcpd.withSpan('support_agent', async (run) => {
+  const order = await mcpd.withSpan(
+    'lookup_order',
+    async (tool) => {
+      tool.setInput({ orderId: 'A-1042' })
+      mcpd.log('info', 'this line belongs to lookup_order')
+      return { status: 'in transit' }
+    },
+    { kind: 'tool_call' },
+  )
+  run.setOutput(order)
+})`
+
+const explicitParent = `// Correct on every runtime, including ones with no AsyncLocalStorage.
+const run = mcpd.trace('support_agent')
+const step = run.child('call_model', { kind: 'model_generation' })
+step.end()
+
+await run.withChild('call_tool', async (tool) => {
+  tool.setOutput({ ok: true })
+})
+run.end()
+
+// Which mechanism is in use, at runtime.
+mcpd.stats().context // 'async-local-storage' | 'fallback'`
+
+const propagation = `// Outbound: put the active span on the request.
+await fetch(url, {
+  headers: { traceparent: span.traceparent() },
+})
+
+// Inbound: continue that trace instead of starting a new one.
+const run = mcpd.trace('handle_request', {
+  traceparent: request.headers.get('traceparent'),
+})`
+
+const payload = `generation.setModel('claude-sonnet-4', 'anthropic')
+generation.setUsage({
+  inputTokens: 812,
+  outputTokens: 37,
+  inputDetails: { cacheRead: 640 },
+})
+
+// A failure you caught and handled yourself.
+generation.setError('the provider timed out', {
+  kind: 'TimeoutError',
+  retryable: true,
+})
+
+// A point in time inside the span, with no duration of its own.
+generation.event('first_token', { kind: 'model_chunk' })`
+
+const recording = `import { Mcpd, RecordingSink } from '@mcpd/sdk'
+
+const sink = new RecordingSink()
+const mcpd = new Mcpd({ sink })
+
+await answerQuestion(mcpd)
+await mcpd.flush()
+
+expect(sink.spans.map((s) => s.name)).toEqual(['answer_question', 'model_call'])
+expect(sink.scores[0]?.scorerId).toBe('answer_relevance')`
+
+const finished = `// Ids, parent and times the caller already holds. Queued as given.
+mcpd.record({
+  traceId: otel.traceId,
+  spanId: otel.spanId,
+  parentSpanId: otel.parentSpanId,
+  name: 'GET /orders',
+  kind: 'http_request',
+  status: 'ok',
+  startTime: otel.startTime,
+  endTime: otel.endTime,
+  isRoot: false,
+  isEvent: false,
+  correlation: { project: 'support' },
+  receivedAt: otel.endTime,
+})
+
+// A parent from a tracing system that is not mcpd, for correlation only.
+const run = mcpd.trace('handle_request', { externalParentSpanId: otel.spanId })`
+
+const serverless = `export default async function handler(request: Request): Promise<Response> {
+  const answer = await mcpd.withSpan('answer', async (run) => {
+    run.setInput(await request.text())
+    return 'ok'
+  })
+
+  // The batch is still in memory here. Send it before the response goes out.
+  await mcpd.flush()
+  return new Response(answer)
+}`
+---
+
+<Doc
+  title="TypeScript"
+  description="El SDK de mcpd para TypeScript y JavaScript: Node, Deno, Bun, navegadores y runtimes edge. Sin dependencias, contexto con AsyncLocalStorage e instrumentación que nunca lanza."
+  lede="Un paquete sin dependencias. Registra spans, logs, métricas, puntuaciones y feedback, y nunca lanza una excepción desde una llamada de instrumentación."
+  og="docs"
+>
+  <h2>Instalación</h2>
+  <p>
+    Node 20 o posterior, Deno, Bun, navegadores y runtimes edge. ESM primero,
+    con una compilación CommonJS para <code>require</code>. Las únicas piezas
+    propias de Node, <code>async_hooks</code> y <code>zlib</code>, se cargan en
+    tiempo de ejecución y se omiten donde no existen.
+  </p>
+
+  <Command command="npm install @mcpd/sdk" />
+
+  <h2>Construir el cliente</h2>
+  <p>
+    Un cliente por proceso. Cada opción lee también una variable de entorno, así
+    que el mismo código corre en desarrollo y en producción sin ninguna edición.
+    Sin ningún argumento habla con un daemon en
+    <code>http://localhost:4317</code>.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="init" title="conectar" />
+
+  <p>El código gana al entorno, y el entorno gana al valor por defecto.</p>
+
+  <table>
+    <thead>
+      <tr><th>Opción</th><th>Entorno</th><th>Por defecto</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>apiKey</code></td><td><code>MCPD_API_KEY</code></td><td>ninguno</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>ninguno</td></tr>
+      <tr><td><code>serviceName</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>ninguno</td></tr>
+      <tr><td><code>serviceVersion</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>ninguno</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capturePayloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>logLevel</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      <tr><td><code>batchSize</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flushIntervalMs</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2000</code></td></tr>
+      <tr><td><code>maxQueue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeoutMs</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10000</code></td></tr>
+      <tr><td><code>sink</code></td><td></td><td>el transporte HTTP</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>enabled: false</code> no registra nada y no envía nada, mientras que
+    cada llamada sigue devolviendo un objeto válido y las lecturas de listas
+    devuelven una página vacía. Una suite de pruebas puede apagar mcpd sin tocar
+    una línea de instrumentación.
+  </p>
+  <p>
+    <code>capturePayloads: false</code> mantiene los prompts y las completions
+    dentro del proceso. El span se sigue registrando con sus tiempos, su estado,
+    su uso, su modelo, su correlación y sus errores; <code>input</code> y
+    <code>output</code> se descartan antes de llegar a la cola, así que nada
+    sensible puede salir en un flush. Un span lo anula para sí mismo con
+    <code>capturePayloads</code> en sus opciones de inicio, en cualquiera de los
+    dos sentidos.
+  </p>
+
+  <h2>Registrar una ejecución</h2>
+  <p>
+    <code>withSpan</code> es la forma con ámbito. Abre el span, lo mantiene
+    activo para todo lo que arranque el callback y lo cierra cuando el callback
+    termina. Si el callback lanza, el span queda marcado como <code>error</code>
+    con el mensaje lanzado y el error se relanza sin cambios, de modo que tu
+    propio manejo de errores no cambia por estar observado.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="trace" title="registrar una ejecución" />
+
+  <h2>Contexto</h2>
+  <p>
+    En Node y en Bun el span activo vive en un <code>AsyncLocalStorage</code>.
+    Todo lo que arranque dentro de un callback de <code>withSpan</code> se anida
+    bajo él sin recibir ninguna referencia, y dos ejecuciones entrelazadas en un
+    mismo bucle de eventos nunca ven los spans de la otra.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="anidamiento"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: nesting }]}
+  />
+
+  <p>
+    Los navegadores y casi todos los runtimes edge no tienen
+    <code>AsyncLocalStorage</code>. Ahí el SDK guarda en su lugar un único valor.
+    Eso anida bien y sobrevive a un <code>await</code> dentro de una ejecución,
+    pero no distingue dos ejecuciones concurrentes, y el resultado sería la
+    llamada a herramienta de una ejecución apareciendo dentro del árbol de otra.
+    Cuando ejecutes agentes de forma concurrente en esos runtimes, pasa el padre
+    de forma explícita.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="padre explícito"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: explicitParent }]}
+  />
+
+  <p>
+    Entre servicios, el contexto viaja en una cabecera <code>traceparent</code>
+    de W3C. Eso es todo lo que hace que una traza sobreviva a un salto de red.
+    Una cabecera mal formada se ignora y se inicia una traza raíz nueva, porque
+    una cabecera que nadie puede leer no es motivo para fallar la solicitud que
+    la traía.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="a través de un límite de servicio"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: propagation }]}
+  />
+
+  <h2>Modelo, uso y errores</h2>
+  <p>
+    mcpd calcula el precio a partir de los recuentos de tokens en la ingesta,
+    así que el costo que ves en la traza es el costo que te facturaron. Informa
+    lo que te dijo el proveedor en vez de contar los tokens por tu cuenta. Un
+    error siempre lleva un mensaje, y asignarlo pone el estado del span en
+    <code>error</code> en el mismo movimiento, así que los dos nunca pueden
+    discrepar.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="qué lleva un span"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: payload }]}
+  />
+
+  <h2>Ejecuciones duraderas</h2>
+  <p>
+    El mismo cliente sirve las ejecuciones duraderas del daemon.
+    <code>workflow()</code> construye la definición y guarda los cuerpos de los
+    pasos; un <code>Worker</code> la registra, hace long polling para obtener
+    leases y atiende cada uno, y <code>mcpd.runs</code>,
+    <code>mcpd.events</code> y <code>mcpd.definitions</code> reflejan la
+    superficie de ejecuciones una a una. Un cuerpo lanza
+    <code>RetryableError</code> para que se reintente dentro del presupuesto del
+    paso, y registra spans bajo su paso a través del <code>StepContext</code>.
+    Un span registrado así, y todos los spans anidados bajo él, suman su uso al
+    del paso cuando este termina, de modo que el daemon cobra lo que muestra la
+    traza y el cuerpo nunca suma tokens a mano; <code>ctx.setUsage</code> es una
+    anulación explícita. Junto a <code>onError</code> hay cuatro hooks:
+    <code>onLease</code>, <code>onStepStart</code>, <code>onStepEnd</code> y
+    <code>onConflict</code>, y <code>worker.stats()</code> cuenta tomas,
+    finalizaciones, fallos por clase y conflictos por motivo.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} example="workflow" region="workflow" title="un workflow" />
+  <p>
+    Qué hace cada construcción, el protocolo de leases y la API de ejecuciones
+    están en <a href={urlFor('/docs/workflows', locale)} class="link">Workflows</a>,
+    <a href={urlFor('/docs/workers', locale)} class="link">Workers</a> y
+    <a href={urlFor('/docs/runs', locale)} class="link">Ejecuciones</a>.
+  </p>
+
+  <h2>Puntuaciones y feedback</h2>
+  <p>
+    El tipo exige <code>min</code> y <code>max</code>. Una puntuación de 0.7 en
+    una escala sin declarar no se puede comparar con nada, y para cuando alguien
+    esté leyendo el gráfico ya es tarde para preguntar qué significaba. El
+    feedback es el juicio de una persona y se guarda aparte de una puntuación,
+    porque los dos responden preguntas distintas y nunca se deben promediar
+    juntos.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="score" title="puntuación y feedback" />
+
+  <p>
+    Ambos se adjuntan a la traza del span activo cuando no nombras ninguna, así
+    que un control de pulgar arriba o abajo en tu propio producto puede llamar a
+    <code>feedback</code> sin más que el id de traza que guardaste.
+  </p>
+
+  <h2>Las cinco señales, un solo juego de ids</h2>
+  <p>
+    Los spans, los logs, las métricas, las puntuaciones y el feedback pasan por
+    la misma cola y llevan los mismos ids de traza y de span. Eso es lo que
+    permite que un pico en un gráfico abra la ejecución que lo causó.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>Flush y apagado</h2>
+  <p>
+    Registrar es añadir a una cola. Nada ha salido del proceso hasta que el
+    worker lo envía, cosa que hace cada dos segundos o cuando se llena un lote.
+    Tanto <code>flush()</code> como <code>shutdown()</code> se pueden esperar y
+    son idempotentes, y <code>shutdown()</code> además detiene el worker.
+  </p>
+  <p>
+    En una función serverless esto no es opcional. El runtime congela el proceso
+    en cuanto devuelves una respuesta, y el worker en segundo plano no vuelve a
+    correr, así que el último lote se pierde. Espera un flush antes de que salga
+    la respuesta.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="un handler serverless"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: serverless }]}
+  />
+
+  <p>
+    En Node el cliente también hace flush en <code>beforeExit</code>, así que un
+    script que se olvida de <code>shutdown()</code> aún recibe su último lote.
+    Ese hook no se dispara con un <code>process.exit()</code> explícito ni con
+    una señal fatal, así que es una red de seguridad y no un sustituto.
+  </p>
+
+  <h2>Comprobar lo que registraste</h2>
+  <p>
+    Un <code>RecordingSink</code> sustituye la red por memoria, así que una
+    prueba vuelve a leer los spans, los logs, las métricas, las puntuaciones y
+    el feedback que produjo el código bajo prueba, sin servidor y sin puerto. Un
+    <code>ConsoleSink</code> imprime en su lugar una línea JSON por señal, y
+    cualquier objeto con un método <code>export(batch, ingestKey)</code> es un
+    sink. Uno que lanza es un lote fallido y un diagnóstico, nunca una excepción
+    en tu código. <code>mcpd.stats()</code> responde <code>queued</code>,
+    <code>dropped</code>, <code>capacity</code>, <code>exported</code>,
+    <code>failed</code> y <code>rejected</code>.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="una prueba sin servidor"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: recording }]}
+  />
+
+  <h2>Registrar un span ya terminado</h2>
+  <p>
+    <code>mcpd.record(span)</code> encola un span cuyos ids, padre y tiempos ya
+    tienes: lo que trae en la mano un adaptador de otro sistema de trazas, una
+    importación por lotes o una repetición. Se encola tal cual, nunca se le
+    cambia el padre, ni los tiempos, ni el muestreo, y la correlación que dejó
+    vacía se rellena desde el cliente. Un registro cuyos ids no tienen la forma
+    de OpenTelemetry, cuyo nombre está vacío o al que le falta la hora de inicio
+    se descarta y se cuenta en <code>stats().rejected</code>. En cualquier span,
+    <code>externalParentSpanId</code> lleva un padre de un sistema de trazas que
+    no es mcpd, solo para correlacionar.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="un span de otro sitio"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: finished }]}
+  />
+
+  <h2>Con qué puedes contar</h2>
+  <ul>
+    <li>
+      La instrumentación nunca lanza. Una exportación fallida, un daemon
+      inalcanzable o un payload que no se serializa se informan como mucho una
+      vez por intervalo a través de <code>onError</code> y después se dejan
+      pasar. La observabilidad nunca debe tumbar aquello que observa.
+    </li>
+    <li>
+      Registrar no bloquea. Añade a una cola y vuelve; la red ocurre en un
+      worker en segundo plano, así que la latencia de tu agente nunca depende de
+      que mcpd sea rápido, ni de que esté en pie.
+    </li>
+    <li>
+      La memoria está acotada. La cola guarda <code>maxQueue</code> señales.
+      Cuando está llena se descarta la más antigua y se cuenta en
+      <code>mcpd.stats()</code>, porque un búfer sin límite convierte una caída
+      de red en una muerte por falta de memoria.
+    </li>
+    <li>
+      La decisión de muestreo se toma una vez, en la raíz, y se hereda. Una
+      traza registrada a medias se lee como un fallo de tu sistema.
+    </li>
+    <li>
+      Un span abierto también se envía. Un span se encola cuando empieza y otra
+      vez cuando termina, así que una ejecución que se cae a mitad de vuelo es
+      visible. Si el registro de inicio todavía no ha salido, el registro de fin
+      lo reemplaza, así que un span rápido cuesta un registro y no dos.
+    </li>
+    <li>
+      Tu payload nunca se reescribe. Las claves se convierten entre
+      <code>camelCase</code> y el <code>snake_case</code> del daemon, y la
+      conversión se detiene en <code>input</code>, <code>output</code>,
+      <code>attributes</code>, <code>metadata</code>, <code>fields</code> y
+      <code>labels</code>. Tu prompt llega exactamente como lo escribiste.
+    </li>
+  </ul>
+
+  <h2>Volver a leerlo</h2>
+  <p>
+    El mismo cliente lee. Cada método refleja un endpoint HTTP y devuelve los
+    tipos generados. Las lecturas lanzan un <code>McpdError</code> cuando
+    fallan: una consulta que esperaste y no se puede responder es una noticia, a
+    diferencia de un span que no se pudo exportar.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="query" title="buscar y analizar" />
+
+  <p>
+    <a href={urlFor('/docs/searching', locale)} class="link">Encontrar una ejecución</a>
+    cubre los filtros por completo.
+    <a href={urlFor('/docs/reference/data-model', locale)} class="link">El modelo de datos</a>
+    lista todos los campos que llevan estos tipos.
+  </p>
+</Doc>

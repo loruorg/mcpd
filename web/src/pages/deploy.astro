@@ -1,0 +1,673 @@
+---
+/**
+ * Deploying mcpd.
+ *
+ * The manifests on this page are not transcribed. They are read from
+ * `deploy/` at build time, so the file a reader copies is the file that is in
+ * the repository. A drifted example is worse than no example.
+ */
+import fs from 'node:fs'
+import path from 'node:path'
+import Doc from '@/layouts/Doc.astro'
+import Unreleased from '@/components/Unreleased.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+
+const ROOT = path.resolve(process.cwd(), '..')
+const read = (rel: string) => fs.readFileSync(path.join(ROOT, rel), 'utf8').trimEnd()
+
+const docker = [
+  {
+    lang: 'curl' as const,
+    label: 'docker-compose.yml',
+    shiki: 'yaml',
+    code: read('deploy/docker/docker-compose.yml'),
+  },
+  {
+    lang: 'kotlin' as const,
+    label: '.env.example',
+    shiki: 'bash',
+    code: read('deploy/docker/.env.example'),
+  },
+]
+
+const kubernetes = [
+  { lang: 'typescript' as const, label: 'deployment.yaml', shiki: 'yaml', code: read('deploy/k8s/deployment.yaml') },
+  { lang: 'python' as const, label: 'service.yaml', shiki: 'yaml', code: read('deploy/k8s/service.yaml') },
+  { lang: 'go' as const, label: 'pvc.yaml', shiki: 'yaml', code: read('deploy/k8s/pvc.yaml') },
+  { lang: 'rust' as const, label: 'secret.yaml.example', shiki: 'yaml', code: read('deploy/k8s/secret.yaml.example') },
+]
+
+const chartValues = [
+  { lang: 'curl' as const, label: 'values.yaml', shiki: 'yaml', code: read('deploy/helm/mcpd/values.yaml') },
+]
+---
+
+<Doc
+  title="Docker and Kubernetes"
+  description="Run mcpd as a container or on Kubernetes: a compose file, manifests with real probes, a Helm chart, and the two keys to set before the port is reachable by anything else."
+  lede="One process, one volume, one file to back up. The longest section on this page is the one about what to set before anyone but you can reach it."
+  og="docs"
+>
+  <h2>One container</h2>
+  <Unreleased class="not-prose my-6" />
+  <p>
+    mcpd is a single process with its storage compiled in. There is no database
+    to run beside it, no sidecar, and no static-file server: ingest, the query
+    API and the interface are all served from one port.
+  </p>
+
+  <Command
+    command="docker run -p 4317:4317 -v mcpd-data:/data -e MCPD_DATA=/data/mcpd.db ghcr.io/mcpd/mcpd:0.1.0"
+    secondary={[
+      { label: 'Print the configuration and exit', command: 'docker run --rm ghcr.io/mcpd/mcpd:0.1.0 config' },
+      { label: 'Keep nothing', command: 'docker run -p 4317:4317 -e MCPD_DATA=:memory: ghcr.io/mcpd/mcpd:0.1.0' },
+    ]}
+  />
+
+  <p>
+    The volume is the part worth reading twice. Without it the SQLite file lives
+    in the container's writable layer, and the traces go when the container
+    does. <code>MCPD_DATA</code> is set explicitly for the same reason: if the
+    path the daemon writes and the path you mounted ever drift apart, mcpd keeps
+    working and the volume stays empty, which is the kind of mistake you find
+    out about on the day you need the data.
+  </p>
+  <p>
+    Pin the tag. <code>latest</code> makes a restart into an upgrade, at a time
+    nobody chose. Each tag is built for <code>linux/amd64</code> and
+    <code>linux/arm64</code>, and runs as uid 10001, which owns
+    <code>/data</code> in the image.
+  </p>
+
+  <h2>The port, and what answers on it</h2>
+  <p>
+    Everything is on 4317. That is what makes the deployment one container, and
+    it is also what you need to know when you write an ingress rule or a network
+    policy, because the paths do not all carry the same risk.
+  </p>
+
+  <div class="scroll-x">
+  <table>
+    <thead>
+      <tr>
+        <th>Path</th>
+        <th>What it is</th>
+        <th>Key required</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>/v1/traces</code>, <code>/v1/logs</code>, <code>/v1/metrics</code></td>
+        <td>OTLP ingest, for any OpenTelemetry SDK</td>
+        <td>Ingest</td>
+      </tr>
+      <tr>
+        <td><code>/v1/ingest</code></td>
+        <td>Native ingest, the full model in one request</td>
+        <td>Ingest</td>
+      </tr>
+      <tr>
+        <td><code>/v1/api/…</code></td>
+        <td>The query API: traces, spans, logs, scores, analytics</td>
+        <td>Read</td>
+      </tr>
+      <tr>
+        <td><code>/</code></td>
+        <td>The operator interface, embedded in the binary</td>
+        <td>None</td>
+      </tr>
+      <tr>
+        <td><code>/healthz</code>, <code>/readyz</code>, <code>/metrics</code></td>
+        <td>Liveness, readiness, and mcpd's own Prometheus counters</td>
+        <td>None</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    An ingest request is capped at 32 MiB. Prompts are large, so that limit is
+    generous on purpose, but a proxy in front of mcpd usually has a smaller one:
+    a reverse proxy that refuses a 3 MiB batch is the most common reason a trace
+    never arrives.
+  </p>
+
+  <h2>Compose</h2>
+  <p>
+    Two decisions in this file are worth explaining, because both look like
+    omissions. The port is published on <code>127.0.0.1</code>, so nothing
+    outside the host can reach it while you are still setting keys. And the file
+    has no healthcheck because the image has one: it requests
+    <code>/healthz</code> every 30 seconds with the busybox <code>wget</code> in
+    the image, on the port in <code>MCPD_LISTEN</code>, and
+    <code>docker compose ps</code> shows the result. Docker does not restart a
+    container for being unhealthy; the restart policy acts when the process
+    exits.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={docker} title="deploy/docker" />
+
+  <Command
+    class="my-6"
+    command="docker compose -f deploy/docker/docker-compose.yml up -d"
+    secondary={[
+      { label: 'Logs', command: 'docker compose -f deploy/docker/docker-compose.yml logs -f mcpd' },
+    ]}
+  />
+
+  <p>
+    The <code>:?</code> in each key line is not decoration. Compose refuses to
+    start the service when the variable is unset, which turns a forgotten key
+    from a silent open port into an error message. The two run keys have no
+    value at all in the file, so Compose passes them only when
+    <code>.env</code> sets them: an empty value would reach the daemon as one
+    empty key rather than none.
+  </p>
+
+  <h2>Kubernetes</h2>
+  <p>
+    Four objects: a Deployment, a Service, a PersistentVolumeClaim, and a Secret
+    you create yourself. The Deployment runs one replica with the
+    <code>Recreate</code> strategy, and that is the one line in these manifests
+    you should not change. mcpd stores everything in a single SQLite file, one
+    process writes it, and a rolling update would start a second pod on the same
+    volume while the first still holds it. That is not a scaling story, it is a
+    corruption story.
+  </p>
+  <p>
+    The Secret is not one of the files <code>kubectl apply</code> reads.
+    <code>secret.yaml.example</code> shows its shape, and the extension keeps it
+    out of the apply, because a Secret applied as written would make its
+    placeholder strings your keys. Create it from the command line instead,
+    with keys generated on the spot. The pod runs as uid 10001 with a read-only
+    root filesystem, no capabilities and the runtime's default seccomp profile,
+    which is what the Pod Security <code>restricted</code> level asks for.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={kubernetes} title="deploy/k8s" />
+
+  <pre><code class="language-bash">{`export INGEST_KEY=$(openssl rand -hex 32) READ_KEY=$(openssl rand -hex 32) ADMIN_KEY=$(openssl rand -hex 32)
+kubectl create namespace mcpd
+kubectl -n mcpd create secret generic mcpd-keys \\
+  --from-literal=ingest-keys=$INGEST_KEY \\
+  --from-literal=read-keys=$READ_KEY \\
+  --from-literal=admin-keys=$ADMIN_KEY \\
+  --from-literal=redact-key=$(openssl rand -hex 32)
+kubectl -n mcpd apply -f deploy/k8s/`}</code></pre>
+
+  <p>
+    Keep the three keys where your team keeps secrets: the ingest key goes to
+    every agent, the read key to whoever reads the interface, and the admin key
+    to whoever may delete data. Add <code>execute-keys</code> and
+    <code>worker-keys</code> the same way once a worker runs outside the
+    cluster; until then the ingest keys are accepted for both.
+  </p>
+
+  <pre class="my-6"><code>{`export EXECUTE_KEY=$(openssl rand -hex 32) WORKER_KEY=$(openssl rand -hex 32)
+kubectl -n mcpd patch secret mcpd-keys --type merge \\
+  -p '{"stringData":{"execute-keys":"'$EXECUTE_KEY'","worker-keys":"'$WORKER_KEY'"}}'
+kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
+
+  <Command
+    class="my-6"
+    command="kubectl -n mcpd port-forward svc/mcpd 4317:4317"
+    primaryLabel="Reach it from your machine"
+  />
+
+  <p>
+    Agents inside the cluster point at the Service. The SDKs read both of these
+    from the environment, so instrumented code needs no change:
+  </p>
+
+  <Command command="MCPD_ENDPOINT=http://mcpd.mcpd.svc:4317 MCPD_API_KEY=$INGEST_KEY" />
+
+  <h3>The probes</h3>
+  <p>
+    The two endpoints do deliberately different things, and swapping them causes
+    a specific, ugly failure.
+  </p>
+  <ul>
+    <li>
+      <code>/healthz</code> never touches storage. It answers from process state
+      alone. A liveness probe that queried the database would restart a healthy
+      daemon every time a large query made it slow, and restarting is exactly
+      what you do not want while a write-ahead log is being flushed.
+    </li>
+    <li>
+      <code>/readyz</code> pings the store and returns 503 with
+      <code>"status": "degraded"</code> and a line saying what is wrong when it
+      cannot. That keeps traffic away from an instance that cannot serve it,
+      without killing it.
+    </li>
+  </ul>
+  <p>
+    The startup probe is there because migrations run at start. They are
+    idempotent and usually instant, but on a large database they can take longer
+    than the liveness probe would tolerate, and a pod that gets killed
+    mid-migration on every attempt never starts at all.
+  </p>
+
+  <h3>What to give it</h3>
+  <p>
+    These numbers come from what the process actually does, not from a
+    benchmark, and no benchmark is claimed.
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Resource</th>
+        <th>Value</th>
+        <th>Why</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>CPU request</td>
+        <td><code>100m</code></td>
+        <td>Idle costs close to nothing. The request exists so the scheduler does not stack it under something noisy.</td>
+      </tr>
+      <tr>
+        <td>CPU limit</td>
+        <td>none</td>
+        <td>Ingest arrives in bursts. Throttling the writer during a burst is how a client queue fills and spans get dropped.</td>
+      </tr>
+      <tr>
+        <td>Memory request</td>
+        <td><code>128Mi</code></td>
+        <td>A static binary, five SQLite connections and their page caches.</td>
+      </tr>
+      <tr>
+        <td>Memory limit</td>
+        <td><code>512Mi</code></td>
+        <td>Headroom for concurrent ingest. One request can hold 32 MiB of prompt text, so memory tracks how many large batches arrive at once.</td>
+      </tr>
+      <tr>
+        <td>Volume</td>
+        <td><code>20Gi</code>, ReadWriteOnce</td>
+        <td>Sized from your own payloads. Text dominates, and the search index is not an external-content one, so indexed prompts and completions are stored a second time.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Keep the volume on a local block device. SQLite's locking is only correct
+    there: on NFS or another shared filesystem the locks are advisory at best,
+    and the failure does not show up as an error, it shows up as a corrupt
+    database weeks later.
+  </p>
+
+  <h2>The Helm chart</h2>
+  <p>
+    The chart renders the same four objects with values in front of them, plus
+    six that are off until a value turns them on: an Ingress, a NetworkPolicy,
+    a PodDisruptionBudget, a ServiceAccount, a ServiceMonitor, and a ConfigMap
+    or Secret for the config file. Each release pushes it to the same registry
+    as the image. Generate the keys first and keep them where your team keeps
+    secrets, because the install will not print them back to you:
+  </p>
+
+  <Command
+    command="helm install mcpd oci://ghcr.io/mcpd/charts/mcpd -n mcpd --create-namespace --set keys.ingest=$INGEST_KEY --set keys.read=$READ_KEY"
+    primaryLabel="Install from the registry"
+    secondary={[
+      { label: 'Generate the keys', command: 'export INGEST_KEY=$(openssl rand -hex 32) READ_KEY=$(openssl rand -hex 32)' },
+      { label: 'From a clone', command: 'helm install mcpd ./deploy/helm/mcpd -n mcpd --create-namespace -f values.yaml' },
+      { label: 'Upgrade', command: 'helm upgrade mcpd oci://ghcr.io/mcpd/charts/mcpd -n mcpd --reset-then-reuse-values' },
+    ]}
+  />
+
+  <p>
+    The install fails when <code>keys.ingest</code> or <code>keys.read</code> is
+    unset, and says why. A chart that let you discover an open ingest endpoint
+    later would not be doing its job. If you manage the Secret yourself, set
+    <code>keys.existingSecret</code> instead and the chart creates none.
+  </p>
+  <p>
+    The pod template carries a checksum of the Secret, so rotating a key and
+    running <code>helm upgrade</code> restarts the pod. Without that, the new
+    key sits in the cluster and the daemon keeps enforcing the old one.
+  </p>
+  <p>
+    Monitors, SLOs, the judge, per-project keys and the run store's timings are
+    read from the daemon's config file, not from flags. Write that JSON object
+    under <code>configFile.content</code> and the chart mounts it read-only and
+    points <code>MCPD_CONFIG_FILE</code> at it. Per-project keys, the judge's
+    <code>api_key</code> and forward headers are credentials, so the chart
+    refuses to put content carrying any of them in a ConfigMap: set
+    <code>configFile.kind</code> to <code>Secret</code>, or keep the file in a
+    Secret you manage and name it in <code>configFile.existingSecret</code>.
+    <code>extraEnv</code>, <code>extraVolumes</code> and
+    <code>extraVolumeMounts</code> cover anything else, such as a private CA
+    bundle.
+  </p>
+  <p>
+    Every combination the chart cannot serve is refused at install time with a
+    message that names the value to change, never left to crash-loop after it.
+    The chart's README lists each refusal.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={chartValues} title="deploy/helm/mcpd" />
+
+  <h2>Before anything else can reach it</h2>
+  <p>
+    Ingest is open by default. That is a deliberate choice for the first five
+    minutes on a laptop, where a credential before the first trace would be
+    friction with no benefit, and it is the wrong default the moment the port is
+    reachable by anything else. So the daemon says so, every time it starts on a
+    non-loopback address without keys:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="what an unprotected start looks like"
+    lines={[
+      { cmd: 'docker run -p 4317:4317 -v mcpd-data:/data ghcr.io/mcpd/mcpd:0.1.0' },
+      { out: 'mcpd 0.1.0 listening on http://0.0.0.0:4317', tone: 'ok' },
+      { out: 'WARN listening on 0.0.0.0:4317 with open ingest. Anyone who can', tone: 'warn' },
+      { out: '     reach this port can write to it. Set --ingest-key (or', tone: 'warn' },
+      { out: '     MCPD_INGEST_KEYS) before exposing it.', tone: 'warn' },
+      { out: 'WARN listening on 0.0.0.0:4317 with an open read API. Stored', tone: 'warn' },
+      { out: '     prompts and completions are readable by anyone who can reach', tone: 'warn' },
+      { out: '     this port. Set --read-key to require a key.', tone: 'warn' },
+    ]}
+  />
+
+  <p>
+    mcpd warns rather than refusing to start, because refusing would break the
+    path that makes it worth running at all. The warning is the contract: if you
+    see it in a deployment log, that deployment is open.
+  </p>
+
+  <h3>Six keys, six scopes</h3>
+  <p>
+    <code>--ingest-key</code> permits writing signals. <code>--read-key</code>
+    permits reading them. <code>--write-key</code> permits changing stored data:
+    scores, feedback, datasets, experiments and acknowledgements.
+    <code>--execute-key</code> permits starting, cancelling and signalling runs.
+    <code>--worker-key</code> permits claiming steps and reporting what happened
+    to them, and is the key that lives in the process running your step bodies.
+    <code>--admin-key</code> permits deleting a trace and reading the audit log.
+    An unset list accepts a wider one in its place: write accepts the ingest
+    keys, admin accepts the read keys, and execute and worker accept the write
+    keys. A deployment configured before a scope existed keeps working.
+  </p>
+  <p>
+    The first split is the one that decides your blast radius, because the
+    populations are different sizes: every agent process in your fleet needs the
+    ingest key, and a much smaller number of people need any of the others.
+    Handing your fleet one key that also reads would put a credential for every
+    stored prompt into every container that emits a span, including the ones
+    running third-party code.
+  </p>
+  <p>
+    That is also why capturing a run into a dataset moved to the write scope. It
+    reads the run's input and output on the way through, so authorising it with
+    the key your fleet carries handed every one of those containers a way to copy
+    any stored prompt out.
+  </p>
+  <p>
+    Each flag takes a comma-separated list and each has an environment variable:
+    <code>MCPD_INGEST_KEYS</code>, <code>MCPD_READ_KEYS</code>,
+    <code>MCPD_WRITE_KEYS</code> and <code>MCPD_ADMIN_KEYS</code>. Use more than
+    one: a key per team or per fleet means a leaked key is revoked by removing it
+    from the list, not by re-deploying everything that emits a span. A key is
+    presented as <code>Authorization: Bearer …</code> or in the
+    <code>X-Mcpd-Key</code> header, and is compared in constant time.
+  </p>
+  <p>
+    The asymmetry to know about is what happens when you leave the two newer
+    flags unset. An unset write list accepts the ingest keys and an unset admin
+    list accepts the read keys, so an upgrade never revokes a key that was
+    working. Until you set <code>--admin-key</code>, a read key is a key to read
+    and to delete, not a strictly read-only one, and the daemon says so at
+    startup. Give it out accordingly, or set the flag.
+  </p>
+
+  <h3>Who read what</h3>
+  <p>
+    The handlers that hand payloads back record the access: the trace detail, the
+    span and log searches, feedback, dataset items, capture, and delete. A row
+    carries the time, a short digest of the key that acted, the action, the
+    project, the resource and whether authorisation allowed it. The key itself is
+    never written down, so the log is not a second place your credentials live.
+  </p>
+  <p>
+    Read it with <code>GET /v1/api/audit</code>, which takes the admin scope.
+    Two properties are worth knowing before you rely on it. It is not trimmed by
+    <code>--retention-days</code>, because a log that deleted itself on the same
+    schedule as the data it describes could not say who read the data that has
+    since gone. And writing a row never fails the read it describes: a row that
+    cannot be written is counted as
+    <code>mcpd_audit_write_failures_total</code> on <code>/metrics</code>, which
+    is the counter to alert on.
+  </p>
+
+  <h3>What a key does not cover</h3>
+  <ul>
+    <li>
+      <strong>The interface.</strong> The markup at <code>/</code> is served to
+      anyone who can reach the port. The data behind it is not: every request it
+      makes goes through the query API, which enforces the read key. There is no
+      login screen in the daemon, so if people rather than services need access,
+      put it behind the identity proxy you already run.
+    </li>
+    <li>
+      <strong>The probes and <code>/metrics</code>.</strong> Unauthenticated, on
+      purpose, because a kubelet and a Prometheus scraper cannot carry a key.
+      They expose counters and uptime, never payloads.
+    </li>
+    <li>
+      <strong>Transport.</strong> mcpd speaks plain HTTP and does not terminate
+      TLS. Terminate it at your ingress or in your mesh. Prompts and completions
+      cross that link in full.
+    </li>
+    <li>
+      <strong>Hashes in redacted payloads.</strong> Redaction is on unless you
+      pass <code>--no-redact</code>, and where it hashes an identifier the digest
+      is only as private as its salt. Set <code>--redact-key</code>, or short
+      identifiers can be recovered by guessing. See
+      <a href="/docs/privacy" class="link">Redaction and retention</a>.
+    </li>
+  </ul>
+
+  <h3>Check before you expose it</h3>
+  <p>
+    <code>mcpd config</code> prints the configuration an invocation would use
+    and exits. It is the cheapest way to find out that the environment variable
+    you set in the wrong place did nothing:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="pre-flight"
+    lines={[
+      { cmd: 'docker compose -f deploy/docker/docker-compose.yml run --rm mcpd config' },
+      { out: 'listen          0.0.0.0:4317' },
+      { out: 'storage         sqlite at /data/mcpd.db' },
+      { out: 'config file     none' },
+      { out: 'log format      json' },
+      { out: 'project         default' },
+      { out: 'projects        none' },
+      { out: 'retention       30 days' },
+      { out: 'ingest auth     key required', tone: 'ok' },
+      { out: 'read auth       key required', tone: 'ok' },
+      { out: 'write auth      key required (ingest keys)', tone: 'ok' },
+      { out: 'admin auth      key required (read keys)', tone: 'warn' },
+      { out: 'execute auth    key required (ingest keys)', tone: 'warn' },
+      { out: 'worker auth     key required (ingest keys)', tone: 'warn' },
+      { out: 'signup          off' },
+      { out: 'runs            sqlite at /data/mcpd.runs.db' },
+      { out: 'run settings    lease_ttl_ms 30000, reclaim_window_ms 30000, stall_window_ms 300000, idempotency_window_ms 86400000, park_ttl_ms 86400000, max_depth 8, max_step_repeats 16' },
+      { out: 'identity        off' },
+      { out: 'client ip       peer address' },
+      { out: 'sampling        keep everything' },
+      { out: 'quota           unlimited' },
+      { out: 'redaction       on' },
+      { out: 'redact key      set', tone: 'ok' },
+      { out: 'cors            same-origin only' },
+      { out: 'timeout         30s per request' },
+      { out: 'limits          32 MiB per request, 10000 signals per batch' },
+      { out: 'derived         duration and token metrics' },
+      { out: 'aspects         off' },
+      { out: 'monitors        none' },
+      { out: 'objectives      none' },
+      { out: 'judge           off' },
+      { out: 'forwarding      off' },
+    ]}
+  />
+
+  <p>
+    Six lines matter here. If any auth line reads <code>open</code>, that scope
+    is open to whoever can reach the port. A line in brackets names the wider
+    list that scope is inheriting from: the invocation above sets no
+    <code>--admin-key</code>, so its read keys delete as well as read. It sets no
+    <code>--execute-key</code> or <code>--worker-key</code> either, so its ingest
+    keys also start runs and claim steps, and mcpd warns about that when it
+    starts. Every flag
+    this prints is documented on
+    <a href="/docs/configuration" class="link">Configuration</a>.
+  </p>
+
+  <h2>Backups</h2>
+  <p>
+    The backup is one file. Everything mcpd stores, including the search index,
+    is in the file at <code>MCPD_DATA</code>.
+  </p>
+  <p>
+    Copying that file while the daemon runs is the one thing not to do. mcpd
+    runs SQLite in WAL mode, so recent writes live in a <code>-wal</code> file
+    beside it, and a copy of the database alone is a copy that is missing them.
+    Take a consistent copy instead, from any image that has the
+    <code>sqlite3</code> tool and mounts the same volume:
+  </p>
+
+  <Command
+    command={`sqlite3 /data/mcpd.db ".backup '/backup/mcpd-$(date -u +%Y%m%dT%H%M).db'"`}
+    primaryLabel="Online backup"
+    secondary={[
+      { label: 'Compacted copy', command: 'sqlite3 /data/mcpd.db "VACUUM INTO \'/backup/mcpd.db\'"' },
+    ]}
+  />
+
+  <p>
+    Both read a consistent snapshot while writes continue. A volume snapshot
+    taken by your CSI driver works too, if the driver's snapshot is atomic; a
+    <code>tar</code> of a live directory is not. Restoring is stopping the
+    daemon, putting the file back at <code>MCPD_DATA</code>, deleting the
+    <code>-wal</code> and <code>-shm</code> files beside it, and starting the
+    daemon again; <a href="/docs/operations" class="link">Running it</a> walks
+    through it.
+  </p>
+  <p>
+    Deleted rows free pages inside the file, they do not shrink it, so a
+    database that has aged out a lot of data stays the size it was. Run
+    <code>VACUUM</code> when you want the disk back.
+  </p>
+
+  <h2>Upgrades</h2>
+  <p>
+    Change the tag and restart. Migrations run at start and are safe to run on
+    every start, so no step happens outside the process. Take the backup first
+    anyway: a migration is the one moment a schema changes under your data.
+  </p>
+  <p>
+    The restart is a short outage, not a rolling one, for the same reason there
+    is one replica. Agents survive it: the SDKs queue in memory and retry, and
+    the queue is bounded, so a restart that takes seconds costs nothing and one
+    that takes an hour drops the oldest spans and says so in the client's log.
+  </p>
+  <p>
+    mcpd handles SIGTERM and shuts down gracefully, which is what Kubernetes
+    sends. <code>terminationGracePeriodSeconds</code> has to outlast the longest
+    request, or the kubelet kills the process mid-write. A request may run for
+    the 30-second request timeout, so the manifests and the chart give the pod
+    45 seconds, and the compose file gives the container the same. Raise both
+    together.
+  </p>
+
+  <h2>Where one SQLite file stops, and what to do about it</h2>
+  <p>
+    The embedded file is the right default and it has two hard limits. Both
+    belong to SQLite, not to mcpd.
+  </p>
+  <ul>
+    <li>
+      <strong>One writer.</strong> Reads run on their own connections and never
+      block the writer, which is what WAL mode is for, but one process owns the
+      file. You scale that instance up, not out.
+    </li>
+    <li>
+      <strong>One volume, one availability zone.</strong> A ReadWriteOnce claim
+      pins the pod. There is no failover to another node with the data intact.
+    </li>
+  </ul>
+  <p>
+    Two settings usually buy back more than a new backend would.
+    <a href="/docs/sampling" class="link">Sampling</a> keeps a fraction of
+    traces and keeps each kept trace whole, deciding by hashing the trace id so
+    every instance in a fleet agrees. Retention caps how far back the file goes.
+    Running one instance per team, each with its own volume, also works and
+    keeps a noisy team from filling everyone's disk.
+  </p>
+  <p>
+    When those run out, point mcpd at a database. Set
+    <code>externalStore.type</code> to <code>postgres</code> or
+    <code>clickhouse</code> in the chart, with the connection string in
+    <code>externalStore.postgresUrl</code> or
+    <code>externalStore.clickhouseUrl</code>. The string is held in the chart's
+    Secret, not in the pod spec. To keep it out of your values altogether, put
+    it in a Secret you manage under <code>postgres-url</code> or
+    <code>clickhouse-url</code>, name that Secret in
+    <code>keys.existingSecret</code>, and set the type all the same: the type,
+    not the URL, selects the backend.
+  </p>
+  <p>
+    That moves the signals and leaves one file on disk: the run store, which is
+    embedded SQLite whatever the signal store is. With
+    <code>runs.enabled</code> true, the default, the chart keeps it on the
+    volume and runs one replica. To run several pods, turn the run surface off.
+    The chart then runs <code>replicaCount</code> pods, switches from
+    <code>Recreate</code> to a rolling update, and drops the
+    PersistentVolumeClaim, because nothing local is left to fight over, and the
+    daemon answers the run endpoints with a 503 that says so. The chart refuses
+    a <code>replicaCount</code> above 1 while runs are on, rather than starting
+    pods that each hold a run store of their own.
+  </p>
+
+  <pre><code class="language-bash">{`helm install mcpd ./deploy/helm/mcpd \\
+  --set keys.ingest=$INGEST_KEY \\
+  --set keys.read=$READ_KEY \\
+  --set externalStore.type=postgres \\
+  --set externalStore.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
+  --set runs.enabled=false \\
+  --set replicaCount=3`}</code></pre>
+
+  <p>
+    Reach for Postgres first: it lifts both limits on a database most teams
+    already run, back up and monitor. Migration takes an advisory lock and is
+    skipped when the schema is current, so several replicas starting together is
+    safe. Reach for ClickHouse when retention is measured in billions of spans.
+    A URL for a backend the type does not name is refused rather than ignored.
+  </p>
+  <p>
+    One thing does not change with the backend.
+    <strong>Retention covers the projects you wrote down.</strong> The hourly
+    pass deletes signals older than <code>--retention-days</code> in the project
+    named by <code>--project</code> and in every project in the
+    <code>projects</code> block, each on its own <code>retention_days</code>
+    where it sets one. Traces sent under a project name that appears in neither
+    place have no window and are never trimmed, so watch the volume if your
+    agents set their own.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>Every flag and environment variable: <a href="/docs/configuration" class="link">Configuration</a>.</li>
+    <li>Probes, counters and day-to-day running: <a href="/docs/operations" class="link">Running it</a>.</li>
+    <li>What never reaches the disk: <a href="/docs/privacy" class="link">Redaction and retention</a>.</li>
+    <li>Not deployed anything yet: <a href="/docs/quickstart" class="link">Quickstart</a>.</li>
+  </ul>
+</Doc>

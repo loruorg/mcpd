@@ -1,0 +1,472 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import Command from '@/components/Command.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, locale)
+
+/* Written here rather than read from an example program: these are queries a
+   reader runs against their own daemon, not code CI can execute. */
+const breakdown = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# 先週の支出を、モデル別に。
+curl -s --get http://localhost:4317/v1/api/analytics/cost \\
+  --data-urlencode 'from=-7d' \\
+  --data-urlencode 'group_by=model'
+
+# 同じ週を日ごとの時系列で。変わった日が見えます。
+curl -s --get http://localhost:4317/v1/api/analytics/cost \\
+  --data-urlencode 'from=-7d' \\
+  --data-urlencode 'group_by=model' \\
+  --data-urlencode 'bucket=1d'
+`,
+  },
+  {
+    lang: 'typescript' as const,
+    label: 'TypeScript',
+    shiki: 'typescript',
+    code: `import { Mcpd } from '@mcpd/sdk'
+
+const mcpd = new Mcpd()
+
+const spend = await mcpd.analyticsCost({
+  from: '-7d',
+  to: '-0s',
+  groupBy: 'model',
+  bucket: '1d',
+})
+
+console.log(\`\${spend.currency} \${spend.totalCost.toFixed(4)} over the window\`)
+for (const group of spend.groups) {
+  console.log(group.key, group.totalCost, group.inputTokens, group.outputTokens)
+}`,
+  },
+  {
+    lang: 'python' as const,
+    label: 'Python',
+    shiki: 'python',
+    code: `from mcpd import Mcpd
+
+mcpd = Mcpd()
+
+spend = mcpd.analytics_cost("-7d", "-0s", group_by="model", bucket="1d")
+
+print(f"{spend.currency} {spend.total_cost:.4f} over the window")
+for group in spend.groups:
+    print(group.key, group.total_cost, group.input_tokens, group.output_tokens)`,
+  },
+]
+
+const response = [
+  {
+    lang: 'curl' as const,
+    label: 'CostBreakdown',
+    shiki: 'json',
+    code: `{
+  "from": "2026-08-20T09:00:00Z",
+  "to": "2026-08-27T09:00:00Z",
+  "currency": "USD",
+  "total_cost": 12.418264,
+  "groups": [
+    {
+      "key": "claude-sonnet-4",
+      "count": 1841,
+      "error_count": 12,
+      "total_cost": 9.612055,
+      "input_tokens": 2903118,
+      "output_tokens": 214477,
+      "latency": { "mean": 1840.2, "max": 24193.0 }
+    },
+    {
+      "key": "gpt-4o-mini",
+      "count": 6204,
+      "error_count": 3,
+      "total_cost": 2.806209,
+      "input_tokens": 9114882,
+      "output_tokens": 388310,
+      "latency": { "mean": 612.4, "max": 8801.0 }
+    }
+  ]
+}`,
+  },
+]
+---
+
+<Doc
+  title="コスト集計"
+  description="mcpd がトークン数をコストの値に変える手順。履歴が書き換わらないよう取り込み時に値付けし、キャッシュ分は別に課金し、未知のモデルは無料ではなく未値付けのままにします。"
+  lede="コストの値は、どこから来たかを言えて初めて意味があります。ここにあるのは、トークン数から画面上の数字までの、すべての段です。"
+  og="docs"
+>
+  <h2>値付けは取り込み時に一度だけ</h2>
+  <p>
+    モデル id とトークン数を持つスパンが届くと、mcpd はそのモデルを価格表で
+    引き、その呼び出しの費用を計算して、結果をスパンに保存します。読み出しの
+    ときに計算し直すものは、何もありません。
+  </p>
+  <p>
+    これが、このページで重要な決定です。価格は変わります。もしコストを、
+    クエリの時点で、その日たまたま読み込まれていた価格表から導いていたら、
+    来月の値下げが先月のコストを黙って書き換え、あなたが誰かに報告した数字は、
+    その人が確かめに行ったときにはもう無い、ということになります。取り込み時に
+    値付けすることで、その値は、呼び出しの時点で正しかった単価に対して固定
+    されます。保存されたコストは、それを生んだ価格表の id も記録するので、値
+    からその裏にある単価までたどれます。
+  </p>
+  <p>
+    すでにコストを持って届いたスパンは、届いたそのままにされます。プロバイダー
+    が実際の金額を返し、それをあなたが記録したなら、mcpd はあなたの値を残し、
+    その上から値付けし直すことはしません。<code>is_estimated</code> フラグが、
+    この 2 つを分けます。mcpd が価格表から導いたものは推定として印が付きます。
+    実際に推定だからです。
+  </p>
+
+  <h2>単価は 100 万トークンあたり</h2>
+  <p>
+    価格表の単価はどれも、100 万トークンあたりの通貨単位です。どのプロバイダーも
+    その形で公表しています。価格ページから写した単価は、そのまま価格表に入り
+    ます。午前 3 時に割り算を間違える余地はありません。1 つの計測項目の計算は
+    <code>tokens × rate ÷ 1,000,000</code> です。
+  </p>
+
+  <h2>コストは実行ではなく、ステップに載ります</h2>
+  <p>
+    モデル呼び出しは、それぞれ自分の値を持ちます。実行の合計はスパンの和で
+    あり、mcpd はカウンターを足していくのではなく、スパンが 1 つ届くたびに、
+    スパンから合計を計算し直します。スパンは順序が入れ替わって届き、リトライされ、
+    その場で更新されます。足していく合計は、この 3 つのどれでもずれます。下に
+    並ぶ行と一致しない見出しの数字は、そのページの他のすべての数字への信頼を
+    壊します。
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>
+    上の 3 つのモデル呼び出しは、$0.00015、$0.00018、$0.00021 と値付けされて
+    います。ヘッダーにある実行の合計は、それらの和であって、それ以外は含み
+    ません。ツール呼び出し、メモリーの参照、ガードレールはトークンを消費して
+    いないので、コストを持たず、合計にも寄与しません。
+  </p>
+
+  <h2>計測項目</h2>
+  <p>
+    モデル呼び出しは、1 つのトークン数ではありません。プロバイダーは複数の
+    計測項目をそれぞれ違う単価で課金し、価格表は、その 1 つずつに単価を与えます。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>単価</th><th>対象</th><th>価格表にない場合</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>input</code></td>
+        <td>通常の入力トークン。</td>
+        <td>必須です。</td>
+      </tr>
+      <tr>
+        <td><code>output</code></td>
+        <td>通常の生成トークン。</td>
+        <td>必須です。</td>
+      </tr>
+      <tr>
+        <td><code>cache_read</code></td>
+        <td>プロンプトキャッシュから返されたトークン。</td>
+        <td><code>input</code> で課金します。</td>
+      </tr>
+      <tr>
+        <td><code>cache_write</code></td>
+        <td>プロンプトキャッシュに書き込まれたトークン。</td>
+        <td><code>input</code> で課金します。</td>
+      </tr>
+      <tr>
+        <td><code>cache_write_5m</code></td>
+        <td>5 分キャッシュへの書き込み。プロバイダーが TTL ごとに値付けする場合です。</td>
+        <td><code>cache_write</code>、次いで <code>input</code> にフォールバックします。</td>
+      </tr>
+      <tr>
+        <td><code>cache_write_1h</code></td>
+        <td>1 時間キャッシュへの書き込み。</td>
+        <td><code>cache_write</code>、次いで <code>input</code> にフォールバックします。</td>
+      </tr>
+      <tr>
+        <td><code>audio_input</code></td>
+        <td>音声の入力トークン。</td>
+        <td><code>input</code> で課金します。</td>
+      </tr>
+      <tr>
+        <td><code>audio_output</code></td>
+        <td>音声の出力トークン。</td>
+        <td><code>output</code> で課金します。</td>
+      </tr>
+      <tr>
+        <td><code>reasoning</code></td>
+        <td>隠れた推論トークン。プロバイダーがこれを別に課金する場合です。</td>
+        <td>
+          フォールバックはありません。プロバイダーが別に <code>text</code> の
+          数も報告していないかぎり、出力の合計の一部として
+          <code>output</code> で課金されます。主要なプロバイダーの課金の仕方が
+          それです。下を見てください。
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>キャッシュされたトークンは、一度だけ課金されます</h2>
+  <p>
+    請求額を多く見せる古典的なやり方は、キャッシュされたトークンを二度課金する
+    ことです。一度はキャッシュの単価で、もう一度は、それをすでに含んでいる報告
+    済みの入力合計の一部として数えるのです。そのため、プロバイダーが内訳を報告
+    している場合は、その内訳が優先されます。mcpd は各計測項目をそれぞれの単価
+    で値付けし、残りだけを通常の入力の単価で課金します。
+  </p>
+  <p>
+    入力トークン 100 万、うち 90 万がキャッシュから読まれたと報告する
+    <code>claude-sonnet-4</code> の呼び出しは、同梱の価格表に対して次のように
+    値付けされます。
+  </p>
+  <ul>
+    <li>キャッシュ読み取り 900,000 を 100 万あたり $0.30 で、$0.27。</li>
+    <li>残りの入力トークン 100,000 を 100 万あたり $3.00 で、$0.30。</li>
+    <li>
+      入力のコストは $0.57。報告された合計だけから出したなら $3.00 に
+      なっていたところです。
+    </li>
+  </ul>
+  <p>
+    プロバイダーが明示的な <code>text</code> の数を返す場合、その数がそのまま
+    残りとして使われます。返さない場合、残りは、報告された合計から計測項目の
+    フィールドをすべて引いたものです。
+  </p>
+  <p>
+    ここに、名前を挙げておく価値のある穴が 1 つ残ります。価格表が単価を持たない
+    計測項目は、残りの一部としてしか課金されないので、プロバイダーが
+    <code>text</code> の数も送っていた場合は、まったく課金されません。推論
+    トークンは、価格表がそれ自身の単価を与えていないときに、いつでもここに
+    落ちます。単価を 1 つ書けば直ります。画像トークンは常にここに落ちます。
+    価格表に与えられる画像の単価が無いからです。マルチモーダルの比重が大きい
+    処理では、この値は正確な額ではなく、低めの額として読んでください。
+  </p>
+
+  <h2>未知のモデルにはコストがありません。コストがゼロなのではありません</h2>
+  <p>
+    価格表にそのモデルの単価が無ければ、mcpd はコストのフィールドをまったく
+    付けずにスパンを保存します。ゼロを保存することはしません。
+  </p>
+  <p>
+    ゼロは主張です。この呼び出しは無料だった、という主張です。無いことは告白
+    です。この呼び出しの費用は分からない、という告白です。この 2 つは違う判断に
+    つながり、後者を前者として報告する道具は、請求について嘘をついています。
+    同じ規則は読み出し経路にも通っています。スパンの合計が何も出ない実行は、
+    コストがゼロではなく、コストの値を持たないまま返されます。だからコストの
+    列が空欄なら、それは<em>値付けされていない</em>という意味であり、
+    <em>無料</em>という意味には決してなりません。
+  </p>
+  <p>
+    実務上の帰結は、身につけておく価値があります。価格表に無いモデルは、どの
+    合計からも抜けます。その支出は <code>/v1/api/analytics/cost</code> に現れ
+    ず、その実行は、正の <code>min_cost</code> フィルターから除外されます。週の
+    合計が低すぎるように見えるときは、たいてい暇な週だったのではなく、解決でき
+    ていないモデル id があります。
+  </p>
+
+  <h2>モデル id の解決</h2>
+  <p>
+    スパンに載る id は、あなたのクライアントが送ったそのままであり、
+    クライアントはそこに飾りを付けます。ゲートウェイはベンダー名を前に付け、
+    クラウドはリージョンを前に付け、プロバイダーはリリース日を後ろに留めます。
+    価格表は素のモデル名を鍵にしているので、検索は 4 つを順に試し、最初に当たった
+    ところで止まります。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>段階</th><th>例</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>与えられたままの id、大文字小文字をそろえたもの</td>
+        <td><code>GPT-4o</code> は <code>gpt-4o</code> に当たります</td>
+      </tr>
+      <tr>
+        <td>最後のスラッシュより後の部分</td>
+        <td><code>openai/gpt-4o</code> は <code>gpt-4o</code> に当たります</td>
+      </tr>
+      <tr>
+        <td>クラウドの id の、ドットで区切られた末尾</td>
+        <td>
+          <code>us.anthropic.claude-sonnet-4</code> は
+          <code>claude-sonnet-4</code> に当たります
+        </td>
+      </tr>
+      <tr>
+        <td>末尾の日付を取り除いた id。接頭辞は、有っても無くてもかまいません</td>
+        <td>
+          <code>openai/gpt-4o-2024-08-06</code> は <code>gpt-4o</code> に当たります
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>-YYYY-MM-DD</code> と <code>-YYYYMMDD</code> のどちらの接尾辞も認識
+    します。4 つの段階すべてに外れることは、エラーではなく普通の結果です。上に
+    書いたとおり、コストが無いという意味になります。
+  </p>
+
+  <h2>同梱の価格表</h2>
+  <p>
+    mcpd は小さな組み込みの価格表を持っています。設定を 1 つもしなくても
+    <code>docker run</code> が実際の値を出すためです。名前は
+    <code>builtin</code>、通貨は USD で、そこから出たコストはすべて、その名前を
+    記録します。
+  </p>
+
+  {/* Transcribed from `builtin_book` in crates/mcpd-core/src/cost.rs. When a
+      rate moves there, it moves here. */}
+  <table>
+    <thead>
+      <tr>
+        <th>モデル</th><th>入力</th><th>出力</th><th>キャッシュ読み取り</th><th>キャッシュ書き込み、5 分</th><th>キャッシュ書き込み、1 時間</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><code>claude-opus-4</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
+      <tr><td><code>claude-opus-4-1</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
+      <tr><td><code>claude-opus-4-5</code></td><td>5.00</td><td>25.00</td><td>0.50</td><td>6.25</td><td>10.00</td></tr>
+      <tr><td><code>claude-sonnet-4</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
+      <tr><td><code>claude-sonnet-4-5</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
+      <tr><td><code>claude-haiku-4-5</code></td><td>1.00</td><td>5.00</td><td>0.10</td><td>1.25</td><td>2.00</td></tr>
+      <tr><td><code>claude-3-5-haiku</code></td><td>0.80</td><td>4.00</td><td>0.08</td><td>1.00</td><td>1.60</td></tr>
+      <tr><td><code>gpt-4o</code></td><td>2.50</td><td>10.00</td><td>1.25</td><td>入力と同じ</td><td>入力と同じ</td></tr>
+      <tr><td><code>gpt-4o-mini</code></td><td>0.15</td><td>0.60</td><td>0.075</td><td>入力と同じ</td><td>入力と同じ</td></tr>
+      <tr><td><code>gpt-4.1</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>入力と同じ</td><td>入力と同じ</td></tr>
+      <tr><td><code>gpt-4.1-mini</code></td><td>0.40</td><td>1.60</td><td>0.10</td><td>入力と同じ</td><td>入力と同じ</td></tr>
+      <tr><td><code>o3</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>入力と同じ</td><td>入力と同じ</td></tr>
+      <tr><td><code>o4-mini</code></td><td>1.10</td><td>4.40</td><td>0.275</td><td>入力と同じ</td><td>入力と同じ</td></tr>
+      <tr><td><code>gemini-2.5-pro</code></td><td>1.25</td><td>10.00</td><td>0.31</td><td>入力と同じ</td><td>入力と同じ</td></tr>
+      <tr><td><code>gemini-2.5-flash</code></td><td>0.30</td><td>2.50</td><td>0.075</td><td>入力と同じ</td><td>入力と同じ</td></tr>
+      <tr><td><code>text-embedding-3-small</code></td><td>0.02</td><td>0.00</td><td>入力と同じ</td><td>入力と同じ</td><td>入力と同じ</td></tr>
+      <tr><td><code>text-embedding-3-large</code></td><td>0.13</td><td>0.00</td><td>入力と同じ</td><td>入力と同じ</td><td>入力と同じ</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    100 万トークンあたりの USD で、第三者のモデルカタログと最後に突き合わせた
+    時点の価格表の状態です。その日付は、価格表が <code>as_of</code> として記録
+    しています。Anthropic の項目が両方のキャッシュ書き込み単価を持っているのは、
+    デーモンが 1 時間の単価から 5 分の単価へフォールバックするからで、長いほうを
+    省いた価格表は、黙って過少請求になります。OpenAI はキャッシュへの書き込みに
+    課金しないので、そこでのキャッシュ書き込みは入力の単価で計算します。
+    <code>gemini-2.5-flash</code> は、音声入力の単価 1.00 も持っています。それ
+    以外の項目は、音声をテキストの単価で値付けします。
+    <code>claude-haiku-4</code> はありません。Anthropic が提供している id は
+    <code>claude-haiku-4-5</code> であり、何にも解決しない id は、推測せずに
+    未値付けのままにします。
+  </p>
+  <p>
+    これは公開された定価であって、あなたの価格ではありません。交渉した単価が
+    ある場合や、この表に無いモデルを動かしている場合、mcpd が見せる数字は推定
+    であり、推定として読むべきものです。価格表が短いのは意図したことです。長い
+    表は、より多くの箇所で古びていき、それに値するより強い正確さの印象を
+    与えます。
+  </p>
+  <p>
+    自分の価格表を渡すためのコマンドラインのフラグは、まだありません。価格表は
+    サーバーの状態の一部で、今のところ差し替える方法は、mcpd をライブラリとして
+    組み込み、<code>AppState::with_price_book</code> に 1 つ渡すことです。価格表
+    は、id と、ISO 4217 の通貨と、モデル id から単価への対応表です。そこから出た
+    値にはすべて価格表の id が刻まれるので、後から 2 つの価格表を見分けられます。
+    1 つのプロジェクトの中では、価格の通貨をそろえてください。mcpd は実行の
+    スパンをそのまま足し合わせ、通貨の換算はしません。
+  </p>
+
+  <h2>使った金額を読み出す</h2>
+  <p>
+    <code>GET /v1/api/analytics/cost</code> は、ある期間で金額がどこに使われた
+    かに答えます。表計算ソフトへ何かを書き出す必要はありません。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    command="curl -s 'http://localhost:4317/v1/api/analytics/cost?from=-7d&group_by=model'"
+  />
+
+  <table>
+    <thead>
+      <tr><th>パラメーター</th><th>意味</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>from</code>、<code>to</code></td>
+        <td>
+          期間。RFC 3339、または相対表記の短縮形です。既定は、今を終端とする
+          直近 7 日間です。
+        </td>
+      </tr>
+      <tr>
+        <td><code>group_by</code></td>
+        <td>
+          既定は <code>model</code>。ほかに <code>provider</code>、
+          <code>entity_name</code>、<code>environment</code>、
+          <code>status</code>、<code>session_id</code>、<code>user_id</code>、
+          <code>service_name</code>、<code>name</code> が使えます。
+        </td>
+      </tr>
+      <tr>
+        <td><code>bucket</code></td>
+        <td>
+          <code>30s</code>、<code>5m</code>、<code>1h</code>、<code>1d</code> の
+          いずれか。省略すると合計だけになり、指定すると合計に加えて時系列も
+          返ります。
+        </td>
+      </tr>
+      <tr>
+        <td><code>project</code></td>
+        <td>どのプロジェクトを読むか。既定は、デーモンの既定のプロジェクトです。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <CodeSwitcher class="not-prose my-6" samples={breakdown} title="どこに使われたか" />
+
+  <p>
+    グループは大きい順に返り、上限は 100 行です。バケットに分けた時系列の上限は
+    5,000 点です。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={response} title="レスポンス" />
+
+  <p>
+    <code>count</code> に、細かい点が 1 つあります。<code>model</code>、
+    <code>provider</code>、<code>entity_name</code> でまとめる場合はスパンを
+    読むので、<code>count</code> はモデル呼び出しの数です。それ以外でまとめる
+    場合は実行の射影を読むので、<code>count</code> は実行の数です。どちらも役に
+    立ちますが、同じ数ではありません。片方をもう片方と比べることが、ここで
+    いちばんしやすい間違いです。
+  </p>
+  <p>
+    このレスポンスの、グループごとのレイテンシは、平均と最大だけを持ちます。
+    パーセンタイルは <code>GET /v1/api/analytics/summary</code> から得られます。
+    こちらが、期間全体で計算します。
+  </p>
+
+  <h2>次に読むもの</h2>
+  <p>
+    コストは実行の一覧の 1 列であり、調査が実際に始まるのは、その一覧です。
+    <a href={linkTo('/docs/searching')} class="link">実行を探す</a> が
+    <code>min_cost</code> と、支出による並べ替えを扱っています。値付けの前に
+    ペイロードが捨てられているせいで数字がおかしく見える場合は、
+    <a href={linkTo('/docs/sampling')} class="link">サンプリング</a> を見て
+    ください。そもそも何が記録されるかを決めているのは、こちらです。この
+    ページに出てくるフィールドはすべて、
+    <a href={linkTo('/docs/reference/data-model')} class="link">データモデル</a>
+    に載っています。
+  </p>
+</Doc>

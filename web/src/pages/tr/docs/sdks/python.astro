@@ -1,0 +1,377 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (href: string) => urlFor(href, code)
+
+const scoped = `# Senkron ve asenkron aynı nesnedir. İkisi de çıkarken span'i kapatır ve
+# blok istisna fırlattıysa onu kaydeder.
+with mcpd.trace("nightly_summariser") as run:
+    with mcpd.span("fetch", kind=SpanKind.TOOL_CALL) as step:
+        step.set_output({"documents": 42})
+
+async with mcpd.trace("agent") as run:
+    async with mcpd.span("generate", kind=SpanKind.MODEL_GENERATION) as generation:
+        generation.set_output(await model.complete(prompt))
+    await mcpd.aflush()`
+
+const nesting = `def draft(question: str) -> str:
+    # İçeriye hiçbir şey geçilmedi. Span yine de çalıştırmanın altına yerleşir,
+    # çünkü etkin span bir contextvars.ContextVar ve bu çağrı bloğun içinde.
+    with mcpd.span("draft", kind=SpanKind.MODEL_GENERATION) as generation:
+        generation.set_input(question)
+        return "..."
+
+
+with mcpd.trace("support_agent") as run:
+    run.set_output(draft("where is my order?"))`
+
+const propagation = `# Giden: etkin span'i bir sonraki servise verin.
+requests.post(url, headers={"traceparent": mcpd.traceparent()}, json=payload)
+
+# Gelen: yeni bir trace başlatmak yerine o trace'i sürdürün.
+with mcpd.trace("handler", traceparent=request.headers.get("traceparent")) as run:
+    ...`
+
+const payload = `generation.set_model("gpt-4o-mini", provider="openai")
+generation.set_usage(input_tokens=812, output_tokens=96, cache_read=128)
+
+# Kendiniz yakalayıp kararını kendiniz verdiğiniz bir hata.
+generation.set_error("the provider timed out", kind="TimeoutError", retryable=True)
+
+# Span içinde bir an; kendine ait bir süresi yoktur.
+generation.event("first_token")`
+
+const sinks = `from mcpd import Mcpd, RecordingSink
+
+sink = RecordingSink()
+mcpd = Mcpd(sink=sink)
+with mcpd.trace("answer") as run:
+    run.set_usage(input_tokens=12)
+mcpd.flush()
+assert sink.spans[0].usage.input_tokens == 12
+print(mcpd.stats())  # queued, dropped, capacity, exported, failed, rejected`
+
+const serverless = `def handler(event, context):
+    with mcpd.trace("answer") as run:
+        run.set_input(event["body"])
+        answer = agent(event["body"])
+        run.set_output(answer)
+
+    # Yığın burada hâlâ bellekte. Runtime, handler döner dönmez bu süreci
+    # dondurur ve worker thread'i bir daha çalışmaz.
+    mcpd.flush()
+    return {"statusCode": 200, "body": answer}`
+---
+
+<Doc
+  title="Python"
+  description="Python için mcpd SDK'sı: senkron ve asenkron bağlam yöneticileri, contextvars ile bağlam taşıma, zorunlu bağımlılık yok ve hiçbir zaman istisna fırlatmayan ölçümleme."
+  lede="Senkron ve asenkron kod için bağlam yöneticileri, contextvars tabanlı bir etkin span ve hiçbir zorunlu bağımlılık."
+  og="docs"
+>
+  <h2>Kurulum</h2>
+  <p>
+    Python 3.9 veya üstü. Zorunlu bağımlılık yok, bilerek: exporter
+    standart kütüphanedeki <code>urllib</code> ve <code>gzip</code> ile çalışır,
+    yani mcpd'yi kurmak bir lockfile'a hiçbir şey eklemez ve ajanınızın zaten
+    bağlı olduğu şeylerle çakışamaz.
+  </p>
+
+  <Command
+    command="pip install mcpd"
+    primaryLabel="Yalnızca standart kütüphane"
+    secondary={[{ label: "httpx extra'sıyla", command: 'pip install "mcpd[httpx]"' }]}
+  />
+
+  <p>
+    <code>httpx</code> extra'sı yalnızca bağlantıların yeniden kullanımını
+    ekler, başka bir şey değil. SDK onsuz da tıpatıp aynı davranır.
+  </p>
+
+  <h2>İstemciyi oluşturma</h2>
+  <p>
+    Süreç başına bir istemci. Her argüman bir ortam değişkenini de okur, böylece
+    aynı kod tek bir düzenleme olmadan hem geliştirmede hem üretimde çalışır.
+    Argümansız çağrılan <code>Mcpd()</code>,
+    <code>http://localhost:4317</code> adresindeki bir daemon ile konuşur.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="init" title="bağlanma" />
+
+  <p>Kod ortam değişkenine, ortam değişkeni de varsayılana üstün gelir.</p>
+
+  <table>
+    <thead>
+      <tr><th>Argüman</th><th>Ortam değişkeni</th><th>Varsayılan</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>api_key</code></td><td><code>MCPD_API_KEY</code></td><td>yok</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>yok</td></tr>
+      <tr><td><code>service_name</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>yok</td></tr>
+      <tr><td><code>service_version</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>yok</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capture_payloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>log_level</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      <tr><td><code>batch_size</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flush_interval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2.0</code> saniye</td></tr>
+      <tr><td><code>max_queue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10.0</code> saniye</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>enabled=False</code>, her kayıt çağrısını hiçbir şey yapmayan ama yine
+    de geçerli nesneler döndüren bir çağrıya çevirir; böylece sınadığınız kodu
+    değiştirmeden testlerde mcpd'yi kapatabilirsiniz.
+    <code>capture_payloads=False</code> prompt'ları ve tamamlamaları sürecin
+    içinde tutar: span'ler yine zamanlaması, durumu, token kullanımı, modeli,
+    ilişkilendirmesi ve hatalarıyla kaydedilir, <code>input</code> ile
+    <code>output</code> ise kuyruğa varmadan atılır. Bir span, başlangıç
+    alanlarındaki <code>capture_payloads=True</code> ile kendisi için tersini
+    söyleyebilir; ters yönde de aynısı geçerlidir.
+  </p>
+
+  <h2>Bir çalıştırmayı kaydetme</h2>
+  <p>
+    <code>mcpd.trace(name)</code> bir çalıştırma başlatır,
+    <code>mcpd.span(name)</code> ise o an etkin olan neyse onun altında bir adım
+    başlatır. İkisi de bağlam yöneticisidir: blok çıkarken span'i kapatır, blok
+    istisna fırlattıysa onu kaydeder ve istisnayı olduğu gibi geçirir. Gözleniyor
+    olmak kendi hata işleyişinizi değiştirmez.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="trace" title="bir çalıştırmayı kaydetme" />
+
+  <p>
+    <code>with</code> bloğu kullanmıyorsanız <code>run.end()</code> çağrısını
+    kendiniz yapın. Span her iki durumda da başladığında dışa aktarılır, yani
+    hiç bitmeyen bir span, hiç bitmemiş bir span olarak görünür; aradığınız
+    genellikle odur.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="senkron ve asenkron"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: scoped }]}
+  />
+
+  <h2>Bağlam</h2>
+  <p>
+    Etkin span bir <code>contextvars.ContextVar</code> değeridir. Bir
+    <code>await</code> ile göreve kadar izler ve thread'ler arasında sızmaz;
+    böylece üç çerçeve aşağıdaki bir yardımcı fonksiyon, çağıranların hiçbiri
+    ona argüman geçirmeden doğru üst span'in altında bir alt span açar.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="iç içe geçme"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: nesting }]}
+  />
+
+  <p>Ortaya çıkan şey, zamanlamaları ve payload'ları iliştirilmiş ağaçtır.</p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>
+    Servisler arasında bağlam, W3C <code>traceparent</code> başlığında taşınır.
+    Bozuk bir başlık, onu taşıyan isteği başarısız kılmak yerine yeni bir trace
+    başlatır. Gelen isteğin örneklememe kararına uyulur; çünkü bazı servislerin
+    sakladığı, bazılarının attığı bir şey trace değildir.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="servis sınırının ötesinde"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: propagation }]}
+  />
+
+  <h2>Model, kullanım ve hatalar</h2>
+  <p>
+    mcpd alım sırasında token sayılarını fiyatlandırır, dolayısıyla trace'te
+    gördüğünüz maliyet size faturalanan maliyettir. Sağlayıcının size
+    bildirdiğini raporlayın. <code>set_error</code> bir dizge ya da bir istisna
+    alır, aynı hamlede <code>status</code> alanını <code>error</code> yapar ve
+    her zaman bir mesaj doldurur: "bir şey başarısız oldu" ile kimse bir şey
+    yapamaz.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="bir span neler taşır"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: payload }]}
+  />
+
+  <p>
+    Diğer ayarlayıcılar şunlardır: <code>set_input</code>,
+    <code>set_output</code>, <code>set_metadata</code>,
+    <code>set_attributes</code>, <code>set_tags</code>, <code>set_entity</code>,
+    <code>set_cost</code>, <code>set_status</code> ve <code>add_link</code>.
+    Hepsi span'i döndürür ve hepsi span başlarken anahtar sözcük olarak da
+    verilebilir. <code>external_parent_span_id=</code>, mcpd olmayan bir izleme
+    sisteminden gelen bir üstü adlandırır; yalnızca ilişkilendirme için taşınır
+    ve üstlük kurmak için hiç kullanılmaz.
+  </p>
+
+  <h2>Payload'lar, sink'ler ve bitmiş span'ler</h2>
+  <p>
+    Sink, boşaltılan bir yığının gittiği yerdir. Varsayılan olan HTTP
+    taşıyıcısıdır. <code>RecordingSink</code> her yığını bellekte tutar, böylece
+    bir test ölçümlemenin ne kaydettiğini sunucu olmadan doğrular;
+    <code>ConsoleSink</code> ise sinyal başına tek bir JSON satırını stderr'e
+    yazar. Hata fırlatan bir sink, sayılan ve bildirilen başarısız bir yığın
+    demektir, kodunuzda asla bir istisna değil. <code>stats()</code>,
+    istemcinin oluşturulmasından bu yana ne yaptığını söyler.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="kaydedileni doğrulama"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: sinks }]}
+  />
+
+  <p>
+    <code>mcpd.record(span)</code>, çoktan bitmiş bir <code>SpanRecord</code>
+    kaydını kuyruğa alır; kimlikler, üst ve zamanlar sizde nasılsa öyle: başka
+    bir izleme sistemi için yazılmış bir adaptörün ya da toplu bir içe
+    aktarmanın elindeki gibi. Üstü, zamanları ve örneklemesi hiç değiştirilmez;
+    bozuk bir kayıt atılır ve <code>stats().rejected</code> içinde sayılır, hiç
+    fırlatılmaz.
+  </p>
+
+  <h2>Kalıcı çalıştırmalar</h2>
+  <p>
+    Daemon'ın kalıcı çalıştırmalarını da aynı istemci karşılar.
+    <code>workflow()</code> tanımı kurar ve adım gövdelerini çağrı ya da
+    dekoratör olarak saklar; bir <code>Worker</code> bu tanımı kaydeder, bir
+    thread havuzunda lease'ler için uzun yoklama yapar ve her birini karşılar;
+    <code>mcpd.runs</code>, <code>mcpd.events</code> ve
+    <code>mcpd.definitions</code> ise çalıştırma yüzeyini bire bir yansıtır. Bir
+    gövde, adımın bütçesi içinde yeniden denenmek için
+    <code>class_="retryable"</code> ile <code>StepFailure</code> fırlatır ve
+    <code>StepContext</code> üzerinden kendi adımının altına span kaydeder. Bu
+    span'lerin harcadığı, adımın kullanımıdır: her span bittikçe token'lar
+    toplanır ve en son görülen model geçerli olur, böylece daemon adımı trace'in
+    gösterdiğine göre fiyatlandırır; <code>ctx.set_usage</code> bunu alan alan
+    geçersiz kılar. <code>Worker</code>, <code>on_error</code> yanında dört hook
+    alır (<code>on_lease</code>, <code>on_step_start</code>,
+    <code>on_step_end</code>, <code>on_conflict</code>) ve
+    <code>worker.stats()</code> alınan lease'leri, yolda olan gövdeleri,
+    tamamlananları, sınıfına göre başarısız olanları, nedenine göre çakışmaları
+    ve karşılanamayan lease'leri sayar.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['python']} example="workflow" region="workflow" title="bir iş akışı" />
+  <p>
+    Her yapının ne yaptığı, lease protokolü ve çalıştırma API'si şu sayfalarda:
+    <a href={linkTo('/docs/workflows')} class="link">İş akışları</a>,
+    <a href={linkTo('/docs/workers')} class="link">Worker'lar</a> ve
+    <a href={linkTo('/docs/runs')} class="link">Çalıştırmalar</a>.
+  </p>
+
+  <h2>Puanlar ve geri bildirim</h2>
+  <p>
+    <code>min</code> ve <code>max</code> yalnızca anahtar sözcükle verilir ve
+    varsayılanları yoktur. Ölçeği bildirilmemiş çıplak bir sayı hiçbir şeyle
+    karşılaştırılamaz, bu yüzden ölçek sonradan tahmin edilmek yerine çağrı
+    yerinde zorunlu kılınır. Geri bildirim bir insanın yargısıdır ve puandan
+    ayrı durur: ikisi farklı sorulara yanıt verir ve asla birlikte
+    ortalanmamalıdır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="score" title="puan ve geri bildirim" />
+
+  <p>
+    Bir trace vermezseniz ikisi de etkin span'in trace'ine bağlanır. Loglar ve
+    metrikler de aynısını yapar, böylece bir grafikteki sıçrama onu doğuran
+    çalıştırmayı açar.
+  </p>
+
+  <h2>Flush ve kapatma</h2>
+  <p>
+    Kayıt, bellekteki bir kuyruğa ekler ve döner; HTTP işini bir daemon
+    thread'i yapar. <code>flush()</code> bekleyeni gönderir ve süresi içinde
+    gönderemezse <code>False</code> döndürür. <code>shutdown()</code> flush
+    eder, worker'ı durdurur ve taşıyıcıyı serbest bırakır. İkisi de
+    idempotenttir. Bir olay döngüsü içinde <code>aflush()</code> ve
+    <code>ashutdown()</code> çağırın; bunlar aynı işi döngüyü bloklamadan yapar.
+  </p>
+  <p>
+    Serverless bir fonksiyonda bu, her yerden daha çok önem taşır. Runtime,
+    handler'ınız döner dönmez süreci dondurur ve worker thread'i bir daha
+    çalışmaz, yani hâlâ kuyrukta bekleyen bir yığın kaybolur.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="serverless bir handler"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: serverless }]}
+  />
+
+  <p>
+    İstemci ayrıca bir <code>atexit</code> hook'u kaydeder; böylece kapatmayı
+    unutan sıradan bir betik yine de son yığınını gönderir. Bu hook
+    <code>os._exit()</code> çağrısında veya ölümcül bir sinyalde çalışmaz, yani
+    bir emniyet ağıdır, kapatmanın yerine geçmez.
+  </p>
+
+  <h2>Güvenebilecekleriniz</h2>
+  <ul>
+    <li>
+      Ölçümleme hiçbir zaman istisna fırlatmaz. Her kayıt çağrısı korumalıdır;
+      bir başarısızlık aralık başına en çok bir kez loglanır ve yutulur.
+      Gözlemlenebilirlik, gözlediği şeyi asla devirmemelidir. Okuma çağrıları
+      bunun istisnasıdır ve hata fırlatır, çünkü yanıtını beklediğiniz bir sorgu
+      başka bir şeydir.
+    </li>
+    <li>
+      Kayıt bloklamaz. Ajanınızın gecikmesi mcpd'nin hızlı ya da ayakta olmasına
+      hiç bağlı değildir.
+    </li>
+    <li>
+      Bellek sınırlıdır. <code>max_queue</code> kadar sinyal, varsayılan olarak
+      8192. Kuyruk dolduğunda en eskiler atılır, <code>mcpd.dropped</code>
+      bunları sayar ve aralık başına bir uyarı loglanır. Sınırsız bir tampon, bir
+      ağ kesintisini bellek yetersizliğinden ölüme çevirir.
+    </li>
+    <li>
+      Örnekleme kararı bir kez, kökte, trace id'sinden verilir ve her alt span'e
+      kalıtılır. Gelen bir <code>traceparent</code> her zaman üstün gelir.
+    </li>
+    <li>
+      Bir span başladığında dışa aktarılır, bittiğinde güncellenir; böylece yolun
+      ortasında çöken bir çalıştırma da görünür kalır.
+    </li>
+    <li>
+      Zaman damgaları <code>time.time_ns()</code> çağrısından gelir ve hat
+      üzerinde dokuz haneli UTC olarak gider. Yerel saat, dağıtık bir trace'i
+      okunamaz hâle getirir.
+    </li>
+  </ul>
+
+  <h2>Geri okuma</h2>
+  <p>
+    Okuma metotları HTTP API'yi yansıtır ve üretilmiş tipleri döndürür.
+    Senkrondurlar ve başarısızlıkta <code>McpdError</code> fırlatırlar.
+    <code>from_</code> ile <code>to</code>, bir <code>datetime</code> ya da
+    <code>-15m</code>, <code>-1h</code>, <code>-7d</code> gibi bir kısayol kabul
+    eder. Asenkron kodda bunları <code>asyncio.to_thread</code> ile döngünün
+    dışında çalıştırın.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="query" title="arama ve analiz" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">Çalıştırma bulma</a>
+    filtreleri eksiksiz anlatır.
+    <a href={linkTo('/docs/reference/data-model')} class="link">Veri modeli</a>
+    bu tiplerin taşıdığı her alanı listeler.
+  </p>
+</Doc>

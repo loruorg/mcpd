@@ -1,0 +1,292 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import Annunciator from '@/components/Annunciator.astro'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* Le route interne restano scritte in inglese e vengono localizzate qui. Una
+   route la cui pagina italiana non è ancora scritta porta alla pagina inglese,
+   invece che a un URL italiano senza niente dietro. */
+const code = localeOf(Astro.url.pathname)
+const href = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+---
+
+<Doc
+  title="Monitor e avvisi"
+  description="Come mcpd sorveglia in sottofondo tasso di errore, latenza, costo e medie dei punteggi, perché un monitor si aggancia, perché una finestra silenziosa non azzera un avviso, e il corpo del webhook."
+  lede="Una condizione che merita di essere sorvegliata, sorvegliata. mcpd valuta su un timer, aggancia quello che trova, e te lo dice una volta sola."
+  og="docs"
+>
+  <h2>Che cos’è un monitor</h2>
+  <p>
+    Un monitor è una domanda salvata che mcpd fa a sé stesso su un timer: il
+    tasso di errore di questo progetto è sopra il cinque per cento negli
+    ultimi cinque minuti? La media di questo scorer è sotto il numero su cui
+    ci siamo accordati? Legge lo stesso storage che legge l’interfaccia,
+    quindi un monitor può affermare solo qualcosa che avresti potuto cercare
+    da solo.
+  </p>
+  <p>
+    I monitor sono spenti finché non ne configuri uno. mcpd non indovina una
+    soglia al posto tuo, perché una soglia che non ha scelto nessuno è una soglia
+    di cui nessuno si fida.
+  </p>
+
+  <Annunciator class="not-prose my-8" />
+
+  <h2>Si aggancia</h2>
+  <p>
+    Un monitor che scatta a ogni valutazione mentre una condizione persiste viene
+    messo a tacere nel giro di un giorno, e un monitor messo a tacere è peggio di
+    nessun monitor perché sembra copertura. Perciò mcpd riferisce la transizione
+    e non lo stato: una volta all’andata verso i guai, una volta al ritorno, e
+    niente in mezzo.
+  </p>
+
+  <h2>Il silenzio non è una guarigione</h2>
+  <p>
+    È la regola che costa dei disservizi alle persone. Quando il traffico si
+    ferma, la finestra contiene troppe poche esecuzioni per giudicare, e
+    l’implementazione ovvia riferisce «non c’è niente che non va» e azzera
+    l’avviso. Ma un agente che ha smesso di servire richieste è il guasto, non la
+    guarigione da esso.
+  </p>
+  <p>
+    Una finestra con troppe poche esecuzioni dentro lascia un avviso in corso
+    esattamente dov’era. Un monitor torna a nominale solo quando una lettura con
+    dietro abbastanza campioni rientra dentro la soglia.
+  </p>
+  <p>
+    Lo stesso ragionamento fissa <code>min_samples</code>. Una sola esecuzione
+    fallita in un’ora tranquilla è un tasso di errore del cento per cento, e
+    mcpd non lo chiamerà un guasto. Il valore predefinito è venti.
+  </p>
+
+  <h2>Che cosa si può sorvegliare</h2>
+  <table>
+    <thead>
+      <tr><th>Sorveglianza</th><th>Che cosa misura</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>error_rate</code></td>
+        <td>Esecuzioni fallite sul totale delle esecuzioni nella finestra.</td>
+      </tr>
+      <tr>
+        <td><code>latency_p95</code></td>
+        <td>Novantacinquesimo percentile della durata di un’esecuzione, in millisecondi.</td>
+      </tr>
+      <tr>
+        <td><code>cost</code></td>
+        <td>Spesa totale nella finestra, nella valuta del listino.</td>
+      </tr>
+      <tr>
+        <td><code>score_mean</code></td>
+        <td>
+          Media di un solo scorer, nominato da <code>scorer_id</code>. È quella
+          che prende una regressione di qualità che un grafico di latenza non
+          può vedere.
+        </td>
+      </tr>
+      <tr>
+        <td><code>trace_count</code></td>
+        <td>Esecuzioni nella finestra. Sorvegliala con <code>below</code> per prendere una pipeline diventata muta.</td>
+      </tr>
+      <tr>
+        <td><code>step_count_divergence</code></td>
+        <td>Esecuzioni nella finestra che hanno fatto un numero di passi insolito per la loro stessa definizione. È l’unica sorveglianza qui senza una soglia nell’unità di ciò che misura. Legge le esecuzioni durevoli, non le tracce.</td>
+      </tr>
+      <tr>
+        <td><code>run_repetition</code></td>
+        <td>Quanto un’esecuzione si ripete: la media, sulle esecuzioni della finestra, del maggior numero di tentativi che una di esse ha fatto su un singolo nodo della propria definizione. 1 significa che nessun nodo è girato due volte. Legge le esecuzioni durevoli, non le tracce.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Un obiettivo, quando una soglia è la domanda sbagliata</h2>
+  <p>
+    Un monitor chiede se il tasso di errore è sopra il cinque per cento in
+    questo momento. Uno SLO chiede qualcosa di più utile: stiamo per mancare
+    il bersaglio che abbiamo promesso, e quanto in fretta ci stiamo andando.
+  </p>
+  <p>
+    La differenza conta perché una soglia non sa distinguere un picco di due
+    minuti da una perdita lenta, e i due casi vogliono risposte opposte. Metti
+    una soglia stretta abbastanza da prendere la perdita e il picco ti sveglia
+    alle tre di notte. Mettila larga abbastanza da dormirci sopra e la perdita
+    corre per una settimana.
+  </p>
+
+  <h3>Il budget, e il ritmo con cui si consuma</h3>
+  <p>
+    Un obiettivo di <code>0.995</code> su trenta giorni dice che può fallire
+    mezzo per cento delle esecuzioni. Quel mezzo per cento è il budget di
+    errore. Un tasso di consumo pari a 1 lo spende esattamente nei trenta
+    giorni; un tasso di consumo pari a 10 lo spende in tre.
+  </p>
+  <p>
+    mcpd misura il consumo su due finestre insieme e scatta solo quando sono
+    d’accordo entrambe: più veloce di <span class="data">14,4x</span> nell’ultima
+    ora <em>e</em> più veloce di <span class="data">6x</span> nelle ultime sei. È
+    questo che separa i due casi. Un disservizio di cinque minuti muove il numero
+    su un’ora e non può muovere quello su sei, quindi non chiama nessuno. Una
+    perdita che va avanti da tutto il pomeriggio li muove tutti e due.
+  </p>
+  <p>
+    Da sapere prima di appoggiarcisi: su un obiettivo del 99,5% quelle soglie
+    corrispondono a un tasso di errore di circa il 7,2%. Un tasso di fallimento
+    fermo al 5% consuma il budget dieci volte troppo in fretta e lo esaurirà in
+    anticipo, ma non sveglia nessuno. Per quello guarda
+    <code>budget_remaining</code>, e tieni un monitor
+    <code>score_mean</code> o <code>error_rate</code> se vuoi saperlo prima.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "slos": [
+    {
+      "id": "support-availability",
+      "name": "99.5% of support runs succeed over 30 days",
+      "project": "support-desk",
+      "objective": 0.995,
+      "window_days": 30,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    <code>GET /v1/api/slos</code> restituisce ogni obiettivo con il suo tasso di
+    successo, la frazione di budget rimasta ed entrambi i tassi di consumo.
+    <code>POST /v1/api/slos/&#123;id&#125;/ack</code> ne conferma uno. Si
+    agganciano e si confermano esattamente come i monitor, e una finestra troppo
+    sottile per giudicare non azzera mai un avviso in corso.
+  </p>
+  <p>
+    <code>budget_remaining</code> diventa negativo quando il budget è stato
+    speso oltre, invece di fermarsi a zero. Zero e «bersaglio mancato di un
+    fattore cento» sono situazioni diverse e il numero dice quale.
+  </p>
+
+  <h2>Configurarne uno</h2>
+  <p>
+    I monitor stanno in un file JSON invece che sulla riga di comando, perché una
+    soglia, una finestra e un confronto non stanno su un’opzione e vanno rivisti
+    come si rivede il codice. Il file si monta come una ConfigMap Kubernetes
+    senza modifiche.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitor_interval_seconds": 60,
+  "monitors": [
+    {
+      "id": "support-error-rate",
+      "name": "Support agent error rate above 5%",
+      "project": "support-desk",
+      "watch": "error_rate",
+      "compare": "above",
+      "threshold": 0.05,
+      "window_seconds": 300,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    },
+    {
+      "id": "relevance-regression",
+      "name": "Answer relevance fell below 0.8",
+      "project": "support-desk",
+      "watch": "score_mean",
+      "scorer_id": "answer_relevance",
+      "compare": "below",
+      "threshold": 0.8,
+      "window_seconds": 3600
+    }
+  ]
+}`}</code></pre>
+
+  <Command
+    class="not-prose my-6"
+    title="avvia con i monitor armati"
+    command="mcpd serve --config-file ./mcpd.json"
+  />
+
+  <p>
+    Una chiave sconosciuta fa fallire l’avvio invece di essere ignorata. Un
+    errore di battitura in <code>threshold</code> che in silenzio non sorveglia
+    niente è il peggiore degli esiti disponibili, quindi mcpd lo rifiuta ad alta
+    voce.
+  </p>
+  <p>
+    Imposta <code>"enabled": false</code> per tenere la definizione di un monitor
+    senza valutarlo. <code>mcpd config</code> stampa quanti ne sono armati.
+  </p>
+
+  <h2>Dove va a finire una transizione</h2>
+  <p>
+    Ogni transizione finisce nei log con l’id del monitor, il progetto, la soglia
+    e il valore misurato come campi strutturati, così una pipeline di log può
+    smistarla senza analizzare una frase. Se ne gestisci già una, l’integrazione
+    è tutta lì.
+  </p>
+  <p>
+    Dai a un monitor un <code>webhook</code> e mcpd invia anche la transizione in
+    POST. Il corpo è generico di proposito: Slack, PagerDuty, Opsgenie e tutti
+    gli strumenti di workflow accettano un webhook in entrata, e dare al payload
+    la forma di uno di essi vorrebbe dire mantenere un insieme di integrazioni
+    per singolo fornitore che invecchiano.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitor_id": "support-error-rate",
+  "name": "Support agent error rate above 5%",
+  "project": "support-desk",
+  "condition": "tripped",
+  "watch": "error_rate",
+  "threshold": 0.05,
+  "value": 0.5,
+  "samples": 40,
+  "detail": "error rate is 0.5000, threshold above 0.0500, over 40 run(s)",
+  "at": "2026-08-28T02:13:54.687391446Z"
+}`}</code></pre>
+
+  <p>
+    Una consegna fallita finisce nei log e viene scartata. Ritentare
+    bloccherebbe il ciclo di valutazione oppure richiederebbe una coda in uscita
+    durevole, e un percorso di avviso che può restare indietro in silenzio è
+    peggio di uno che ha visibilmente perso un messaggio.
+  </p>
+
+  <h2>Leggere e confermare</h2>
+  <p>
+    <code>GET /v1/api/monitors</code> restituisce ogni monitor con la sua
+    condizione agganciata, la sua ultima lettura e quando è scattato.
+  </p>
+  <p>
+    <code>POST /v1/api/monitors/&#123;id&#125;/ack</code> ne conferma uno.
+    Confermare mette a tacere la transizione senza fingere che la condizione sia
+    passata: il monitor resta confermato finché la condizione persiste, e torna
+    a nominale da solo quando il numero si riprende. Nessuno deve ricordarsi di
+    togliere il silenzio.
+  </p>
+  <p>
+    Lo stato di un monitor sta in memoria e viene ricostruito dalle letture a
+    ogni avvio. Non viene reso persistente, perché un riavvio che resuscita un
+    avviso già rientrato è un guasto peggiore di un riavvio che rivaluta.
+  </p>
+
+  <h2>Avanti</h2>
+  <ul>
+    <li>
+      Gli scorer che sorveglia un monitor <code>score_mean</code>:
+      <a href={href('/docs/testing')} class="link">Test di regressione</a>.
+    </li>
+    <li>
+      La salute di mcpd stesso, che nessun monitor copre:
+      <a href={href('/docs/operations')} class="link">Gestione</a>.
+    </li>
+    <li>
+      Ogni opzione e impostazione di file:
+      <a href={href('/docs/configuration')} class="link">Configurazione</a>.
+    </li>
+  </ul>
+</Doc>

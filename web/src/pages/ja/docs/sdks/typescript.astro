@@ -1,0 +1,406 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+const nesting = `// コールバックが始めたものはすべてこの下に入れ子になる。ハンドルは渡さない。
+await mcpd.withSpan('support_agent', async (run) => {
+  const order = await mcpd.withSpan(
+    'lookup_order',
+    async (tool) => {
+      tool.setInput({ orderId: 'A-1042' })
+      mcpd.log('info', 'this line belongs to lookup_order')
+      return { status: 'in transit' }
+    },
+    { kind: 'tool_call' },
+  )
+  run.setOutput(order)
+})`
+
+const explicitParent = `// AsyncLocalStorage のないものも含め、どのランタイムでも正しく動く。
+const run = mcpd.trace('support_agent')
+const step = run.child('call_model', { kind: 'model_generation' })
+step.end()
+
+await run.withChild('call_tool', async (tool) => {
+  tool.setOutput({ ok: true })
+})
+run.end()
+
+// 実行時にどちらの仕組みが使われているか。
+mcpd.stats().context // 'async-local-storage' | 'fallback'`
+
+const propagation = `// 送信側: アクティブなスパンをリクエストに載せる。
+await fetch(url, {
+  headers: { traceparent: span.traceparent() },
+})
+
+// 受信側: 新しいトレースを始めず、そのトレースを続ける。
+const run = mcpd.trace('handle_request', {
+  traceparent: request.headers.get('traceparent'),
+})`
+
+const payload = `generation.setModel('claude-sonnet-4', 'anthropic')
+generation.setUsage({
+  inputTokens: 812,
+  outputTokens: 37,
+  inputDetails: { cacheRead: 640 },
+})
+
+// 自分で捕まえて処理した失敗。
+generation.setError('the provider timed out', {
+  kind: 'TimeoutError',
+  retryable: true,
+})
+
+// スパンの中の一点。それ自体は長さを持たない。
+generation.event('first_token', { kind: 'model_chunk' })`
+
+const recording = `import { Mcpd, RecordingSink } from '@mcpd/sdk'
+
+const sink = new RecordingSink()
+const mcpd = new Mcpd({ sink })
+
+await answerQuestion(mcpd)
+await mcpd.flush()
+
+expect(sink.spans.map((s) => s.name)).toEqual(['answer_question', 'model_call'])
+expect(sink.scores[0]?.scorerId).toBe('answer_relevance')`
+
+const finished = `// 呼び出し側がすでに持っている id、親、時刻。渡されたままキューに入る。
+mcpd.record({
+  traceId: otel.traceId,
+  spanId: otel.spanId,
+  parentSpanId: otel.parentSpanId,
+  name: 'GET /orders',
+  kind: 'http_request',
+  status: 'ok',
+  startTime: otel.startTime,
+  endTime: otel.endTime,
+  isRoot: false,
+  isEvent: false,
+  correlation: { project: 'support' },
+  receivedAt: otel.endTime,
+})
+
+// mcpd 以外のトレーシングシステムの親。相関のためだけに使う。
+const run = mcpd.trace('handle_request', { externalParentSpanId: otel.spanId })`
+
+const serverless = `export default async function handler(request: Request): Promise<Response> {
+  const answer = await mcpd.withSpan('answer', async (run) => {
+    run.setInput(await request.text())
+    return 'ok'
+  })
+
+  // この時点でバッチはまだメモリの中。レスポンスを返す前に送る。
+  await mcpd.flush()
+  return new Response(answer)
+}`
+---
+
+<Doc
+  title="TypeScript"
+  description="TypeScript と JavaScript のための mcpd SDK。Node、Deno、Bun、ブラウザ、エッジランタイムで動きます。ランタイム依存はなく、コンテキストは AsyncLocalStorage が持ち、計装は例外を投げません。"
+  lede="依存のないパッケージが 1 つ。スパン、ログ、メトリクス、スコア、フィードバックを記録し、計装の呼び出しから例外を投げることはありません。"
+  og="docs"
+>
+  <h2>インストール</h2>
+  <p>
+    Node 20 以降、Deno、Bun、ブラウザ、エッジランタイムで動きます。ESM を基本とし、
+    <code>require</code> 用に CommonJS ビルドも用意しています。Node 固有の部分は
+    <code>async_hooks</code> と <code>zlib</code> の 2 つだけで、どちらも実行時に
+    読み込み、存在しない環境では読み飛ばします。
+  </p>
+
+  <Command command="npm install @mcpd/sdk" />
+
+  <h2>クライアントの構築</h2>
+  <p>
+    クライアントは 1 プロセスに 1 つです。どのオプションも環境変数から読めるので、
+    同じコードを書き換えずに開発環境でも本番環境でも動かせます。引数を何も渡さ
+    なければ、<code>http://localhost:4317</code> のデーモンに接続します。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="init" title="接続" />
+
+  <p>コードが環境変数より優先され、環境変数が既定値より優先されます。</p>
+
+  <table>
+    <thead>
+      <tr><th>オプション</th><th>環境変数</th><th>既定値</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>apiKey</code></td><td><code>MCPD_API_KEY</code></td><td>なし</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>なし</td></tr>
+      <tr><td><code>serviceName</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>なし</td></tr>
+      <tr><td><code>serviceVersion</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>なし</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capturePayloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>logLevel</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      <tr><td><code>batchSize</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flushIntervalMs</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2000</code></td></tr>
+      <tr><td><code>maxQueue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeoutMs</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10000</code></td></tr>
+      <tr><td><code>sink</code></td><td></td><td>HTTP トランスポート</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>enabled: false</code> にすると、何も記録せず何も送信しませんが、どの
+    呼び出しも有効なオブジェクトを返し、一覧の読み出しは空のページを返します。
+    テストスイートは計装のコードを 1 行も触らずに mcpd を止められます。
+  </p>
+  <p>
+    <code>capturePayloads: false</code> にすると、プロンプトと補完はプロセスの
+    中に留まります。スパンは所要時間、ステータス、使用量、モデル、相関、
+    エラーとともに記録され、<code>input</code> と <code>output</code> はキューに
+    入る前に捨てられます。フラッシュで機密が外に出ることはありません。個々の
+    スパンは開始オプションの <code>capturePayloads</code> でこの設定を上書き
+    でき、有効にも無効にもできます。
+  </p>
+
+  <h2>実行の記録</h2>
+  <p>
+    <code>withSpan</code> はスコープ付きの書き方です。スパンを開き、コールバックが
+    始めたすべての処理に対してアクティブなまま保ち、コールバックが決着した時点で
+    終了します。コールバックが例外を投げた場合、スパンは投げられたメッセージ
+    とともに <code>error</code> になり、例外はそのまま再送出されます。観測される
+    ことで、あなた自身のエラー処理が変わることはありません。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="trace" title="実行の記録" />
+
+  <h2>コンテキスト</h2>
+  <p>
+    Node と Bun では、アクティブなスパンは <code>AsyncLocalStorage</code> に入り
+    ます。<code>withSpan</code> のコールバックの中で始めた処理は、参照を渡さなくても
+    その下に入れ子になります。1 つのイベントループ上で交互に進む 2 つの実行が、
+    互いのスパンを見ることはありません。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="入れ子"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: nesting }]}
+  />
+
+  <p>
+    ブラウザとほとんどのエッジランタイムには <code>AsyncLocalStorage</code> が
+    ありません。そこでは SDK が代わりに 1 つの値を保持します。この方式でも入れ子は
+    正しくなり、1 つの実行の中の <code>await</code> をまたいでも残りますが、同時に
+    走る 2 つの実行を区別できません。その結果、ある実行のツール呼び出しが別の
+    実行のツリーに現れます。これらのランタイムでエージェントを並行して動かす
+    ときは、親を明示的に渡してください。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="親の明示"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: explicitParent }]}
+  />
+
+  <p>
+    サービスの間では、コンテキストは W3C の <code>traceparent</code> ヘッダーで
+    運ばれます。1 つのトレースがネットワークをまたいで残るのは、これだけによります。
+    形式の壊れたヘッダーは無視され、新しいルートトレースが始まります。誰にも
+    読めないヘッダーは、それを運んできたリクエストを失敗させる理由にはならない
+    からです。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="サービス境界をまたぐ"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: propagation }]}
+  />
+
+  <h2>モデル、使用量、エラー</h2>
+  <p>
+    mcpd は取り込み時にトークン数から料金を計算するので、トレースに出るコストは
+    実際に請求されたコストになります。自分でトークンを数えるのではなく、
+    プロバイダーが返した値をそのまま報告してください。エラーには必ずメッセージが
+    付き、エラーを設定すると同時にスパンのステータスも <code>error</code> になる
+    ので、この 2 つが食い違うことはありません。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="スパンが持つもの"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: payload }]}
+  />
+
+  <h2>永続実行</h2>
+  <p>
+    同じクライアントがデーモンの永続実行も扱います。<code>workflow()</code> が定義を
+    組み立ててステップの本体を保持し、<code>Worker</code> がそれを登録し、リースを
+    ロングポーリングで受け取って 1 件ずつ処理します。<code>mcpd.runs</code>、
+    <code>mcpd.events</code>、<code>mcpd.definitions</code> は実行の API を 1 対 1 で
+    写しています。本体は <code>RetryableError</code> を投げるとステップの予算の
+    範囲でリトライされ、<code>StepContext</code> を通して自分のステップの下にスパンを
+    記録します。そうして記録したスパンと、その下に入れ子になったすべてのスパンは、
+    終了時に使用量をステップの使用量に足し込みます。デーモンはトレースに出ている
+    とおりに料金を計算し、本体がトークンを手で合計することはありません。
+    <code>ctx.setUsage</code> はそれを明示的に上書きします。<code>onError</code> の
+    隣には 4 つのフック <code>onLease</code>、<code>onStepStart</code>、
+    <code>onStepEnd</code>、<code>onConflict</code> があり、
+    <code>worker.stats()</code> は取得数、完了数、クラス別の失敗数、理由別の競合数を
+    数えます。
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} example="workflow" region="workflow" title="ワークフロー" />
+  <p>
+    それぞれの構成要素の働き、リースのプロトコル、実行の API は
+    <a href={linkTo('/docs/workflows')} class="link">ワークフロー</a>、
+    <a href={linkTo('/docs/workers')} class="link">ワーカー</a>、
+    <a href={linkTo('/docs/runs')} class="link">実行</a>のページにあります。
+  </p>
+
+  <h2>スコアとフィードバック</h2>
+  <p>
+    <code>min</code> と <code>max</code> は型として必須です。スケールが宣言されて
+    いない 0.7 というスコアは何とも比べられませんし、誰かがチャートを見ている時点
+    では、それが何を意味していたのかを聞くには遅すぎます。フィードバックは人の
+    判断であり、スコアとは別に保持します。2 つは別の問いに答えるものなので、
+    まとめて平均してはいけません。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="score" title="スコアとフィードバック" />
+
+  <p>
+    どちらもトレースを指定しなければ、アクティブなスパンのトレースに付きます。
+    自分の製品にある評価ボタンは、控えておいたトレース id だけで
+    <code>feedback</code> を呼べます。
+  </p>
+
+  <h2>5 つのシグナル、1 組の id</h2>
+  <p>
+    スパン、ログ、メトリクス、スコア、フィードバックは同じキューを通り、同じ
+    トレース id とスパン id を持ちます。だからこそ、チャート上のスパイクから、
+    それを起こした実行を開けます。
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>フラッシュとシャットダウン</h2>
+  <p>
+    記録はキューへの追加です。バックグラウンドのワーカーが送るまで、何もプロセスの
+    外には出ません。ワーカーは 2 秒ごと、またはバッチがいっぱいになったときに
+    送ります。<code>flush()</code> と <code>shutdown()</code> はどちらも await でき、
+    何度呼んでも結果は同じです。<code>shutdown()</code> はワーカーも停止します。
+  </p>
+  <p>
+    サーバーレス関数では、これは省略できません。レスポンスを返した瞬間にランタイムが
+    プロセスを凍結し、バックグラウンドのワーカーは二度と動かないので、最後のバッチは
+    失われます。レスポンスを返す前にフラッシュを await してください。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="サーバーレスのハンドラー"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: serverless }]}
+  />
+
+  <p>
+    Node では、クライアントは <code>beforeExit</code> でもフラッシュするので、
+    <code>shutdown()</code> を忘れたスクリプトにも最後のバッチは届きます。この
+    フックは明示的な <code>process.exit()</code> や致命的なシグナルでは発火しない
+    ので、安全網であって代わりにはなりません。
+  </p>
+
+  <h2>記録した内容の検証</h2>
+  <p>
+    <code>RecordingSink</code> はネットワークをメモリに置き換えます。テストは、
+    サーバーもポートもなしに、対象のコードが作ったスパン、ログ、メトリクス、
+    スコア、フィードバックを読み返せます。<code>ConsoleSink</code> は代わりに
+    シグナル 1 件につき JSON を 1 行出力します。<code>export(batch, ingestKey)</code>
+    メソッドを持つオブジェクトは、どれもシンクになります。例外を投げるシンクは
+    バッチの失敗と診断になるだけで、あなたのコードに例外が出ることはありません。
+    <code>mcpd.stats()</code> は <code>queued</code>、<code>dropped</code>、
+    <code>capacity</code>、<code>exported</code>、<code>failed</code>、
+    <code>rejected</code> を返します。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="サーバーの要らないテスト"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: recording }]}
+  />
+
+  <h2>完了済みスパンの記録</h2>
+  <p>
+    <code>mcpd.record(span)</code> は、id、親、時刻をすでに手元に持っているスパンを
+    キューに入れます。別のトレーシングシステムのアダプター、一括インポート、
+    リプレイが持っているのがこれです。渡されたままキューに入り、親を付け替えたり、
+    時刻を打ち直したり、サンプリングをやり直したりはしません。空のままだった相関
+    情報だけがクライアントの値で埋まります。id が OpenTelemetry の形式でないもの、
+    名前が空のもの、開始時刻がないものは捨てられ、<code>stats().rejected</code> に
+    数えられます。どのスパンでも、<code>externalParentSpanId</code> は mcpd 以外の
+    トレーシングシステムの親を、相関のためだけに持ちます。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="別の場所から来たスパン"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: finished }]}
+  />
+
+  <h2>保証されること</h2>
+  <ul>
+    <li>
+      計装は例外を投げません。エクスポートの失敗、到達できないデーモン、
+      シリアライズできないペイロードは、<code>onError</code> を通して 1 間隔に
+      つき多くても 1 回報告され、そのまま流されます。可観測性が、観測している
+      相手を落としてはいけません。
+    </li>
+    <li>
+      記録はブロックしません。キューに追加して戻るだけで、ネットワークは
+      バックグラウンドのワーカーが担います。エージェントのレイテンシが、mcpd の
+      速さや、mcpd が動いているかどうかに左右されることはありません。
+    </li>
+    <li>
+      メモリには上限があります。キューが保持するシグナルは <code>maxQueue</code>
+      件です。いっぱいになると最も古いものが捨てられ、<code>mcpd.stats()</code> に
+      数えられます。上限のないバッファは、ネットワーク障害をメモリ不足による
+      強制終了に変えてしまうからです。
+    </li>
+    <li>
+      サンプリングの判断はルートで一度だけ行われ、以降は引き継がれます。半分だけ
+      記録されたトレースは、あなたのシステムのバグに見えてしまいます。
+    </li>
+    <li>
+      開いたままのスパンも送られます。スパンは開始時と終了時の 2 回キューに入る
+      ので、途中でクラッシュした実行も見えます。開始のレコードがまだ出ていなければ、
+      終了のレコードがそれを置き換えるので、短いスパンにかかるのは 2 件ではなく
+      1 件です。
+    </li>
+    <li>
+      ペイロードが書き換えられることはありません。キーは <code>camelCase</code> と
+      デーモンの <code>snake_case</code> の間で変換されますが、変換は
+      <code>input</code>、<code>output</code>、<code>attributes</code>、
+      <code>metadata</code>、<code>fields</code>、<code>labels</code> の手前で
+      止まります。プロンプトは書いたとおりに届きます。
+    </li>
+  </ul>
+
+  <h2>読み出し</h2>
+  <p>
+    読み出しも同じクライアントで行います。各メソッドは HTTP エンドポイント 1 つに
+    対応し、生成された型を返します。読み出しは失敗すると <code>McpdError</code> を
+    投げます。エクスポートできなかったスパンとは違い、await して答えの得られない
+    クエリは、知らせるべきことだからです。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="query" title="検索と分析" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">実行を探す</a>に、フィルターの
+    全体があります。<a href={linkTo('/docs/reference/data-model')} class="link">データモデル</a>
+    には、これらの型が持つすべてのフィールドが並んでいます。
+  </p>
+</Doc>

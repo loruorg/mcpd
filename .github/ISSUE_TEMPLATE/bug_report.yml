@@ -1,0 +1,187 @@
+name: Bug report
+description: mcpd did something wrong, or stopped doing something it does.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two things before you start.
+
+        **This form is not for vulnerabilities.** If the problem is a security
+        problem, close this and email hi@mcpd.sh. Do not post it.
+
+        **Read what you paste.** Traces carry prompts and completions.
+        Redaction runs before anything is stored, so what the interface shows
+        you has already been through it, but check anyway. Replace what you
+        cannot show with a placeholder, and say that you replaced it.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected instead
+      description: >-
+        Both halves. "The trace is wrong" does not say which part of it you
+        were reading, or what it should have said.
+      placeholder: |
+        I sent a run that makes one model call and three tool calls. The trace
+        shows the model call and the first tool call and stops there. I
+        expected four spans under the run.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+      description: >-
+        Start from a daemon someone else can start. `mcpd demo` fills a fresh
+        store with a sample run, so a report that reproduces against it needs
+        no data from you at all.
+      placeholder: |
+        1. mcpd --data /tmp/bug.db
+        2. Run examples/typescript/quickstart.ts against it
+        3. Open http://localhost:4317 and click the run
+        4. The tool spans are missing
+    validations:
+      required: true
+
+  - type: textarea
+    id: healthz
+    attributes:
+      label: What /healthz says
+      description: >-
+        Run `curl -s localhost:4317/healthz` against the daemon that has the
+        problem, and paste the whole reply. It carries the daemon version, the
+        spec version it was generated from, and the storage backend it opened.
+        That decides most of the triage.
+      render: json
+    validations:
+      required: true
+
+  - type: dropdown
+    id: storage
+    attributes:
+      label: Storage backend
+      description: >-
+        The three backends run different SQL behind one trait, so a bug in one
+        is often absent from the other two. `/healthz` names it as well, and
+        the two should agree.
+      options:
+        - "SQLite, the embedded default"
+        - "SQLite in memory (--data :memory:)"
+        - "Postgres (--postgres-url)"
+        - "ClickHouse (--clickhouse-url)"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ingest
+    attributes:
+      label: How the data got in
+      description: >-
+        OTLP and native ingest decode along separate paths before they meet in
+        one pipeline. Naming the door narrows the search to one of them.
+      options:
+        - "A native mcpd SDK"
+        - "OTLP/HTTP JSON, to /v1/traces, /v1/logs or /v1/metrics"
+        - "OTLP/HTTP protobuf, to those same paths"
+        - "Native batch ingest, to /v1/ingest"
+        - "Nothing was ingested: this is about the interface or the query API"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: sdk
+    attributes:
+      label: Which SDK
+      description: >-
+        Pick the OpenTelemetry option for any instrumentation that is not one
+        of ours, including a framework that exports OTLP on your behalf.
+      options:
+        - "TypeScript (@mcpd/sdk)"
+        - "Python (mcpd)"
+        - "Rust (mcpd-sdk)"
+        - "Go (github.com/mcpd/mcpd/sdks/go)"
+        - "Kotlin (dev.mcpd:mcpd-kotlin)"
+        - "Elixir (:mcpd)"
+        - "An OpenTelemetry SDK, not one of ours"
+        - "None: raw HTTP, or no SDK is involved"
+    validations:
+      required: true
+
+  - type: input
+    id: sdk-version
+    attributes:
+      label: SDK version, and what it runs on
+      description: >-
+        Name the library and the runtime version. If you chose the
+        OpenTelemetry option above, say which package and which semantic
+        convention it emits, `gen_ai.*` or OpenInference `llm.*`.
+      placeholder: "@mcpd/sdk 0.1.0 on Node 22.11.0"
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How mcpd is running
+      options:
+        - "Container image (ghcr.io/mcpd/mcpd)"
+        - "Docker Compose (deploy/docker)"
+        - "Kubernetes, from the Helm chart"
+        - "Kubernetes, from the manifests in deploy/k8s"
+        - "A release archive (the binary for your machine)"
+        - "Built from source"
+        - "mcpd demo"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: redaction
+    attributes:
+      label: Does it still happen with redaction turned off?
+      description: >-
+        Redaction rewrites payloads before they are written, and hashes
+        identifiers, so it is the first suspect whenever a value arrives
+        missing, altered or unrecognisable. Start a daemon with `--no-redact`
+        against a throwaway store and try again. Do not paste the unredacted
+        result here.
+      options:
+        - "Yes, --no-redact changes nothing"
+        - "No, it goes away with --no-redact"
+        - "I have not tried"
+        - "Not applicable: nothing is being ingested"
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: The configuration it resolved
+      description: >-
+        The output of `mcpd config`, which prints the settings an invocation
+        resolved to and then exits. It holds no secrets: ingest and read keys
+        appear as `open` or `key required`, and the credentials are stripped
+        from a Postgres connection string. Sampling and retention show here
+        too, and both explain a missing trace.
+      render: text
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Daemon lines, and anything the SDK reported
+      description: >-
+        Start the daemon with `--log-format json` for structured lines. An SDK
+        never throws at your agent, by contract, so what it has to say arrives
+        on your own logger at most once per interval. Those lines belong here.
+      render: text
+
+  - type: checkboxes
+    id: before-you-post
+    attributes:
+      label: Before you post
+      options:
+        - label: I searched the open and closed issues for this.
+          required: true
+        - label: I read everything I pasted above, and it carries no key, secret or personal data.
+          required: true

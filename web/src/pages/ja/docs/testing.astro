@@ -1,0 +1,280 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="回帰テスト"
+  description="うまくいかなかった本番の実行を恒久的なテストケースに変え、保存済みの実行に mcpd の組み込みスコアラーをかけ、差分の横にサンプル数を添えてエージェントの 2 つの版を比べます。"
+  lede="火曜日に壊れたあの実行が、以降のすべての版が通らなければならないケースになります。"
+  og="docs"
+>
+  <h2>閉じたいのはこのループです</h2>
+  <p>
+    エージェントが実際の質問で失敗します。誰かが手で再現し、プロンプトを直し、
+    良くなったように見えます。3 週間後、同じ質問でまた失敗します。
+    それを残しておいたものが何もなかったからです。
+  </p>
+  <p>
+    データセットがそれを残します。失敗した実行を取り込めば、それは逸話であることをやめ、
+    入力と、分かっていれば期待される回答と、元になったトレースへの参照を持つケースになります。
+    以降のどの版も、それに対して実行されます。
+  </p>
+
+  <h2>実行を取り込む</h2>
+  <p>
+    画面または API でその実行を見つけ、トレース id をデータセットに渡します。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="失敗した実行をケースとして取り込む"
+    command={`curl -X POST localhost:4317/v1/api/datasets/$DATASET/capture \\
+  -H 'content-type: application/json' \\
+  -d '{"trace_ids": ["b3d9e71a4c0f428eb6a5d2317f90c684"]}'`}
+  />
+
+  <p>
+    取り込まれたケースは <code>source_trace_id</code> を保持します。そのため何か月か後でも、
+    きっかけになった実行を開いて、入力から推測するのではなく実際に何が起きたかを読めます。
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <h2>実行自身の回答は、期待される回答ではありません</h2>
+  <p>
+    <code>use_output_as_expected</code> は既定でオフであり、その既定こそが大事な部分です。
+    取り込む価値がある実行はたいていうまくいかなかったものであり、
+    誤った回答を基準として記録すれば、そのバグを正典にしてしまいます。
+    以降のどの版も、それを再現できるかどうかで測られることになります。
+  </p>
+  <p>
+    すでに気に入っている振る舞いを固定するために、正しかった実行を取り込むときはオンにしてください。
+    失敗を取り込むときはオフのままにして、期待される回答は自分で書いてください。
+  </p>
+
+  <h2>組み込みのスコアラー</h2>
+  <p>
+    mcpd には決定的なスコアラーが 13 種類付属します。保存済みの実行を読んで数値を返す、
+    ふつうのコードです。費用はかからず、モデルを呼ぶこともなく、二度実行すれば同じ答えを返します。
+    これは回帰テストが必要とする性質であり、ジャッジモデルが持たない性質です。
+  </p>
+  <table>
+    <thead>
+      <tr><th>スコアラー</th><th>合格する条件</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>answered</code></td><td>実行が空でない回答を出していること。</td></tr>
+      <tr><td><code>no_errors</code></td><td>実行のどのスパンも失敗していないこと。</td></tr>
+      <tr><td><code>exact_match</code></td><td>回答が期待されるものと一致すること。</td></tr>
+      <tr><td><code>contains</code></td><td>回答が必要な文字列を含むこと。</td></tr>
+      <tr><td><code>json_valid</code></td><td>回答が JSON として解析できること。</td></tr>
+      <tr><td><code>latency_budget</code></td><td>実行がミリ秒の上限内で終わっていること。</td></tr>
+      <tr><td><code>cost_budget</code></td><td>実行の費用が決めた額を超えていないこと。</td></tr>
+      <tr><td><code>no_tool_loop</code></td><td>同じ入力で二度呼ばれたツールがないこと。</td></tr>
+      <tr><td><code>tool_efficiency</code></td><td>実行がツール呼び出し回数の上限内に収まっていること。</td></tr>
+      <tr><td><code>not_a_refusal</code></td><td>回答が拒否でも謝罪でもないこと。</td></tr>
+      <tr><td><code>no_leaked_secret</code></td><td>鍵、トークン、資格情報のいずれも回答に現れないこと。</td></tr>
+      <tr><td><code>span_present</code></td><td>実行が、求められた種類または名前のスパンを記録した。</td></tr>
+      <tr><td><code>tool_succeeded</code></td><td>求められたツールが動き、少なくとも一度の呼び出しが正常に終わった。</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>GET /v1/api/scorers</code> は同じ一覧を <code>needs_config</code> フラグ付きで返します。
+    期待される回答を必要とするスコアラーにそれが渡されなかった場合、推測せずに見送り、
+    見送ったことが報告されます。
+  </p>
+
+  <h2>モデルが採点する場合</h2>
+  <p>
+    決定的なコードをいくら書いても答えられない問いがあります。回答が実際に問いに応えていたか、
+    要約が意味を保っていたか、口調が適切だったか。こうしたものには読み手が要り、
+    モデルは安上がりな読み手です。
+  </p>
+  <p>
+    ジャッジによる採点は設定するまでオフであり、ジャッジ型のスコアラーは名前で指定しない限り動きません。
+    どちらの既定も理由は同じです。採点は読んだ実行ごとにお金を使うので、
+    それを黙って行う機能は、請求書で気づく機能になります。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "judge": {
+    "endpoint": "http://localhost:11434/v1",
+    "model": "qwen2.5:14b",
+    "api_key": "",
+    "timeout_seconds": 30,
+    "criteria": {
+      "answer_relevance": "Does the answer address the question that was asked?",
+      "no_hedging": "Does the answer commit, rather than hedge?"
+    }
+  }
+}`}</code></pre>
+
+  <p>
+    リクエストは OpenAI の chat-completions の形です。これは特定のベンダーを好んでのことではありません。
+    Ollama、vLLM、llama.cpp、LM Studio、OpenRouter、そしてホスティング型の各社がいずれも受け付けるので、
+    同じ設定で手元のノート PC のモデルにも、本番のゲートウェイにも届きます。
+    キーを必要としないローカルのモデルには <code>api_key</code> を空のままにしてください。
+    temperature はゼロです。毎回違う答えを返すジャッジは自分自身と比べられず、
+    比べることだけがスコアの用途だからです。
+  </p>
+  <p>
+    基準はリクエストごとに渡すのではなく、設定します。スコアラー id は生成されるすべてのスコアに
+    保存され、後の比較がまとめる単位になります。呼び出しごとに id と問いの両方を作らせれば、
+    誰も信用できない列ができあがります。
+  </p>
+  <p>
+    設定した基準は <code>GET /v1/api/scorers</code> には現れません。このエンドポイントが並べるのは
+    組み込みの 13 種類だけなので、そこからスコアラーの選択肢を組み立てるクライアントは
+    あなたの基準を出しません。デーモンが基準の名前を返してくる唯一の場所は、
+    未知のスコアラー id に対するエラーです。そこには組み込みと設定済みの基準が一緒に並びます。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="直近 1 件の実行にジャッジ型スコアラーをかける"
+    command={`curl -X POST localhost:4317/v1/api/score \\
+  -H 'content-type: application/json' \\
+  -d '{"limit": 1, "scorers": ["answer_relevance"]}'`}
+  />
+
+  <p>
+    <code>timeout_seconds</code> は、1 回の採点呼び出しにかけてよい時間で、
+    接続から応答の最後のバイトまでを数えます。既定は 30、範囲は 1 から 300 です。
+    これを超えた呼び出しはキー名を示して見送られ、mcpd が読む応答は最大 1 MiB です。
+  </p>
+  <p>
+    ジャッジ型スコアラー 1 つにつき、実行 1 件ごとに 1 回モデルを呼び出し、
+    リクエストは <code>--request-timeout-seconds</code> の中で終わらなければなりません。
+    そのため 1 回のリクエストで採点できるのは、すべての呼び出しが <code>timeout_seconds</code> を使い切ってもその期限に収まる件数までです。
+    既定値の 30 と 30、ジャッジ型スコアラー 1 つなら、それは 1 件です。
+    <code>trace_ids</code> や <code>limit</code> でそれより多くを求めるリクエストは、
+    モデルを呼ぶ前に上限を示す 400 で拒否されます。<code>limit</code> を省略すると、収まるだけの直近の実行を採点します。
+    1 回でもっと採点するには <code>--request-timeout-seconds</code> を上げてください。
+    ジャッジ型のスコアはモデルが答えた時点で保存されるので、途中で打ち切られたリクエストでも、
+    終わった分のスコアは残ります。
+  </p>
+
+  <h3>推測はせず、見送ります</h3>
+  <p>
+    導き出していない数値を返すジャッジは、ジャッジがいないより悪いものです。証拠のように見えるからです。
+    そのため以下はいずれも理由とともに <code>skipped</code> に報告され、スコアは生成されません。
+  </p>
+  <table>
+    <thead>
+      <tr><th>起きたこと</th><th>mcpd の動作</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>実行が回答を記録していない</td>
+        <td>見送ります。回答のない実行は関連性で低く出たのではなく、そもそも測られていません。</td>
+      </tr>
+      <tr>
+        <td>モデルが文章で返した</td>
+        <td>その返答を引用して見送ります。コードフェンスや文に包まれた JSON はそれでも読み取ります。</td>
+      </tr>
+      <tr>
+        <td>モデルが尺度の外の値を答えた</td>
+        <td>見送ります。1 点満点の 7 は 10 分の 9 ではなく、丸め込めば数値をでっち上げることになります。</td>
+      </tr>
+      <tr>
+        <td>モデルに到達できなかった</td>
+        <td>ステータスと本文を添えて見送ります。レート制限は理由であって、ゼロではありません。</td>
+      </tr>
+      <tr>
+        <td>応答が 1 MiB を超えた</td>
+        <td>残りを読まずに見送ります。判定は数百バイトなので、その大きさの応答は判定ではありません。</td>
+      </tr>
+      <tr>
+        <td>リクエストの期限に呼び出しの時間が残っていなかった</td>
+        <td>モデルを呼ばずに辞退します。採点の一回分は、503 ではなく、期限内に終えたスコアで答えます。</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    ジャッジ型のスコアはいずれもモデルを <code>scorer_version</code> として記録します。
+    別々のジャッジから出た 2 つのスコアは比較できず、そのことをレコード上で述べているのがこのフィールドです。
+  </p>
+
+  <h2>採点は事後に行われます</h2>
+  <p>
+    <code>POST /v1/api/score</code> は、すでに保存されている実行に対してスコアラーをかけます。
+    実行中にその場で評価するものはありません。リクエスト経路に置かれた評価は、
+    判定している当のものにその待ち時間を上乗せしますし、
+    例外を投げる評価が利用者のリクエストを失敗させてよいはずがありません。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="直近 100 件の実行を採点する"
+    command={`curl -X POST localhost:4317/v1/api/score \\
+  -H 'content-type: application/json' \\
+  -d '{"project": "support-desk", "limit": 100, "config": {"max_ms": 4000}}'`}
+  />
+
+  <p>
+    レスポンスは、書き込んだスコアと、それとは別に、見送ったすべてのスコアラーをその理由とともに返します。
+    答えられなかったスコアラーのほうが、数値を返したスコアラーより興味深いので、mcpd はそれを飲み込みません。
+    プロジェクトの取り込み上限もこの入り口に届きます。処理が算出したスコアのうち、
+    プロジェクトを <code>--quota-per-minute</code> の上限を超えさせるものは保存されません。
+    上限を超えて書き込まれることも、黙って捨てられることもなく、そう述べて <code>skipped</code> に並びます。
+  </p>
+  <p>
+    何も保存せずに処理の結果だけを見たい場合は <code>"dry_run": true</code> を送ってください。
+  </p>
+  <p>
+    どの実行を読むかは <code>trace_ids</code>、<code>from</code>、<code>limit</code> が決めます。
+    ちょうどその実行だけを採点したいなら <code>trace_ids</code> に名前を挙げてください。
+    空のままにすると、プロジェクト内の新しいものから <code>limit</code> 件を新しい順に取ります。
+    <code>from</code> はその範囲を区切ります。<code>from</code> を付けた処理は、
+    その時刻以降に始まった実行だけを読みます。デプロイ以降のすべてを id を並べずに採点する方法がこれです。
+  </p>
+
+  <h2>2 つの版を比べる</h2>
+  <p>
+    比べたい版ごとに実験を登録し、そのスコアに実験の id を付け、mcpd に差を尋ねます。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="新しいプロンプトは効いたのか"
+    command="curl 'localhost:4317/v1/api/experiments/compare?baseline=v3&candidate=v4'"
+  />
+
+  <p>
+    返るのはスコアラーごとの差分で、両側のサンプル数と <code>decidable</code> フラグが付きます。
+    観測が 20 件に満たない場合、mcpd は動きを報告するのではなく、この比較は判断できないと述べます。
+  </p>
+  <p>
+    これは意図的に大雑把な規則であって、有意差検定ではありません。防ぎたいのはよくある失敗です。
+    4 件の実行で動いた平均が、件数を伏せたまま印字され、結果として読まれ、そのまま出荷されることです。
+    差分の横に件数を並べることが、ノイズを発見と取り違えさせない歯止めになります。
+  </p>
+
+  <h2>これが動く場所</h2>
+  <p>
+    すべて HTTP API なので、このループは CI に置くのが向いています。失敗をその場で取り込み、
+    テストスイートが生む実行を採点し、ビルドを実験として登録し、判断可能な比較で
+    <code>regressed</code> が true で返ってきたらジョブを失敗させます。
+  </p>
+
+  <h2>次に</h2>
+  <ul>
+    <li>
+      スコアが並び立つ 2 つのシグナル：
+      <a href={urlFor('/docs/evaluation', locale)} class="link">スコアとフィードバック</a>。
+    </li>
+    <li>
+      本番でスコアラーの平均を見張る：
+      <a href={urlFor('/docs/alerting', locale)} class="link">モニターとアラート</a>。
+    </li>
+    <li>
+      すべてのエンドポイントとフィールド：
+      <a href={urlFor('/docs/reference/api', locale)} class="link">HTTP API</a>。
+    </li>
+  </ul>
+</Doc>

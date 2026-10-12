@@ -1,0 +1,224 @@
+---
+/**
+ * A documentation page.
+ *
+ * Read mode: the reader has a question, and everything here serves finding the
+ * answer. The sidebar is always the same so position is learnable, the measure
+ * is held to a comfortable line length, and every page ends by naming the next
+ * one so there is always somewhere to go.
+ */
+import Base from '@/layouts/Base.astro'
+import { DOCS, neighbours } from '@/lib/docs'
+import { docLegend, docTitle } from '@/lib/docs-strings'
+import { localeOf, routeOf, urlFor } from '@/lib/i18n'
+import { strings } from '@/lib/ui-strings'
+
+interface Props {
+  title: string
+  description: string
+  /** Shown under the title. One sentence on what this page is for. */
+  lede?: string
+  og?: string
+  updated?: string
+}
+
+const { title, description, lede, og = 'docs', updated } = Astro.props
+
+/* The documentation map in `@/lib/docs` is written once, in English routes.
+   Reading the page's locale off the URL and stripping the prefix lets the same
+   list drive the index, the current-page mark and the reading order in all nine
+   locales: the route is compared unprefixed and every href is rebuilt with the
+   prefix put back. A second copy of the map per locale would be a second place
+   for a link to rot. */
+const code = localeOf(Astro.url.pathname)
+const route = routeOf(Astro.url.pathname)
+
+/* The four words this layout says of its own accord come from the catalogue,
+   like the rail's and the colophon's. `Previous` and `Next` sit in `.legend`,
+   which uppercases through `text-transform`, and that is language-sensitive:
+   the English word on a Turkish page would render as `PREVİOUS`, with a Turkish
+   dotted I, which is the visible form of shipping an untranslated string. */
+const s = strings(code)
+
+const { prev, next } = neighbours(route)
+const isCurrent = (href: string) => route === href
+const linkTo = (href: string) => urlFor(href, code)
+
+/*
+ * The "on this page" rail is built here, at build time, from the headings the
+ * page actually renders. It was built by a script after load, which left a
+ * reader with no JavaScript an empty bordered column beside every article, and
+ * left a crawler with no anchors at all. The article is rendered once to a
+ * string, every h2 without an id is given one, and the rail lists them. The
+ * slug rule is the one the scroll spy below relies on.
+ */
+/*
+ * Locale-invariant case folding, deliberately. This produces an anchor id and
+ * the scroll spy matches on it, so the mapping has to be identical for every
+ * reader: `toLocaleLowerCase` under Turkish folds `I` to `ı`, and `#init`
+ * would become a different fragment for Turkish readers alone. Display text
+ * uses `capitalise` from `@/lib/i18n` instead.
+ *
+ * The character filter keeps any Unicode letter or number, not only `a-z0-9`.
+ * With the ASCII rule, every Chinese, Japanese and Korean heading slugged to
+ * the empty string: each one shipped `id=""`, several to a page, and the whole
+ * "on this page" rail pointed at `href="#"`. Turkish fared little better, since
+ * `ı`, `ş` and `ğ` were dropped out of the middle of a word. A Unicode fragment
+ * is valid HTML and every browser resolves it. Checked against all 351 English
+ * headings on the site: not one id changes, so no published anchor breaks.
+ */
+const slug = (text: string) =>
+  text
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '-')
+    .replace(/^-|-$/g, '')
+
+const headings: { id: string; text: string }[] = []
+const article = (await Astro.slots.render('default')).replace(
+  /<h2(\s[^>]*)?>([\s\S]*?)<\/h2>/g,
+  (whole, attrs: string | undefined, inner: string) => {
+    const text = inner.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
+    const existing = /\sid="([^"]+)"/.exec(attrs ?? '')
+    // A heading of nothing but punctuation would still slug to nothing, and an
+    // empty id is worse than an ugly one: it silently breaks the link to it.
+    const id = existing ? existing[1]! : slug(inner) || `section-${headings.length + 1}`
+    headings.push({ id, text })
+    return existing ? whole : `<h2${attrs ?? ''} id="${id}">${inner}</h2>`
+  },
+)
+const showRail = headings.length > 1
+---
+
+<Base title={title} description={description} og={og} kind="article" updated={updated}>
+  <div class="mx-auto grid max-w-[86rem] gap-0 px-0 lg:grid-cols-[15rem_minmax(0,1fr)] xl:grid-cols-[15rem_minmax(0,1fr)_14rem]">
+    {/* The index. A panel column with a scribed edge, not a floating card. */}
+    <aside class="hidden border-r border-scribe-2 lg:block">
+      <nav class="scroll-y sticky top-[4.75rem] max-h-[calc(100vh-6rem)] overflow-y-auto px-5 pb-16 pt-8" aria-label={s('doc.nav')}>
+        {
+          DOCS.map((section) => (
+            <div class="mb-7">
+              <p class="legend mb-2.5">{docLegend(section.legend, code)}</p>
+              <ul class="space-y-px">
+                {section.entries.map((e) => (
+                  <li>
+                    <a
+                      href={linkTo(e.href)}
+                      aria-current={isCurrent(e.href) ? 'page' : undefined}
+                      class:list={[
+                        'block border-l py-1.5 pl-3 text-[0.875rem] transition-colors',
+                        isCurrent(e.href)
+                          ? 'border-ink font-medium text-ink'
+                          : 'border-transparent text-ink-3 hover:border-scribe hover:text-ink',
+                      ]}
+                    >
+                      {docTitle(e.href, e.title, code)}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))
+        }
+      </nav>
+    </aside>
+
+    <article class="min-w-0 px-5 py-10 sm:px-8 sm:py-14">
+      <header class="max-w-[68ch]">
+        <h1 class="display text-[clamp(1.9rem,3.6vw,2.75rem)]">{title}</h1>
+        {lede && <p class="mt-4 text-[1.0625rem] leading-relaxed text-ink-2">{lede}</p>}
+      </header>
+
+      <div class="prose mt-10" set:html={article} />
+
+      <nav class="mt-20 grid gap-px border-t border-scribe bg-scribe sm:grid-cols-2" aria-label="Pagination">
+        {
+          prev ? (
+            <a href={linkTo(prev.href)} class="group bg-panel-0 py-5 pr-5 transition-colors hover:bg-panel-1 sm:pl-5">
+              <p class="legend text-ink-3">{s('doc.previous')}</p>
+              <p class="mt-1 text-[0.9375rem] text-ink transition-colors group-hover:text-amber">
+                {docTitle(prev.href, prev.title, code)}
+              </p>
+            </a>
+          ) : (
+            <div class="bg-panel-0" />
+          )
+        }
+        {
+          next ? (
+            <a href={linkTo(next.href)} class="group bg-panel-0 py-5 pl-5 text-right transition-colors hover:bg-panel-1 sm:pr-5">
+              <p class="legend text-ink-3">{s('doc.next')}</p>
+              <p class="mt-1 text-[0.9375rem] text-ink transition-colors group-hover:text-amber">
+                {docTitle(next.href, next.title, code)}
+              </p>
+            </a>
+          ) : (
+            <div class="bg-panel-0" />
+          )
+        }
+      </nav>
+    </article>
+
+    {/* On this page. The prose is held to a reading measure, which left a third
+        of the screen empty on every page; some of these pages are very long and
+        had no in-page navigation at all. Built from the rendered headings at
+        build time, so it cannot fall out of step with the content, and the
+        column is not drawn at all on a page with one section. */}
+    {
+      showRail && (
+        <aside class="hidden border-l border-scribe-2 xl:block">
+          <nav
+            id="on-this-page"
+            class="sticky top-[4.75rem] max-h-[calc(100vh-6rem)] overflow-y-auto px-5 pb-16 pt-8"
+            aria-label={s('doc.onThisPage')}
+          >
+            <p class="legend mb-2.5">{s('doc.onThisPage')}</p>
+            <ul class="space-y-px" data-toc>
+              {headings.map((h) => (
+                <li>
+                  <a
+                    href={`#${h.id}`}
+                    class="block border-l-2 border-transparent py-1.5 pl-3 text-[0.8125rem] leading-snug text-ink-3 transition-colors hover:border-scribe hover:text-ink"
+                  >
+                    {h.text}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+        </aside>
+      )
+    }
+  </div>
+</Base>
+
+<script>
+  // Mark the section the reader is in. The list itself is in the markup; the
+  // script only moves the mark, so nothing here can hide content.
+  const list = document.querySelector('#on-this-page [data-toc]')
+  const headings = [...document.querySelectorAll<HTMLElement>('article .prose h2[id]')]
+
+  if (list && headings.length > 1) {
+    const links = [...list.querySelectorAll('a')]
+    const spy = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (!e.isIntersecting) continue
+          const i = headings.indexOf(e.target as HTMLElement)
+          links.forEach((a, n) => {
+            a.classList.toggle('border-amber', n === i)
+            a.classList.toggle('text-ink', n === i)
+            a.classList.toggle('border-transparent', n !== i)
+          })
+        }
+      },
+      { rootMargin: '0px 0px -75% 0px' },
+    )
+    headings.forEach((h) => spy.observe(h))
+  }
+</script>

@@ -1,0 +1,244 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import RunCursor from '@/components/RunCursor.astro'
+import { exampleLanguages } from '@/lib/snippets'
+
+const langs = exampleLanguages('workflow')
+---
+
+<Doc
+  title="Workflows"
+  description="A durable workflow in mcpd: the definition the daemon walks, the nine constructs, templates and guards, retries and effects, and the builder that writes it in six languages."
+  lede="A workflow is data the daemon holds and bodies the daemon never sees. This page is the data: what a definition can say, and what each construct makes the daemon do."
+  og="docs"
+>
+  <h2>The division of labour</h2>
+  <p>
+    A durable run has two owners. The daemon owns the run between steps: the
+    cursor, the journal, the retry budget, the timers and the waits. Your
+    process owns everything inside a step: the model you call, the prompt you
+    send, the tools you run, the credentials you hold. The daemon is never
+    handed any of that, and it never runs a model on your behalf.
+  </p>
+  <p>
+    So a workflow arrives in two parts from one file. The graph goes to the
+    daemon as a definition, a document the daemon walks. The step bodies stay in
+    your process, in whatever language you wrote them, for a
+    <a href="/docs/workers" class="link">worker</a> to serve. Nothing has to be
+    deployed to the daemon, and a body can change without the definition
+    changing at all.
+  </p>
+
+  <RunCursor class="not-prose my-8" />
+
+  <h2>Writing one</h2>
+  <p>
+    The builder produces both parts. <code>document()</code> is the definition,
+    and each <code>step</code> or <code>agent</code> call keeps its body behind
+    for the worker. Every SDK has the same builder with the same nine
+    constructs, so a workflow written in one language reads the same in
+    another, and the daemon stores the same document whichever wrote it.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" example="workflow" region="workflow" only={langs} title="a support workflow" />
+
+  <p>
+    Three things about that example are the shape of every workflow. A step's
+    input is a template rendered by the daemon per attempt, so
+    <code>draft</code> reads what <code>classify</code> answered without either
+    body knowing about the other. A guard decides whether a node runs at all:
+    a question is sent as it is, a bug waits for a person. And the last step is
+    <code>at_most_once</code> with a retry policy, which is the combination a
+    side effect needs: the daemon retries a transient failure, and it never
+    runs a body twice without being told.
+  </p>
+
+  <h2>The constructs</h2>
+  <p>
+    Nine, and every SDK has all nine. Two are claimable, which means a worker
+    serves them; the rest are the daemon's own.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Construct</th><th>Who runs it</th><th>What it does</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>task</code></td>
+        <td>A worker</td>
+        <td>Claimable work. The worker runs whatever code it registered under this id.</td>
+      </tr>
+      <tr>
+        <td><code>agent</code></td>
+        <td>A worker</td>
+        <td>The same on the wire, recorded as an agent turn: your own loop, however many model calls, as one durable step. The trace and the interface tell it from a plain task.</td>
+      </tr>
+      <tr>
+        <td><code>sleep</code></td>
+        <td>The daemon</td>
+        <td>A delay of so many milliseconds. No process is alive during it.</td>
+      </tr>
+      <tr>
+        <td><code>sleep_until</code></td>
+        <td>The daemon</td>
+        <td>A delay until an instant rendered from a template, such as a billing date carried in the input.</td>
+      </tr>
+      <tr>
+        <td><code>wait_event</code></td>
+        <td>The daemon</td>
+        <td>A pause until an event with this name and key arrives, or until the deadline passes. The key is rendered per run, so one wait addresses one order and no other.</td>
+      </tr>
+      <tr>
+        <td><code>parallel</code></td>
+        <td>Both</td>
+        <td>Named branches, each one claimable step, all on disk before any is offered. The run moves on when the last branch ends.</td>
+      </tr>
+      <tr>
+        <td><code>foreach</code></td>
+        <td>Both</td>
+        <td>One claimable step per element of the array at a path, bounded by <code>max_items</code> and, if you say so, by how many run at once. The outputs come back as an array in item order.</td>
+      </tr>
+      <tr>
+        <td><code>loop</code></td>
+        <td>Both</td>
+        <td>A bounded loop over one claimable step. <code>until</code> is evaluated after each iteration and may end it early.</td>
+      </tr>
+      <tr>
+        <td><code>subworkflow</code></td>
+        <td>The daemon</td>
+        <td>A child run of another definition, with its own journal. Its output becomes this step's output, and cancelling the parent cancels it.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    A branch, a foreach body and a loop body are one claimable step each. A
+    body that needs several steps is a subworkflow, which keeps every journal
+    flat: a run is a list, never a tree of lists.
+  </p>
+
+  <h2>Templates and guards</h2>
+  <p>
+    A template is JSON with <code>${'${path}'}</code> references in its strings.
+    The daemon renders it when an attempt is created, from what the run holds
+    at that moment: <code>input</code>, the run's input;
+    <code>steps.&lt;id&gt;</code>, what an earlier step answered, with
+    <code>.output</code>, <code>.status</code> and <code>.error</code>;
+    <code>run</code>, the run's own id and correlation; and inside a foreach or
+    a loop, <code>item</code>, <code>index</code> and <code>iter.index</code>.
+    A reference that is the whole string keeps its type, so
+    <code>"${'${steps.classify.output}'}"</code> hands the next step an object,
+    not a string of one.
+  </p>
+  <p>
+    A guard is a predicate on the same paths: <code>eq</code>, <code>ne</code>,
+    <code>lt</code>, <code>lte</code>, <code>gt</code>, <code>gte</code>,
+    <code>in</code>, <code>exists</code> and <code>matches</code>, combined with
+    <code>all</code>, <code>any</code> and <code>not</code>. A guard that is
+    false writes the node as <code>skipped</code> and the run moves on. A path
+    that is absent makes every comparison false rather than raising, because a
+    run that dies on a missing field is a run nobody can finish.
+  </p>
+  <p>
+    The daemon validates the document when it is stored. A guard that names a
+    path nothing can produce, a template that reads a step declared later, a
+    foreach over something that is not a path, an id that does not match
+    <code>^[a-z][a-z0-9_]*$</code>: each is refused with a 400 naming the
+    field. Unknown fields are refused too, so a guard spelled wrong is an error
+    and not a run that skips its guard.
+  </p>
+  <p>
+    Every duration has a ceiling as well as a floor. <code>run_timeout_ms</code>,
+    <code>step_timeout_ms</code>, a retry's <code>initial_ms</code> and
+    <code>max_ms</code>, a sleep's <code>ms</code> and a wait's
+    <code>timeout_ms</code> are each at most <code>315360000000</code>, which
+    is 3650 days, and a longer one is refused with a 400 naming the field, the
+    ceiling and the value you sent. A deadline further out than that would not
+    fit the clock the daemon stores it on.
+  </p>
+
+  <h2>Retries, effects and failure</h2>
+  <p>
+    A body that fails tells the daemon how, with a class. <code>retryable</code>
+    is worth another attempt, and the daemon makes one while the node's
+    <code>retry</code> budget lasts, at the node's backoff, waiting at least
+    the <code>retry_after_ms</code> the body asked for, which is held to the
+    same 3650-day ceiling as every other duration. <code>fatal</code> and
+    <code>invalid_input</code> are not retried. <code>unservable</code> means
+    this worker does not hold the definition or the step, and the attempt goes
+    back to the queue for another worker without spending the budget. A body
+    that throws anything else is <code>fatal</code>.
+  </p>
+  <p>
+    <code>max_attempts</code> counts every attempt including the first, so the
+    default of one means no retry. After the budget, <code>on_error</code>
+    decides: <code>fail_run</code>, the default, ends the run with the step's
+    message as its error; <code>continue</code> marks the step failed and
+    moves on, so a later guard can read <code>steps.&lt;id&gt;.status</code>
+    and route around it.
+  </p>
+  <p>
+    <code>effect</code> says what a duplicated body would cost. Under
+    <code>at_least_once</code>, the default, a lease that is lost requeues the
+    attempt and the body may run again. Under <code>at_most_once</code> the
+    worker must post <code>started</code> before the body, and a started
+    attempt whose lease is lost fails rather than runs again. Use it for the
+    step that sends the email or charges the card, and give that body the
+    lease's <code>idempotency_key</code> to hand to the third party: it is
+    stable across retries of the same step, so a retry after a lost reply is
+    recognised on the far side too.
+  </p>
+
+  <h2>Versions</h2>
+  <p>
+    A definition is immutable once stored. Post the same body again and you
+    get the same version back; post a different body under a version that
+    exists and the daemon refuses with a 409, because a run that pinned that
+    version would otherwise change under it. Leave the version out and the
+    daemon assigns the next number, which is what a worker does at start-up.
+    A run pins the version it started with and never re-resolves it, so a
+    deploy that stores version 3 finishes the runs on version 2 as they were
+    written.
+  </p>
+
+  <h2>Limits</h2>
+  <p>
+    A definition may declare <code>max_steps</code>, <code>run_timeout_ms</code>
+    and <code>max_cost_usd</code>. The daemon counts every attempt against the
+    first, the run's age against the second, and the priced usage the steps
+    report against the third, and ends the run <code>timed_out</code> or
+    <code>failed</code> at the ceiling with the ceiling named as the error. A
+    loop that will not converge and an agent step that will not stop spending
+    are the same problem to the daemon, and the same flag stops both.
+  </p>
+
+  <h2>What the daemon keeps</h2>
+  <p>
+    A run's input, its state, its output and every step's input and output are
+    kept in the run store exactly as they were sent. They are not redacted:
+    they are the workflow's own working state, a later step reads them back,
+    and a value the redactor had rewritten would change what the run does. The
+    spans a run writes into the trace store are redacted like any other span.
+    Retention and erasure reach the run store as well, for runs that have
+    ended. <a href="/docs/runs#storage" class="link">Runs</a> says exactly
+    what each one deletes.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>
+      Serving the bodies, and the protocol a worker speaks:
+      <a href="/docs/workers" class="link">Workers</a>.
+    </li>
+    <li>
+      Starting, watching, signalling and cancelling a run:
+      <a href="/docs/runs" class="link">Runs</a>.
+    </li>
+    <li>
+      The document itself, field by field:
+      <a href="https://github.com/mcpd/mcpd/blob/main/spec/definition.schema.json" class="link">definition.schema.json</a>,
+      and the binding contract in
+      <a href="https://github.com/mcpd/mcpd/blob/main/internal/run-contract-v1.md" class="link">run-contract-v1.md</a>.
+    </li>
+  </ul>
+</Doc>

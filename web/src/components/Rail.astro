@@ -1,0 +1,215 @@
+---
+/**
+ * The console rail.
+ *
+ * The top edge of the panel, not a navigation bar: a wordmark plate, engraved
+ * route legends, a live status annunciator, the language selector, and the
+ * scribed seam that separates the rail from the panel below it.
+ *
+ * Every word in here comes from `lib/ui-strings`, because the rail is on all
+ * nine locales and the markup is one copy.
+ */
+import { SITE } from '@/lib/site'
+import { localeOf, routeOf, urlFor } from '@/lib/i18n'
+import { strings } from '@/lib/ui-strings'
+import LanguageSelector from '@/components/LanguageSelector.astro'
+
+/* `route` is the path with the locale prefix taken off, so one list of routes
+   written once serves all nine locales. */
+const locale = localeOf(Astro.url.pathname)
+const route = routeOf(Astro.url.pathname)
+const s = strings(locale)
+
+// The interface has its own daemon indicator in its toolbar; a second one in
+// the rail 40px away is the same fact twice.
+const showDaemonTile = !route.startsWith('/app')
+
+const routes = [
+  { path: '/docs', label: s('rail.docs') },
+  { path: '/docs/quickstart', label: s('rail.quickstart') },
+  { path: '/app', label: s('rail.interface') },
+  { path: '/deploy', label: s('rail.deploy') },
+]
+const isCurrent = (path: string) =>
+  path === '/docs' ? route === '/docs' : route === path || route.startsWith(`${path}/`)
+---
+
+<header class="sticky top-0 z-40 bg-panel-0/97">
+  <div class="mx-auto flex max-w-[86rem] items-center gap-6 px-5 py-3 sm:px-8">
+    <a
+      href={urlFor('/', locale)}
+      class="group flex shrink-0 items-baseline gap-2.5"
+      aria-label={s('rail.home')}
+    >
+      <span
+        class="display text-[1.375rem] leading-none tracking-[-0.03em] text-ink transition-colors group-hover:text-amber"
+        >{SITE.name}</span
+      >
+      {/* Plain type: the tagline is a phrase beside the wordmark, not a legend
+          engraved on a region of the panel.
+
+          It appears at the same width the daemon tile does, and for the same
+          reason that tile names: below 1024px the rail is carrying the mark,
+          four routes, a link and the language control, and the tagline is the
+          one piece of it that is not navigation. Kept from 640px it pushed the
+          rail 27px past its own edge at exactly 768px, where the full nav
+          appears and the menu button goes. */}
+      <span class="hidden text-[0.8125rem] text-ink-3 lg:inline">{s('rail.tagline')}</span>
+    </a>
+
+    <nav class="ml-auto hidden items-center gap-1 md:flex" aria-label={s('rail.nav')}>
+      {
+        routes.map((r) => (
+          <a
+            href={urlFor(r.path, locale)}
+            aria-current={isCurrent(r.path) ? 'page' : undefined}
+            class:list={[
+              'px-3 py-2 text-[0.9375rem] transition-colors',
+              isCurrent(r.path) ? 'font-medium text-ink' : 'text-ink-2 hover:text-ink',
+            ]}
+          >
+            {r.label}
+          </a>
+        ))
+      }
+    </nav>
+
+    <div class="ml-auto flex items-center gap-3 md:ml-0">
+      {/* A real status tile. It reads the daemon when one is reachable and
+          says so plainly when there is none, rather than showing a green dot
+          that means nothing. The lit label is a template the script fills, so
+          the sentence stays translatable rather than being built in script. */}
+      {showDaemonTile && (
+      <div
+        id="daemon-status"
+        class="annunciator mcpd-tile-off"
+        data-lit=""
+        data-label-ready={s('rail.daemonReady')}
+        role="status"
+        aria-live="polite"
+      >
+        <span
+          class="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-70"
+          aria-hidden="true"></span>
+        <span data-label>{s('rail.daemonAbsent')}</span>
+      </div>
+      )}
+
+      <a
+        href={SITE.repo}
+        rel="noopener"
+        class="px-2 py-2 text-[0.9375rem] text-ink-2 transition-colors hover:text-ink"
+        >{s('rail.source')}</a
+      >
+
+      <LanguageSelector />
+
+      {/* The size is on the button, not only on the label inside it. Without it
+          the button's own line box was sized by the inherited 16px root text it
+          never renders, so it stood 43.6px tall next to a 42px language control
+          on the same row. The label is unchanged: the span already set this. */}
+      <button
+        type="button"
+        id="rail-toggle"
+        class="well px-2.5 py-2 text-[0.9375rem] md:hidden"
+        aria-expanded="false"
+        aria-controls="rail-menu"
+      >
+        <span class="text-[0.9375rem] text-ink-2">{s('rail.menu')}</span>
+      </button>
+    </div>
+  </div>
+
+  {/* Mobile routes. Rendered in the document and only hidden, so they exist
+      for a crawler and for a reader with no JavaScript. */}
+  <nav
+    id="rail-menu"
+    class="hidden border-t border-scribe-2 px-5 pb-3 md:!hidden sm:px-8"
+    aria-label={s('rail.nav')}
+  >
+    {
+      routes.map((r) => (
+        <a
+          href={urlFor(r.path, locale)}
+          aria-current={isCurrent(r.path) ? 'page' : undefined}
+          class:list={[
+            'block border-b border-scribe-2 py-3 text-[0.9375rem]',
+            isCurrent(r.path) ? 'font-medium text-ink' : 'text-ink-2',
+          ]}
+        >
+          {r.label}
+        </a>
+      ))
+    }
+  </nav>
+
+  <div class="seam"></div>
+</header>
+
+<script>
+  // The menu toggle. A control that looks interactive must work, so this is
+  // wired directly rather than through a framework island.
+  const toggle = document.getElementById('rail-toggle')
+  const menu = document.getElementById('rail-menu')
+  toggle?.addEventListener('click', () => {
+    const open = toggle.getAttribute('aria-expanded') === 'true'
+    toggle.setAttribute('aria-expanded', String(!open))
+    menu?.classList.toggle('hidden', open)
+  })
+
+  // Ask the local daemon whether it is running. The tile starts in its honest
+  // unlit state and only lights when something actually answered, so a failed
+  // probe leaves a correct label rather than a stale green light.
+  const tile = document.getElementById('daemon-status')
+  // Probe once per browsing session rather than on every navigation. A machine
+  // with no daemon does not become one three pages later, and each failed
+  // attempt costs a console line the reader did not ask for.
+  const PROBED = 'mcpd:probed'
+  let cached: string | null = null
+  try {
+    cached = sessionStorage.getItem(PROBED)
+  } catch {
+    /* Private browsing; probe as usual. */
+  }
+  // One place that lights the tile, used by both the cached answer and a fresh
+  // probe. They were two copies, and the cached one lit the lamp and wrote the
+  // label but never took the tile out of `display: none`. The tile is hidden
+  // until something answers, so on a machine that IS running mcpd it appeared
+  // on the first page of a session and then vanished for every page after it,
+  // which is the wrong way round: the cache exists to keep it there.
+  const light = (version: string) => {
+    if (!tile) return
+    tile.setAttribute('data-lit', 'olive')
+    tile.classList.remove('mcpd-tile-off')
+    const l = tile.querySelector('[data-label]')
+    // The sentence comes from the string catalogue on the element, filled here.
+    // Building it in script would leave one language hard-coded in the bundle.
+    if (l) l.textContent = (tile.dataset.labelReady ?? 'daemon {version}').replace('{version}', version)
+  }
+  if (tile && cached) {
+    if (cached !== 'absent') light(cached)
+  } else if (tile) {
+    // The daemon serves this page from its own binary, so its own origin is
+    // the first place to look. A documentation host will not answer at all,
+    // and the tile stays hidden.
+    const endpoint =
+      new URLSearchParams(location.search).get('daemon') ??
+      (location.protocol.startsWith('http') ? location.origin : 'http://localhost:4317')
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 1200)
+    fetch(`${endpoint}/healthz`, { signal: controller.signal, mode: 'cors' })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((h: { version?: string }) => {
+        // Only ever shown lit. An unlit chip saying "no daemon" in the header
+        // of a marketing page reads as an error to someone who has not
+        // installed anything yet.
+        light(h.version ?? 'ready')
+        try { sessionStorage.setItem(PROBED, h.version ?? 'ready') } catch { /* ignore */ }
+      })
+      .catch(() => {
+        /* No daemon on this machine. The unlit tile already says so. */
+        try { sessionStorage.setItem(PROBED, 'absent') } catch { /* ignore */ }
+      })
+      .finally(() => clearTimeout(timer))
+  }
+</script>

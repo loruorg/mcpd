@@ -1,0 +1,232 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="Elixir"
+  description="Elixir 向けの mcpd SDK。ワーカーは GenServer、スパンのツリーはプロセス辞書から組み上がり、依存は 1 つもありません。JSON コーデックも HTTP クライアントも OTP に入っているからです。"
+  lede="ワーカーには GenServer、コンテキストにはプロセス。依存ツリーには何も足しません。"
+  og="docs"
+>
+  <h2>インストール</h2>
+  <p>
+    <code>mix.exs</code> に追加します。ほかには何も付いてきません。
+  </p>
+
+  <pre><code class="language-elixir">{`defp deps do
+  [{:mcpd, "~> 0.1"}]
+end`}</code></pre>
+
+  <p>
+    依存の一覧はこれで全部で、そうしているのは意図的です。OTP 27 には JSON
+    コーデック（<code>:json</code>）と HTTP クライアント（<code>:inets</code>）が
+    入っています。システムを見張るのが仕事のライブラリが、そのシステムのビルドを
+    変える理由になってはいけません。ほかの 5 つの SDK も、それぞれの言語で同じ
+    約束をしています。
+  </p>
+
+  <h2>クライアントの構築</h2>
+  <p>
+    どのオプションも、指定がなければ環境変数を読みます。コードのほうが優先されます。
+    引数なしの <code>Mcpd.start_link()</code> は、ローカルのデーモンに接続します。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="init" title="接続" />
+
+  <p>
+    スーパービジョンツリーに入れれば、ほかのワーカーと同じように振る舞います。
+  </p>
+
+  <pre><code class="language-elixir">{`children = [
+  {Mcpd, project: "support-desk", environment: "production"}
+]
+
+Supervisor.start_link(children, strategy: :one_for_one)`}</code></pre>
+
+  <h2>実行の記録</h2>
+  <p>
+    <code>span</code> はマクロなので、実行はブロックとして書け、その値はブロックの
+    値になります。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="trace" title="実行の記録" />
+
+  <p>
+    マクロは、呼ぶ前に require しておく必要があります。これはこの SDK の選択では
+    なく、言語のルールです。<code>use Mcpd</code> がそれを済ませます。
+  </p>
+
+  <pre><code class="language-elixir">{`defmodule MyAgent do
+  use Mcpd
+
+  def answer(mcpd, question) do
+    Mcpd.span mcpd, "agent", kind: :agent_run, input: question do
+      do_the_work(question)
+    end
+  end
+end`}</code></pre>
+
+  <p>
+    本体がブロックではなく、すでに関数になっている場合は、代わりに
+    <code>Mcpd.with_span/4</code> を呼びます。マクロを使わないだけで、中身は
+    同じです。
+  </p>
+
+  <h2>ツリーの組み上がり方</h2>
+  <p>
+    アクティブなスパンはプロセス辞書に入ります。これは手抜きではなく、Elixir に
+    限っては正しい置き場所です。ここでは並行性の単位がプロセスなので、同時に
+    処理される 2 つのリクエストが互いのスパンを見ることはありませんし、ツリーを
+    つなぐために何かをすべての関数へ引き回す必要もありません。
+  </p>
+  <p>
+    3 段下の呼び出しで開いた子も、自分で親を見つけます。
+  </p>
+
+  <pre><code class="language-elixir">{`Mcpd.span mcpd, "agent", kind: :agent_run do
+  plan(mcpd)          # 言われなくても "agent" の子を開く
+end
+
+defp plan(mcpd) do
+  Mcpd.span mcpd, "plan_answer", kind: :model_generation, model: "gpt-4o" do
+    call_the_model()
+  end
+end`}</code></pre>
+
+  <p>
+    知っておくべき帰結があります。<code>Task.async</code> の中で開いたスパンは、
+    別のプロセスなので新しいトレースを始めます。トレースを渡すには
+    <code>Mcpd.traceparent/0</code> と <code>Mcpd.continue/2</code> を使います。
+    HTTP の境界をまたぐときと同じ組み合わせです。
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>ブロックしない、例外を投げない</h2>
+  <p>
+    スパンの記録は、ワーカーにメッセージを送って戻るだけです。ネットワークはその
+    ワーカーが担うので、エージェントのレイテンシが、mcpd の速さや、mcpd が動いて
+    いるかどうか、そもそも起動しているかどうかに左右されることはありません。
+  </p>
+  <p>
+    ブロックの中で送出された例外は、スパンにエラーとして記録され、そのまま再送出
+    されます。mcpd の仕事は起きたことを見ることであって、それに対してあなたの
+    コードがどうするかを決めることではありません。
+  </p>
+  <p>
+    キューには上限があり、いっぱいになると古いシグナルから捨てられます。この向きは
+    選んだ結果です。デーモンに到達できないとき、いま起きていることを説明するのは
+    新しいシグナルのほうで、復旧したときに誰かが見たいのもそちらだからです。
+    <code>Mcpd.stats/1</code> は、クライアントが何をしたかを返します。
+    <code>queued</code>、<code>dropped</code>、<code>capacity</code>、
+    <code>exported</code>、<code>failed</code>、<code>rejected</code> です。
+  </p>
+
+  <p>
+    <code>log_level:</code>、または <code>MCPD_LOG_LEVEL</code> は、
+    <code>Mcpd.log/4</code> の下限を決めます。既定は <code>debug</code> で、
+    すべてを残します。下限より下の行はレコードを組み立てる前に捨てられるので、
+    本番環境のデバッグ行にかかるのは比較 1 回分です。この下限が効くのはログだけで、
+    スパン、メトリクス、スコア、フィードバックには影響しません。
+  </p>
+
+  <h2>ペイロードのプロセス内保持</h2>
+  <p>
+    <code>capture_payloads: false</code>、または
+    <code>MCPD_CAPTURE_PAYLOADS=false</code> にすると、プロンプトと補完は
+    その場に留まります。スパンは所要時間、ステータス、使用量、モデル、相関、
+    エラーを持って出ていきますが、<code>input:</code>、<code>output:</code>、
+    ブロックが返した値は、キューに入る前に捨てられます。機密がキューに入ることも、
+    フラッシュで外に出ることもありません。個々のスパンは
+    <code>capture_payloads: true</code> で別の扱いにできます。
+  </p>
+
+  <h2>記録した内容の検証</h2>
+  <p>
+    シンクは、吐き出されたバッチの行き先です。既定は HTTP トランスポート
+    です。<code>Mcpd.Sink.Recorder</code> はすべてのバッチをメモリに保持するので、
+    テストはデーモンなしで、計装が記録したスパン、ログ、メトリクス、スコア、
+    フィードバックを読み返せます。<code>Mcpd.Sink.Console</code> は、シグナル
+    1 件につき JSON を 1 行、標準エラー出力に書きます。自分のシンクは
+    <code>Mcpd.Sink</code> を実装します。例外を投げるシンクはバッチの失敗として
+    数えられ、報告されるだけで、呼び出し側に例外が届くことはありません。
+  </p>
+  <p>
+    <code>Mcpd.record/3</code> は、すでに終了したスパンを渡されたままキューに
+    入れます。id、親、開始時刻、終了時刻はそのままで、親を付け替えたり、時刻を
+    打ち直したり、サンプリングをやり直したりはしません。別のトレーシングシステムの
+    アダプターや一括インポートが持っているのが、これです。id が OpenTelemetry の
+    形式でないレコードは受け付けられずに数えられ、例外にはなりません。どのスパン
+    でも <code>external_parent_span_id:</code> は、mcpd 以外のトレーシング
+    システムの親を、相関のためだけに運びます。
+  </p>
+
+  <h2>永続実行</h2>
+  <p>
+    同じクライアントがデーモンの永続実行も扱います。<code>Mcpd.Workflow</code> が
+    定義を組み立て、ステップの本体を 3 引数の関数として保持します。
+    <code>Mcpd.StepWorker</code> がそれを登録し、リースをロングポーリングで受け
+    取って、1 件ずつ専用のプロセスで処理します。<code>Mcpd.start_run/3</code>、
+    <code>Mcpd.watch_run/3</code>、<code>Mcpd.publish_event/4</code> なども、
+    実行の API を 1 対 1 で写しています。本体は <code>class: :retryable</code> を
+    付けた <code>Mcpd.StepException</code> を送出するとステップの予算の範囲で
+    リトライされ、<code>Mcpd.StepContext.span/4</code> を通して自分のステップの下に
+    スパンを記録します。本体が閉じたスパンはすべて、その使用量をステップの使用量に
+    足し込み、最後に見えたモデルが採用されるので、デーモンはトレースに出ている
+    とおりに料金を計算します。<code>set_usage/2</code> は、それを明示的に上書き
+    します。ワーカーには <code>on_error</code> の隣に <code>on_lease</code>、
+    <code>on_step_start</code>、<code>on_step_end</code>、
+    <code>on_conflict</code> があり、<code>StepWorker.stats/1</code> は取得した数、
+    完了した数、クラス別に失敗した数、理由別に手放した数を数えます。
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} example="workflow" region="workflow" title="ワークフロー" />
+  <p>
+    それぞれの構成要素の働き、リースのプロトコル、実行の API は
+    <a href={linkTo('/docs/workflows')} class="link">ワークフロー</a>、
+    <a href={linkTo('/docs/workers')} class="link">ワーカー</a>、
+    <a href={linkTo('/docs/runs')} class="link">実行</a>のページにあります。
+  </p>
+
+  <h2>スコアとフィードバック</h2>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="score" title="スコアとフィードバック" />
+
+  <h2>読み出し</h2>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="query" title="実行の読み出し" />
+
+  <h2>短命なプロセスにはフラッシュが必要</h2>
+  <p>
+    すぐに終了するスクリプトやタスクは、送りきれなかったものを失います。
+    <code>Mcpd.shutdown/1</code> はフラッシュしてワーカーを止めます。2 回呼んでも
+    問題ありません。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="ローカルのデーモンで例を実行"
+    command={`mcpd serve --data ./mcpd.db
+elixir examples/elixir/quickstart.exs`}
+  />
+
+  <h2>次に</h2>
+  <ul>
+    <li>
+      この SDK がほかの 5 つと共有している振る舞いのすべて：
+      <a href="https://github.com/mcpd/mcpd/blob/main/sdks/SDK-CONTRACT.md" class="link">SDK コントラクト</a>。
+    </li>
+    <li>
+      スパンが持つもの：
+      <a href={linkTo('/docs/reference/data-model')} class="link">データモデル</a>。
+    </li>
+    <li>
+      あとから目的の実行を見つける方法：
+      <a href={linkTo('/docs/searching')} class="link">実行を探す</a>。
+    </li>
+  </ul>
+</Doc>

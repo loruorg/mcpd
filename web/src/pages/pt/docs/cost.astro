@@ -1,0 +1,477 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import Command from '@/components/Command.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+
+/* Written here rather than read from an example program: these are queries a
+   reader runs against their own daemon, not code CI can execute. */
+const breakdown = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# Where the money went last week, by model.
+curl -s --get http://localhost:4317/v1/api/analytics/cost \\
+  --data-urlencode 'from=-7d' \\
+  --data-urlencode 'group_by=model'
+
+# The same week as a daily series, so you can see the day it changed.
+curl -s --get http://localhost:4317/v1/api/analytics/cost \\
+  --data-urlencode 'from=-7d' \\
+  --data-urlencode 'group_by=model' \\
+  --data-urlencode 'bucket=1d'
+`,
+  },
+  {
+    lang: 'typescript' as const,
+    label: 'TypeScript',
+    shiki: 'typescript',
+    code: `import { Mcpd } from '@mcpd/sdk'
+
+const mcpd = new Mcpd()
+
+const spend = await mcpd.analyticsCost({
+  from: '-7d',
+  to: '-0s',
+  groupBy: 'model',
+  bucket: '1d',
+})
+
+console.log(\`\${spend.currency} \${spend.totalCost.toFixed(4)} over the window\`)
+for (const group of spend.groups) {
+  console.log(group.key, group.totalCost, group.inputTokens, group.outputTokens)
+}`,
+  },
+  {
+    lang: 'python' as const,
+    label: 'Python',
+    shiki: 'python',
+    code: `from mcpd import Mcpd
+
+mcpd = Mcpd()
+
+spend = mcpd.analytics_cost("-7d", "-0s", group_by="model", bucket="1d")
+
+print(f"{spend.currency} {spend.total_cost:.4f} over the window")
+for group in spend.groups:
+    print(group.key, group.total_cost, group.input_tokens, group.output_tokens)`,
+  },
+]
+
+const response = [
+  {
+    lang: 'curl' as const,
+    label: 'CostBreakdown',
+    shiki: 'json',
+    code: `{
+  "from": "2026-08-20T09:00:00Z",
+  "to": "2026-08-27T09:00:00Z",
+  "currency": "USD",
+  "total_cost": 12.418264,
+  "groups": [
+    {
+      "key": "claude-sonnet-4",
+      "count": 1841,
+      "error_count": 12,
+      "total_cost": 9.612055,
+      "input_tokens": 2903118,
+      "output_tokens": 214477,
+      "latency": { "mean": 1840.2, "max": 24193.0 }
+    },
+    {
+      "key": "gpt-4o-mini",
+      "count": 6204,
+      "error_count": 3,
+      "total_cost": 2.806209,
+      "input_tokens": 9114882,
+      "output_tokens": 388310,
+      "latency": { "mean": 612.4, "max": 8801.0 }
+    }
+  ]
+}`,
+  },
+]
+---
+
+<Doc
+  title="Apuração de custos"
+  description="Como o mcpd transforma contagens de tokens em um custo: precificado na ingestão para o histórico não ser reescrito, cache cobrado à parte, e modelo desconhecido sem preço em vez de grátis."
+  lede="Um valor de custo só vale a pena se você consegue dizer de onde ele veio. Aqui está cada passo entre uma contagem de tokens e um número na tela."
+  og="docs"
+>
+  <h2>Precificado uma vez, na ingestão</h2>
+  <p>
+    Quando um span chega trazendo um id de modelo e uma contagem de tokens, o
+    mcpd procura esse modelo em uma tabela de preços, calcula o que a chamada
+    custou e guarda o resultado no span. Nada é recalculado na leitura.
+  </p>
+  <p>
+    Essa é a decisão importante desta página. Preços mudam. Se o custo fosse
+    derivado na hora da consulta, a partir da tabela que estivesse carregada
+    naquele dia, um corte de tarifa no mês que vem reescreveria em silêncio o
+    que o mês passado custou, e o número que você informou a alguém não estaria
+    lá quando essa pessoa fosse conferir. Precificar na ingestão congela o valor
+    contra as tarifas que valiam quando a chamada foi feita. Todo custo
+    armazenado também registra o id da tabela que o produziu, então um valor
+    pode ser rastreado até as tarifas que estão por trás dele.
+  </p>
+  <p>
+    Um span que já chega com um custo é deixado exatamente como chegou. Se o seu
+    provedor entrega um valor real e você o registra, o mcpd mantém o seu e não
+    precifica por cima. O campo <code>is_estimated</code> separa os dois: tudo o
+    que o mcpd derivou de uma tabela é marcado como estimado, porque é.
+  </p>
+
+  <h2>As tarifas são por milhão de tokens</h2>
+  <p>
+    Toda tarifa em uma tabela de preços é em unidades da moeda por milhão de
+    tokens, que é como todo provedor as publica. Uma tarifa copiada de uma
+    página de preços entra na tabela sem mudança, sem nenhuma divisão para você
+    errar às três da manhã. A aritmética de um medidor é
+    <code>tokens × tarifa ÷ 1.000.000</code>.
+  </p>
+
+  <h2>O custo fica na etapa, não na execução</h2>
+  <p>
+    Cada chamada de modelo carrega o próprio valor. O total de uma execução é a
+    soma dos spans dela, e o mcpd recalcula essa soma a partir dos spans toda
+    vez que um deles chega, em vez de incrementar um contador. Spans chegam fora
+    de ordem, são reenviados e são atualizados no lugar, e um total que só
+    incrementa desanda nos três casos. Um número de destaque que não bate com as
+    linhas abaixo dele destrói a confiança em todos os outros números da página.
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>
+    As três chamadas de modelo acima estão precificadas em $0.00015, $0.00018 e
+    $0.00021. O total da execução no cabeçalho é a soma delas e nada mais: as
+    chamadas de ferramenta, a consulta à memória e o guardrail não
+    consumiram tokens, então não carregam custo e não contribuem com nada.
+  </p>
+
+  <h2>Os medidores</h2>
+  <p>
+    Uma chamada de modelo não é um número só de tokens. Provedores cobram vários
+    medidores a tarifas diferentes, e uma tabela de preços dá uma tarifa para
+    cada um deles.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Tarifa</th><th>Vale para</th><th>Quando a tabela a omite</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>input</code></td>
+        <td>Tokens de entrada comuns.</td>
+        <td>Obrigatória.</td>
+      </tr>
+      <tr>
+        <td><code>output</code></td>
+        <td>Tokens de resposta comuns.</td>
+        <td>Obrigatória.</td>
+      </tr>
+      <tr>
+        <td><code>cache_read</code></td>
+        <td>Tokens servidos de um cache de prompt.</td>
+        <td>Cobrados como <code>input</code>.</td>
+      </tr>
+      <tr>
+        <td><code>cache_write</code></td>
+        <td>Tokens gravados em um cache de prompt.</td>
+        <td>Cobrados como <code>input</code>.</td>
+      </tr>
+      <tr>
+        <td><code>cache_write_5m</code></td>
+        <td>Gravações em um cache de cinco minutos, onde o provedor cobra os TTLs à parte.</td>
+        <td>Recua para <code>cache_write</code>, depois para <code>input</code>.</td>
+      </tr>
+      <tr>
+        <td><code>cache_write_1h</code></td>
+        <td>Gravações em um cache de uma hora.</td>
+        <td>Recua para <code>cache_write</code>, depois para <code>input</code>.</td>
+      </tr>
+      <tr>
+        <td><code>audio_input</code></td>
+        <td>Tokens de áudio de entrada.</td>
+        <td>Cobrados como <code>input</code>.</td>
+      </tr>
+      <tr>
+        <td><code>audio_output</code></td>
+        <td>Tokens de áudio de saída.</td>
+        <td>Cobrados como <code>output</code>.</td>
+      </tr>
+      <tr>
+        <td><code>reasoning</code></td>
+        <td>Tokens de raciocínio ocultos, onde um provedor os cobra à parte.</td>
+        <td>
+          Sem recuo. Eles são cobrados como <code>output</code>, dentro do total
+          de saída, que é como os grandes provedores os cobram, a menos que o
+          provedor também tenha informado uma contagem <code>text</code>
+          separada. Veja abaixo.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Um token em cache é cobrado uma vez</h2>
+  <p>
+    O jeito clássico de inflar uma conta é cobrar um token em cache duas vezes:
+    uma na tarifa de cache, e de novo como parte do total de entrada informado,
+    dentro do qual ele já está. Então, quando um provedor informa um detalhamento por
+    medidor, esse detalhamento vence. O mcpd precifica cada medidor na tarifa dele e
+    cobra apenas o restante na tarifa de entrada comum.
+  </p>
+  <p>
+    Uma chamada a <code>claude-sonnet-4</code> informando um milhão de tokens de
+    entrada, dos quais novecentos mil foram lidos do cache, é precificada contra
+    a tabela embutida assim:
+  </p>
+  <ul>
+    <li>900.000 leituras de cache a $0.30 por milhão, o que dá $0.27.</li>
+    <li>100.000 tokens de entrada restantes a $3.00 por milhão, o que dá $0.30.</li>
+    <li>
+      $0.57 de custo de entrada, em vez dos $3.00 que o total informado, sozinho,
+      teria produzido.
+    </li>
+  </ul>
+  <p>
+    Onde um provedor dá uma contagem <code>text</code> explícita, essa contagem
+    é usada diretamente como o restante. Onde ele não dá, o restante é o total
+    informado menos todos os campos com medidor.
+  </p>
+  <p>
+    Isso deixa uma lacuna que vale nomear. Um medidor para o qual a tabela não
+    tem tarifa só é cobrado como parte do restante, então, quando o provedor
+    também mandou uma contagem <code>text</code>, ele não é cobrado de jeito
+    nenhum. Tokens de raciocínio caem aí sempre que a sua tabela não lhes dá uma
+    tarifa própria, e declarar uma resolve isso. Tokens de imagem caem aí
+    sempre, porque uma tabela não tem tarifa de imagem para dar, então, em uma
+    carga de trabalho bastante multimodal, leia o valor como baixo, e não como exato.
+  </p>
+
+  <h2>Um modelo desconhecido não tem custo, e não um custo de zero</h2>
+  <p>
+    Se a tabela não tem tarifas para o modelo, o mcpd guarda o span sem campo de
+    custo nenhum. Ele não guarda um zero.
+  </p>
+  <p>
+    Zero é uma afirmação: esta chamada foi gratuita. Ausente é uma admissão: não
+    sabemos o que esta chamada custou. As duas levam a decisões diferentes, e uma
+    ferramenta que informa a segunda como se fosse a primeira está mentindo
+    sobre uma conta. A mesma regra atravessa o caminho de leitura, onde uma
+    execução cujos spans somam nada é devolvida sem valor de custo, em vez de com
+    um custo de zero, então uma coluna de custo em branco quer dizer <em>não
+    precificado</em> e nunca <em>gratuito</em>.
+  </p>
+  <p>
+    Vale internalizar a consequência prática: um modelo que falta na tabela
+    falta em todo total. O gasto dele não aparece em
+    <code>/v1/api/analytics/cost</code>, e as execuções dele são excluídas por
+    qualquer filtro <code>min_cost</code> positivo. Um total semanal que parece
+    baixo demais costuma ser um id de modelo que não está resolvendo, e não uma
+    semana fraca.
+  </p>
+
+  <h2>Como um id de modelo é resolvido</h2>
+  <p>
+    O id em um span é o que o seu cliente enviou, e clientes enfeitam esse id.
+    Um gateway prefixa o fornecedor dele, uma nuvem prefixa a região dela, um
+    provedor fixa uma data de lançamento. Uma tabela é indexada por nomes de
+    modelo puros, então a busca tenta quatro coisas em ordem e para na primeira
+    que acerta.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Passo</th><th>Exemplo</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>O id como veio, sem diferenciar maiúsculas</td>
+        <td><code>GPT-4o</code> encontra <code>gpt-4o</code></td>
+      </tr>
+      <tr>
+        <td>A parte depois da última barra</td>
+        <td><code>openai/gpt-4o</code> encontra <code>gpt-4o</code></td>
+      </tr>
+      <tr>
+        <td>O final com pontos de um id de nuvem</td>
+        <td>
+          <code>us.anthropic.claude-sonnet-4</code> encontra
+          <code>claude-sonnet-4</code>
+        </td>
+      </tr>
+      <tr>
+        <td>O id com a data do fim removida, com ou sem o prefixo</td>
+        <td>
+          <code>openai/gpt-4o-2024-08-06</code> encontra <code>gpt-4o</code>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Os sufixos <code>-YYYY-MM-DD</code> e <code>-YYYYMMDD</code> são os dois
+    reconhecidos. Falhar nos quatro passos é um desfecho normal, e não um erro:
+    quer dizer nenhum custo, como acima.
+  </p>
+
+  <h2>A tabela que vem junto</h2>
+  <p>
+    O mcpd carrega uma pequena tabela embutida para que um <code>docker run</code>
+    produza valores reais sem configuração nenhuma. Ela se chama
+    <code>builtin</code>, precifica em USD, e todo custo que ela produz registra
+    esse nome.
+  </p>
+
+  {/* Transcribed from `builtin_book` in crates/mcpd-core/src/cost.rs. When a
+      rate moves there, it moves here. */}
+  <table>
+    <thead>
+      <tr>
+        <th>Modelo</th><th>Entrada</th><th>Saída</th><th>Leitura de cache</th><th>Gravação de cache, 5 min</th><th>Gravação de cache, 1 hora</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><code>claude-opus-4</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
+      <tr><td><code>claude-opus-4-1</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
+      <tr><td><code>claude-opus-4-5</code></td><td>5.00</td><td>25.00</td><td>0.50</td><td>6.25</td><td>10.00</td></tr>
+      <tr><td><code>claude-sonnet-4</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
+      <tr><td><code>claude-sonnet-4-5</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
+      <tr><td><code>claude-haiku-4-5</code></td><td>1.00</td><td>5.00</td><td>0.10</td><td>1.25</td><td>2.00</td></tr>
+      <tr><td><code>claude-3-5-haiku</code></td><td>0.80</td><td>4.00</td><td>0.08</td><td>1.00</td><td>1.60</td></tr>
+      <tr><td><code>gpt-4o</code></td><td>2.50</td><td>10.00</td><td>1.25</td><td>como input</td><td>como input</td></tr>
+      <tr><td><code>gpt-4o-mini</code></td><td>0.15</td><td>0.60</td><td>0.075</td><td>como input</td><td>como input</td></tr>
+      <tr><td><code>gpt-4.1</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>como input</td><td>como input</td></tr>
+      <tr><td><code>gpt-4.1-mini</code></td><td>0.40</td><td>1.60</td><td>0.10</td><td>como input</td><td>como input</td></tr>
+      <tr><td><code>o3</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>como input</td><td>como input</td></tr>
+      <tr><td><code>o4-mini</code></td><td>1.10</td><td>4.40</td><td>0.275</td><td>como input</td><td>como input</td></tr>
+      <tr><td><code>gemini-2.5-pro</code></td><td>1.25</td><td>10.00</td><td>0.31</td><td>como input</td><td>como input</td></tr>
+      <tr><td><code>gemini-2.5-flash</code></td><td>0.30</td><td>2.50</td><td>0.075</td><td>como input</td><td>como input</td></tr>
+      <tr><td><code>text-embedding-3-small</code></td><td>0.02</td><td>0.00</td><td>como input</td><td>como input</td><td>como input</td></tr>
+      <tr><td><code>text-embedding-3-large</code></td><td>0.13</td><td>0.00</td><td>como input</td><td>como input</td><td>como input</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    USD por milhão de tokens, como a tabela estava na última vez em que foi
+    conferida contra um catálogo de modelos de terceiros, o que a tabela registra
+    como a data <code>as_of</code> dela. As entradas da Anthropic trazem as duas
+    tarifas de gravação de cache porque o daemon recua da tarifa de uma hora para
+    a de cinco minutos, e uma tabela que omitisse a mais longa cobraria a menos
+    em silêncio. A OpenAI não cobra nada para gravar no cache dela, então uma
+    gravação de cache ali é cobrada na tarifa de entrada. O
+    <code>gemini-2.5-flash</code> também traz uma tarifa de áudio de entrada de
+    1.00; toda outra entrada precifica áudio na tarifa de texto dela. Não existe
+    <code>claude-haiku-4</code>: o id que a Anthropic serve é
+    <code>claude-haiku-4-5</code>, e um id que não resolve para nada fica sem
+    preço em vez de adivinhado.
+  </p>
+  <p>
+    Estes são preços de tabela publicados, não os seus preços. Se você negociou
+    tarifas, ou roda um modelo que não está nesta tabela, os valores que o mcpd
+    mostra são uma estimativa e devem ser lidos como tal. A tabela é curta de
+    propósito: uma tabela longa envelheceria em mais lugares e passaria uma
+    impressão de exatidão maior do que ela merece.
+  </p>
+  <p>
+    Fornecer a sua própria tabela ainda não tem uma opção de linha de comando. A
+    tabela faz parte do estado do servidor, e o jeito de trocá-la hoje é embutir
+    o mcpd como biblioteca e passar uma para
+    <code>AppState::with_price_book</code>. Uma tabela é um id, uma moeda ISO
+    4217 e um mapa de id de modelo para tarifas, e todo valor que ela produz é
+    carimbado com o id dela, para que duas tabelas possam ser distinguidas depois
+    do fato. Os preços de um mesmo projeto deveriam compartilhar uma moeda; o
+    mcpd soma os spans de uma execução aritmeticamente e não converte entre
+    moedas.
+  </p>
+
+  <h2>Ler o dinheiro de volta</h2>
+  <p>
+    O <code>GET /v1/api/analytics/cost</code> responde para onde o dinheiro foi
+    ao longo de uma janela, sem exportar nada para uma planilha.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    command="curl -s 'http://localhost:4317/v1/api/analytics/cost?from=-7d&group_by=model'"
+  />
+
+  <table>
+    <thead>
+      <tr><th>Parâmetro</th><th>Significado</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>from</code>, <code>to</code></td>
+        <td>
+          A janela. RFC 3339 ou a forma relativa abreviada. O padrão são os
+          últimos sete dias, terminando agora.
+        </td>
+      </tr>
+      <tr>
+        <td><code>group_by</code></td>
+        <td>
+          <code>model</code> por padrão. Também <code>provider</code>,
+          <code>entity_name</code>, <code>environment</code>,
+          <code>status</code>, <code>session_id</code>, <code>user_id</code>,
+          <code>service_name</code> ou <code>name</code>.
+        </td>
+      </tr>
+      <tr>
+        <td><code>bucket</code></td>
+        <td>
+          <code>30s</code>, <code>5m</code>, <code>1h</code> ou <code>1d</code>.
+          Omita para ter só os totais; informe para ter uma série temporal ao
+          lado deles.
+        </td>
+      </tr>
+      <tr>
+        <td><code>project</code></td>
+        <td>Qual projeto ler. O padrão é o projeto padrão do daemon.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <CodeSwitcher class="not-prose my-6" samples={breakdown} title="para onde foi" />
+
+  <p>
+    Os grupos voltam do maior para o menor, limitados a cem linhas, e uma série
+    por bucket é limitada a cinco mil pontos.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={response} title="resposta" />
+
+  <p>
+    Uma sutileza no <code>count</code>. Agrupar por <code>model</code>,
+    <code>provider</code> ou <code>entity_name</code> lê os spans, então
+    <code>count</code> é um número de chamadas de modelo. Agrupar por qualquer
+    outra coisa lê a projeção da execução, então <code>count</code> é um número
+    de execuções. Os dois são úteis; eles não são o mesmo número, e comparar um
+    com o outro é o erro mais fácil de cometer aqui.
+  </p>
+  <p>
+    A latência por grupo nesta resposta traz apenas uma média e um máximo. Os
+    percentis vêm do
+    <code>GET /v1/api/analytics/summary</code>, que os calcula sobre a janela.
+  </p>
+
+  <h2>Para onde ir depois</h2>
+  <p>
+    O custo é uma coluna em uma lista de execuções, e a lista de execuções é
+    onde uma investigação de fato começa:
+    <a href={urlFor('/docs/searching', locale)} class="link">Encontrar uma execução</a>
+    cobre o <code>min_cost</code> e a ordenação por gasto. Se os seus valores
+    parecem errados porque payloads estão sendo descartados antes de serem
+    precificados, veja
+    <a href={urlFor('/docs/sampling', locale)} class="link">Amostragem</a>, que
+    decide o que é registrado. Todo campo citado nesta página está listado no
+    <a href={urlFor('/docs/reference/data-model', locale)} class="link">modelo de dados</a>.
+  </p>
+</Doc>

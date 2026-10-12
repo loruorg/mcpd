@@ -1,0 +1,441 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import Conformance from '@/components/Conformance.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="연동"
+  description="실행 중인 mcpd를 쓰는 세 가지 방법. HTTP API만 쓰거나, 여섯 SDK 중 하나를 쓰거나, 에이전트가 호출하는 MCP 서버로 쓰는 것입니다. 각각 무엇을 요구하고 무엇을 돌려주는지 다룹니다."
+  lede="어딘가에서 데몬이 실행되고 있습니다. 다른 것들이 그 데몬에 닿는 세 가지 경로와, 그중에서 고르는 방법입니다."
+  og="docs"
+>
+  <p>
+    mcpd에는 문이 하나 있고, 그 문을 지나는 방법이 셋입니다. 아래에 나오는 모든
+    것이 같은 HTTP 접점과 대화합니다. SDK는 그 위에 얹은 편의 계층이고, MCP
+    서버는 그 접점의 클라이언트입니다.
+  </p>
+
+  <h2>포트 하나, 접점 넷</h2>
+  <p>
+    프로세스 하나가 포트 하나에서 전부 제공합니다. 기본값은 4317입니다. 사이드카도
+    없고, 옆에서 같이 돌려야 하는 컬렉터도 없고, 인터페이스를 위한 정적 파일
+    서버도 없습니다.
+  </p>
+  <table>
+    <thead>
+      <tr><th>경로</th><th>무엇인지</th><th>키</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>/v1/traces</code>, <code>/v1/logs</code>, <code>/v1/metrics</code></td>
+        <td>OpenTelemetry 수집 입구입니다. OTel SDK라면 무엇이든 되고, 애플리케이션에 mcpd 전용 코드를 넣지 않습니다.</td>
+        <td>ingest</td>
+      </tr>
+      <tr>
+        <td><code>/v1/ingest</code></td>
+        <td>네이티브 수집 입구입니다. 배치 하나가 여섯 시그널을 원하는 대로 섞어 데이터 모델 전체를 실을 수 있고, 요청 하나가 배치의 스트림을 실을 수 있습니다.</td>
+        <td>ingest</td>
+      </tr>
+      <tr>
+        <td><code>/v1/api/…</code></td>
+        <td>쿼리 API입니다. 인터페이스와 SDK 모두 이것으로만 읽고, 다른 통로는 없습니다.</td>
+        <td>read, write, admin, execute 또는 worker. 엔드포인트마다 따로 선언합니다</td>
+      </tr>
+      <tr>
+        <td><code>/</code></td>
+        <td>운영자 인터페이스입니다. 바이너리 안에 함께 컴파일되어 있습니다.</td>
+        <td>마크업 자체에는 필요 없습니다. 데이터는 쿼리 API를 지나갑니다</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    경로가 둘 더 있습니다. <code>/healthz</code>와 <code>/readyz</code>는 프로브가
+    닿을 수 있도록 인증을 요구하지 않습니다. 엔드포인트에 애초에 닿기는 하는지
+    확인할 때는 여기서 시작하십시오.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="거기 있는가"
+    lines={[
+      { cmd: 'curl -s "$MCPD/healthz"' },
+      { out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0",…}', tone: 'ok' },
+      { cmd: 'curl -s "$MCPD/readyz"' },
+      { out: 'storage is not reachable: …', tone: 'warn' },
+      { out: '# readyz 는 저장소까지 확인하므로, 여기서 503 이 나오면 데몬은 떠 있고' },
+      { out: '# 그 뒤의 데이터베이스가 아니라는 뜻입니다.' },
+    ]}
+  />
+
+  <h2>SDK 없이 쓰는 HTTP API</h2>
+  <p>
+    쓰는 언어에 HTTP 클라이언트가 있으면 mcpd와 대화할 수 있습니다. 등록할 것도,
+    미리 만들어 둘 프로젝트도, 핸드셰이크도 없습니다. 모든 SDK는 아래 요청들 위에
+    얹은 편의 계층이고, 이 경로를 고르면 배치 처리와 재시도와 id 생성을 잃습니다.
+    그때부터는 직접 해야 합니다.
+  </p>
+
+  <h3>실행 기록하기</h3>
+  <p>
+    <code>POST /v1/ingest</code>는 배치 하나를 받습니다. 배치 하나에 스팬, 로그,
+    메트릭, 점수, 피드백, 관점 노트를 함께 실을 수 있고, 네이티브 입구가
+    OTLP 입구와 나란히 있는 이유가 바로 그것입니다. 여섯 시그널이 트레이스 id와
+    스팬 id를 공유하므로,
+    한 요청으로 보내면 두 번 찾아보지 않고도 상관관계가 유지됩니다.
+  </p>
+
+  <p>
+    그 엔드포인트에 닿는 형태는 셋이고, 어느 것인지는 콘텐츠 타입이 말합니다.
+    바이트를 보고 추측하는 부분이 없으므로, 문자열 안에 줄바꿈을 하나 넣는다고
+    본문의 의미가 바뀌는 일은 절대 없습니다.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>콘텐츠 타입</th><th>본문</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>application/json</code></td>
+          <td>배치 객체 하나. 모든 SDK가 보내는 형태입니다</td>
+        </tr>
+        <tr>
+          <td><code>application/json</code></td>
+          <td>배치 객체의 배열. 보낼 것을 여러 개 들고 있는 발신자를 위한 형태입니다</td>
+        </tr>
+        <tr>
+          <td><code>application/x-ndjson</code></td>
+          <td>한 줄에 배치 하나. 통째로 들고 있지 않고 본문이 도착하는 대로 읽습니다. <code>application/jsonl</code>도 같은 뜻입니다</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    각 원소는 그 자체로 하나의 배치입니다. <code>ingest_key</code>를 실은 원소는
+    자기 트랜잭션 안에서 저장되므로, 다시 보낸 스트림은 한 덩어리가 아니라 줄
+    단위로 중복임을 알아봅니다. 키가 없는 원소들은 함께 저장됩니다. 한 줄이라도
+    읽을 수 없거나 요청 전체가 두 한계 중 하나를 넘으면, 아무것도 저장하지 않고
+    요청 전체를 거절합니다. 응답은 그 전부를 아우르는 <code>IngestResult</code>
+    하나입니다.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <CodeSwitcher class="not-prose my-6" only={['curl']} region="trace" title="배치 하나" />
+
+  <p>요청이 반드시 맞게 해야 하는 것이 넷 있습니다.</p>
+  <ul>
+    <li>
+      <strong>id는 OpenTelemetry 형식입니다.</strong> 트레이스는 소문자 16진수
+      32자, 스팬은 16자이고, 전부 0이어서는 안 됩니다. 그 밖의 값은 함께 돌리는
+      다른 모든 도구와의 상관관계를 깨뜨립니다.
+    </li>
+    <li>
+      <strong><code>ingest_key</code>가 재시도를 안전하게 만듭니다.</strong> 한
+      배치에 대해 값이 변하지 않는 멱등성 키이므로, 다시 보내면 두 번 쓰이는 대신
+      중복으로 인식되어 집계됩니다.
+    </li>
+    <li>
+      <strong>키는 헤더에 넣습니다.</strong>
+      <code>Authorization: Bearer …</code> 또는 <code>X-Mcpd-Key</code>입니다.
+      수집에는 ingest 키가 필요하고, 데몬에 키가 하나라도 설정되어 있을 때만
+      그렇습니다.
+    </li>
+    <li>
+      <strong>배치에는 한계가 있습니다.</strong> 기본값은 본문 32 MiB와 시그널
+      10,000개이고, 둘 다 <code>--max-body-bytes</code>와
+      <code>--max-batch-signals</code>로 바꿀 수 있습니다. 시그널 한계는 요청
+      전체를 세므로, 같은 시그널을 여러 줄로 나눈다고 통과하지 못합니다. 큰 것을
+      보낼 때는 <code>content-encoding: gzip</code>을 쓰십시오.
+    </li>
+  </ul>
+  <p>
+    응답은 시그널별로 무슨 일이 있었는지 보고합니다.
+    <code>{'{"accepted":2,"rejected":0,"duplicate":0}'}</code>이고, 거절된 것이
+    있으면 <code>errors</code> 배열이 그 인덱스와 이유를 알려 줍니다. OTLP
+    엔드포인트는 대신 OTLP 자신의 형태로 답하며, 거절된 개수를 실은
+    <code>partialSuccess</code> 객체를 돌려줍니다. OpenTelemetry 발신자가 읽는
+    것이 그것이기 때문입니다.
+  </p>
+
+  <h3>다시 읽어오기</h3>
+  <CodeSwitcher class="not-prose my-6" only={['curl']} region="query" title="읽기" />
+
+  <p>
+    필터는 서로 조합되고, 페이징은 커서로 하며, <code>project</code>를 빼면
+    데몬의 기본 프로젝트가 됩니다. 저장된 페이로드에 대한 전문 검색은
+    <code>q</code> 파라미터이고, "모델이 이렇게 말한 실행을 찾아라"를 grep이 아니라
+    쿼리로 만들어 주는 것이 이것입니다.
+  </p>
+  <p>
+    mcpd가 스스로 일으키는 실패는 JSON으로 돌아옵니다. 기계가 읽을 수 있고 값이
+    변하지 않는 <code>error</code> 코드, 이 문제를 고쳐야 하는 사람을 위해 쓴
+    <code>message</code>, 그리고 파라미터 하나가 문제일 때의 <code>field</code>가
+    들어 있습니다. 코드로 분기하고, 메시지를 보여 주십시오.
+  </p>
+  <p>
+    실패 중 한 부류는 그 형태가 아니고, 그렇다고 가정한 클라이언트는 응답을 파싱하지
+    못합니다. 엔드포인트가 기대하는 타입으로 디코딩할 수 없는 요청 본문은 mcpd
+    코드가 실행되기 전에 웹 프레임워크가 거절하므로, <code>422</code>와
+    <code>content-type: text/plain</code>으로,
+    <code>missing field `scorer_id`</code> 같은 메시지로 답합니다. 아예 JSON이
+    아닌 본문 구문은 <code>400</code>으로, 역시 텍스트로 답합니다. 두 경우 모두
+    분기할 <code>error</code> 코드가 없습니다. 타입이 정해진 본문을 받는 모든
+    엔드포인트가 여기에 해당합니다.
+    <code>POST /v1/api/scores</code>, <code>/v1/api/feedback</code>,
+    <code>/v1/api/score</code>, <code>/v1/api/datasets</code>와 그
+    <code>items</code> 및 <code>capture</code> 경로, 그리고
+    <code>/v1/api/experiments</code>입니다. 수집 입구는 본문을 직접 읽으므로
+    <code>/v1/ingest</code>와 OTLP 경로는 JSON 형태로 답합니다. 4xx에 JSON이 아닌
+    본문이 오면 자기 코드가 보낸 잘못된 요청으로 보고, 텍스트로 읽으십시오.
+  </p>
+
+  <h2>SDK</h2>
+  <p>
+    여섯 언어입니다. <a href={linkTo('/docs/sdks/typescript')} class="link">TypeScript</a>,
+    <a href={linkTo('/docs/sdks/python')} class="link">Python</a>,
+    <a href={linkTo('/docs/sdks/rust')} class="link">Rust</a>,
+    <a href={linkTo('/docs/sdks/go')} class="link">Go</a>,
+    <a href={linkTo('/docs/sdks/kotlin')} class="link">Kotlin</a>,
+    <a href={linkTo('/docs/sdks/elixir')} class="link">Elixir</a>. 각각은 가능한
+    곳에서는 그 언어답고, 중요한 곳에서는 서로 같습니다. TypeScript 빠른 시작을
+    읽은 사람은 Kotlin 쪽을 예측할 수 있습니다.
+  </p>
+  <p>날것의 HTTP 위에 더해 얻는 것은 이렇습니다.</p>
+  <ul>
+    <li>배치 처리와 백그라운드 워커. 스팬을 기록하면 큐에 붙이고 곧바로 돌아옵니다.</li>
+    <li>429와 재시도할 가치가 있는 5xx 코드에 대한 백오프 재시도. 계속 잘못된 상태로 남을 4xx에는 절대 재시도하지 않습니다.</li>
+    <li>id 생성, 컨텍스트 전파, 그리고 들어올 때 파싱하고 나갈 때 내보내는 W3C <code>traceparent</code>. 덕분에 트레이스가 서비스 경계를 넘어 살아남습니다.</li>
+    <li>데몬과 같은 명세에서 생성된 타입. 한 필드가 SDK에서와 저장소에서 다른 뜻일 수 없습니다.</li>
+  </ul>
+  <p>
+    모든 언어에서 지키는 약속이 셋 있고, SDK를 뜨거운 경로에 넣어도 안전한 이유가
+    그것입니다. 계측은 절대 예외를 던지지 않습니다. 닿지 않는 데몬은 한 주기에 많아야
+    한 번 로그로 남기고 삼킵니다. 절대 블로킹하지 않습니다. 네트워크 작업은 워커에서
+    일어나므로, 에이전트의 지연 시간이 mcpd가 떠 있는지에 달려 있지 않습니다. 그리고
+    큐에는 한계가 있습니다. 큐가 차면 가장 오래된 스팬부터 버리고 카운터를 올립니다.
+    한계 없는 버퍼는 네트워크 장애를 메모리 부족 종료로 바꾸기 때문입니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="init" title="연결" />
+
+  <p>
+    인자 없이 만든 클라이언트는 로컬 데몬을 상대로 동작합니다. 모든 값은 코드로도
+    환경 변수로도 설정할 수 있고 코드가 이깁니다. 변수 이름은 모든 언어에서 같으므로,
+    두 서비스가 서로 다른 언어로 쓰여 있어도 한쪽에서 복사한 값이 다른 쪽에서 그대로
+    동작합니다. <code>MCPD_ENDPOINT</code>, <code>MCPD_API_KEY</code>,
+    <code>MCPD_PROJECT</code>, <code>MCPD_ENVIRONMENT</code>,
+    <code>MCPD_SERVICE_NAME</code>, <code>MCPD_SERVICE_VERSION</code>,
+    <code>MCPD_SAMPLE</code>, <code>MCPD_ENABLED</code>입니다.
+    <code>MCPD_ENABLED=false</code>로 두면 모든 호출이 아무 일도 하지 않으면서
+    유효한 객체는 그대로 돌려주므로, 테스트 스위트가 코드를 건드리지 않고 mcpd를
+    꺼 둘 수 있습니다.
+  </p>
+
+  <h3>서로 바꿔 쓸 수 있고, 그것을 테스트합니다</h3>
+  <p>
+    단위 테스트는 각 SDK가 그 작성자가 뜻한 대로 동작함을 증명합니다. 여섯이 서로
+    일치하는지에 대해서는 아무것도 증명하지 않습니다. 그래서 적합성 스위트가 살아 있는
+    데몬 하나를 상대로 각 언어를 통해 표준 실행 하나를 기록하고, 여기에 오직
+    <code>curl</code>만으로 같은 실행을 보내는 일곱 번째 통로를 더한 다음, 돌아오는
+    것이 구조적으로 동일함을 단언합니다.
+  </p>
+
+  <Conformance class="not-prose my-8" />
+
+  <p>
+    새 서비스에 쓸 언어를 고르는 중이라면, "이미 가지고 있는 것과 트레이스가 같아
+    보이겠는가"에 대한 답이 이것입니다.
+  </p>
+
+  <h3>쓰는 언어가 여섯에 없다면</h3>
+  <p>
+    OpenTelemetry SDK를 <code>/v1/traces</code>로 향하게 하고, 코드는 새로 쓰지
+    마십시오. mcpd는 OTLP 수신기이고, OpenTelemetry의 <code>gen_ai.*</code> 규약과
+    OpenInference의 <code>llm.*</code> 규약을 모두 매핑하므로 이미 가지고 있는
+    계측이 제대로 들어옵니다.
+    <a href={linkTo('/docs/opentelemetry')} class="link">OpenTelemetry</a>를 보십시오.
+  </p>
+
+  <h2>AI 에이전트에서, MCP로</h2>
+  <p>
+    세 번째 경로는 서비스가 아니라 에이전트를 위한 것입니다. 코드가 트레이스를 읽는
+    대신, 코딩이나 지원 에이전트가 대신 읽고 그에 대한 질문에 답합니다. "지난 실행은
+    왜 실패했는가", "이번 주에 스코어러가 낮게 매긴 실행을 보여 달라", "이 세션은
+    비용이 얼마였는가" 같은 질문입니다. mcpd는 이것을 Model Context Protocol로
+    노출합니다.
+  </p>
+
+  <h3>세 가지 도구</h3>
+  <p>
+    서른이 아니라 셋입니다. 한 번의 조사에서 밟는 세 걸음입니다. 어느 실행인가, 그
+    안에서 무슨 일이 있었는가, 그리고 이것이 한 실행의 문제인가 전부의 문제인가.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>도구</th><th>답하는 것</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>find_runs</code></td>
+        <td>
+          어느 실행인가. 한 줄에 하나씩, id와 경과 시간, 상태, 소요 시간, 비용,
+          단계 수를 보여 줍니다. 상태, 모델, 사용자, 세션 또는 자유 문구로 거르고,
+          소요 시간으로 정렬해 가장 느린 것을 얻습니다. 기본은 최근 24시간입니다.
+        </td>
+      </tr>
+      <tr>
+        <td><code>get_run</code></td>
+        <td>
+          무슨 일이 있었는가. 워터폴, 실패한 단계와 그 이유, 프롬프트와 컴플리션,
+          로그, 점수를 보여 줍니다. 페이로드에는 상한이 있어서 실행 하나가 컨텍스트
+          창을 채울 수 없습니다.
+        </td>
+      </tr>
+      <tr>
+        <td><code>run_stats</code></td>
+        <td>
+          한 실행인가 전부인가. 일정 구간의 비용, 실패율, 지연 시간, 토큰을 모델,
+          이름, 상태, 환경 또는 사용자로 묶어 보여 줍니다. 실패율이 40퍼센트라면
+          지금 읽고 있는 실행이 문제가 아닙니다.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    결과는 JSON이 아니라 텍스트로 돌아옵니다. 누구의 컨텍스트를 쓰는지에 대한 의도된
+    선택입니다. 스팬 객체 마흔 개는 대부분이 구두점입니다. 같은 실행을 워터폴로 그리면
+    몇백 토큰이고, 에이전트는 그 모양을 볼 수 있습니다.
+  </p>
+
+  <h3>구조</h3>
+  <p>
+    MCP 서버는 두 번째 서비스가 아니라 같은 바이너리의 하위 명령입니다.
+    <code>mcpd mcp</code>로 실행되고, 표준 입력과 표준 출력으로 JSON-RPC를 말하며,
+    자기 데이터를 갖지 않습니다. 열 포트도, 살려 둘 프로세스도, 배포할 것도 없습니다.
+    대화에 필요할 때 에이전트 호스트가 자식 프로세스로 시작하고, 끝나면 멈춥니다.
+  </p>
+  <p>
+    대신 가지고 있는 것은 데몬으로의 연결입니다. 모든 도구 호출은 위에서 설명한 같은
+    쿼리 API에 대한 요청이 되며, 같은 read 키와 같은 프로젝트 범위를 씁니다. 그래서
+    에이전트는 자기가 받은 키로 닿지 못하는 프로젝트에 닿을 수 없습니다. 에이전트에게
+    이 서버를 넘길 때의 영향 범위는 그 키를 넘길 때의 영향 범위와 정확히 같고, 하나를
+    설정하기 전에 확인해야 할 성질이 그것입니다.
+  </p>
+  <p>
+    도구 집합은 일부러 작게 두었습니다. 표면이 넓으면 모델이 잘못 고르고, 에이전트의
+    동작에 대한 질문 대부분은 실행을 나열하고, 하나를 열고, 일정 구간에 대해 수치를
+    묻는 것으로 줄어듭니다. 클라이언트는 여기에 적어 두어 뒤처질 수 있는 목록이 아니라
+    프로토콜 자신의 <code>tools/list</code> 호출로 현재 집합을 알아냅니다.
+  </p>
+
+  <h3>클라이언트 설정하기</h3>
+  <p>
+    MCP 호스트는 명령 하나와 인자 몇 개와 환경으로 서버를 띄웁니다. 정확한 파일과
+    정확한 키는 mcpd의 것이 아니라 호스트의 것이므로 그쪽 문서를 확인하십시오.
+    호스트가 요구하는 세 값은 어디서나 같습니다.
+  </p>
+  <table>
+    <thead>
+      <tr><th>호스트에 필요한 것</th><th>값</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>명령</td><td>호스트가 실행할 수 있는 경로에 있는 <code>mcpd</code> 바이너리.</td></tr>
+      <tr>
+        <td>인자</td>
+        <td>
+          <code>mcp</code> 하위 명령. 환경보다 인자를 넘기기 쉬운 호스트를 위해
+          쿼리할 데몬인 <code>--endpoint</code>와 그에 대한 read 키인
+          <code>--api-key</code>를 받습니다.
+        </td>
+      </tr>
+      <tr>
+        <td>환경</td>
+        <td>
+          같은 두 값을 <code>MCPD_ENDPOINT</code>와 <code>MCPD_API_KEY</code>로
+          넣습니다. 엔드포인트의 기본값은 <code>http://127.0.0.1:4317</code>이고,
+          데몬에 설정된 키가 없으면 키는 빼도 됩니다.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <Command
+    class="not-prose my-6"
+    label="호스트가 실행하는 것"
+    command="MCPD_ENDPOINT=https://mcpd.internal MCPD_API_KEY=$READ mcpd mcp"
+    primaryLabel="환경 변수로"
+    secondary={[
+      { label: '플래그로', command: 'mcpd mcp --endpoint https://mcpd.internal --api-key $READ' },
+      { label: 'Docker에서', command: 'docker run -i --rm -e MCPD_ENDPOINT -e MCPD_API_KEY ghcr.io/mcpd/mcpd mcp' },
+    ]}
+  />
+
+  <p>그 키를 발급할 때 붙들고 있어야 할 것이 셋입니다.</p>
+  <ul>
+    <li>
+      에이전트에게는 <code>ingest</code> 키가 아니라 <code>read</code> 키를
+      주십시오. 스팬을 쓰기 위한 자격 증명이 저장된 모든 프롬프트에 대한 자격
+      증명이 되지 않도록 스코프가 존재합니다.
+    </li>
+    <li>
+      프로젝트 하나로 범위를 좁히십시오. 최상위에 설정된 키는 그 데몬의 모든
+      프로젝트에 닿습니다.
+    </li>
+    <li>
+      <code>admin</code> 목록을 설정하기 전까지는 read 키로도 트레이스를 지울 수
+      있다는 점을 알아 두십시오. admin 스코프는 설정되지 않았을 때 read 목록으로
+      되돌아가기 때문입니다. admin 목록을 한 번도 받은 적 없는 데몬에서는 read 키를
+      가진 에이전트가 실행 하나를 지울 수 있습니다.
+    </li>
+  </ul>
+  <p>셋 다 <a href={linkTo('/docs/security')} class="link">보안</a>에 있습니다.</p>
+
+  <h2>무엇을 쓸지</h2>
+  <table>
+    <thead>
+      <tr><th>경로</th><th>쓸 때</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>HTTP</td>
+        <td>쓰는 언어에 SDK가 없거나, 셸이나 잡에서 보내거나, 의존성을 전혀 두고 싶지 않을 때.</td>
+      </tr>
+      <tr>
+        <td>SDK</td>
+        <td>애플리케이션을 계측하는 중이고, 배치 처리와 재시도와 예외를 던지지 않는 성질이 의존성보다 값질 때.</td>
+      </tr>
+      <tr>
+        <td>OpenTelemetry</td>
+        <td>이미 OTel을 내보내고 있고, 라이브러리를 더하기보다 URL을 바꾸고 싶을 때.</td>
+      </tr>
+      <tr>
+        <td>MCP</td>
+        <td>코드가 정해진 주기로 읽는 것이 아니라, 사람이 저장된 실행에 대해 에이전트에게 묻고 있을 때.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    섞어 써도 됩니다. TypeScript SDK로 내보내는 여러 서비스와, <code>curl</code>로
+    점수를 올리는 야간 잡과, 그 전부를 MCP로 다시 읽는 에이전트는 셋이 아니라 하나의
+    배포입니다.
+  </p>
+
+  <h2>다음</h2>
+  <ul>
+    <li>무엇이 저장되고 누가 읽을 수 있는지: <a href={linkTo('/docs/security')} class="link">보안</a>.</li>
+    <li>이미 있는 OTel 설정을 mcpd로 향하게 하기: <a href={linkTo('/docs/opentelemetry')} class="link">OpenTelemetry</a>.</li>
+    <li>명세에서 생성된 모든 엔드포인트: <a href={linkTo('/docs/reference/api')} class="link">HTTP API</a>.</li>
+    <li>알아 둘 만한 쿼리들: <a href={linkTo('/docs/searching')} class="link">실행 찾기</a>.</li>
+  </ul>
+</Doc>

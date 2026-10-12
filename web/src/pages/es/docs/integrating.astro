@@ -1,0 +1,470 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import Conformance from '@/components/Conformance.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Integración"
+  description="Tres formas de usar un mcpd en marcha: la API HTTP a secas, uno de los seis SDK, o un servidor MCP al que un agente puede llamar. Qué cuesta cada una y qué devuelve."
+  lede="Hay un daemon en ejecución en alguna parte. Estas son las tres formas de llegar hasta él desde fuera, y cómo elegir entre ellas."
+  og="docs"
+>
+  <p>
+    mcpd tiene una sola puerta y tres formas de cruzarla. Todo lo que sigue
+    habla con la misma superficie HTTP: los SDK son una comodidad encima de
+    ella, y el servidor MCP es un cliente suyo.
+  </p>
+
+  <h2>Un puerto, cuatro superficies</h2>
+  <p>
+    Un único proceso sirve todo eso en un solo puerto, el 4317 por defecto. No
+    hay sidecar, ni colector que ejecutar al lado, ni servidor de archivos
+    estáticos para la interfaz.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Ruta</th><th>Qué es</th><th>Clave</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>/v1/traces</code>, <code>/v1/logs</code>, <code>/v1/metrics</code></td>
+        <td>Ingesta de OpenTelemetry. Cualquier SDK de OTel, sin código específico de mcpd en tu aplicación.</td>
+        <td>De ingesta</td>
+      </tr>
+      <tr>
+        <td><code>/v1/ingest</code></td>
+        <td>Ingesta nativa. Un lote lleva cualquier mezcla de las seis señales y todo el modelo de datos, y una solicitud lleva un flujo de lotes.</td>
+        <td>De ingesta</td>
+      </tr>
+      <tr>
+        <td><code>/v1/api/…</code></td>
+        <td>La API de consulta. La interfaz y los SDK leen por aquí y por ningún otro sitio.</td>
+        <td>De lectura, escritura, administración, execute o worker, declarada endpoint por endpoint</td>
+      </tr>
+      <tr>
+        <td><code>/</code></td>
+        <td>La interfaz del operador, compilada dentro del binario.</td>
+        <td>Ninguna para el marcado; sus datos pasan por la API de consulta</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Otras dos rutas, <code>/healthz</code> y <code>/readyz</code>, no piden
+    autenticación para que una sonda pueda alcanzarlas. Empieza por ahí cuando
+    estés averiguando si un endpoint responde siquiera:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="¿está ahí?"
+    lines={[
+      { cmd: 'curl -s "$MCPD/healthz"' },
+      { out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0",…}', tone: 'ok' },
+      { cmd: 'curl -s "$MCPD/readyz"' },
+      { out: 'storage is not reachable: …', tone: 'warn' },
+      { out: '# readyz touches the store, so a 503 here means the daemon is up' },
+      { out: '# and the database behind it is not.' },
+    ]}
+  />
+
+  <h2>La API HTTP, sin SDK</h2>
+  <p>
+    Si tu lenguaje tiene un cliente HTTP, puede hablar con mcpd. No hay nada
+    que registrar, ningún proyecto que crear de antemano y ningún saludo
+    inicial. Cada SDK es una comodidad sobre las solicitudes de abajo, y elegir
+    esta vía te cuesta la agrupación en lotes, los reintentos y la generación
+    de ids, que pasas a hacer tú.
+  </p>
+
+  <h3>Escribir una ejecución</h3>
+  <p>
+    <code>POST /v1/ingest</code> acepta un lote. Un lote puede llevar spans,
+    logs, métricas, puntuaciones, feedback y notas de aspecto a la vez, y esa es
+    la razón de que la puerta nativa exista junto a la de OTLP: las seis señales
+    comparten los ids de traza y de span, así que enviarlas en una sola
+    solicitud las mantiene correlacionadas sin una segunda búsqueda.
+  </p>
+
+  <p>
+    A ese endpoint llegan tres formas, y el tipo de contenido dice cuál es.
+    Nada se deduce de los bytes, así que añadir un salto de línea dentro de una
+    cadena no puede cambiar nunca lo que significa un cuerpo.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Tipo de contenido</th><th>Cuerpo</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>application/json</code></td>
+          <td>Un objeto de lote, que es lo que envía cada SDK</td>
+        </tr>
+        <tr>
+          <td><code>application/json</code></td>
+          <td>Un array de objetos de lote, para un emisor que tiene varios a mano</td>
+        </tr>
+        <tr>
+          <td><code>application/x-ndjson</code></td>
+          <td>Un lote por línea, leído según llega el cuerpo en vez de retenerlo entero. <code>application/jsonl</code> significa lo mismo</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Cada elemento es el lote que es: se almacena en su propia transacción
+    cuando lleva un <code>ingest_key</code>, de modo que un flujo reenviado se
+    reconoce línea a línea y no como un bloque, y los elementos sin clave se
+    almacenan juntos. Se rechaza la solicitud entera, sin almacenar nada, si
+    alguna línea no se puede leer o si la solicitud en conjunto supera
+    cualquiera de los dos límites. La respuesta es un solo
+    <code>IngestResult</code> que cubre todo.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <CodeSwitcher class="not-prose my-6" only={['curl']} region="trace" title="un lote" />
+
+  <p>Cuatro cosas que la solicitud tiene que acertar:</p>
+  <ul>
+    <li>
+      <strong>Los ids tienen la forma de OpenTelemetry.</strong> 32 caracteres
+      hexadecimales en minúscula para una traza, 16 para un span, nunca todo
+      ceros. Cualquier otra cosa rompe la correlación con las demás
+      herramientas que ejecutas.
+    </li>
+    <li>
+      <strong><code>ingest_key</code> hace seguro un reintento.</strong> Es una
+      clave de idempotencia estable para un lote, así que un reenvío se
+      reconoce y se cuenta como duplicado en vez de escribirse dos veces.
+    </li>
+    <li>
+      <strong>La clave va en una cabecera.</strong>
+      <code>Authorization: Bearer …</code>, o <code>X-Mcpd-Key</code>. La
+      ingesta necesita una clave de ingesta, y solo cuando el daemon tiene
+      alguna configurada.
+    </li>
+    <li>
+      <strong>Los lotes tienen límites.</strong> 32 MiB de cuerpo y 10,000
+      señales por defecto, ambos ajustables con <code>--max-body-bytes</code> y
+      <code>--max-batch-signals</code>. El límite de señales cuenta la solicitud
+      entera, así que repartir las mismas señales en varias líneas no lo
+      esquiva. Envía <code>content-encoding: gzip</code> para cualquier cosa
+      grande.
+    </li>
+  </ul>
+  <p>
+    La respuesta informa de lo que pasó con cada señal:
+    <code>{'{"accepted":2,"rejected":0,"duplicate":0}'}</code>, con un array
+    <code>errors</code> que nombra el índice y el motivo de todo lo rechazado.
+    Los endpoints de OTLP responden en la forma propia de OTLP, con un objeto
+    <code>partialSuccess</code> que lleva el número de rechazos, porque es lo
+    que lee un emisor de OpenTelemetry.
+  </p>
+
+  <h3>Volver a leerlo</h3>
+  <CodeSwitcher class="not-prose my-6" only={['curl']} region="query" title="leer" />
+
+  <p>
+    Los filtros se combinan, la paginación es por cursor, y
+    <code>project</code> toma el proyecto por defecto del daemon cuando lo
+    omites. La búsqueda de texto completo sobre los payloads almacenados es el
+    parámetro <code>q</code>, y es lo que convierte «encontrar la ejecución
+    donde el modelo dijo esto» en una consulta y no en un grep.
+  </p>
+  <p>
+    Un fallo que levanta el propio mcpd vuelve como JSON con un código
+    <code>error</code> estable y legible por una máquina, un
+    <code>message</code> escrito para quien tenga que arreglarlo, y un
+    <code>field</code> cuando la culpa es de un parámetro concreto. Ramifica
+    por el código, muestra el mensaje.
+  </p>
+  <p>
+    Hay una clase de fallo que no tiene esa forma, y un cliente que dé por
+    hecho que sí no conseguirá interpretar la respuesta. Un cuerpo de solicitud
+    que no se puede decodificar al tipo que el endpoint espera lo rechaza el
+    framework web antes de que se ejecute ningún código de mcpd, así que
+    responde <code>422</code> con <code>content-type: text/plain</code> y un
+    mensaje como <code>missing field `scorer_id`</code>. Una sintaxis de cuerpo
+    que ni siquiera es JSON responde <code>400</code>, también como texto. En
+    ninguno de los dos casos hay un código <code>error</code> por el que
+    ramificar. Esto vale para todos los endpoints que reciben un cuerpo
+    tipado:
+    <code>POST /v1/api/scores</code>, <code>/v1/api/feedback</code>,
+    <code>/v1/api/score</code>, <code>/v1/api/datasets</code>, sus rutas
+    <code>items</code> y <code>capture</code>, y
+    <code>/v1/api/experiments</code>. Las puertas de ingesta leen el cuerpo
+    ellas mismas, así que <code>/v1/ingest</code> y las rutas de OTLP sí
+    devuelven la forma JSON. Trata un cuerpo que no es JSON en un 4xx como una
+    solicitud mal formada de tu propio código, y léelo como texto.
+  </p>
+
+  <h2>Los SDK</h2>
+  <p>
+    Seis lenguajes: <a href={urlFor('/docs/sdks/typescript', locale)} class="link">TypeScript</a>,
+    <a href={urlFor('/docs/sdks/python', locale)} class="link">Python</a>,
+    <a href={urlFor('/docs/sdks/rust', locale)} class="link">Rust</a>,
+    <a href={urlFor('/docs/sdks/go', locale)} class="link">Go</a>,
+    <a href={urlFor('/docs/sdks/kotlin', locale)} class="link">Kotlin</a> y
+    <a href={urlFor('/docs/sdks/elixir', locale)} class="link">Elixir</a>. Cada
+    uno es idiomático donde puede serlo e idéntico donde importa. Quien haya
+    leído el inicio rápido de TypeScript puede predecir el de Kotlin.
+  </p>
+  <p>Lo que ganas frente al HTTP a secas:</p>
+  <ul>
+    <li>Agrupación en lotes y un worker en segundo plano, así que registrar un span añade a una cola y vuelve.</li>
+    <li>Reintentos con backoff ante un 429 y ante los códigos 5xx que merecen reintento, y nunca ante un 4xx que seguirá mal formado.</li>
+    <li>Generación de ids, propagación del contexto, y el <code>traceparent</code> de W3C analizado a la entrada y emitido a la salida, para que una traza sobreviva al límite entre dos servicios.</li>
+    <li>Tipos generados a partir de la misma especificación que los del daemon, para que un campo no pueda significar una cosa en el SDK y otra en el almacén.</li>
+  </ul>
+  <p>
+    Tres promesas se cumplen en todos los lenguajes, y son la razón de que un
+    SDK se pueda poner en una ruta crítica. La instrumentación nunca lanza una
+    excepción: un daemon inalcanzable se anota como mucho una vez por intervalo
+    y el error se traga ahí. Nunca bloquea: el trabajo de red ocurre en el
+    worker, así que la latencia de tu agente no depende de que mcpd esté
+    levantado. Y su cola tiene un tope: cuando se llena, se descartan los spans
+    más antiguos y sube un contador, porque un búfer sin límite convierte un
+    corte de red en una muerte por falta de memoria.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="init" title="conectar" />
+
+  <p>
+    Un cliente construido sin argumentos funciona contra un daemon local. Todo
+    se puede fijar en el código o por variable de entorno, y gana el código, y
+    los nombres de las variables son los mismos en todos los lenguajes, así que
+    un valor copiado entre dos servicios sigue funcionando cuando están
+    escritos en lenguajes distintos:
+    <code>MCPD_ENDPOINT</code>, <code>MCPD_API_KEY</code>,
+    <code>MCPD_PROJECT</code>, <code>MCPD_ENVIRONMENT</code>,
+    <code>MCPD_SERVICE_NAME</code>, <code>MCPD_SERVICE_VERSION</code>,
+    <code>MCPD_SAMPLE</code> y <code>MCPD_ENABLED</code>. Poner
+    <code>MCPD_ENABLED=false</code> convierte cada llamada en una operación
+    vacía que aun así devuelve objetos válidos, así que una suite de pruebas
+    puede apagar mcpd sin tocar código.
+  </p>
+
+  <h3>Son intercambiables, y eso está probado</h3>
+  <p>
+    Las pruebas unitarias demuestran que cada SDK hace lo que quisieron sus
+    autores. No demuestran nada sobre si los seis coinciden. Por eso la suite
+    de conformidad escribe una misma ejecución canónica desde cada lenguaje
+    contra un daemon vivo, más un séptimo canal que envía esa misma ejecución
+    solo con <code>curl</code>, y comprueba que lo que vuelve es
+    estructuralmente idéntico:
+  </p>
+
+  <Conformance class="not-prose my-8" />
+
+  <p>
+    Si estás eligiendo lenguaje para un servicio nuevo, esta es la respuesta a
+    «¿las trazas se verán igual que las que ya tenemos?».
+  </p>
+
+  <h3>Si tu lenguaje no es uno de los seis</h3>
+  <p>
+    Apunta un SDK de OpenTelemetry a <code>/v1/traces</code> y no hace falta
+    código nuevo. mcpd es un receptor OTLP, y mapea tanto el convenio
+    <code>gen_ai.*</code> de OpenTelemetry como el <code>llm.*</code> de
+    OpenInference, así que la instrumentación que ya tienes aterriza donde
+    debe. Consulta <a href={urlFor('/docs/opentelemetry', locale)} class="link">OpenTelemetry</a>.
+  </p>
+
+  <h2>Desde un agente de IA, por MCP</h2>
+  <p>
+    La tercera vía es para un agente y no para un servicio: en lugar de que tu
+    código lea las trazas, un agente de programación o de soporte las lee por
+    ti y responde a una pregunta sobre ellas. «Por qué falló la última
+    ejecución», «enséñame las ejecuciones que un evaluador puntuó bajo esta
+    semana», «cuánto costó esta sesión». mcpd expone eso a través del Model
+    Context Protocol.
+  </p>
+
+  <h3>Las tres herramientas</h3>
+  <p>
+    Tres, no treinta. Son los tres movimientos de una misma investigación: qué
+    ejecución, qué pasó dentro de ella, y si es una ejecución o son todas.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Herramienta</th><th>Qué responde</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>find_runs</code></td>
+        <td>
+          Qué ejecución. Una línea por cada una: id, antigüedad, estado,
+          duración, costo, pasos. Filtra por estado, modelo, usuario, sesión o
+          texto libre; ordena por duración para sacar las más lentas. Por
+          defecto, las últimas 24 horas.
+        </td>
+      </tr>
+      <tr>
+        <td><code>get_run</code></td>
+        <td>
+          Qué pasó. La cascada, el paso que falló y por qué, los prompts y las
+          completions, los logs, las puntuaciones. Los payloads
+          tienen un tope para que una sola ejecución no llene una ventana de
+          contexto.
+        </td>
+      </tr>
+      <tr>
+        <td><code>run_stats</code></td>
+        <td>
+          Una ejecución o todas. Costo, tasa de fallos, latencia y tokens en
+          una ventana, agrupados por modelo, nombre, estado, entorno o usuario.
+          Una tasa de fallos del 40% significa que la ejecución que estás
+          leyendo no es el problema.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Los resultados vuelven como texto y no como JSON, una decisión deliberada
+    sobre el contexto de quién se gasta aquí. Cuarenta objetos de span son
+    sobre todo signos de puntuación; la misma ejecución dibujada como cascada
+    son unos cientos de tokens y el agente ve su forma.
+  </p>
+
+  <h3>Cómo está montado</h3>
+  <p>
+    El servidor MCP es un subcomando del mismo binario, no un segundo servicio.
+    Se ejecuta como <code>mcpd mcp</code>, habla JSON-RPC por la entrada y la
+    salida estándar, y no guarda datos propios. No hay puerto que abrir, ni
+    proceso que mantener vivo, ni nada que desplegar: el anfitrión del agente
+    lo arranca como proceso hijo cuando una conversación lo necesita y lo para
+    después.
+  </p>
+  <p>
+    Lo que sí mantiene es una conexión con un daemon. Cada llamada a una
+    herramienta se convierte en una solicitud a la misma API de consulta
+    descrita arriba, con la misma clave de lectura y el mismo ámbito de
+    proyecto, así que un agente no puede llegar a un proyecto al que no llegue
+    la clave que le diste. El radio de impacto de dar a un agente este servidor
+    es exactamente el de darle esa clave, y esa es la propiedad que hay que
+    comprobar antes de configurar uno.
+  </p>
+  <p>
+    El conjunto de herramientas es pequeño a propósito. Una superficie grande
+    hace que un modelo elija mal, y casi todas las preguntas sobre el
+    comportamiento de un agente se reducen a listar ejecuciones, abrir una y
+    hacer una pregunta numérica sobre una ventana. Un cliente descubre el
+    conjunto actual con la llamada <code>tools/list</code> del propio
+    protocolo, y no con una lista escrita aquí que podría quedarse atrás.
+  </p>
+
+  <h3>Configurar un cliente</h3>
+  <p>
+    Un anfitrión MCP lanza un servidor a partir de un comando, unos argumentos
+    y un entorno. El archivo exacto y la clave exacta son del anfitrión y no de
+    mcpd, así que consulta su documentación; los tres valores que necesita de
+    ti son los mismos en todas partes.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Qué necesita el anfitrión</th><th>Valor</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Comando</td><td>El binario <code>mcpd</code>, en una ruta que el anfitrión pueda ejecutar.</td></tr>
+      <tr>
+        <td>Argumentos</td>
+        <td>
+          El subcomando <code>mcp</code>. Acepta <code>--endpoint</code>, el
+          daemon a consultar, y <code>--api-key</code>, una clave de lectura
+          para él, pensados para un anfitrión que pasa argumentos con más
+          facilidad que un entorno.
+        </td>
+      </tr>
+      <tr>
+        <td>Entorno</td>
+        <td>
+          Los mismos dos valores, como <code>MCPD_ENDPOINT</code> y
+          <code>MCPD_API_KEY</code>. El endpoint por defecto es
+          <code>http://127.0.0.1:4317</code>, y la clave se puede omitir cuando
+          el daemon no tiene claves configuradas.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <Command
+    class="not-prose my-6"
+    label="lo que ejecuta el anfitrión"
+    command="MCPD_ENDPOINT=https://mcpd.internal MCPD_API_KEY=$READ mcpd mcp"
+    primaryLabel="Como entorno"
+    secondary={[
+      { label: 'Como flags', command: 'mcpd mcp --endpoint https://mcpd.internal --api-key $READ' },
+      { label: 'Desde Docker', command: 'docker run -i --rm -e MCPD_ENDPOINT -e MCPD_API_KEY ghcr.io/mcpd/mcpd mcp' },
+    ]}
+  />
+
+  <p>Tres cosas que tener presentes cuando emitas esa clave.</p>
+  <ul>
+    <li>
+      Dale al agente una clave <code>read</code>, no una clave
+      <code>ingest</code>. Los ámbitos existen para que una credencial que
+      escribe spans no sea además una credencial para todos los prompts
+      almacenados.
+    </li>
+    <li>
+      Limítala a un proyecto. Una clave configurada en el nivel superior llega
+      a todos los proyectos del daemon.
+    </li>
+    <li>
+      Ten en cuenta que una clave de lectura también borra trazas hasta que
+      configures una lista <code>admin</code>, porque el ámbito de
+      administración recurre a la lista de lectura cuando no está definido. Un
+      agente con una clave de lectura, en un daemon al que nunca se le dio una
+      lista de administración, puede borrar una ejecución.
+    </li>
+  </ul>
+  <p>Las tres están en <a href={urlFor('/docs/security', locale)} class="link">Seguridad</a>.</p>
+
+  <h2>Cuál usar</h2>
+  <table>
+    <thead>
+      <tr><th>Vía</th><th>Úsala cuando</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>HTTP</td>
+        <td>Tu lenguaje no tiene SDK, envías desde una shell o desde un trabajo programado, o no quieres ninguna dependencia.</td>
+      </tr>
+      <tr>
+        <td>Un SDK</td>
+        <td>Estás instrumentando una aplicación, y ahí los lotes, los reintentos y no lanzar nunca una excepción valen más que la dependencia.</td>
+      </tr>
+      <tr>
+        <td>OpenTelemetry</td>
+        <td>Ya emites OTel y prefieres cambiar una URL antes que añadir una biblioteca.</td>
+      </tr>
+      <tr>
+        <td>MCP</td>
+        <td>Una persona hace preguntas a un agente sobre ejecuciones almacenadas, en vez de que sea código quien las lee de forma programada.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Se mezclan. Una flota que emite por el SDK de TypeScript, un trabajo
+    nocturno que publica puntuaciones con <code>curl</code> y un agente que lo
+    lee todo por MCP son un despliegue, no tres.
+  </p>
+
+  <h2>A continuación</h2>
+  <ul>
+    <li>Qué se almacena y quién puede leerlo: <a href={urlFor('/docs/security', locale)} class="link">Seguridad</a>.</li>
+    <li>Apuntar a mcpd una instalación de OTel que ya existe: <a href={urlFor('/docs/opentelemetry', locale)} class="link">OpenTelemetry</a>.</li>
+    <li>Todos los endpoints, generados a partir de la especificación: <a href={urlFor('/docs/reference/api', locale)} class="link">API HTTP</a>.</li>
+    <li>Las consultas que conviene conocer: <a href={urlFor('/docs/searching', locale)} class="link">Encontrar una ejecución</a>.</li>
+  </ul>
+</Doc>

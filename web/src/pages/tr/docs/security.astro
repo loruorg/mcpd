@@ -1,0 +1,602 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Güvenlik"
+  description="Dağıtımı yapılmış bir mcpd neyi saklar, hangi ayarla makineden ne çıkar, anahtarlar, kapsamlar ve proje kiracılığı nasıl işler, maskelemenin sınırları nedir ve mcpd'de hangi denetimler yoktur."
+  lede="Bir güvenlik incelemesini tek sayfada yanıtlar. Ne saklanıyor, başka bir yere ne gönderiliyor, kim okuyabiliyor ve mcpd'de hangi denetimler yok."
+  og="docs"
+>
+  <p>
+    Aşağıdaki her şey daemon'un kendi kaynak kodundan ve API'nin üretildiği
+    <code>spec/mcpd.spec.json</code> dosyasından alınmıştır. Bir denetim yoksa
+    bu sayfa bunu söyler; eksiği bir güvenlik anketinde bulmanızı beklemez.
+  </p>
+
+  <h2>mcpd neyi saklar</h2>
+  <p>
+    mcpd, ajanınızın konuşmalarının metnini saklar. Amacı budur ve bir inceleme
+    buradan başlamalıdır. <code>model_generation</code> türündeki bir span
+    <code>input</code> ve <code>output</code> taşır: modele gönderilen prompt'un
+    tamamı ve geri gelen metnin tamamı. Çoğu kullanıcı için elindeki en hassas
+    veri budur.
+  </p>
+  <p>Altı sinyalin tamamında saklanan serbest biçimli alanlar şunlardır:</p>
+  <table>
+    <thead>
+      <tr><th>Sinyal</th><th>Taşıdığı içerik</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Span'ler</td>
+        <td><code>input</code>, <code>output</code>, <code>attributes</code>, <code>metadata</code> ve hata mesajı</td>
+      </tr>
+      <tr><td>Loglar</td><td>mesaj ve yapılandırılmış <code>fields</code></td></tr>
+      <tr><td>Metrikler</td><td><code>labels</code></td></tr>
+      <tr><td>Puanlar</td><td><code>reason</code> ve <code>metadata</code></td></tr>
+      <tr><td>Geri bildirim</td><td>serbest metin <code>comment</code> alanı ve <code>metadata</code></td></tr>
+      <tr><td>Yön notları</td><td>cümlenin kendisi, <code>text</code> alanında</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Payload'ın yanında her sinyal, bir çalıştırmayı sisteminizin geri kalanına
+    bağlayan ilişkilendirme alanları taşır: proje, ortam, servis adı ve sürümü,
+    oturum, thread, kullanıcı, kaynak, çalıştırma, istek, deney ve release.
+    <code>user_id</code>, maskelemeyi kapatmadığınız sürece girişte özetlenir.
+    Diğerleri gönderildiği gibi saklanır; birine bir kimlik koyarsanız o alanı,
+    bir kişinin teşhis edilebileceği bir alan olarak görün.
+  </p>
+  <p>
+    Token sayıları ve bir maliyet değeri alım sırasında hesaplanır ve
+    çalıştırmayla birlikte saklanır. Model çağrısıyla ilgili hiçbir şey bir
+    sağlayıcıdan çekilmez.
+  </p>
+
+  <h3>Nereye yazılır</h3>
+  <p>
+    Başlangıçta seçilen tek bir arka uç. Varsayılan, <code>--data</code> ile
+    ayarlanan <code>./mcpd.db</code> yolundaki gömülü bir SQLite dosyasıdır. Tam
+    metin dizini de aynı dosyada durur, yani depo yedeklenecek tek bir dosya ve
+    korunacak tek bir dosyadır. <code>--postgres-url</code> veya
+    <code>--clickhouse-url</code> veriyi, bunun yerine sizin çalıştırdığınız bir
+    veritabanına koyar.
+  </p>
+  <p>
+    Kalıcı çalıştırmalar, açık olduklarında, trace deposu hangisi olursa olsun
+    ilkinin yanındaki ikinci bir SQLite dosyasında durur. Bu dosya her
+    çalıştırmanın girdisini, durum verisini, çıktısını ve ilişkilendirmesini,
+    her adımın girdisini, çıktısını ve hatasını gönderildikleri gibi tutar:
+    maskelenmeden ve <code>user_id</code> özetlenmeden, çünkü sonraki bir adım
+    onları geri okur ve yeniden yazılmış bir değer çalıştırmanın yaptığı şeyi
+    değiştirirdi. Bir çalıştırmanın trace deposuna yazdığı span'ler diğer her
+    span gibi maskelenir. Çalıştırma dosyasını trace deposunu koruduğunuz gibi,
+    ya da daha sıkı koruyun. Saklama da özneye göre silme de, sona ermiş
+    çalıştırmalar için ona erişir;
+    <a href={`${urlFor('/docs/runs', code)}#storage`} class="link">Çalıştırmalar</a>
+    sayfasına bakın.
+  </p>
+  <p>
+    mcpd yazdığı şeyi şifrelemez. Durağan veri şifrelemesi gömülü depoda birimin,
+    diğer ikisinde veritabanının işidir.
+  </p>
+
+  <h2>Makineden ne çıkar</h2>
+  <p>
+    Varsayılan yapılandırmada hiçbir şey. Daemon tam olarak dört yerde dışarı
+    istek yapar ve bunların her biri siz yapılandırana kadar kapalıdır.
+    Güncelleme denetimi yok, kullanım raporlaması yok, hiçbir türde telemetri
+    yok.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Hedef</th><th>Ne gönderilir</th><th>Şu olmadıkça kapalı</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Depolama arka ucu</td>
+        <td>mcpd'nin sakladığı her şey, kendi bağlantınız üzerinden.</td>
+        <td><code>--postgres-url</code> veya <code>--clickhouse-url</code> ayarlarsanız. Varsayılan depo yerel bir dosyadır ve hiç ağ gerektirmez.</td>
+      </tr>
+      <tr>
+        <td>İletme</td>
+        <td>
+          Saklanan her span, <code>&#123;endpoint&#125;/v1/traces</code> adresine
+          OTLP JSON olarak yeniden yayılır. Buna payload da dahildir:
+          <code>input</code> ve <code>output</code>, her biri 32 KiB ile
+          sınırlanarak <code>input.value</code> ve <code>output.value</code>
+          öznitelikleri olarak dışarı çıkar. Zaten maskelenmiş değerler maskeli
+          kalır, özetlenmiş bir <code>user_id</code> özet hâliyle iletilir.
+        </td>
+        <td><code>--forward-endpoint</code> ayarlarsanız veya yapılandırma dosyasına bir <code>forward</code> bloğu koyarsanız.</td>
+      </tr>
+      <tr>
+        <td>İzleyici ve hedef webhook'ları</td>
+        <td>
+          Sabit bir JSON gövdesi: izleyicinin veya hedefin kimliği ve adı, proje,
+          koşul, neyi izlediği, eşik, okuma değeri, örnek sayısı, tek satırlık
+          bir ayrıntı ve bir zaman damgası. İçinde prompt veya tamamlama metni
+          yoktur.
+        </td>
+        <td>Yapılandırma dosyasındaki bir izleyici veya hedef bir <code>webhook</code> adı verir.</td>
+      </tr>
+      <tr>
+        <td>Yargıç model</td>
+        <td>
+          Ölçüt, artı çalıştırmanın sorusu ve yanıtı, her biri 4.000 karakterde
+          kesilerek <code>&#123;endpoint&#125;/chat/completions</code> adresine
+          POST edilir. Saklanan prompt ve tamamlama metnini bir model sağlayıcısına
+          gönderen tek yol budur.
+        </td>
+        <td>Yapılandırma dosyasındaki bir <code>judge</code> bloğu bir endpoint, bir model ve en az bir ölçüt adı verir ve bir çağıran o puanlayıcıyı adıyla ister.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    İkilinin <code>/</code> altında sunduğu arayüz kendi içine derlenmiştir. Yazı
+    tipleri, stilleri ve betikleri aynı kökenden gelir ve üçüncü taraf isteği
+    yapmaz.
+  </p>
+
+  <h2>Anahtarlar ve kapsamlar</h2>
+  <p>
+    Kimlik doğrulama API anahtarlarıyla yapılır. Hesap yok, oturum yok, giriş
+    yok. Bir anahtar <code>Authorization: Bearer …</code> olarak veya
+    <code>X-Mcpd-Key</code> başlığında sunulur; karşılaştırmadan önce iki taraf
+    da SHA-256 ile özetlenir, böylece ne yapılandırılmış anahtarın uzunluğu ne de
+    ilk yanlış karakterin konumu zamanlamadan gözlenebilir.
+  </p>
+  <p>Verdikleri erişimin genişliğine göre sıralı altı kapsam vardır:</p>
+  <table>
+    <thead>
+      <tr><th>Kapsam</th><th>Neye izin verir</th><th>Neden kendi kapsamı</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ingest</code></td>
+        <td>Sinyal yazar. Hiçbir şey okumaz.</td>
+        <td>Bu anahtar, span yayan her konteynerde bulunur; üçüncü taraf kod çalıştıranlarda da. Aynı anahtar saklanan her prompt'u da açmamalıdır.</td>
+      </tr>
+      <tr>
+        <td><code>read</code></td>
+        <td>Saklanan sinyalleri okur.</td>
+        <td>Prompt'lar okuma tarafındadır.</td>
+      </tr>
+      <tr>
+        <td><code>write</code></td>
+        <td>Saklanan veriyi değiştirir: puanlar, geri bildirimler, veri kümeleri, deneyler ve onaylar.</td>
+        <td>Bu işleyicilerin birkaçı yol üzerinde bir payload okur. Bir üretim çalıştırmasını bir veri kümesine almak o çalıştırmanın <code>input</code> ve <code>output</code> alanlarını okur, bu da bir span yaymaktan fazlasıdır.</td>
+      </tr>
+      <tr>
+        <td><code>execute</code></td>
+        <td>Çalıştırma başlatır, iptal eder, sinyal gönderir ve çalıştırmalara olay yayımlar.</td>
+        <td>Bir çalıştırma başlatmak para harcar ve sistemlerinize uzanır. Puan kaydedebilen bir anahtar iş de başlatabilmemelidir.</td>
+      </tr>
+      <tr>
+        <td><code>worker</code></td>
+        <td>Adım talep eder ve adımlara ne olduğunu bildirir.</td>
+        <td>Adım gövdelerini çalıştıran süreçteki anahtardır. Bir talep adımın <code>input</code> alanını ve önceki her adımın <code>output</code> alanını geri verir, yani payload okur; çalıştırma başlatabilmemeli ve saklanan veriyi değiştirebilmemelidir.</td>
+      </tr>
+      <tr>
+        <td><code>admin</code></td>
+        <td>Veriyi yok eder ve denetim günlüğünü okur.</td>
+        <td>Silmek okumak değildir.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Bir endpoint'in hangi kapsamı aldığı spesifikasyonda endpoint başına
+    bildirilir ve üretilen
+    <a href={urlFor('/docs/reference/api', code)} class="link">HTTP API</a>
+    referansında yayımlanır; böylece “bu endpoint neye ihtiyaç duyar” sorusunun
+    belge başına bir değil, tek bir yanıtı olur.
+  </p>
+
+  <h3>Geri düşme ve elinizdeki anahtar için anlamı</h3>
+  <p>
+    Ayarlanmamış bir <code>write</code> listesi <code>ingest</code> listesine,
+    ayarlanmamış bir <code>admin</code> listesi <code>read</code> listesine geri
+    düşer. Ayarlanmamış <code>execute</code> ve <code>worker</code> listeleri
+    <code>write</code> listesine, o da ayarlanmamışsa <code>ingest</code>
+    listesine geri düşer. Bir yükseltmenin, dar kapsamlar var olmadan önce
+    yapılandırılmış her dağıtımda erişimi iptal etmesini bu engeller. Bir admin
+    anahtarı da <code>execute</code> ve <code>worker</code> için kabul edilir;
+    böylece bir operatör bir çalıştırmayı elle yürütebilir. Bunlar birlikte,
+    yalnızca bir ingest anahtarı ile bir read anahtarı tutan bir daemon'da şu
+    anlama gelir:
+  </p>
+  <ul>
+    <li>ingest anahtarı puan ve geri bildirim de ekler, çalıştırma başlatır ve adım talep eder, ve</li>
+    <li>read anahtarı trace de siler ve admin geri düşmesi üzerinden çalıştırma başlatır ve adım talep eder.</li>
+  </ul>
+  <p>
+    Yani <code>--admin-key</code> ayarlanana kadar bir read anahtarı aynı zamanda
+    bir silme anahtarıdır; <code>--execute-key</code>,
+    <code>--worker-key</code> ve <code>--admin-key</code> ayarlanana kadar da iki
+    anahtar da çalıştırma yüzeyine erişir. Anahtarları bu bilgiyle dağıtın.
+    Hiçbir şey kendiliğinden daralmaz. Her kapsamın bir seçeneği vardır:
+    <code>--ingest-key</code>, <code>--read-key</code>,
+    <code>--write-key</code>, <code>--admin-key</code>,
+    <code>--execute-key</code> ve <code>--worker-key</code>; her biri bir liste
+    alır ve hepsi yapılandırma dosyasında proje başına da ayarlanabilir.
+  </p>
+
+  <h3>Anahtar yoksa her kapsam açıktır</h3>
+  <p>
+    Bu varsayılan bilinçlidir: bir dizüstünde ilk çalıştırma bir kimlik bilgisi
+    gerektirmemelidir. Aynı zamanda dışarı açılmış bir örnekle ilgili en tehlikeli
+    tek şeydir, bu yüzden daemon loopback dışı bir adrese bağlandığında, ona
+    erişmemesi gereken bir çağırana açık her yüzey için başlangıçta bir uyarı
+    loglar. Her uyarı yüzeyi ve onu kapatan seçenekleri adlandırır. Bir portu
+    dışarı açmadan önce <code>mcpd config</code> çalıştırın: bir çağrının
+    çözüldüğü yapılandırmayı yazdırır, sonra çıkar. Kapsam başına bir satır taşır
+    ve bir kapsamın hangi listeye geri düştüğünü söyler, yani
+    <code>admin auth      key required (read keys)</code> satırı read
+    anahtarlarının hâlâ silebildiğini anlatır.
+    <a href={urlFor('/deploy', code)} class="link">Docker ve Kubernetes</a>
+    çıktıyı gösterir.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="erişilebilir olmadan önce kapalı"
+    command={'mcpd --ingest-key "$INGEST" --read-key "$READ"'}
+    primaryLabel="Seçenekler"
+    secondary={[
+      { label: 'Altı kapsamın tümü', command: 'mcpd --ingest-key "$I" --read-key "$R" --write-key "$W" --execute-key "$E" --worker-key "$K" --admin-key "$A"' },
+      { label: 'Ortam değişkeniyle', command: 'MCPD_INGEST_KEYS=… MCPD_READ_KEYS=… mcpd' },
+      { label: 'Önce denetleyin', command: 'mcpd config' },
+    ]}
+  />
+
+  <h3>Proje bir kiracılık sınırıdır</h3>
+  <p>
+    Üst düzeyde yapılandırılan bir anahtar her projeye yetki verir. Bunun yerine
+    yapılandırma dosyasının <code>projects</code> bloğunda adlandırılmış bir
+    projenin altında listelenen anahtar yalnızca o projeye yetki verir ve her
+    proje kapsam başına kendi listesini tutar. Bir anahtar birden çok projenin
+    altında görünebilir; bir platform ekibi, sunucunun tamamını elinde tutmadan
+    işlettiği her şeyi kapsayan bir anahtarı böyle tutar.
+  </p>
+  <p>Yazma yolunda denetim istek başına değil, sinyal başınadır:</p>
+  <ul>
+    <li>
+      Bir yığın birden çok proje adlandırabilir. Anahtarın erişemediği bir
+      projeyi adlandıran sinyaller düşürülür ve yanıtta gerekçesiyle birlikte
+      reddedilmiş olarak bildirilir, böylece yanlış projeye yönlendirilmiş bir
+      filo zaten okuduğu yanıttan fark edilir. Yığının geri kalanı saklanır.
+    </li>
+  </ul>
+  <p>
+    Okuma yolunda, bir projeyi adlandıran her endpoint onu anahtarın yetkisiyle
+    karşılaştırır: trace'ler, span'ler, loglar, metrikler, puanlar, geri
+    bildirimler, analitik, veri kümeleri, deneyler ve denetim günlüğü. Bir veri
+    kümesinin içindeki öğeler veri kümesinin kimliğiyle adreslenir; daemon o
+    veri kümesinin hangi projeye ait olduğunu bulup anahtarı ona göre denetler,
+    yani projeyi açamayan bir anahtar o projeden alınmış öğeleri okuyamaz. Var
+    olmayan bir kimlik, anahtarın erişemeyeceği bir kimlikle aynı şekilde
+    reddedilir, böylece endpoint hangi kimliklerin var olduğunu sınamak için
+    kullanılamaz. Üç endpoint hiç proje almaz ve okuma kapsamını tutan her anahtarla, hangi
+    projelere sınırlanmış olursa olsun, erişilebilir: proje listesi,
+    puanlayıcı kataloğu ve depolamanın yetenek kümesi
+    (<code>GET /v1/api/capabilities</code>). Proje listesi anahtarın yetkisine
+    göre süzülür, yani projeye sınırlanmış bir anahtar yalnızca erişebildiği
+    projeleri görür. Paylaşılan bir örnekte proje adları çoğu zaman ekip veya
+    müşteri adlarıdır. İzleyici durumu ile hedef durumu da bu listedeydi;
+    artık anahtarın proje yetkisine göre süzülüyor, ki baştan beri öyle
+    olmalıydı: bir izleyici izlediği projeyi adıyla taşır ve gönderdiği
+    webhook’u da yanında getirir. API bu webhook’un yalnızca sunucu adını
+    verir, çünkü bir webhook URL’si çoğu zaman kendi kimlik bilgisidir.
+  </p>
+
+  <h3>Bir ret, iki sorundan hangisi olduğunu söyler</h3>
+  <p>
+    Eksik veya tanınmayan bir anahtar 401'dir; tanınan ama bu endpoint'in ya da
+    bu projenin kabul etmediği bir anahtar 403'tür. Ayrım operasyoneldir: 401
+    sizi bir kimlik bilgisindeki yazım hatasını aramaya gönderir, 403 kimlik
+    bilgisinin doğru, yetkinin yanlış olduğunu söyler.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="dört ret"
+    lines={[
+      { cmd: 'curl -sw "%{http_code} " "$MCPD/v1/api/traces?project=acme"' },
+      { out: '401  this endpoint needs an API key; send it as `Authorization: Bearer <key>`', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $TYPO"' },
+      { out: '401  that key is not one this daemon knows', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $INGEST"' },
+      { out: '403  that key is not valid for reading', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $BILLING_READ"' },
+      { out: '403  that key does not reach the project "acme"', tone: 'warn' },
+    ]}
+  />
+
+  <p>
+    Bu son mesaj, proje var olsa da olmasa da aynıdır. Hangi proje adlarının
+    gerçek olduğunu doğrulamak küçük bir sızıntıdır ve paylaşılan bir daemon'da
+    o adlar müşterilerinizin adlarıdır.
+  </p>
+
+  <h3>Denetim günlüğü</h3>
+  <p>
+    Saklanan bir payload'ın mcpd'den dışarı verilmesi kaydedilir, her silme de
+    kaydedilir, böylece “bu çalıştırmayı kim okudu” sorusunun bir yanıtı olur.
+    Bir satır şunları taşır: ne zaman, hangi anahtar, hangi eylem, hangi proje,
+    hangi trace veya veri kümesi adlandırıldı ve istek karşılandı mı reddedildi mi.
+    <code>GET /v1/api/audit</code> bunu en yenisi başta olacak şekilde geri okur
+    ve <code>admin</code> kapsamını ister.
+  </p>
+  <p>
+    On sekiz eylem kaydedilir: <code>get_trace</code>, <code>list_spans</code>,
+    <code>list_logs</code>, <code>list_feedback</code>,
+    <code>list_dataset_items</code>, <code>capture_into_dataset</code>,
+    <code>read_trace_aspect_notes</code>, <code>get_theme</code>, <code>get_theme_flow</code>, <code>list_theme_history</code>, <code>list_theme_examples</code>,
+    <code>delete_trace</code>, <code>erase_subject</code> ve kalıcı
+    çalıştırmalar üzerinde beş eylem: <code>list_runs</code>,
+    <code>get_run</code>, <code>list_run_events</code>,
+    <code>get_step_cause</code> ve <code>cancel_run</code>. Sınır istek değil,
+    payload'dır. Trace'leri listelemek adlardan, sürelerden, token
+    sayılarından ve maliyetten oluşan, içinde prompt veya tamamlama bulunmayan bir
+    izdüşüm döndürür, bu yüzden kaydedilmez; o trace'lerden birini açmak
+    kaydedilir, çünkü metin oradadır. Kalıcı çalıştırmaları listelemek
+    kaydedilir, çünkü listedeki her çalıştırma girdisini, çıktısını ve durum
+    verisini gönderildikleri gibi taşır. Bir çalıştırmanın reddedilen bir
+    okuması, çalıştırmanın sahibi olan projenin altında kaydedilir.
+  </p>
+  <p>
+    Worker çağrıları kaydedilmez: bir adımı talep etmek, başladığını bildirmek,
+    heartbeat, complete ve fail. Bir lease adımın girdisini ve ondan önceki
+    adımların çıktılarını taşır, ama worker döngüsü dakikada birçok kez talep
+    eder ve talep başına bir satır, bir kişinin yaptığı okumaları gömerdi.
+    <code>worker</code> anahtarını, sunduğu çalıştırmaların her payload'ını
+    okuyan bir anahtar olarak görün. Bir çalıştırmayı başlatmak da kaydedilmez;
+    hâlâ tutulan bir idempotency anahtarıyla yeniden gönderilen istek, o
+    anahtarın başlattığı çalıştırmayla yanıtlanır, bu yüzden
+    <code>execute</code> anahtarını başlattığı çalıştırmaları okuyabilen bir
+    anahtar olarak görün.
+  </p>
+  <p>Bir inceleyicinin bilmesi gereken beş özellik:</p>
+  <ul>
+    <li>
+      <strong>Anahtar hiçbir zaman yazılmaz.</strong> Aktör, anahtarın
+      kısaltılmış bir SHA-256 özetidir; bu, anahtar için bir doğrulayıcı
+      saklamadan bir anahtarı diğerinden ayırır. Açık bir daemon'a anahtarsız
+      gelen bir istek <code>anonymous</code> olarak kaydedilir.
+    </li>
+    <li>
+      <strong>Kişi ingress'inizden gelir, yoksa hiç gelmez.</strong> mcpd'de
+      kullanıcı hesabı yoktur, bu yüzden bir satır tek başına bir eylemi bir
+      insana değil bir anahtara bağlar. <code>subject</code> alanı,
+      <code>--trusted-identity-header</code> ve
+      <code>--trusted-proxy-cidr</code> birlikte ayarlandığında bir kimlik
+      taşır, aksi hâlde boştur ve varsayılan budur. mcpd o kimliği hiçbir zaman
+      kendisi belirlemez; adını verdiğiniz bir adresin öne sürdüğünü kaydeder.
+    </li>
+    <li>
+      <strong>Ret de kaydedilir.</strong> Satır, 403 döndürülmeden önce yazılır,
+      çünkü başka bir ekibin projesine yapılmış reddedilmiş bir deneme, denetim
+      günlüğünün var olma nedenidir. Günlüğü okumak kendisi kaydedilmez: hiçbir
+      payload okunmadan büyürdü ve satır, admin anahtarını tutanın zaten
+      bilmediği bir şey söylemezdi.
+    </li>
+    <li>
+      <strong>Hangi anahtarı kaydeder, isteğe bağlı olarak da kimi.</strong>
+      Anahtar kendisi olarak değil, kısaltılmış bir özet olarak saklanır, yani
+      günlük kimlik bilgilerinin biriktiği bir yer değildir. Bu, “bunu bir admin
+      anahtarı sildi” sorusunu yanıtlar, “hangi kişi sildi” sorusunu değil,
+      çünkü mcpd'nin kimlik sağlayıcısı yoktur. İkinci yanıtı
+      istiyorsanız, ingress'inizin zaten koyduğu başlığı ve onu koymasına izin
+      verilen adresleri verin: <code>--trusted-proxy-cidr 10.42.0.0/16</code> ile
+      birlikte <code>--trusted-identity-header x-forwarded-user</code>. İki yarım
+      da gereklidir. Başlık, porta erişebilen herkesin gönderebileceği bir
+      metindir, bu yüzden mcpd onu yalnızca adını verdiğiniz bir adresten okur;
+      başka bir yerden gelen istek normal karşılanır ve satırı bir özne taşımaz,
+      ki bu bir tahmin yerine dürüst yanıttır. İki seçenek de ayarlanmadığında
+      hiçbir özne kaydedilmez ve varsayılan budur.
+    </li>
+    <li>
+      <strong>Saklama süresi onu budamaz.</strong> Saklama taraması span'leri,
+      logları, metrikleri, trace'leri, puanları, geri bildirimleri, yön notlarını
+      ve sona ermiş kalıcı çalıştırmaları kaldırır. Denetim günlüğüne dokunmaz, çünkü anlattığı verinin yanında
+      süresi dolan bir günlük, silinen veriyi kimin okuduğunu
+      söyleyemezdi.
+    </li>
+    <li>
+      <strong>Anlattığı isteği hiçbir zaman başarısız kılmaz.</strong>
+      Yazılamayan bir satır loglanır ve <code>/metrics</code> üzerinde
+      <code>mcpd_audit_write_failures_total</code> olarak sayılır, okuma yine de
+      döner. Okuma yolunu düşürebilen bir denetim günlüğü, önlediği riskten daha
+      ağır bir risktir, bu yüzden isteklerin başarısız olmasına güvenmek yerine o
+      sayacı izleyin.
+    </li>
+  </ul>
+
+  <h3>Hiçbir anahtarın kapsamadıkları</h3>
+  <ul>
+    <li>
+      <strong>Arayüz.</strong> <code>/</code> üzerindeki işaretleme, porta
+      erişebilen herkese sunulur. Arkasındaki veri sunulmaz: yaptığı her istek
+      sorgu API'sinden geçer ve aynı anahtarlarla karşılaşır. Daemon'da oturum açma
+      ekranı yoktur.
+    </li>
+    <li>
+      <strong>Yoklamalar ve <code>/metrics</code>.</strong> Bilerek kimlik
+      doğrulamasızdır, çünkü bir kubelet ve bir collector anahtar taşıyamaz.
+      Durumu, sürümü, çalışma süresini, depolama arka ucunun adını ve sayaçları
+      bildirirler, payload'ları asla.
+    </li>
+    <li>
+      <strong>Köken.</strong> Sorgu API'si ve yoklamalar
+      <code>Access-Control-Allow-Origin: *</code> ile yanıt verir, yani herhangi
+      bir kökendeki bir tarayıcı sayfası onları çağırabilir. mcpd çerez ve
+      ortamdan gelen kimlik bilgisi kullanmaz, bu yüzden böyle bir sayfanın yine
+      de bir anahtar tutması gerekir: izin verici bir köken politikası ona
+      anahtar vermez.
+    </li>
+  </ul>
+
+  <h2>Maskeleme ne yapar, ne yapamaz</h2>
+  <p>
+    Maskeleme varsayılan olarak açıktır ve yazmadan önce, alım hattının üçüncü
+    aşaması olarak çalışır. Bir kuralın eşleştiği değer veritabanına hiç
+    ulaşmaz; bu, sonradan silinen bir değerden başka bir güvencedir ve fark, bir
+    denetçinin sorduğu farktır. Yapamadığı şey baytları ağdan uzak tutmaktır:
+    kural çalıştığında baytlar ağı çoktan geçmiştir. Bunun için SDK'lar
+    <code>MCPD_CAPTURE_PAYLOADS=false</code> taşır; bu, bir span kuyruğa
+    alınmadan önce <code>input</code> ve <code>output</code> alanlarını düşürür,
+    span'in geri kalanına dokunmaz.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    Bir kural, küçük harfli alt dizelerden ve bir moddan oluşur. Bir anahtar, adı
+    küçük harfe çevrildiğinde bunlardan birini içeriyorsa eşleşir. Eşleşen
+    değerler tümüyle veya kısmen maskelenir, anahtarlı bir özetle karılır ya da
+    düşürülür. Eşleşen bir anahtar bir nesne tutuyorsa, alt anahtarların adı ne
+    olursa olsun altındaki her şey de maskelenir; JSON sayısı olarak gönderilen bir
+    sır, dize olarak gönderilenle aynı biçimde ele alınır. Kuralların tam tablosu
+    <a href={urlFor('/docs/privacy', code)} class="link">Maskeleme ve saklama</a>
+    sayfasındadır.
+  </p>
+  <p>
+    Şimdi sınır: bir inceleme bunu soracaktır ve hiçbir yapılandırma bunu ortadan
+    kaldırmaz. <strong>Kurallar alan adlarıyla eşleşir, bir değerin biçimiyle
+    değil.</strong> Bir kullanıcının cümlenin ortasına yapıştırdığı ve
+    <code>content</code> ya da <code>question</code> adlı bir alanda gelen bir
+    API anahtarı, hattaki hiçbir şeyle eşleşmez. Alan adı masumdur, dolayısıyla
+    değer olduğu gibi saklanır.
+  </p>
+  <p>Yani maskeleme tek bir şeyi durdurur:</p>
+  <ul>
+    <li>Kimlik bilgilerinin ve tanımlayıcıların yapılandırılmış biçimde toplanmasını durdurur, yani bir kimlik bilgisinin ne olduğunu söyleyen adda bir alanda gelmesini.</li>
+    <li>Serbest metni taramaz ve bir içerik sınıflandırıcısı değildir.</li>
+    <li>Bir sırrı biçiminden veya entropisinden tanımaz.</li>
+    <li>Bir span'in adına veya bir log kaydının mesajına dokunmaz. Bunlar payload değil, gruplama için kullanılan tanımlayıcılardır ve yeniden yazmak gruplamayı bozardı. Bir span adını bir müşterinin e-posta adresinden kurmayın.</li>
+    <li>Çalıştırma deposuna dokunmaz. Kalıcı bir çalıştırmanın payload'ları onun çalışma durumudur ve gönderildikleri gibi tutulur; yalnızca bir çalıştırmanın trace deposuna yazdığı span'ler maskelenir.</li>
+  </ul>
+  <p>
+    Bir denetim biçim üzerinde çalışır ve o da önleme değil, sonradan tespittir:
+    yerleşik <code>no_leaked_secret</code> puanlayıcısı, <em>yanıtında</em> kimlik
+    bilgisine benzeyen bir belirteç taşıyan çalıştırmanın puanını düşürür; bunu
+    bilinen bir önekten ya da uzun, karışık büyük küçük harfli alfanümerik bir
+    diziden anlar. Zaten saklanmış bir çalıştırmayı puanlar. Hiçbir şeyi
+    kaldırmaz, prompt'u okumaz ve yalnızca siz istediğinizde çalışır. Bunu ikinci
+    bir maskeleme katmanı olarak değil, bunun olduğunu öğrenmenin bir yolu olarak
+    görün.
+  </p>
+  <p>
+    Bir kural eşleşse de eşleşmese de iki sınır geçerlidir. 128 KiB'den uzun her
+    tek dize, bir işaretle birlikte karakter sınırında kesilir ve gezinme 32
+    derinliğinde durur. İkisi de, kaçak tek bir belgenin veritabanınızın boyutunu
+    belirlemesini veya bir CPU'yu meşgul etmesini engellemek için vardır.
+  </p>
+  <p>
+    <code>--no-redact</code> hattın tamamını kapatır; bu yalnızca yukarı akışta bir
+    şey zaten maskeliyorsa akla yatkındır. Maskelemenin bir tanımlayıcıyı
+    özetlediği yerde <code>--redact-key</code> ayarlayın: yerleşik anahtar
+    yayımlanmış kaynak koddaki bir sabittir ve tanımlayıcılar küçük kümelerden
+    gelir, bu yüzden anahtarsız bir özet aday deneyerek geri çözülebilir.
+  </p>
+
+  <h2>Saklama ve silme</h2>
+  <p>
+    <code>--retention-days</code>, verdiğiniz gün sayısından eski sinyalleri
+    siler. Vermezseniz hiçbir şey silinmez ve doğru varsayılan budur: geçen ayın
+    trace'lerini sessizce atan bir aracı en kötü anda fark edersiniz.
+  </p>
+  <p>
+    Tarama, bir kullanıcının isteği içinde değil, daemon'un içinde saatlik bir
+    zamanlayıcıyla çalışır. <code>projects</code> bloğunda adlandırılmış her
+    projeyi kapsar; her biri için kendi <code>retention_days</code> değeri varsa
+    onu, yoksa genel değeri kullanır, artı varsayılan projeyi. Hiçbir yerde
+    penceresi olmayan bir proje hiç budanmaz.
+  </p>
+  <p>
+    Tek bir kişiyle ilgili bir talep için
+    <code>DELETE /v1/api/subjects/{'{user_id}'}?project=…</code>, o kişiye karşı
+    projede kaydedilmiş her çalıştırmayı, bunlara bağlı span'ler, loglar,
+    metrikler, puanlar ve geri bildirimlerle birlikte kaldırır ve sinyal başına
+    bir sayıyla yanıt verir. Tanımlayıcı, eşleştirilmeden önce aynı anahtarla
+    özetlenir, böylece istek siz hiçbir şeyi özetlemeden özetlenmiş
+    tanımlayıcılara karşı çalışır; yanıt ayrıca saklanan tanımlayıcılardan
+    kaçının isteğin eşleştiremeyeceği bir biçimde olduğunu söyler. Bir kişi
+    yerine tek bir çalıştırmayı kaldırmak için
+    <code>DELETE /v1/api/traces/{'{trace_id}'}</code> onu ve ona bağlı her şeyi
+    tek bir işlemde kaldırır. İkisi de <code>admin</code> kapsamını ister ve
+    ikisi de denetim günlüğüne kaydedilir.
+    <a href={urlFor('/docs/privacy', code)} class="link">Maskeleme ve saklama</a>
+    sayfası silme talebini ve neyin söz verilip verilemeyeceğini adım adım
+    anlatır.
+  </p>
+
+  <h2>mcpd'nin yapmadıkları</h2>
+  <p>
+    Aşağıdakilerin hiçbiri bu yapıda yoktur. Burada sıralanmalarının nedeni,
+    bunları sonradan keşfeden bir incelemenin, burada okuyan bir incelemeden daha
+    kötü bir sonuç olmasıdır.
+  </p>
+  <table>
+    <thead>
+      <tr><th>mcpd'de olmayan</th><th>Bunun yerine ne yapmalı</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>TLS sonlandırma.</strong> mcpd düz HTTP konuşur. Prompt'lar ve tamamlamalar bu bağlantıyı olduğu gibi geçer.</td>
+        <td>TLS'i ingress'inizde veya mesh'inizde sonlandırın ve daemon'un portunu güvenilmeyen ağların dışında tutun.</td>
+      </tr>
+      <tr>
+        <td><strong>SSO.</strong> Kimlik sağlayıcı tümleşmesi yok, OIDC yok, SAML yok, oturum açma ekranı yok.</td>
+        <td>Arayüzü, zaten çalıştırdığınız kimlik proxy'sinin arkasına koyun. Bir kişinin kimliği, o proxy'nin belirlediği şeydir.</td>
+      </tr>
+      <tr>
+        <td><strong>SCIM.</strong> Kullanıcı veya grup sağlama yok, çünkü mcpd'de kullanıcı hesabı diye bir kavram yoktur.</td>
+        <td>Sağlamayı proxy'de yapın. mcpd'nin içinde birim, bir listeye eklenen veya listeden çıkarılan bir anahtardır.</td>
+      </tr>
+      <tr>
+        <td><strong>Altı kapsamın ötesinde roller.</strong> Yetkilendirme bir kapsam ve bir proje listesidir. Endpoint başına rol ve grup yoktur.</td>
+        <td>Anahtara ve projeye göre ayırın. Bir ayrım önemliyse onu bir proje yapın.</td>
+      </tr>
+      <tr>
+        <td><strong>Bir kişinin kim olduğunu belirlemek.</strong> Denetim günlüğü bir özne kaydedebilir ama mcpd çağıranın kim olduğunu hiçbir zaman kendisi çözmez. Ingress'inizin öne sürdüğünü, yalnızca adını verdiğiniz bir adresten kaydeder.</td>
+        <td><code>--trusted-identity-header</code> ve <code>--trusted-proxy-cidr</code> ayarlayın ki proxy'nizin zaten koyduğu başlık denetim satırına ulaşsın. Bunlar olmadan bir satır eylemi bir anahtara bağlar, ekip başına bir anahtar vermek de özeti daraltır.</td>
+      </tr>
+      <tr>
+        <td><strong>Anahtar yaşam döngüsü.</strong> Anahtarlar başlangıçta okunan listelerdir. Süre dolumu, rotasyon takvimi ve anahtar başına kota yoktur. Var olan tavan proje başınadır: <code>--quota-per-minute</code>, hangi anahtar göndermiş olursa olsun bir projenin bir dakikada kaç sinyal saklayabileceğini sınırlar.</td>
+        <td>Ekip veya filo başına bir tane olacak şekilde birkaç anahtar yapılandırın, böylece birini iptal etmek span yayan her şeyi yeniden dağıtmak yerine bir düzenleme ve bir yeniden başlatma olur. Kendi tavanı gerekiyorsa bir filoyu kendi projesi yapın.</td>
+      </tr>
+      <tr>
+        <td><strong>Durağan veri şifrelemesi.</strong> mcpd düz dosya veya düz satır yazar.</td>
+        <td>Birimi şifreleyin veya bunu yapan bir veritabanı kullanın.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Bir şey bildirmek</h2>
+  <p>
+    Şüphelenilen açıklar, herkese açık bir issue'ya değil, konusunda “Security”
+    geçen bir iletiyle <strong>hi@mcpd.sh</strong> adresine gider. Deponun
+    <code>SECURITY.md</code> dosyası kapsamı ve iyi bir bildirimin neleri
+    içerdiğini anlatır. Birinin dışarı açmayı seçtiği, kimlik doğrulaması olmayan
+    bir örnek bir bulgu değil, belgelenmiş bir varsayılandır. Yapılandırılmış bir
+    anahtarı, yapılandırılmış bir maskeleme kuralını veya bir proje sınırını aşan
+    her şey bulgudur.
+  </p>
+
+  <h2>Sırada</h2>
+  <ul>
+    <li>Kural tablosu, dört mod ve anahtarlı özet: <a href={urlFor('/docs/privacy', code)} class="link">Maskeleme ve saklama</a>.</li>
+    <li>Bir port erişilebilir olmadan önce ayarlanacaklar: <a href={urlFor('/deploy', code)} class="link">Docker ve Kubernetes</a>.</li>
+    <li>Her seçenek ve ortam değişkeni: <a href={urlFor('/docs/configuration', code)} class="link">Yapılandırma</a>.</li>
+    <li>Dağıtımı yapılmış bir örneğe koddan veya bir ajandan erişmek: <a href={urlFor('/docs/integrating', code)} class="link">Entegrasyon</a>.</li>
+  </ul>
+</Doc>

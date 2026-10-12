@@ -1,0 +1,186 @@
+---
+/**
+ * A durable run's steps as tags on the daemon's board, and two workers that
+ * take a tag, run the step, and bring it back.
+ *
+ * The argument is the one the run cursor made, with the part it could not
+ * show: what happens when a worker dies holding a step. The dial on the board
+ * reads the seconds since the holder's last heartbeat. Past the lease it
+ * enters the reclaim window, and when that closes the tag goes back on its
+ * hook for the other worker.
+ *
+ * The build runs the model to `START` and draws that frame, so the board is
+ * complete with no script. The page runs the same model on from there.
+ */
+import FigureFrame from '@/components/FigureFrame.astro'
+import { t } from '@/lib/ui-strings'
+import { localeOf } from '@/lib/i18n'
+import * as B from '@/lib/iso/lease'
+
+interface Props {
+  class?: string
+}
+const { class: className = '' } = Astro.props
+const locale = localeOf(Astro.url.pathname)
+
+/** Simulated seconds: the second step is running on the first worker. */
+const START = 42
+const s = B.initial()
+while (s.t < START) B.advance(s, 0.1)
+const art = B.art()
+const tags = B.STEPS.map((step, i) => ({ i, wait: step.wait }))
+const held = (i: number) => s.step === i && (s.phase === 'out' || s.phase === 'run' || s.phase === 'back')
+const placeOf = (i: number) => {
+  if (!held(i)) return B.onHook(i)
+  const share = s.phase === 'out' ? s.inPhase / B.FLIGHT : s.phase === 'back' ? 1 - s.inPhase / B.FLIGHT : 1
+  return B.tagPlace(i, s.worker, share)
+}
+const lampOf = (i: number) => (s.done[i] ? 'ok' : s.step === i && s.phase !== 'pending' ? 'lit' : '')
+---
+
+<FigureFrame
+  class={className}
+  title={t('fig.lease.title', locale)}
+  caption={t('fig.lease.caption', locale)}
+  hint={t('fig.lease.hint', locale)}
+  readout={B.readoutOf(s)}
+>
+  <div
+    class="iso iso-stage cursor-pointer"
+    data-fig="lease"
+    data-start={START}
+    tabindex="0"
+    role="button"
+    aria-label={t('fig.lease.label', locale)}
+    aria-description={t('fig.lease.hint', locale)}
+  >
+    <svg class="iso-svg mx-auto max-w-[60rem]" viewBox={`0 0 ${B.WIDTH} ${B.HEIGHT}`} aria-hidden="true">
+      <g set:html={art.back} />
+      <g data-layer="hooked">
+        {tags.filter((g) => !g.wait && !held(g.i)).map((g) => (
+          <g data-tag={g.i} transform={B.translate(placeOf(g.i))} set:html={B.tagSvg()} />
+        ))}
+      </g>
+      <g set:html={art.hooksFront} />
+      {B.LAMPS.map(([x, y], i) => (
+        <circle class="iso-lamp" data-step={i} data-on={lampOf(i)} cx={x.toFixed(1)} cy={y.toFixed(1)} r="1.9" />
+      ))}
+      <g transform={B.NEEDLE_FRAME()}>
+        <path class="iso-line" data-tone="hi" data-needle style="stroke-width:1.3px" d={B.needleAt(B.sinceBeat(s))} />
+        <circle cx={B.DIAL_HUB} cy="0" r="1.6" fill="var(--iso-hi)" />
+      </g>
+      <g set:html={art.front} />
+      {B.WORKERS.map((_, w) => {
+        const [x, y] = B.unitLamp(w)
+        return (
+          <g>
+            <circle class="iso-lamp" data-unit={w} data-on="ok" cx={x.toFixed(1)} cy={y.toFixed(1)} r="1.7" />
+            <path class="iso-line" data-tone="hi" data-progress={w} style="stroke-width:1.1px"
+              d={B.progressAt(w, s.worker === w && s.phase === 'run' ? s.body / B.STEPS[s.step]!.secs : 0)} />
+          </g>
+        )
+      })}
+      <g data-layer="moving">
+        {tags.filter((g) => !g.wait && held(g.i)).map((g) => (
+          <g data-tag={g.i} data-sel="" transform={B.translate(placeOf(g.i))} set:html={B.tagSvg()} />
+        ))}
+      </g>
+    </svg>
+    <span class="sr-only" aria-live="polite" data-say></span>
+  </div>
+</FigureFrame>
+
+<script>
+  import * as B from '@/lib/iso/lease'
+  import { live } from '@/lib/iso/live'
+
+  for (const stage of document.querySelectorAll<HTMLElement>('[data-fig="lease"]')) {
+    const svg = stage.querySelector('svg')!
+    const readout = stage.closest('figure')?.querySelector<HTMLElement>('[data-readout]')
+    const hooked = svg.querySelector<SVGGElement>('[data-layer="hooked"]')!
+    const moving = svg.querySelector<SVGGElement>('[data-layer="moving"]')!
+    const tags = new Map<number, SVGGElement>()
+    svg.querySelectorAll<SVGGElement>('[data-tag]').forEach((g) => tags.set(Number(g.dataset.tag), g))
+    const lamps = [...svg.querySelectorAll<SVGCircleElement>('[data-step]')]
+    const units = [...svg.querySelectorAll<SVGCircleElement>('[data-unit]')]
+    const progress = [...svg.querySelectorAll<SVGPathElement>('[data-progress]')]
+    const needle = svg.querySelector<SVGPathElement>('[data-needle]')!
+
+    const s = B.initial()
+    while (s.t < Number(stage.dataset.start ?? 0)) B.advance(s, 0.1)
+    let shownNeedle = B.sinceBeat(s)
+    let beatAt = -1
+    let said = ''
+    const say = stage.querySelector<HTMLElement>('[data-say]')!
+
+    const draw = () => {
+      const held = (i: number) => s.step === i && (s.phase === 'out' || s.phase === 'run' || s.phase === 'back')
+      tags.forEach((el, i) => {
+        let q = B.onHook(i)
+        if (held(i)) {
+          const share = s.phase === 'out' ? s.inPhase / B.FLIGHT : s.phase === 'back' ? 1 - s.inPhase / B.FLIGHT : 1
+          q = B.tagPlace(i, s.worker, share)
+          if (el.parentNode !== moving) moving.appendChild(el)
+          el.setAttribute('data-sel', '')
+        } else {
+          if (el.parentNode !== hooked) hooked.appendChild(el)
+          el.removeAttribute('data-sel')
+        }
+        el.setAttribute('transform', B.translate(q))
+      })
+      lamps.forEach((l, i) => {
+        l.dataset.on = s.done[i] ? 'ok' : s.step === i && s.phase !== 'pending' ? 'lit' : ''
+      })
+      units.forEach((l, w) => {
+        // A heartbeat flashes the lamp amber for a moment; a stopped worker shows its fault.
+        const beating = s.phase === 'run' && s.worker === w && s.t - s.lastBeat < 1.4 && s.alive[w]
+        l.dataset.on = !s.alive[w] ? 'fault' : beating ? 'lit' : 'ok'
+      })
+      progress.forEach((p, w) => {
+        const share = s.worker === w && (s.phase === 'run' || s.phase === 'back') ? Math.min(1, s.body / B.STEPS[s.step]!.secs) : 0
+        p.setAttribute('d', B.progressAt(w, s.phase === 'back' && s.returned === 'pending' ? 0 : share))
+      })
+      needle.setAttribute('d', B.needleAt(shownNeedle))
+      const text = B.readoutOf(s)
+      // Phases, not seconds: a screen reader hears each change of status once,
+      // and only while the board has focus.
+      const phase = s.phase === 'done' ? 'succeeded' : `${B.STEPS[s.step]?.id} ${s.phase === 'wait' ? 'wait_event' : B.statusOf(s)}`
+      if (phase !== said && document.activeElement === stage) say.textContent = phase
+      said = phase
+      if (readout && readout.textContent !== text) readout.textContent = text
+    }
+
+    const fig = live(stage, {
+      tick(dt, calm) {
+        if (!calm) B.advance(s, dt * B.SPEED)
+        // The needle swings back on a heartbeat rather than jumping, the way a
+        // reset pointer is driven home by its spring.
+        const target = B.sinceBeat(s)
+        if (calm || target >= shownNeedle) shownNeedle = target
+        else shownNeedle += (target - shownNeedle) * (1 - Math.exp(-dt / 0.12))
+        if (beatAt !== s.lastBeat) beatAt = s.lastBeat
+        draw()
+        return !calm
+      },
+    })
+
+    const act = () => {
+      B.toggle(s)
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        // No animation: run the model on to the next settled moment and show it.
+        for (let i = 0; i < 4000; i++) {
+          B.advance(s, 0.1)
+          if (s.phase === 'run' && s.alive[s.worker] && s.body > 3) break
+        }
+      }
+      fig.touch()
+      draw()
+    }
+    stage.addEventListener('click', act)
+    stage.addEventListener('keydown', (e) => {
+      if (e.key !== ' ' && e.key !== 'Enter') return
+      e.preventDefault()
+      act()
+    })
+  }
+</script>

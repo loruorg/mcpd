@@ -1,0 +1,373 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+
+/*
+ * Two reads of the same entity, an hour apart. The point of the transcript is
+ * the pair of lines a reader would otherwise have to derive: `notes_needed`
+ * counting down, and the entity's overall readiness sitting at the least
+ * advanced of its aspects rather than at the best one. Every field name and
+ * every value is one the specification publishes, and the arithmetic holds
+ * against the floor of 50 the same document states.
+ */
+const progress = [
+  { cmd: 'E="project=support&entity_kind=agent&entity_name=support_agent"' },
+  { cmd: 'curl -s "$MCPD/v1/api/aspects/progress?$E"' },
+  { out: '"readiness": "collecting",' },
+  { out: '"aspects": [' },
+  { out: '  { "aspect": "goal",      "readiness": "collecting", "note_count":  31, "notes_needed": 19 },' },
+  { out: '  { "aspect": "behaviour", "readiness": "collecting", "note_count":   8, "notes_needed": 42 },' },
+  { out: '  { "aspect": "outcome",   "readiness": "ready",      "note_count": 812, "notes_needed":  0 }]' },
+  { cmd: '# an hour later, the same request' },
+  { cmd: 'curl -s "$MCPD/v1/api/aspects/progress?$E"' },
+  { out: '"readiness": "processing",', tone: 'ok' },
+  { out: '"aspects": [' },
+  { out: '  { "aspect": "goal",      "readiness": "processing", "note_count":   63, "notes_needed": 0 },' },
+  { out: '  { "aspect": "behaviour", "readiness": "processing", "note_count":   57, "notes_needed": 0 },' },
+  { out: '  { "aspect": "outcome",   "readiness": "ready",      "note_count": 1204, "notes_needed": 0 }]' },
+]
+---
+
+<Doc
+  title="Themes and snapshots"
+  description="How aspect notes are grouped by shared wording, the floor before anything is reported, what collecting, processing and ready each mean, and what a snapshot is."
+  lede="A theme is a group of aspect notes that share their wording. There is no model in it and no embedding in it, which decides both what it can tell you and what it cannot."
+  og="docs"
+>
+  <h2>How a note becomes a theme</h2>
+  <p>
+    Clustering runs once per aspect, per entity, on the daemon's own timer. An
+    entity is the pair of a kind and a name, which is the identity spans already
+    carry, so nothing new has to be assigned to have one. A pass reads that
+    entity's notes along one aspect, newest first, groups them, and writes the
+    result as a snapshot.
+  </p>
+  <p>
+    What it compares is a sketch of the wording, not the wording itself. When a
+    note is stored the daemon normalises the text, lowercases it, takes its
+    one-word and two-word runs, hashes them with a fixed seed and keeps the 64
+    smallest values. That is 512 bytes a note, in an ordinary binary column on
+    all three storage backends. There is no vector type, no distance function
+    in SQL and no extension to install, which is what keeps mcpd one binary
+    with SQLite linked into it.
+  </p>
+  <p>
+    Two notes are compared by counting how many of those 64 values they share.
+    The answer is a whole number out of 64 and there is not one floating-point
+    operation in it, so two replicas of one deployment reading the same notes
+    cannot disagree about where a group ends. Notes are then gathered around
+    leaders, with the order of every tie stated rather than left to the
+    database, and each group's label is the note most like the rest of them.
+  </p>
+  <p>
+    You cannot read a sketch back. It is deliberately not a field on a note: a
+    caller can do nothing with it, and publishing it would fix the hashing
+    exactly where it stands today.
+  </p>
+
+  <h2>Grouping by wording, and what that costs you</h2>
+  <p>
+    A theme groups aspect notes that share their wording. That is why mcpd needs
+    no model and no embedding to build one, and it is also the whole of the
+    limit: the daemon does not read the sentences, so two notes that mean the
+    same thing in different words land in separate themes, and a theme's label
+    is the note most like the others rather than a summary written for it.
+  </p>
+  <p>
+    Read that as a working limit, not as a disclaimer. Three things follow from
+    it, and each one changes how a screen should be read.
+  </p>
+  <ul>
+    <li>
+      <strong>The same problem can appear twice.</strong> "The order never
+      arrived" and "the parcel was not delivered" are one complaint and two
+      themes. A count is a count of one wording, never of one meaning.
+    </li>
+    <li>
+      <strong>The label is an example, not a description.</strong> It is the
+      text of a real note about a real trace, and
+      <code>label_trace_id</code> names that run, so you can open it rather than
+      take the label's word for the group. It also changes between snapshots as
+      the group does.
+    </li>
+    <li>
+      <strong>Nothing here is an opinion about your agent.</strong> The daemon
+      grouped sentences it was given. Whether those sentences were right about
+      the runs is settled on the run, which is what
+      <a href="/docs/aspects" class="link">Aspect notes</a> is about.
+    </li>
+  </ul>
+  <p>
+    The gain for that cost is that the answer is checkable. Every step from a
+    stored sentence to a group on screen is arithmetic you could redo by hand,
+    which is not true of a clustering that runs through a model whose weights
+    you do not have and whose version you cannot pin.
+  </p>
+
+  <h2>The floor, and the ceiling</h2>
+  <p>
+    Below 50 notes for one aspect on one entity, no pass runs and no snapshot is
+    written. That is a refusal to answer, not an empty answer, and it is
+    deliberate: a dozen sentences can always be sorted into groups, and the
+    result looks exactly like a finding. The floor is the line under which mcpd
+    would rather say nothing.
+  </p>
+  <p>
+    The bounds come back with the catalogue, at
+    <code>GET /v1/api/aspects</code>, because each one changes what a reader is
+    looking at. They are copied from the divergence watch, which is the one
+    windowed statistic mcpd already ships.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Bound</th><th>Default</th><th>What it changes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>min_notes_to_cluster</code></td>
+        <td>50</td>
+        <td>Below it the aspect reads <code>collecting</code> and there is no snapshot to read.</td>
+      </tr>
+      <tr>
+        <td><code>max_notes_per_pass</code></td>
+        <td>20,000</td>
+        <td>A window holding more is clustered from the newest of them, and the snapshot is marked <code>capped</code>.</td>
+      </tr>
+      <tr>
+        <td><code>page_size</code></td>
+        <td>500</td>
+        <td>How much a pass holds at a time. It bounds memory, not coverage.</td>
+      </tr>
+      <tr>
+        <td><code>max_aspects</code></td>
+        <td>32</td>
+        <td>How many aspects one project may have, the four built-ins included. Fixed in this build, and nothing in it adds an aspect.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>capped</code> is the field to read before you quote a percentage. Every
+    share in a snapshot is a share of <code>note_count</code>, the notes the pass
+    actually read, and never of the notes in the window. On a capped snapshot
+    those are different numbers, and reading a coverage figure as a share of the
+    window overstates it.
+  </p>
+
+  <h2>The three readiness states</h2>
+  <p>
+    An empty themes screen has more than one cause, and the causes need different
+    actions. <code>GET /v1/api/aspects/progress</code> separates them, counted
+    from stored rows rather than estimated, so it cannot go stale.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>State</th><th>What is true</th><th>What to do</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>collecting</code></td>
+        <td>Fewer notes than the floor. No pass has run and none will yet.</td>
+        <td>Wait, or write more notes. <code>notes_needed</code> says how many.</td>
+      </tr>
+      <tr>
+        <td><code>processing</code></td>
+        <td>Enough notes, and no snapshot covers this aspect yet.</td>
+        <td>Nothing. The next pass writes one.</td>
+      </tr>
+      <tr>
+        <td><code>ready</code></td>
+        <td>A snapshot covers this aspect. Every theme route answers.</td>
+        <td>Read it. An empty screen now means the wrong aspect or the wrong entity.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Readiness is per entity and per aspect, never global. One agent can have goal
+    themes to read while its behaviour notes are still collecting, and an entity's
+    own state is the least advanced of its enabled aspects rather than the best
+    one, so a row that says <code>processing</code> is telling you that at least
+    one aspect is still short of a snapshot.
+  </p>
+
+  <TerminalCast class="not-prose my-8" title="watching an entity fill" lines={progress} />
+
+  <p>
+    There is a case the three states cannot express, and it is the one most often
+    mistaken for <code>collecting</code>: an entity nobody has written about yet
+    has no row at all. A row appears in
+    <code>GET /v1/api/aspects/entities</code> the moment the first note about
+    that entity is recorded, well before any theme exists. Nothing has been
+    written here, and something is being written and there is not enough of it,
+    are different facts about a deployment, and a screen with a count moving on
+    it reads differently from a screen with nothing on it. That is why the row
+    arrives early, and why it carries <code>ready_aspects</code> beside
+    <code>enabled_aspects</code>: the two read as "2 of 4" and answer whether the
+    row is worth opening.
+  </p>
+  <p>
+    A refusal is different again, and it never changes. A storage backend that
+    does not implement this family answers every route in it with 501, naming
+    <code>theme_analysis</code> in the body, which is the same word
+    <code>GET /v1/api/capabilities</code> publishes. Read the capability set once
+    at connect time and decide whether to offer the feature at all, rather than
+    retrying a refusal that will never change.
+  </p>
+
+  <h2>A snapshot is one pass over a moving window</h2>
+  <p>
+    A snapshot is the result of one clustering pass over one entity, covering a
+    window of notes. It is what turns a clustering into a series: every theme
+    belongs to exactly one snapshot, and every theme query names one.
+  </p>
+  <p>
+    It carries the window it read (<code>window_from</code> and
+    <code>window_to</code>), the moment it became the current state
+    (<code>cutoff_at</code>), where it falls in the entity's series
+    (<code>ordinal</code>), how many notes it read and how many traces those
+    notes were about, and <code>capped</code>.
+  </p>
+  <p>
+    <strong>Windows overlap, so counts from two snapshots must never be added.</strong>
+    A trace whose note falls inside three windows is counted once in each of
+    them, and summing the three counts it three times. Compare snapshots, or read
+    one. Do not total them.
+  </p>
+  <p>
+    Reads never recompute. A pass writes a snapshot on its own timer and every
+    read is a lookup of what it wrote, so refreshing a page shows the same
+    numbers rather than a fresh clustering that has quietly moved under you. If
+    you want a newer answer you wait for the next pass, and the timeline tells
+    you when the last one was.
+  </p>
+
+  <h2>Reading a series of them</h2>
+  <p>
+    <code>GET /v1/api/themes/snapshots</code> returns an entity's passes, oldest
+    first, in one of two presentations. An <code>inventory</code> returns
+    consecutive snapshots, which is what a caller walking the whole series wants.
+    <code>landmarks</code> returns a bounded selection spread across the range,
+    with the oldest and the newest always in it and the rest sampled by time, so
+    a quiet week is not crowded out by an hour of frequent passes. Each landmark
+    row says why it was chosen, as the start of the range, the end of it, or a
+    time sample between the two, and an inventory chooses nothing so its rows
+    carry no reason at all. <code>total</code> says how many snapshots the
+    selection was drawn from, so a timeline can state what it stands in for.
+  </p>
+  <p>
+    One theme's own series is <code>GET /v1/api/themes/{'{theme_id}'}/history</code>,
+    the only theme route that names no snapshot, because the series is the
+    answer. A theme keeps its id while its wording holds, so the same id in
+    two snapshots is the same theme, and the history records what happened
+    between each pair: <code>birth</code>, <code>continue</code>,
+    <code>split</code>, <code>merge</code>, <code>resurrection</code> and
+    <code>death</code>. A theme that comes and goes reads as one theme with gaps
+    rather than as several short-lived ones.
+  </p>
+  <p>
+    Retention bounds what that can tell you. The oldest point returned is the
+    oldest snapshot still stored, which is a lower bound on the theme's age and
+    not its birth. A series that begins at the edge of the window is telling you
+    when mcpd started looking, not when the pattern started.
+  </p>
+
+  <h2>Across aspects: noise, overflow and association</h2>
+  <p>
+    <code>GET /v1/api/themes/flow</code> reads one snapshot across two to four
+    aspects at once, as a stage per aspect and links between neighbouring stages.
+    A link's count is the number of traces assigned to both of its ends.
+  </p>
+  <p>
+    <strong>That is association and nothing else.</strong> A ribbon between a
+    goal theme and an outcome theme means the two were written about the same
+    runs. It does not mean one caused the other, and the daemon has no way to
+    tell you whether it did.
+  </p>
+  <p>
+    The order you ask for the aspects in is part of the question, not a display
+    preference. Links only ever join neighbouring stages, so goal beside outcome
+    and goal beside behaviour are two different questions with two different
+    answers. Fewer than two aspects is refused by name rather than answered with
+    an empty flow, because a single stage has no links in it.
+  </p>
+  <p>
+    Each stage holds its themes and at most two other nodes, and the three
+    together account for every trace in the stage, which is what lets the shares
+    add up.
+  </p>
+  <ul>
+    <li>
+      <strong>Noise</strong> is the notes that joined no theme. It is not a
+      failure bucket. It holds rare requests, wording nothing else matched, and
+      patterns that have not recurred yet, so a large noise share means varied
+      traffic or too few notes rather than something going wrong. Its sentences
+      are read from the examples route with <code>noise</code> as the theme id;
+      there is no second pair of routes for it.
+    </li>
+    <li>
+      <strong>Overflow</strong> is everything past
+      <code>theme_limit_per_stage</code>, folded into one node so the stage
+      totals still add up. It carries no theme id and cannot be opened or
+      filtered on, because it is a fold for the screen and not a group of
+      anything.
+    </li>
+  </ul>
+  <p>
+    From any theme, <code>GET /v1/api/themes/{'{theme_id}'}/examples</code>
+    returns the sentences that put traces there, most alike first, each with the
+    run it was written about. That is the route back out of the aggregate and
+    into the recording, and it is where a grouping you do not believe gets
+    settled.
+  </p>
+
+  <h2>Two replicas cannot disagree</h2>
+  <p>
+    Determinism here has two halves, and both are needed. The clustering is a
+    pure function of the notes it reads, with no floating-point arithmetic in the
+    comparison and every tie broken by a stated rule, so two daemons in front of
+    one database write the same themes. And reads never recompute, so a screen
+    refreshed twice shows one answer rather than two.
+  </p>
+  <p>
+    All three storage backends give the same themes, because the clustering runs
+    in the daemon over stored notes and not in SQL. There is nothing here for a
+    backend to do differently, and one case in the shared conformance suite
+    proves it rather than asserting it.
+  </p>
+
+  <h2>A daemon with nothing configured</h2>
+  <p>
+    The pass runs only when <code>aspects.enabled</code> is set in the config
+    file. Without it no pass runs at all: nothing is clustered, no outcome note
+    is written, nothing is spent and no timer fires, in the same way the monitor
+    loop is never spawned when nothing is armed. Notes your process posts are
+    still stored and can be read back.
+  </p>
+  <p>
+    Setting it is the only configuration the analysis needs.
+    <code>outcome</code> ships derived and is written by the daemon itself with
+    no model anywhere, so a deployment that sets <code>aspects.enabled</code>
+    and configures nothing else still fills one aspect from the runs it already
+    has. That is enough for a real themes screen and enough to see the whole
+    pipeline work before a model is wired to anything.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>
+      Where the sentences come from, and who pays for them:
+      <a href="/docs/aspects" class="link">Aspect notes</a>.
+    </li>
+    <li>
+      What sweeps a note and what erases one:
+      <a href="/docs/privacy" class="link">Redaction and retention</a>.
+    </li>
+    <li>
+      Every parameter of the nine routes:
+      <a href="/docs/reference/api" class="link">HTTP API</a>.
+    </li>
+  </ul>
+</Doc>

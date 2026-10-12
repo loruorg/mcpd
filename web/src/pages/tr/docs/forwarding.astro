@@ -1,0 +1,159 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="İletme"
+  description="Saklanan her span'i başka bir OTLP ucuna kopyalayın, böylece mcpd verinin sıkışıp kaldığı bir yer değil, telemetri hattında bir durak olur. Yerel depolama her zaman önce olur."
+  lede="mcpd, OTLP'yi iki yönde de konuşur. Buraya gelen hiçbir şey burada mahsur kalmaz."
+  og="docs"
+>
+  <h2>Tek bir çıkış protokolü, on bir exporter değil</h2>
+  <p>
+    mcpd OTLP alır ve OTLP yayabilir. Bu tek özellik, sağlayıcı başına bir
+    exporter kümesinin yaptığı işin çoğunun yerine geçer: Langfuse, Datadog,
+    Honeycomb, Grafana ve adı anılmaya değer her hedef, HTTP üzerinden OTLP kabul
+    eder. Dolayısıyla iletme on bir değil tek bir uygulamadır ve bir sağlayıcının
+    SDK sürümünün gerisinde kalamaz.
+  </p>
+  <p>
+    Bu aynı zamanda mcpd'yi benimsemenin geri alınabilir olduğu anlamına gelir.
+    Onu daha önce kullandığınız şeye yöneltin, ikisini iki hafta birlikte
+    çalıştırın ve geri alamayacağınız bir geçiş üzerinden değil, önünüzdeki
+    veriyle karar verin.
+  </p>
+
+  <h2>Açmak</h2>
+
+  <Command
+    class="not-prose my-6"
+    title="yerelde sakla, ileriye kopyala"
+    command="mcpd serve --forward-endpoint https://otlp.example.com"
+  />
+
+  <p>
+    Yol sona eklenir, bu yüzden <code>/v1/traces</code> değil temel adresi verin.
+    Kimlik bilgisi isteyen bir hedef için başlık ekleyin:
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="bir yetkilendirme başlığıyla"
+    command={`mcpd serve \\
+  --forward-endpoint https://otlp.example.com \\
+  --forward-header 'Authorization: Bearer $TOKEN'`}
+  />
+
+  <p>
+    Aynı ayarlar yapılandırma dosyasında <code>forward</code> altında durur;
+    orada <code>batch_size</code> ve <code>enabled</code> de vardır. Seçenek
+    dosyayı yener, yani paylaşılan bir ConfigMap düzenlenmeden tek bir örnek
+    başka bir yere yöneltilebilir.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "forward": {
+    "endpoint": "https://otlp.example.com",
+    "headers": [["Authorization", "Bearer sk-..."]],
+    "batch_size": 256,
+    "enabled": true
+  }
+}`}</code></pre>
+
+  {/* The diagram belongs here, not at the top. It draws the intake ending at
+      Store, and this section is about what happens after Store, so the two read
+      as one sequence rather than as a picture that stops where the subject
+      begins. */}
+  <PipelineDiagram class="not-prose my-8" />
+
+  <h2>Yerel depolama önce olur</h2>
+  <p>
+    Bir span, herhangi bir şey iletilmeden önce mcpd'nin kendi deposuna yazılır;
+    iletme ise sonrasında kendi görevinde çalışır. Bunun iki sonucu var ve ikisi
+    de bilinçlidir.
+  </p>
+  <p>
+    Yavaş bir hedef, kendi gecikmesini span'i üreten isteğe hiçbir zaman eklemez.
+    Ajanınız başkasının collector'ını beklemez.
+  </p>
+  <p>
+    Çalışmayan bir hedef hiçbir zaman reddedilmiş bir alıma dönüşmez. mcpd
+    çalışmayı sürdürür ve iletmeyi kendi görevinde yeniden dener. Alternatifinde
+    başka bir şirketin kesintisi, telemetrinizin hiç tutulmaması demek olurdu.
+    Bu tasarım tam da bunu önlemek için var.
+  </p>
+  <p>
+    Her yığının üç denemesi vardır. Bir 429, bir 5xx ya da başarısız bir bağlantı
+    250 ms sonra yeniden denenir ve bekleme her denemeden sonra iki katına çıkar.
+    Saniye olarak verilen bir <code>Retry-After</code>, en fazla 30 saniyeye kadar
+    beklemenin yerini alır. Başka her 4xx ilk yanıtta kesindir, çünkü yığın o
+    hedef için bozuk kalacaktır. Daemon dururken kalan denemeleri hemen yapar.
+    Kesin olarak reddedilen ya da son denemeden sonra hâlâ teslim edilmemiş bir
+    yığın loglanır ve span'leri <code>mcpd_forward_dropped_spans_total</code>
+    sayacına eklenir; böylece kopyanın ne kadarının eksik olduğunu görürsünüz.
+  </p>
+  <p>
+    Bağlantıyı kabul edip hiç yanıt vermeyen bir hedef de daemon'un belleğini
+    ele geçiremez. Aynı anda hedefi en fazla 64 alım isteğinin kopyası bekler.
+    Bu kadarı beklerken yeni bir kopya hemen bırakılır ve
+    <code>mcpd_forward_dropped_spans_total</code> içinde sayılır; yerel yazma
+    etkilenmez.
+  </p>
+  <p>
+    Kalıcı bir giden kuyruk yoktur. Bir yığın yeniden denenirken bellekte
+    bekler; iletme kuyruğu doluysa yeni bir yığın düşürülür ve span'leri aynı
+    metrikte sayılır. Kalıcı bir kuyruk başka bir üründür ve saatlerce geride
+    kalan sessiz bir kuyruk, görünür bir boşluktan daha kötüdür. Teslim güvencesi
+    gerekiyorsa mcpd ile hedef arasına gerçek bir collector koyun; o iş için
+    yapılmıştır.
+  </p>
+
+  <h2>Maskeleme, dışarı çıkana da uygulanır</h2>
+  <p>
+    İletme, herhangi bir şey yazılmadan önce yerinde maskeleme yapan alım
+    hattından sonra gerçekleşir. mcpd'ye gizlemesi söylenen ne varsa bir sonraki
+    durağa da ulaşmaz. Deponuzu koruyup çıkışınızı korumayan bir kural, bir
+    gizlilik denetimi olmazdı.
+  </p>
+
+  <h2>Ne iletilir</h2>
+  <p>
+    Span'ler. Loglar, metrikler, puanlar, geri bildirimler ve yön notları
+    mcpd'de kalır, çünkü insanların ilettiği hedefler izleme arka uçlarıdır ve
+    geri kalanı ya düşürür ya da özniteliklere sıkıştırır.
+  </p>
+  <p>
+    Span'ler, bir alıcının beklediği biçim olan <code>resourceSpans</code> içinde
+    servise göre gruplanır; span başına bir kaynak biçiminde değil, ki bu da
+    geçerlidir ama sonraki her sistemin yeniden gruplamasına yol açar.
+  </p>
+
+  <h2>mcpd'den mcpd'ye iletme</h2>
+  <p>
+    İki uç da aynı protokolü konuştuğu için yerel bir mcpd, paylaşılan bir
+    mcpd'ye iletebilir. Geliştiriciler kendi makinelerinde tam payload'larla
+    hızlı bir depo tutar; ekibin örneği de aynı çalıştırmaları, kendi saklama
+    süresi ve varışta uygulanan kendi maskeleme kurallarıyla alır.
+  </p>
+
+  <h2>Sonraki</h2>
+  <ul>
+    <li>
+      Var olan bir OpenTelemetry kurulumunu mcpd'ye yöneltmek:
+      <a href={urlFor('/docs/opentelemetry', code)} class="link">OpenTelemetry</a>.
+    </li>
+    <li>
+      Bir span saklanmadan veya gönderilmeden önce neyin kaldırıldığı:
+      <a href={urlFor('/docs/privacy', code)} class="link">Maskeleme ve saklama</a>.
+    </li>
+    <li>
+      Her seçenek ve dosya ayarı:
+      <a href={urlFor('/docs/configuration', code)} class="link">Yapılandırma</a>.
+    </li>
+  </ul>
+</Doc>

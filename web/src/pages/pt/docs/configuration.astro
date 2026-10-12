@@ -1,0 +1,1294 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* As rotas internas continuam escritas em inglês e são localizadas aqui. Uma
+   rota cuja página em português ainda não existe leva à página em inglês, em
+   vez de a um URL português sem nada atrás. */
+const code = localeOf(Astro.url.pathname)
+const href = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+
+const composeEnv = `services:
+  mcpd:
+    image: ghcr.io/mcpd/mcpd
+    ports: ['4317:4317']
+    volumes: ['mcpd-data:/data']
+    environment:
+      MCPD_LISTEN: 0.0.0.0:4317
+      MCPD_DATA: /data/mcpd.db
+      MCPD_PROJECT: checkout
+      MCPD_RETENTION_DAYS: '30'
+      MCPD_INGEST_KEYS: write-key-one,write-key-two
+      MCPD_READ_KEYS: read-key
+      MCPD_REDACT_KEY: a-long-random-string
+      MCPD_LOG_FORMAT: json
+      MCPD_LOG: mcpd=info,mcpd_server=warn
+
+volumes:
+  mcpd-data:`
+---
+
+<Doc
+  title="Configuração"
+  description="Cada opção e variável de ambiente do mcpd, com seu padrão: escuta, caminho dos dados, projeto, retenção, chaves de ingest e de leitura, amostragem, ocultação, origens, prazo da requisição e logs."
+  lede="Cada ajuste é uma opção, e cada opção tem uma variável de ambiente com o mesmo significado. As poucas estruturadas demais para uma linha de comando ficam em um único arquivo JSON. Esta página traz todas."
+  og="docs"
+>
+  <h2>Duas formas de dizer a mesma coisa</h2>
+  <p>
+    Rode o mcpd sem argumento nenhum e ele funciona: escuta em
+    <code>0.0.0.0:4317</code>, guarda os dados em <code>./mcpd.db</code>, oculta
+    segredos e armazena todo trace para sempre. Tudo o que vem abaixo muda uma
+    dessas decisões.
+  </p>
+  <p>
+    Uma opção sempre vence a variável de ambiente correspondente. As duas são
+    globais, então são aceitas antes ou depois de um subcomando.
+  </p>
+
+  <h2>Referência</h2>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Opção</th>
+          <th>Variável</th>
+          <th>Padrão</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>--listen</code></td>
+          <td><code>MCPD_LISTEN</code></td>
+          <td><code>0.0.0.0:4317</code></td>
+        </tr>
+        <tr>
+          <td><code>--data</code></td>
+          <td><code>MCPD_DATA</code></td>
+          <td><code>./mcpd.db</code></td>
+        </tr>
+        <tr>
+          <td><code>--project</code></td>
+          <td><code>MCPD_PROJECT</code></td>
+          <td><code>default</code></td>
+        </tr>
+        <tr>
+          <td><code>--retention-days</code></td>
+          <td><code>MCPD_RETENTION_DAYS</code></td>
+          <td>não definido: guarda tudo</td>
+        </tr>
+        <tr>
+          <td><code>--ingest-key</code></td>
+          <td><code>MCPD_INGEST_KEYS</code></td>
+          <td>nenhuma: a ingestão é aberta</td>
+        </tr>
+        <tr>
+          <td><code>--read-key</code></td>
+          <td><code>MCPD_READ_KEYS</code></td>
+          <td>nenhuma: a leitura é aberta</td>
+        </tr>
+        <tr>
+          <td><code>--write-key</code></td>
+          <td><code>MCPD_WRITE_KEYS</code></td>
+          <td>nenhuma: as chaves de ingest são aceitas</td>
+        </tr>
+        <tr>
+          <td><code>--admin-key</code></td>
+          <td><code>MCPD_ADMIN_KEYS</code></td>
+          <td>nenhuma: as chaves de leitura são aceitas</td>
+        </tr>
+        <tr>
+          <td><code>--execute-key</code></td>
+          <td><code>MCPD_EXECUTE_KEYS</code></td>
+          <td>nenhuma: as chaves de escrita são aceitas</td>
+        </tr>
+        <tr>
+          <td><code>--worker-key</code></td>
+          <td><code>MCPD_WORKER_KEYS</code></td>
+          <td>nenhuma: as chaves de escrita são aceitas</td>
+        </tr>
+        <tr>
+          <td><code>--runs-data</code></td>
+          <td><code>MCPD_RUNS_DATA</code></td>
+          <td>o caminho de <code>--data</code> com <code>.runs</code> antes da extensão</td>
+        </tr>
+        <tr>
+          <td><code>--trusted-identity-header</code></td>
+          <td><code>MCPD_TRUSTED_IDENTITY_HEADER</code></td>
+          <td>nenhum: nenhum sujeito é registrado</td>
+        </tr>
+        <tr>
+          <td><code>--trusted-proxy-cidr</code></td>
+          <td><code>MCPD_TRUSTED_PROXY_CIDRS</code></td>
+          <td>nenhum: nenhum endereço pode definir esse cabeçalho</td>
+        </tr>
+        <tr>
+          <td><code>--sample</code></td>
+          <td><code>MCPD_SAMPLE</code></td>
+          <td>não definido: guarda todo trace</td>
+        </tr>
+        <tr>
+          <td><code>--quota-per-minute</code></td>
+          <td><code>MCPD_QUOTA_PER_MINUTE</code></td>
+          <td>não definido: sem teto</td>
+        </tr>
+        <tr>
+          <td><code>--no-redact</code></td>
+          <td><code>MCPD_NO_REDACT</code></td>
+          <td>desligado: a ocultação está ligada</td>
+        </tr>
+        <tr>
+          <td><code>--redact-key</code></td>
+          <td><code>MCPD_REDACT_KEY</code></td>
+          <td>uma chave embutida, que é pública</td>
+        </tr>
+        <tr>
+          <td><code>--redact-key-contains</code></td>
+          <td><code>MCPD_REDACT_KEY_CONTAINS</code></td>
+          <td>nenhuma: apenas as regras embutidas</td>
+        </tr>
+        <tr>
+          <td><code>--redact-max-string</code></td>
+          <td><code>MCPD_REDACT_MAX_STRING</code></td>
+          <td>128 KiB</td>
+        </tr>
+        <tr>
+          <td><code>--cors-origin</code></td>
+          <td><code>MCPD_CORS_ORIGINS</code></td>
+          <td>nenhuma: apenas a mesma origem</td>
+        </tr>
+        <tr>
+          <td><code>--request-timeout-seconds</code></td>
+          <td><code>MCPD_REQUEST_TIMEOUT_SECONDS</code></td>
+          <td><code>30</code></td>
+        </tr>
+        <tr>
+          <td><code>--max-body-bytes</code></td>
+          <td><code>MCPD_MAX_BODY_BYTES</code></td>
+          <td><code>33554432</code>, que são 32 MiB</td>
+        </tr>
+        <tr>
+          <td><code>--max-batch-signals</code></td>
+          <td><code>MCPD_MAX_BATCH_SIGNALS</code></td>
+          <td><code>10000</code></td>
+        </tr>
+        <tr>
+          <td><code>--log-format</code></td>
+          <td><code>MCPD_LOG_FORMAT</code></td>
+          <td><code>text</code></td>
+        </tr>
+        <tr>
+          <td><code>--clickhouse-url</code></td>
+          <td><code>MCPD_CLICKHOUSE_URL</code></td>
+          <td>desligado: o arquivo embutido é usado</td>
+        </tr>
+        <tr>
+          <td><code>--clickhouse-database</code></td>
+          <td><code>MCPD_CLICKHOUSE_DATABASE</code></td>
+          <td><code>mcpd</code></td>
+        </tr>
+        <tr>
+          <td><code>--clickhouse-user</code></td>
+          <td><code>MCPD_CLICKHOUSE_USER</code></td>
+          <td>nenhum</td>
+        </tr>
+        <tr>
+          <td><code>--clickhouse-password</code></td>
+          <td><code>MCPD_CLICKHOUSE_PASSWORD</code></td>
+          <td>nenhuma</td>
+        </tr>
+        <tr>
+          <td><code>--postgres-url</code></td>
+          <td><code>MCPD_POSTGRES_URL</code></td>
+          <td>desligado: o arquivo embutido é usado</td>
+        </tr>
+        <tr>
+          <td><code>--config-file</code></td>
+          <td><code>MCPD_CONFIG_FILE</code></td>
+          <td>nenhum</td>
+        </tr>
+        <tr>
+          <td><code>--forward-endpoint</code></td>
+          <td><code>MCPD_FORWARD_ENDPOINT</code></td>
+          <td>desligado: nada é encaminhado</td>
+        </tr>
+        <tr>
+          <td><code>--forward-header</code></td>
+          <td><code>MCPD_FORWARD_HEADERS</code></td>
+          <td>nenhum</td>
+        </tr>
+        <tr>
+          <td>nenhuma</td>
+          <td><code>MCPD_LOG</code></td>
+          <td><code>mcpd=info,mcpd_server=info,tower_http=warn</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>--listen</h3>
+  <p>
+    O endereço em que escutar. Uma única porta serve os endpoints OTLP, o
+    endpoint de ingestão nativo, a API de consulta, as sondas, as métricas e a
+    interface, então este é o único endereço que o mcpd tem.
+  </p>
+  <p>
+    Escutar em um endereço de loopback é a escolha discreta: o mcpd só avisa
+    sobre ingestão aberta quando o endereço em que escuta não é loopback. Em
+    <code>0.0.0.0</code> e sem chave nenhuma definida, ele avisa duas vezes na
+    partida, uma pela ingestão e outra pela leitura.
+  </p>
+
+  <h3>--data</h3>
+  <p>
+    Caminho do arquivo SQLite. Os diretórios pai são criados se não existirem.
+    Passe <code>:memory:</code> para um armazenamento que não deixa nada para
+    trás, o que é certo para uma demonstração ou um teste e errado para qualquer
+    coisa que você queira ver amanhã.
+  </p>
+
+  <h3>--project</h3>
+  <p>
+    O projeto em que um sinal cai quando o remetente não nomeou nenhum. Um
+    projeto é a fronteira de isolamento: toda consulta é limitada a um. A passagem
+    de retenção roda sobre ele e sobre todo projeto do bloco
+    <code>projects</code>; um projeto que não aparece em nenhum dos dois lugares
+    nunca é aparado, o que importa se seus remetentes nomeiam o projeto deles.
+  </p>
+
+  <h3>--retention-days</h3>
+  <p>
+    Apaga sinais mais velhos que esta quantidade de dias. Não definido, guarda
+    tudo, que é o padrão correto para um notebook e uma decisão que vale tomar
+    de propósito em qualquer outro lugar.
+  </p>
+  <p>
+    A janela vai de 1 a 36500 dias, aqui e no <code>retention_days</code> de um
+    projeto. Zero é recusado na partida em vez de ser lido como ausência de
+    retenção: ele poria o corte em agora, e a primeira passada roda na partida,
+    então apagaria todos os sinais do projeto. Para guardar tudo, deixe o ajuste
+    de fora.
+  </p>
+  <p>
+    A passagem roda em um temporizador de hora em hora, e não no momento da consulta,
+    então um apagamento grande nunca cai dentro da requisição de um usuário.
+    Spans, traces, logs e métricas são cortados pela hora em que o mcpd os
+    recebeu; notas, feedback e notas de aspecto, pelo carimbo de tempo
+    deles. Apagar linhas não
+    encolhe o arquivo. Veja
+    <a href={href('/docs/operations')} class="link">Como executar</a>.
+  </p>
+
+  <h3>--ingest-key, --read-key, --write-key, --admin-key, --execute-key e --worker-key</h3>
+  <p>
+    Seis escopos, porque eles carregam riscos genuinamente diferentes. Cada
+    endpoint declara o escopo de que precisa em
+    <code>spec/mcpd.spec.json</code>, o handler correspondente é marcado com o
+    mesmo escopo, e <code>make check</code> compara os dois, então um escopo
+    documentado aqui é o escopo que o servidor em execução aplica.
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Escopo</th>
+          <th>Definido com</th>
+          <th>O que abre</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>ingest</code></td>
+          <td><code>--ingest-key</code></td>
+          <td>Os quatro endpoints de ingestão. Não lê nada.</td>
+        </tr>
+        <tr>
+          <td><code>read</code></td>
+          <td><code>--read-key</code></td>
+          <td>A API de consulta: traces, spans, logs, métricas, notas, análises.</td>
+        </tr>
+        <tr>
+          <td><code>write</code></td>
+          <td><code>--write-key</code></td>
+          <td>
+            Notas, feedback, datasets, experimentos, reconhecimentos
+            e a captura de uma execução para um dataset.
+          </td>
+        </tr>
+        <tr>
+          <td><code>admin</code></td>
+          <td><code>--admin-key</code></td>
+          <td>Apagar um trace, ler o log de auditoria e tudo o que os dois escopos abaixo abrem.</td>
+        </tr>
+        <tr>
+          <td><code>execute</code></td>
+          <td><code>--execute-key</code></td>
+          <td>Iniciar, cancelar e sinalizar uma execução, e publicar um evento nela.</td>
+        </tr>
+        <tr>
+          <td><code>worker</code></td>
+          <td><code>--worker-key</code></td>
+          <td>Registrar definições, reivindicar etapas e relatar o resultado delas. Não lê trace nenhum.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    A separação que mais importa é <code>ingest</code> contra todo o resto. Uma
+    chave de ingest vive em todo processo que emite um span, inclusive nos que
+    rodam código que você não escreveu. Dar a essa população uma credencial que
+    também consegue ler de volta todo prompt armazenado é um erro que o mcpd não
+    torna fácil: uma chave de ingest apresentada à API de consulta é recusada.
+  </p>
+  <p>
+    <code>write</code> é separado de <code>ingest</code> pela mesma razão, em
+    escala menor. Capturar uma execução para um dataset lê a entrada e
+    a saída dessa execução, ou seja, é uma leitura vestida de escrita e não
+    pertence à chave que a sua frota carrega.
+  </p>
+  <p>
+    <code>admin</code> é separado de <code>read</code> porque apagar uma execução
+    não é lê-la. Até você definir <code>--admin-key</code>, uma chave de leitura
+    apaga além de ler, e o mcpd diz isso na partida.
+  </p>
+  <p>
+    <code>execute</code> e <code>worker</code> são os dois escopos da superfície
+    de execução. Iniciar uma execução faz o worker de alguém trabalhar e gastar
+    dinheiro, o que anotar um trace não faz, então não é <code>write</code>. Uma
+    chave de worker vive no processo que roda os corpos das etapas, que
+    normalmente é o processo que guarda a credencial do provedor, então ela abre
+    o protocolo de lease e nada que leia um prompt armazenado. Até você
+    definir as duas opções, as chaves de escrita são aceitas para ambos, e uma
+    chave de admin sempre é.
+  </p>
+
+  <h4>Atualizar sem parada</h4>
+  <p>
+    Um <code>--write-key</code> não definido aceita as chaves de ingest, e um
+    <code>--admin-key</code> não definido aceita as chaves de leitura. Uma
+    implantação configurada antes de esses dois escopos existirem mantém, então,
+    exatamente o alcance que tinha, e nada quebra na atualização. Defina as duas
+    opções para assumir as concessões mais estreitas; <code>mcpd config</code>
+    diz em qual estado você está: imprime <code>key required</code> quando o
+    escopo tem chaves próprias e <code>key required (ingest keys)</code> ou
+    <code>key required (read keys)</code> quando ele as está herdando.
+  </p>
+  <p>
+    Repita qualquer uma das seis opções para ter várias chaves, que é como se
+    gira uma chave sem parada. As variáveis de ambiente aceitam uma lista
+    separada por vírgulas. Quem chama apresenta a chave como
+    <code>Authorization: Bearer KEY</code> ou como <code>X-Mcpd-Key: KEY</code>,
+    e a comparação é de tempo constante, então nem o comprimento nem a posição
+    da primeira diferença são observáveis.
+  </p>
+  <p>
+    Uma chave que o mcpd não conhece é um <code>401</code>. Uma chave que o mcpd
+    conhece, usada em um endpoint que o escopo dela não cobre, é um
+    <code>403</code>. Vale manter os dois separados: um 401 manda você caçar um
+    erro de digitação em uma chave que está perfeitamente correta.
+  </p>
+  <p>
+    Sem chave nenhuma configurada, todo escopo fica aberto. Isso é de propósito,
+    porque a primeira execução não pode exigir uma credencial, e é por isso que
+    o aviso de partida existe.
+  </p>
+  <p>
+    Note o que as chaves não cobrem: <code>/healthz</code>,
+    <code>/readyz</code>, <code>/metrics</code> e a própria interface são
+    servidos sem chave nesta versão. Ponha-os atrás do seu próprio ingress se
+    isso importa para você.
+  </p>
+
+  <p>
+    Uma entrada vazia é descartada antes que qualquer coisa leia a lista. Uma lista definida que não contém nenhuma chave, como <code>MCPD_EXECUTE_KEYS=</code> ou um valor vazio em um Secret do Kubernetes, impede o daemon de iniciar, e a recusa nomeia a opção e a variável; omita a variável para deixar o escopo não definido, e uma requisição que envia um cabeçalho de chave vazio não apresenta chave nenhuma. Uma chave que ainda é um marcador dos arquivos de exemplo em <code>deploy/</code>, qualquer valor que comece com <code>REPLACE_WITH</code> ou <code>replace-me</code> em maiúsculas ou minúsculas, impede o daemon de iniciar; a recusa nomeia a opção ou a lista do projeto e nunca o valor. O mesmo vale para <code>--redact-key</code>. Gere cada chave com <code>openssl rand -hex 32</code>. Sem <code>--write-key</code>, <code>--execute-key</code> nem <code>--worker-key</code>, as chaves de ingest também iniciam execuções e reivindicam passos, e o mcpd avisa disso ao iniciar e no <code>mcpd doctor</code>.
+  </p>
+
+  <h4>O log de auditoria</h4>
+  <p>
+    Os handlers que devolvem payloads registram quem leu o quê:
+    <code>{`GET /v1/api/traces/{id}`}</code>, as buscas de span e de log, o
+    feedback, os itens de dataset, a captura e o apagamento. Cada
+    linha carrega a hora, um resumo curto da chave que agiu, a ação, o projeto,
+    o recurso e se a autorização permitiu. A chave em si nunca é anotada.
+  </p>
+  <p>
+    Leia o log com <code>GET /v1/api/audit</code>, que exige o escopo de
+    admin. Ele não é aparado por <code>--retention-days</code>: um log que
+    se apagasse no mesmo ritmo dos dados que descreve não poderia dizer quem leu
+    os dados que já se foram. Escrever uma linha nunca faz falhar a leitura que
+    ela descreve; uma linha que não pode ser escrita é logada e contada como
+    <code>mcpd_audit_write_failures_total</code> em <code>/metrics</code>, o que
+    merece um alerta.
+  </p>
+
+  <h3>--sample</h3>
+  <p>
+    Uma fração entre 0.0 e 1.0. Um valor fora dessa faixa é um erro de partida,
+    e não um corte silencioso: <code>--sample must be between 0.0 and 1.0, got
+    2</code>.
+  </p>
+  <p>
+    A decisão é tomada aplicando um hash ao id do trace, então uma frota de
+    instâncias do mcpd atrás de um balanceador de carga guarda e descarta os
+    mesmos traces sem conversar entre si. Ela é tomada uma vez por trace e
+    herdada por todo span daquele trace no lote, porque um trace gravado pela
+    metade parece um defeito no sistema que você está observando.
+  </p>
+  <p>
+    O hash lê os bytes finais do id do trace. Alguns produtores derivam os bytes
+    iniciais de um carimbo de tempo, e um amostrador que olhasse para esses
+    bytes se correlacionaria com a hora do dia e descartaria horas inteiras em
+    silêncio.
+  </p>
+  <p>
+    O tipo de política também carrega "sempre guardar erros" e "sempre guardar
+    mais lento que", mas isso vale para uma decisão de cauda, tomada depois que
+    um trace termina. Esta versão amostra só na cabeça, e nenhuma opção liga a
+    amostragem de cauda.
+    <a href={href('/docs/sampling')} class="link">Amostragem</a> trata da troca.
+  </p>
+
+  <h3>--no-redact, --redact-key, --redact-key-contains e --redact-max-string</h3>
+  <p>
+    A ocultação vem ligada e roda antes de qualquer coisa ser escrita, então um
+    valor que nunca deveria ter sido persistido nunca é. Apagá-lo depois não é a
+    mesma garantia. Três conjuntos de regras vêm embutidos, casados por
+    substrings em minúsculas do nome de uma chave:
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Regra</th>
+          <th>Aplicada quando a chave contém</th>
+          <th>O que é armazenado</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Máscara</td>
+          <td>
+            <code>api_key</code>, <code>apikey</code>, <code>api-key</code>,
+            <code>secret</code>, <code>password</code>, <code>passwd</code>,
+            <code>access_token</code>, <code>refresh_token</code>,
+            <code>id_token</code>, <code>bearer</code>,
+            <code>authorization</code>, <code>auth_token</code>,
+            <code>private_key</code>, <code>client_secret</code>,
+            <code>session_token</code>, <code>credential</code>,
+            <code>signature</code>, <code>x-api-key</code>
+          </td>
+          <td><code>[redacted]</code></td>
+        </tr>
+        <tr>
+          <td>Parcial</td>
+          <td>
+            <code>email</code>, <code>phone</code>, <code>ssn</code>,
+            <code>credit_card</code>, <code>card_number</code>,
+            <code>iban</code>
+          </td>
+          <td>
+            Os dois primeiros e os dois últimos caracteres,
+            <code>ab…yz</code>. Um valor de seis caracteres ou menos é
+            mascarado por inteiro, em vez de vazar quase todo ele
+          </td>
+        </tr>
+        <tr>
+          <td>Hash</td>
+          <td><code>user_id</code>, <code>userid</code></td>
+          <td>
+            <code>sha256:</code> e 12 bytes de um resumo com chave, para você
+            ainda poder agrupar por usuário sem armazenar nenhum
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Uma chave casada que guarda um objeto ou um array tem tudo abaixo dela
+    ocultado também, então <code>{'{'}"credentials": {'{'}"token": "..."{'}'}{'}'}</code>
+    não escapa só pelo nome aninhado. Qualquer string única maior que 128 KiB é
+    truncada com um marcador que nomeia a contagem de bytes, o que limita o que
+    um prompt desgovernado faz com o seu disco.
+  </p>
+  <p>
+    <code>--redact-key</code> é a chave da regra de hash. Entradas iguais geram
+    o mesmo hash sob uma chave, que é o que faz o agrupamento funcionar, e girar
+    a chave quebra esse vínculo de propósito. Defina-a em qualquer implantação
+    que use hash: o padrão embutido está no código-fonte, então resumos sem
+    chave são adivinháveis.
+  </p>
+  <p>
+    <code>--redact-key-contains</code> acrescenta uma regra de máscara sua às
+    três embutidas. As regras embutidas conhecem os nomes sob os quais
+    credenciais costumam ser guardadas; elas não conhecem o campo em que as suas
+    próprias ferramentas põem o número de conta de um cliente. O valor é casado
+    do mesmo jeito que as regras embutidas, como uma substring em minúsculas da
+    chave, então <code>--redact-key-contains ticket</code> mascara
+    <code>ticket_id</code> e <code>supportTicket</code> igualmente, e tudo o que
+    estiver aninhado sob uma chave casada por elas. Repita a opção para várias,
+    ou defina <code>MCPD_REDACT_KEY_CONTAINS</code> com uma lista separada por
+    vírgulas.
+  </p>
+  <p>
+    <code>--redact-max-string</code> baixa o limite de comprimento a partir dos
+    128 KiB embutidos. Uma string maior que o limite é cortada ali, com um
+    marcador que nomeia quantos bytes foram descartados, antes de ser
+    armazenada.
+  </p>
+  <p>
+    <code>--no-redact</code> desliga todo o pipeline, inclusive o limite de
+    comprimento. Como variável de ambiente, é
+    <code>MCPD_NO_REDACT=true</code>. Só faz sentido quando algo antes dele já
+    oculta, e o daemon se recusa a iniciar se qualquer um dos dois acréscimos
+    acima estiver definido ao lado dele, porque não há nada a que eles se
+    apliquem.
+  </p>
+
+  <h3>--runs-data</h3>
+  <p>
+    Onde mora o armazenamento das execuções: as definições, o diário das
+    tentativas de cada etapa, cada prazo e cada espera. É um arquivo embutido,
+    seja qual for o armazenamento de sinais, então em Postgres ou ClickHouse as
+    execuções continuam em um arquivo ao lado do daemon, e a superfície de
+    execução é servida por uma réplica. Por padrão, é o caminho de
+    <code>--data</code> com <code>.runs</code> antes da extensão,
+    <code>./mcpd.runs.db</code> no caso do padrão, e <code>:memory:</code>
+    quando <code>--data</code> é. <code>--runs-data off</code> não serve execução
+    nenhuma: todo endpoint de execução responde <code>503</code> nomeando esta
+    opção, e o resto do daemon fica igual.
+  </p>
+  <p>
+    Os tempos do armazenamento ficam no arquivo de configuração, sob
+    <code>runs</code>, em milissegundos inteiros: <code>lease_ttl_ms</code>,
+    <code>reclaim_window_ms</code>, <code>stall_window_ms</code>,
+    <code>idempotency_window_ms</code>, <code>park_ttl_ms</code> e
+    <code>max_depth</code>. Os padrões, um lease de 30 segundos e uma
+    janela de recuperação de 30 segundos, são certos para um daemon em uma
+    máquina e são o que um worker lê de volta quando se registra.
+  </p>
+
+  <h3>--cors-origin</h3>
+  <p>
+    Quais origens de navegador podem chamar a API de consulta a partir de outro
+    site. Sem nenhuma definida, uma requisição de outra origem não recebe
+    cabeçalho <code>access-control-allow-origin</code> e o navegador se recusa a
+    entregar a resposta à página. Esse é o padrão, e é o que impede que um
+    daemon no seu notebook, com a API de leitura aberta, seja legível por
+    qualquer página aberta no mesmo navegador. A interface incluída é servida
+    pela própria origem do daemon e nunca precisa desta opção.
+  </p>
+  <p>
+    Servir a interface de outro lugar, uma CDN ou um portal interno, é o caso
+    para o qual esta opção existe: nomeie essa origem, como esquema e host, por
+    exemplo <code>--cors-origin https://console.example</code>. Repita a opção
+    para várias, ou defina <code>MCPD_CORS_ORIGINS</code> com uma lista separada
+    por vírgulas. Um valor que não é uma origem, <code>console.example</code> ou
+    um com barra no fim, recusa a partida nomeando a opção, em vez de deixar
+    você com uma interface que não consegue conectar e nenhuma razão para isso.
+    <code>--cors-origin '*'</code> permite toda origem, que é o que versões
+    anteriores faziam sem perguntar.
+  </p>
+  <p>
+    <code>/healthz</code>, <code>/readyz</code> e <code>/metrics</code> não são
+    governados por esta opção. Eles não carregam dado armazenado, e a interface
+    sonda <code>/healthz</code> antes de fazer qualquer outra coisa, então
+    continuam legíveis a partir de qualquer origem.
+  </p>
+
+  <h3>--request-timeout-seconds</h3>
+  <p>
+    O máximo que uma requisição pode levar, leitura do corpo incluída, antes de
+    o daemon responder por ela. Um handler que passa do prazo recebe como
+    resposta um <code>503</code> cujo corpo carrega <code>timeout</code> e o nome
+    desta opção. O padrão é 30 segundos, o que é longo o bastante para um lote
+    grande ser lido e armazenado, e curto o bastante para que um armazenamento
+    que aceita conexões e nunca responde seja relatado em vez de esperado. Não
+    dá para desligar; aumente se uma operação realmente precisar de mais tempo.
+  </p>
+
+  <h3>--max-body-bytes e --max-batch-signals</h3>
+  <p>
+    Os dois limites de uma requisição. <code>--max-body-bytes</code> é o maior
+    corpo que o daemon lê, 32 MiB por padrão, e é o que decide quanta memória
+    uma requisição pode tomar antes de qualquer parte dela ser decodificada. Um
+    corpo maior é recusado com <code>413</code> nomeando os dois números, e um
+    corpo comprimido é medido pelo mesmo número depois de inflado, então um corpo
+    que se expande mil vezes é recusado em vez de expandido.
+  </p>
+  <p>
+    <code>--max-batch-signals</code> é quantos sinais uma requisição pode
+    carregar depois de decodificada, 10.000 por padrão. É contado por toda a
+    requisição, então um array de lotes e um fluxo NDJSON são submetidos ao
+    mesmo número que um único lote. Nada é armazenado quando uma requisição
+    passa do limite: a recusa vem antes da primeira escrita, e não depois de
+    metade delas.
+  </p>
+  <p>
+    Os dois também são chaves do arquivo de configuração,
+    <code>max_body_bytes</code> e <code>max_batch_signals</code>, e a opção vence
+    onde os dois estiverem definidos. Nenhum dos dois pode ser desligado, e zero
+    é recusado na partida em vez de ser lido como "sem limite": um limite de
+    corpo igual a zero recusa toda requisição, então a leitura que parece
+    generosa é a que derruba a ingestão.
+  </p>
+
+  <h3>--log-format e MCPD_LOG</h3>
+  <p>
+    <code>text</code> para um terminal, <code>json</code> para um pipeline de
+    logs. <code>MCPD_LOG</code> aceita uma string de filtro do
+    <code>tracing</code> e não tem opção, porque é um controle de depuração e
+    não uma decisão de implantação. Defina-a como
+    <code>mcpd_server=debug</code> quando quiser ver detalhe por requisição.
+  </p>
+
+  <h2>Onde valem os dois limites de requisição</h2>
+  <p>
+    O limite de corpo vale para toda rota que lê um corpo, API de consulta
+    incluída. O limite de sinais vale para as portas de ingestão, e é isto que
+    ele conta em cada uma delas.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Porta</th>
+          <th>O que o limite de sinais conta</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>POST /v1/ingest</code></td>
+          <td>Cada span, log, métrica, nota, pedaço de feedback e nota de aspecto da requisição, somados por tudo o que houver nela, tenha chegado como um lote, um array de lotes ou um fluxo de linhas NDJSON</td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/traces</code></td>
+          <td>Os spans que o remetente enviou, contados antes de serem mapeados, que é o número sobre o qual o remetente pode agir</td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/logs</code></td>
+          <td>Os registros de log da exportação</td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/metrics</code></td>
+          <td>Os pontos de dados da exportação, por toda métrica que houver nela</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Subcomandos</h2>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Comando</th>
+          <th>O que faz</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>mcpd serve</code></td>
+          <td>Roda o daemon. É o que acontece sem subcomando nenhum</td>
+        </tr>
+        <tr>
+          <td><code>mcpd demo</code></td>
+          <td>Escreve uma execução de exemplo realista no armazenamento e depois serve, para a interface ter algo dentro dela na primeira vez que você a abrir</td>
+        </tr>
+        <tr>
+          <td><code>mcpd config</code></td>
+          <td>Imprime a configuração que esta invocação usaria e sai</td>
+        </tr>
+        <tr>
+          <td><code>mcpd mcp</code></td>
+          <td>Serve o Model Context Protocol por stdio, para um agente poder ler os próprios traces de um daemon em execução</td>
+        </tr>
+        <tr>
+          <td><code>mcpd doctor</code></td>
+          <td>Dá uma nota a esta implantação e relata o que está mal configurado. Sai com 2 diante de uma falha, então pode servir de portão para uma implantação. Veja <a href={href('/docs/operations')} class="link">Como executar</a></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    <code>mcpd config</code> existe por causa da discussão que você está prestes
+    a ter com um contêiner. Opções, variáveis de ambiente e padrões acabam todos
+    em um lugar só, e isto imprime esse lugar sem iniciar um servidor nem tocar
+    no arquivo de dados:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="mcpd config"
+    lines={[
+      { cmd: 'MCPD_INGEST_KEYS=k1,k2 mcpd --retention-days 30 --sample 0.1 config' },
+      { out: 'listen          0.0.0.0:4317' },
+      { out: 'storage         sqlite at ./mcpd.db' },
+      { out: 'config file     none' },
+      { out: 'log format      text' },
+      { out: 'project         default' },
+      { out: 'projects        none' },
+      { out: 'retention       30 days' },
+      { out: 'ingest auth     key required', tone: 'ok' },
+      { out: 'read auth       open', tone: 'warn' },
+      { out: 'write auth      key required (ingest keys)', tone: 'ok' },
+      { out: 'admin auth      open', tone: 'warn' },
+      { out: 'execute auth    key required (ingest keys)', tone: 'warn' },
+      { out: 'worker auth     key required (ingest keys)', tone: 'warn' },
+      { out: 'runs            sqlite at ./mcpd.runs.db' },
+      { out: 'run settings    lease_ttl_ms 30000, reclaim_window_ms 30000, stall_window_ms 300000, idempotency_window_ms 86400000, park_ttl_ms 86400000, max_depth 8, max_step_repeats 16' },
+      { out: 'identity        off' },
+      { out: 'sampling        deterministic 0.1' },
+      { out: 'quota           unlimited' },
+      { out: 'redaction       on', tone: 'ok' },
+      { out: 'redact key      built in, which is public; set --redact-key', tone: 'warn' },
+      { out: 'cors            same-origin only' },
+      { out: 'timeout         30s per request' },
+      { out: 'limits          32 MiB per request, 10000 signals per batch' },
+      { out: 'derived         duration and token metrics' },
+      { out: 'aspects         off' },
+      { out: 'monitors        none' },
+      { out: 'objectives      none' },
+      { out: 'judge           off' },
+      { out: 'forwarding      off' },
+    ]}
+  />
+
+  <p>
+    Leia as seis linhas de autenticação antes de implantar qualquer coisa.
+    <code>open</code> quer dizer aberto a quem alcançar a porta. Uma linha entre
+    parênteses nomeia a lista mais ampla de que aquele escopo está herdando, que
+    é o estado em que começa uma implantação atualizada a partir de uma versão
+    mais antiga.
+  </p>
+
+  <h2>Uma implantação configurada</h2>
+  <p>
+    Nada aqui é específico do mcpd: as variáveis são ambiente comum, então
+    funcionam do mesmo jeito no Compose, em um manifesto do Kubernetes e em uma
+    unidade do systemd.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="compose"
+    samples={[{ lang: 'curl', label: 'docker-compose.yml', shiki: 'yaml', code: composeEnv }]}
+  />
+
+  <p>
+    Os mesmos ajustes como opções, para um shell ou um arquivo de unidade:
+  </p>
+
+  <Command
+    class="my-6"
+    command="mcpd --listen 0.0.0.0:4317 --data /data/mcpd.db --retention-days 30 --ingest-key $KEY --log-format json"
+  />
+
+  <h2>O que os SDKs leem</h2>
+  <p>
+    Estas variáveis são lidas pelo processo do seu agente, não pelo daemon. Elas
+    estão listadas aqui porque os dois conjuntos compartilham nomes, e um
+    contêiner que roda um agente e o mcpd é configurado por um ambiente só.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Variável</th>
+          <th>Padrão</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+        <tr><td><code>MCPD_API_KEY</code></td><td>não definido</td></tr>
+        <tr><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+        <tr><td><code>MCPD_ENVIRONMENT</code></td><td>não definido</td></tr>
+        <tr><td><code>MCPD_SERVICE_NAME</code></td><td>não definido</td></tr>
+        <tr><td><code>MCPD_SERVICE_VERSION</code></td><td>não definido</td></tr>
+        <tr><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+        <tr><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+        <tr><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+        <tr><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    <code>MCPD_PROJECT</code> e <code>MCPD_SAMPLE</code> significam a mesma
+    coisa dos dois lados, que normalmente é o que você quer: defina uma vez e o
+    agente e o daemon concordam sobre o projeto. A amostragem é a que exige
+    pensar. Um SDK descarta um trace antes de ele ser enviado, o que poupa rede.
+    O daemon o descarta antes de ser armazenado, que é o único lugar onde a taxa
+    pode ser imposta a remetentes que você não controla. Defina a taxa em um
+    lugar, não nos dois, ou você estará filtrando um fluxo já filtrado.
+  </p>
+  <p>
+    <code>MCPD_ENABLED=false</code> faz de toda chamada de SDK uma operação sem
+    efeito que ainda devolve objetos válidos, então o mcpd pode ser desligado em
+    testes sem mudar código nenhum. <code>MCPD_CAPTURE_PAYLOADS=false</code>
+    mantém prompts e respostas dentro do processo: os spans ainda chegam com o
+    tempo, o uso, o modelo e os erros deles, mas <code>input</code> e
+    <code>output</code> são descartados antes de entrarem na fila, então nunca
+    atravessam a rede. A ocultação no daemon é a outra ponta do mesmo fio, e a
+    ponta errada para um time que não pode enviar os bytes de jeito nenhum. O
+    detalhe por linguagem está em cada
+    <a href={href('/docs/sdks/typescript')} class="link">página de SDK</a>.
+  </p>
+
+  <h3>--config-file</h3>
+  <p>
+    Um arquivo JSON com os ajustes que não cabem em uma linha de comando:
+    monitores, objetivos de nível de serviço, o intervalo em que são avaliados,
+    o encaminhamento, o juiz, os tempos do armazenamento de execuções, os dois
+    limites de requisição e o bloco por projeto que vem abaixo. JSON, e não YAML
+    ou TOML, porque o mcpd já interpreta JSON para todo o resto, então o arquivo
+    não acrescenta dependência nem uma segunda sintaxe a aprender. Ele monta como
+    um ConfigMap do Kubernetes sem mudança nenhuma.
+  </p>
+  <p>
+    <code>max_body_bytes</code> e <code>max_batch_signals</code> estão aqui além
+    da linha de comando, para uma frota poder mantê-los ao lado dos monitores com
+    que são implantados. Uma opção vence o arquivo, que é como uma instância
+    assume um limite diferente sem que o arquivo compartilhado seja editado para
+    todo mundo.
+  </p>
+  <p>
+    Uma chave desconhecida faz a partida falhar em vez de ser ignorada, porque um
+    erro de digitação que silenciosamente não observa nada é o pior desfecho
+    disponível.
+  </p>
+
+  <p>
+    O mesmo vale para um valor com o qual um temporizador em segundo plano não
+    consegue rodar: um <code>objective</code> que não seja pelo menos 0 e menor
+    que 1, um <code>window_days</code> de objetivo fora de 1 a 365, um
+    <code>monitor_interval_seconds</code> acima de 86400, um
+    <code>aspects.window_seconds</code> fora de 1 a 31536000, um
+    <code>aspects.interval_seconds</code> acima de 604800 e um
+    <code>judge.timeout_seconds</code> fora de 1 a 300. Cada recusa diz a chave
+    e o intervalo.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "max_body_bytes": 33554432,
+  "max_batch_signals": 10000,
+  "monitor_interval_seconds": 60,
+  "monitors": [
+    {
+      "id": "error-rate",
+      "name": "Error rate above 5%",
+      "project": "checkout",
+      "watch": "error_rate",
+      "compare": "above",
+      "threshold": 0.05,
+      "window_seconds": 300,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ],
+  "forward": {
+    "endpoint": "https://otlp.example.com",
+    "headers": [["Authorization", "Bearer sk-..."]],
+    "batch_size": 256,
+    "enabled": true
+  }
+}`}</code></pre>
+
+  <h3>Projetos, e as chaves que os alcançam</h3>
+  <p>
+    Um projeto é a chave de isolamento. Listar chaves sob um projeto é o que torna
+    isso verdadeiro em vez de decorativo: uma chave no bloco de um projeto
+    alcança aquele projeto e nenhum outro, então um daemon serve vários times
+    sem que nenhum deles consiga ler os prompts dos outros.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "projects": {
+    "checkout": {
+      "ingest_keys": ["ck-write-..."],
+      "read_keys": ["ck-read-..."],
+      "admin_keys": ["ck-admin-..."],
+      "retention_days": 30,
+      "sample": 0.25
+    },
+    "support": {
+      "ingest_keys": ["sp-write-..."],
+      "read_keys": ["sp-read-..."],
+      "retention_days": 90
+    }
+  }
+}`}</code></pre>
+
+  <p>
+    As seis listas existem por projeto, como <code>ingest_keys</code>,
+    <code>read_keys</code>, <code>write_keys</code>, <code>admin_keys</code>,
+    <code>execute_keys</code> e <code>worker_keys</code>, e
+    recuam do mesmo jeito: um projeto sem <code>write_keys</code> aceita as
+    próprias chaves de ingest, e um sem <code>admin_keys</code> aceita as
+    próprias chaves de leitura. O bloco <code>support</code> acima não define
+    nenhuma das duas, então se comporta exatamente como se comportava antes de
+    os dois escopos existirem.
+  </p>
+  <p>
+    Uma chave definida com qualquer uma das seis opções de nível superior
+    alcança todo projeto. Esse é o caminho de inquilino único, e ele continua
+    sendo o caminho simples: se você nunca abrir este bloco, nunca encontra nada
+    disto.
+  </p>
+  <p>
+    <code>retention_days</code> e <code>sample</code> recuam para as opções
+    globais quando um projeto não os define. Os dois são por projeto pela mesma
+    razão que as chaves são: a exigência de noventa dias de um time não deveria
+    obrigar todo mundo a guardar os dados, e o tráfego de um time não deveria
+    decidir como outro time é amostrado.
+  </p>
+  <p>
+    Um lote pode nomear vários projetos. Uma chave de ingest com escopo escreve
+    os sinais que ela alcança e recusa o resto, relatando a recusa na resposta em
+    vez de descartá-los em silêncio, então uma frota apontada para o projeto
+    errado fica visível na resposta que ela já está lendo.
+  </p>
+  <p>
+    Uma requisição de leitura para um projeto que a sua chave não alcança é
+    recusada sem dizer se aquele projeto existe. Em um daemon compartilhado, os
+    nomes dos projetos costumam ser os nomes de times ou de clientes.
+  </p>
+
+  <p>
+    Monitores e objetivos de nível de serviço são tratados em
+    <a href={href('/docs/alerting')} class="link">Monitores e alertas</a>; os
+    objetivos vão em um array <code>slos</code> ao lado de
+    <code>monitors</code> e são avaliados no mesmo temporizador. O bloco
+    <code>judge</code> liga a avaliação por juiz e é tratado em
+    <a href={href('/docs/testing')} class="link">Testes de regressão</a>. Ele fica
+    desligado até você defini-lo, e um avaliador por juiz nunca roda a menos que uma
+    requisição o nomeie, porque julgar gasta dinheiro a cada execução que lê.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "judge": {
+    "endpoint": "http://localhost:11434/v1",
+    "model": "qwen2.5:14b",
+    "api_key": "",
+    "criteria": {
+      "answer_relevance": "Does the answer address the question that was asked?"
+    }
+  }
+}`}</code></pre>
+
+  <p>
+    <code>monitor_interval_seconds</code> é de quanto em quanto tempo os monitores e os objetivos são avaliados. O padrão é 60, e um valor abaixo de 5 é elevado a 5.
+  </p>
+
+  <h3>derived_metrics</h3>
+  <p>
+    Quais métricas o daemon deriva dos spans que guarda. As duas metades ficam ligadas quando o bloco não existe. <code>durations</code> grava um ponto de duração para cada span terminado de agente, ferramenta, workflow, geração de modelo ou processador. <code>tokens</code> grava até treze contadores de tokens para cada span de geração de modelo que informou o uso. Defina qualquer uma das duas como <code>false</code> para parar de gravá-la; um campo omitido continua ligado. Não há opção de linha de comando para isso. Os pontos derivados entram depois do teto por projeto e não contam no número <code>accepted</code> de uma resposta de ingestão.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "derived_metrics": { "durations": true, "tokens": false }
+}`}</code></pre>
+
+  <h3>aspects</h3>
+  <p>
+    Se o daemon agrupa as notas de aspecto em temas, e sob quais limites. Desligado quando o bloco não existe. <code>enabled</code> liga a passada e não precisa de modelo nem de credencial, porque o próprio daemon grava o aspecto <code>outcome</code>. <code>interval_seconds</code> é de quanto em quanto tempo uma passada roda, 300 por padrão, e um valor abaixo de 30 é elevado a 30. <code>window_seconds</code> é até onde uma passada lê notas, 86400 por padrão. <code>disabled</code> nomeia aspectos que nenhuma passada agrupa; as notas já gravadas sob um deles continuam legíveis.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "aspects": {
+    "enabled": true,
+    "interval_seconds": 300,
+    "window_seconds": 86400,
+    "disabled": ["sentiment"]
+  }
+}`}</code></pre>
+
+  <h3>--forward-endpoint</h3>
+  <p>
+    Copia todo span armazenado para outro endpoint OTLP/HTTP. Dê a URL base;
+    <code>/v1/traces</code> é acrescentado. A escrita local sempre acontece
+    primeiro, então um destino fora do ar não custa nada a você.
+  </p>
+  <p>
+    Esta opção vence o bloco <code>forward</code> do arquivo de configuração,
+    então uma instância pode ser apontada para outro lugar sem editar um
+    ConfigMap compartilhado. Veja
+    <a href={href('/docs/forwarding')} class="link">Encaminhamento</a>.
+  </p>
+
+  <h3>--forward-header</h3>
+  <p>
+    Um cabeçalho enviado com todo lote encaminhado, escrito como
+    <code>Name: value</code>. Repita a opção para mais de um. A variável de
+    ambiente aceita uma lista separada por vírgulas.
+  </p>
+  <p>
+    Um valor sem dois-pontos é recusado na partida, com a forma que funciona, em
+    vez de ser descartado. Um cabeçalho no estilo do OpenTelemetry,
+    <code>key=value</code>, aqui se escreve <code>key: value</code>.
+  </p>
+
+  <h3>--clickhouse-url</h3>
+  <p>
+    O endpoint HTTP de um servidor ClickHouse, por exemplo
+    <code>http://clickhouse:8123</code>. Defini-lo troca o armazenamento do
+    arquivo embutido para o ClickHouse, e <code>--data</code> deixa de ser lido.
+    O esquema é criado na partida.
+  </p>
+  <p>
+    Este é o ajuste que remove os limites de um escritor e de uma réplica do
+    armazenamento embutido. Recorra a ele quando a retenção for medida em meses
+    de tráfego de produção, e não antes:
+    <a href={href('/docs/operations')} class="link">Como executar</a> trata da
+    troca.
+  </p>
+
+  <h3>--clickhouse-database, --clickhouse-user, --clickhouse-password</h3>
+  <p>
+    O banco em que criar as tabelas, e as credenciais com que alcançá-lo. Um
+    usuário sem senha é enviado sem uma, o que é certo para um contêiner em uma
+    rede privada e errado em qualquer outro lugar.
+  </p>
+
+  <h3>--postgres-url</h3>
+  <p>
+    Uma string de conexão do Postgres, por exemplo
+    <code>postgres://mcpd:secret@db:5432/mcpd</code>. Defini-la troca o
+    armazenamento do arquivo embutido para o Postgres, e <code>--data</code>
+    deixa de ser lido. O esquema é criado na partida.
+  </p>
+  <p>
+    Esta é a opção do meio. Ela remove os mesmos limites de um escritor e de uma
+    réplica que o ClickHouse remove, sem pedir que você rode um banco que ainda
+    não tem. Nomear esta e <code>--clickhouse-url</code> faz a partida falhar em
+    vez de escolher uma das duas.
+  </p>
+  <p>
+    A migração toma um advisory lock, então várias réplicas partindo juntas é
+    seguro, e uma partida sem nada a aplicar não toca em esquema nenhum.
+  </p>
+
+  <p>
+    Para TLS, acrescente <code>sslmode=require</code> à string de conexão. O
+    mcpd então cifra a conexão e sempre verifica o certificado do servidor. Ele o
+    confere com as autoridades certificadoras públicas, ou com a de
+    <code>sslrootcert=/caminho/para/ca.pem</code>, que é o que um serviço
+    gerenciado com autoridade própria exige. <code>verify-ca</code> e
+    <code>verify-full</code> são lidos como <code>require</code>. Com
+    <code>prefer</code>, o padrão, ou com <code>disable</code>, a conexão não é
+    cifrada.
+  </p>
+
+  <h2>Registrar quem, e não só qual chave</h2>
+  <p>
+    O log de auditoria anota um resumo da chave que agiu. Isso responde
+    "uma chave de admin apagou esta execução" e não "qual pessoa apagou". O mcpd
+    não tem provedor de identidade, então a identidade tem de
+    vir do ingress que já está na frente dele.
+  </p>
+  <p>
+    Dê a ele o cabeçalho que o seu proxy define, e os endereços autorizados a
+    defini-lo:
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="tome a identidade de um ingress em que você confia"
+    command={`mcpd serve \\
+  --trusted-identity-header x-forwarded-user \\
+  --trusted-proxy-cidr 10.42.0.0/16`}
+  />
+
+  <p>
+    As duas metades são obrigatórias, e a lista de endereços é a razão de isto
+    ser seguro. Um cabeçalho é uma string que qualquer um capaz de abrir um
+    socket para a porta pode enviar, então o mcpd só o lê de um endereço que você
+    nomeou. Uma requisição de qualquer outro lugar é servida normalmente e a
+    linha de auditoria dela não carrega sujeito, que é a resposta honesta em vez
+    de um palpite. O valor também tem o comprimento limitado e é despido de
+    caracteres de controle, porque um cabeçalho sofre influência de quem ataca
+    mesmo quando o proxy não sofre.
+  </p>
+  <p>
+    Sem nenhuma das duas opções definidas, nada muda e nenhum sujeito é jamais
+    registrado. Esse é o padrão.
+  </p>
+
+
+  <h2>Um projeto não pode gastar o daemon inteiro</h2>
+  <p>
+    Um projeto que inunda o mcpd custa caro a todo outro projeto nele: o disco
+    enche, a retenção não dá conta, e o time que não fez nada de errado é o que
+    perde execuções. <code>--quota-per-minute</code> é o teto que impede isso.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="um teto para todo projeto, e um maior para um deles"
+    command="mcpd serve --quota-per-minute 10000"
+  />
+
+  <p>
+    Não definido quer dizer sem teto, então uma implantação que nunca o define se
+    comporta exatamente como se comportava antes de as cotas existirem. Definido,
+    ele cobre três coisas: todo projeto do bloco <code>projects</code> que não
+    nomeia o próprio <code>quota_per_minute</code>, o projeto nomeado por
+    <code>--project</code> e <strong>todo projeto que a configuração não lista de
+    jeito nenhum</strong>.
+  </p>
+  <p>
+    Este último é a parte que faz dele um teto e não uma sugestão. O nome do
+    projeto chega dentro do corpo da requisição, então um remetente que escolhe
+    um nome que arquivo de configuração nenhum lista era cobrado de ninguém e
+    podia armazenar sem limite. Um limite do qual o remetente escapa inventando
+    uma string não é um limite.
+  </p>
+  <p>
+    Todo projeto não listado divide um contador, em vez de cada um ganhar o seu.
+    Um contador por nome seria uma alocação que qualquer remetente poderia mover
+    inventando nomes, que é o mesmo buraco em outra forma. Dividir quer dizer que
+    uma inundação espalhada por mil nomes inventados é limitada no total por este
+    número, e quer dizer que um projeto que merece a própria cota deve ser
+    nomeado em <code>projects</code>, onde ele ganha uma.
+  </p>
+
+  <h3>O que o teto realmente limita</h3>
+  <p>
+    O contador é do tipo ponderado de duas janelas: a contagem deste minuto,
+    mais a do minuto anterior ponderada por quanto dele a janela que termina
+    agora ainda cobre. Ele segura a taxa sustentada no teto e permite um pico de
+    até um teto inteiro por cima disso, porque um SDK esvaziando uma fila cheia
+    chega como um pico e um contador que o recusasse recusaria tráfego comum.
+  </p>
+  <p>
+    Esses dois juntos têm uma consequência aritmética que vale enunciar em vez de
+    esconder. Um projeto pode armazenar um pouco menos que o <strong>dobro</strong>
+    do teto dentro de um intervalo de 60 segundos: um teto inteiro bem no fim de
+    uma janela, e um teto inteiro de novo bem no fim da seguinte. Isso não é um
+    artefato da aproximação. Qualquer limitador que deixe um projeto gastar o
+    teto de uma vez e o teto de novo por minuto depois disso permite isso na
+    virada, e o único jeito de tirar é recusar o pico.
+  </p>
+  <p>
+    A janela é de um minuto e não é configurável. A opção nomeia a unidade, então
+    um segundo ajuste que mudasse o que "por minuto" quer dizer tornaria o
+    primeiro número ilegível.
+  </p>
+
+  <h3>O que acontece com o excesso</h3>
+  <p>
+    Sinais acima do teto são recusados e relatados, nunca descartados em
+    silêncio. O lote não é recusado inteiro: o mcpd armazena o que cabe e diz a
+    você o que não coube.
+  </p>
+  <ul>
+    <li>
+      Spans vão por trace inteiro. Meia execução tem spans cujo pai ninguém
+      armazenou, o que se lê como uma execução quebrada e não como uma execução
+      faltante. Um trace grande demais para o que sobrou é pulado e o próximo é
+      tentado, então uma execução grande não gasta o resto da cota à toa.
+    </li>
+    <li>
+      Logs, métricas, notas e feedback são independentes, então preenchem o que
+      sobrou na ordem de chegada.
+    </li>
+    <li>
+      Só o que é armazenado é cobrado. O corte guarda traces inteiros e por isso
+      pode armazenar menos sinais do que lhe foi permitido, e a diferença é
+      devolvida. Sem isso, um projeto cujas execuções são maiores que a cota
+      restante pagaria até zerar sem armazenar nada.
+    </li>
+    <li>
+      Outros projetos da mesma requisição ficam intocados. Um projeto acima do
+      teto dele não custa a outro os sinais que este enviou junto.
+    </li>
+  </ul>
+  <p>
+    A resposta carrega a contagem em <code>rejected</code> e uma linha em
+    <code>errors</code> nomeando o projeto e o teto dele. Um projeto que a
+    configuração nunca listou recebe outra frase, porque ouvir que o projeto
+    <code>analytics-v2</code> está acima do teto manda você procurar um ajuste
+    que não existe, quando a resposta é acrescentar o projeto:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="oito sinais para um projeto que ninguém configurou, com o teto compartilhado em cinco"
+    lines={[
+      { cmd: 'curl -sX POST "$MCPD/v1/ingest" -H content-type:application/json -d @batch.json | jq' },
+      { out: '{' },
+      { out: '  "accepted": 5,' },
+      { out: '  "rejected": 3,', tone: 'warn' },
+      { out: '  "duplicate": 0,' },
+      { out: '  "errors": [' },
+      { out: '    {' },
+      { out: '      "signal": "span",' },
+      { out: '      "index": 0,' },
+      { out: '      "message": "3 signal(s) named project analytics-v2, which', tone: 'warn' },
+      { out: '                  no configuration lists. Every unlisted project', tone: 'warn' },
+      { out: '                  shares one ceiling of 5 per minute and it was', tone: 'warn' },
+      { out: '                  full, so they were not stored. Add analytics-v2', tone: 'warn' },
+      { out: '                  to the `projects` block to give it an allowance', tone: 'warn' },
+      { out: '                  of its own, or raise --quota-per-minute."', tone: 'warn' },
+      { out: '    }' },
+      { out: '  ]' },
+      { out: '}' },
+    ]}
+  />
+
+  <p>
+    Uma recusa é contada em <code>mcpd_signals_over_quota_total</code> além de em
+    <code>mcpd_signals_rejected_total</code>, então uma frota sendo limitada se
+    distingue de uma frota enviando dados malformados. Veja
+    <a href={href('/docs/operations')} class="link">Como executar</a>.
+  </p>
+
+  <h3>Duas coisas para conferir quando você o definir</h3>
+  <p>
+    O teto cobre toda porta que armazena um sinal: as de lote,
+    <code>/v1/ingest</code>, <code>/v1/traces</code>, <code>/v1/logs</code> e
+    <code>/v1/metrics</code>, e as de registro único,
+    <code>POST /v1/api/scores</code> e <code>POST /v1/api/feedback</code>. As
+    duas respondem de propósito de formas diferentes a um projeto acima do teto.
+    Uma porta de lote armazena o que cabe e relata o resto como
+    <code>rejected</code> com um motivo, porque um lote pode nomear vários
+    projetos e recusar a requisição inteira puniria os que estão dentro do teto.
+    Uma porta de registro único não tem resposta parcial a dar, então recusa com
+    <code>429</code> e um cabeçalho <code>Retry-After</code> com os segundos que
+    faltam até o contador daquele projeto admitir outro sinal. O número vem do
+    próprio contador, então um cliente que o respeita volta quando há espaço, e
+    não quando um atraso fixo terminou.
+  </p>
+  <p>
+    Uma porta de escrita não é cobrada nele: <code>POST /v1/api/score</code>, que
+    roda avaliadores sobre execuções armazenadas. Ela entrega as notas que produziu
+    direto ao armazenamento, então uma passagem cai no disco para um projeto cujo
+    teto já está gasto, e essas linhas não são contadas nem por
+    <code>mcpd_signals_over_quota_total</code> nem por
+    <code>mcpd_signals_unbounded_total</code>. É uma porta que você mesmo abre, e
+    não uma para a qual uma frota aponta, então trate o teto como um limite do
+    que os remetentes conseguem empurrar para dentro, e não de tudo o que pode
+    chegar ao disco.
+  </p>
+  <p>
+    Um teto abaixo de <code>--max-batch-signals</code>, 10.000 por padrão, quer
+    dizer que um lote legítimo pode passar da cota de um minuto inteiro e é
+    cortado por mais bem comportado que o remetente seja. <code>mcpd doctor</code>
+    dá nota a isso sob <code>limits</code> e nomeia os projetos a que se aplica.
+    Ele também avisa quando um teto é definido por projeto e nenhum teto de nível
+    superior é definido ao lado, que é a configuração que deixa todo projeto não
+    listado sem limite.
+  </p>
+  <p>
+    <code>mcpd config</code> imprime os projetos limitados pelo nome, para você
+    poder ler de volta o que o ajuste cobre em vez de deduzi-lo. Ele imprime só
+    os tetos nomeados, então confirme o compartilhado a partir da própria opção.
+  </p>
+
+</Doc>

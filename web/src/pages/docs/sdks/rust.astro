@@ -1,0 +1,372 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+
+const guard = `let run = mcpd.trace("support agent");
+{
+    let step = run.child_of("retrieve", SpanKind::Retrieval);
+    step.set_input("order 5512");
+    // Whatever this step does. The span ends at the closing brace, and it ends
+    // on an early return, on a ? and on a panic as well.
+}
+run.end();`
+
+const taskLocal = `// Opening a span does not make it current. scope() does.
+let run = mcpd.trace("support agent");
+run.scope(async {
+    lookup(&mcpd).await;
+})
+.await;
+run.end();
+
+async fn lookup(mcpd: &Mcpd) {
+    // No parent was threaded into this function, and this still nests under
+    // the run, because the task-local carries it.
+    let step = mcpd.span("lookup_order", SpanKind::ToolCall);
+    step.set_output(serde_json::json!({ "status": "shipped" }));
+}`
+
+const propagation = `// Outbound: put the header on the request.
+let header = span.traceparent();
+
+// Inbound: continue the caller's trace instead of starting a new one. An
+// absent or malformed header starts a fresh trace rather than failing.
+let run = mcpd.trace_from("charge card", inbound_header, SpanKind::AgentRun);`
+
+const payload = `generation.set_model("claude-sonnet-4", "anthropic");
+generation.set_usage(TokenUsage {
+    input_tokens: Some(412),
+    output_tokens: Some(96),
+    ..TokenUsage::default()
+});
+// Or, when the breakdown does not matter:
+generation.set_tokens(412, 96);
+
+// How the model was called. Settings, not payload: kept with capture off.
+generation.set_model_parameters(ModelParameters {
+    temperature: Some(0.0),
+    seed: Some(0),
+    max_tokens: Some(1024),
+    ..ModelParameters::default()
+});
+
+// A message is required. "Something failed" is not actionable.
+tool.set_error("sms gateway timed out after 5s");
+
+// Or record the error you are already holding, which reads its message and kind.
+tool.record_error(&err);`
+
+const shutdown = `#[tokio::main]
+async fn main() {
+    let mcpd = Mcpd::new();
+
+    // ... the run ...
+
+    // Ignoring this is a reasonable default: an observability failure is not
+    // an application failure. Logging it costs one line.
+    if let Err(e) = mcpd.shutdown().await {
+        eprintln!("mcpd could not export: {e}");
+    }
+}`
+---
+
+<Doc
+  title="Rust"
+  description="The mcpd SDK for Rust: an RAII span guard that ends on drop, a tokio task-local for context, and instrumentation that returns no errors and panics on nothing."
+  lede="A span is a guard that ends when it is dropped, so an early return or an error cannot leave one open. Context travels in a tokio task-local."
+  og="docs"
+>
+  <h2>Install</h2>
+  <p>
+    The SDK exports on a background tokio task, so a runtime is what it expects
+    to find. It runs without one, and then nothing is sent until you call
+    <code>flush()</code>, which is the right behaviour for a synchronous tool but
+    not what a long-lived service wants.
+  </p>
+
+  <Command
+    command="cargo add mcpd-sdk"
+    primaryLabel="The SDK"
+    secondary={[{ label: 'A runtime, if the crate has none', command: 'cargo add tokio --features macros,rt-multi-thread' }]}
+  />
+
+  <h2>Construct the client</h2>
+  <p>
+    One client per process. <code>Mcpd::new()</code> reads the environment and
+    talks to a local mcpd with nothing set at all. Construction never fails: a
+    configuration mcpd cannot use disables the client and logs why, because an
+    observability call is not a thing a program should have to handle an error
+    from.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="init" title="connect" />
+
+  <p>Anything set on the builder after <code>Config::from_env()</code> wins over the environment.</p>
+
+  <table>
+    <thead>
+      <tr><th>Field</th><th>Environment</th><th>Default</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>api_key</code></td><td><code>MCPD_API_KEY</code></td><td>none</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>none</td></tr>
+      <tr><td><code>service_name</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>none</td></tr>
+      <tr><td><code>service_version</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>none</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>batch_size</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flush_interval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2s</code></td></tr>
+      <tr><td><code>max_queue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10s</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capture_payloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>log_level</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    A setting that will not parse is skipped with a warning and the default is
+    used, because a typo in a deployment's environment must not stop the program.
+    <code>enabled = false</code> makes every call a no-op that still returns
+    valid objects; ids are still well formed and <code>traceparent</code> still
+    propagates, so a test can turn mcpd off without touching the code under test.
+  </p>
+
+  <h2>Record a run</h2>
+  <p>
+    <code>Span</code> is an RAII guard. It ends when it is dropped, which is the
+    scoped form in Rust: a block, a scope, or the end of the function. Calling
+    <code>end()</code> yourself does the same thing, and the guard is there so
+    that an early return or a panic cannot leave a span open and unfinished.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="a span is a guard"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: guard }]}
+  />
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="trace" title="record a run" />
+
+  <h2>Context</h2>
+  <p>
+    Inside a process, context travels in a tokio task-local. Holding a span does
+    not make it current: <code>Span::scope</code> sets the task-local for a
+    future and <code>Span::sync_scope</code> does it for a closure. Inside either,
+    <code>Mcpd::span</code> attaches to the run in progress, so a helper several
+    layers down nests correctly without being handed the parent.
+    <code>Span::child_of</code> is the explicit alternative when you are already
+    holding the parent.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="the task-local"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: taskLocal }]}
+  />
+
+  <p>
+    Between processes, context travels in a W3C <code>traceparent</code> header.
+    The sampling flag rides along with it, so the two halves of a trace agree
+    about whether the trace is being kept.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="across a service boundary"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: propagation }]}
+  />
+
+  <h2>Model, usage and errors</h2>
+  <p>
+    Token counts are what mcpd prices at ingest, so the cost on the trace is the
+    cost you were billed. Recording an error sets the span's status to
+    <code>error</code> in the same move, so the two can never disagree, and the
+    message is a required argument rather than an option.
+  </p>
+  <p>
+    <code>set_model_parameters</code> records the settings the call was made
+    with: <code>temperature</code>, <code>top_p</code>, <code>top_k</code>,
+    <code>max_tokens</code>, <code>seed</code>, <code>stop_sequences</code> and
+    <code>has_response_format</code>. They are settings rather than payload, so
+    they survive <code>with_capture_payloads(false)</code>, which is the case
+    that matters: they are what somebody reproducing the run has to match.
+    <code>None</code> is absent and <code>Some(0)</code> is a value, so a zero
+    seed is a seed. The schema behind <code>has_response_format</code> is not
+    recorded, only whether one was in force.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="what a span carries"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: payload }]}
+  />
+
+  <p>
+    The rest of the setters are <code>set_input</code>, <code>set_output</code>,
+    <code>set_attributes</code>, <code>set_metadata</code>,
+    <code>set_tags</code>, <code>set_entity</code>, <code>set_session</code>,
+    <code>set_user</code>, <code>set_status</code> and
+    <code>set_error_detail</code>. All of them take <code>&amp;self</code>, so a
+    span can be filled in from anywhere it is borrowed.
+  </p>
+
+  <h2>Payloads, sinks and finished spans</h2>
+  <p>
+    <code>Config::with_capture_payloads(false)</code> keeps prompts and
+    completions in the process: spans still carry their timing, status, usage,
+    model, model parameters, correlation and errors, and <code>input</code> and
+    <code>output</code> are dropped before they reach the queue. A span
+    overrides the client for itself with <code>span.capture_payloads(..)</code>,
+    in either direction.
+  </p>
+  <p>
+    The exporter hands every batch to the client's sink. The HTTP transport is
+    the default; <code>Config::with_sink</code> takes a
+    <code>RecordingSink</code>, which keeps batches in memory so a test can
+    assert what was recorded without a server, or a <code>ConsoleSink</code>,
+    which prints one JSON line per signal. A sink that fails is a failed
+    export, reported once per interval and never raised.
+    <code>mcpd.stats()</code> answers <code>queued</code>, <code>dropped</code>,
+    <code>capacity</code>, <code>exported</code>, <code>failed</code> and
+    <code>rejected</code>.
+  </p>
+  <p>
+    <code>mcpd.record(span)</code> queues a span that already ended, ids,
+    parent, start and end included, as an adapter or an import holds it: never
+    re-parented, re-timed or re-sampled. A malformed record is dropped and
+    counted as <code>rejected</code>. <code>span.set_external_parent</code>
+    carries a parent from a tracing system that is not mcpd, for correlation
+    only.
+  </p>
+
+  <h2>Durable runs</h2>
+  <p>
+    The same client serves the daemon's durable runs. <code>Workflow::new</code>
+    builds the definition and keeps the step bodies as async closures; a
+    <code>Worker</code> registers it, long-polls for leases and serves each one
+    on a task, and <code>start_run</code>, <code>watch_run</code>,
+    <code>publish_event</code> and the rest mirror the run surface one for
+    one. A body returns <code>StepFailure::retryable</code> to be retried
+    within the step's budget, and records spans under its step through the
+    <code>StepContext</code>. Every span opened that way, and every span nested
+    under one, adds its usage to the step when it ends, so the daemon prices
+    what the trace shows without the body summing tokens by hand;
+    <code>set_usage</code> is the explicit override. The builder's
+    <code>on_lease</code>, <code>on_step_start</code>, <code>on_step_end</code>
+    and <code>on_conflict</code> hooks and <code>worker.stats()</code> make the
+    worker observable from inside.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['rust']} example="workflow" region="workflow" title="a workflow" />
+  <p>
+    What each construct does, the lease protocol and the run API are on
+    <a href="/docs/workflows" class="link">Workflows</a>,
+    <a href="/docs/workers" class="link">Workers</a> and
+    <a href="/docs/runs" class="link">Runs</a>.
+  </p>
+
+  <h2>Scores and feedback</h2>
+  <p>
+    A <code>Scale</code> is a required argument, not an option. A bare 0.9 with no
+    declared range cannot be compared to anything, and by the time someone is
+    reading the chart it is too late to ask what it meant.
+    <code>Scale::UNIT</code> is the usual one, 0.0 to 1.0. Feedback is a person's
+    judgement, kept apart from a score because the two answer different questions
+    and must never be averaged together.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="score" title="score and feedback" />
+
+  <h2>Flush and shutdown</h2>
+  <p>
+    Recording appends to an in-memory queue and returns. <code>flush()</code>
+    sends what is queued; <code>shutdown()</code> flushes, stops the worker and is
+    safe to call twice. Both are awaitable, and both return the last export
+    failure so you can log it.
+  </p>
+  <p>
+    A short-lived process must call one of them. A binary that exits without
+    shutting down exits with its spans still in memory, and in a serverless
+    function the runtime freezes the process the moment the handler returns, so
+    the background task never gets another turn.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="shutting down"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: shutdown }]}
+  />
+
+  <p>
+    Signals lost to a failed flush are not re-queued. The transport has already
+    retried, and a queue that refills itself on failure is how an outage becomes
+    an out-of-memory kill.
+  </p>
+
+  <h2>What you can rely on</h2>
+  <p>
+    With the daemon stopped, the example runs to completion, prints what it could
+    not do, and exits zero.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="with no daemon running"
+    lines={[
+      { cmd: 'cargo run -p mcpd-sdk --example quickstart' },
+      { out: '    Finished `dev` profile [unoptimized + debuginfo]' },
+      { out: '     Running `target/debug/examples/quickstart`' },
+      { out: 'mcpd could not export: export failed: mcpd could not be reached', tone: 'warn' },
+      { out: 'could not read the trace back: mcpd could not be reached', tone: 'warn' },
+      { cmd: 'echo $?' },
+      { out: '0', tone: 'ok' },
+    ]}
+  />
+
+  <ul>
+    <li>
+      No instrumentation call returns an error or panics. An unreachable mcpd, a
+      serialisation failure or a full queue is logged through
+      <code>tracing</code> at most once per flush interval and swallowed.
+      Observability must never take down the thing it observes.
+    </li>
+    <li>
+      Recording never blocks. Export happens on a background tokio task, so your
+      agent's latency does not depend on mcpd being fast, or up.
+    </li>
+    <li>
+      The queue is capped at <code>max_queue</code>. When it is full the oldest
+      signals are discarded and <code>mcpd.stats().dropped</code> counts them.
+      Dropping the oldest is a smaller failure than an out-of-memory kill.
+    </li>
+    <li>
+      Sampling below 1.0 is deterministic on the trace id rather than random, so
+      every process in a fleet makes the same decision about the same trace and a
+      trace that crosses a service boundary is never half recorded.
+    </li>
+    <li>
+      A span is exported when it starts and updated when it ends, so a run that
+      crashes mid-flight is still readable.
+    </li>
+  </ul>
+
+  <h2>Reading it back</h2>
+  <p>
+    The same client reads. Every method mirrors one HTTP endpoint and returns the
+    generated types, which come from the specification by way of
+    <code>mcpd-core</code> and are re-exported as <code>mcpd_sdk::model</code>.
+    Reads return a <code>Result</code>, because a query you awaited and cannot
+    answer is news.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="query" title="search and analyse" />
+
+  <p>
+    <a href="/docs/searching" class="link">Finding a run</a> covers the filters
+    in full. <a href="/docs/reference/data-model" class="link">The data model</a>
+    lists every field these types carry.
+  </p>
+</Doc>

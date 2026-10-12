@@ -1,0 +1,143 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="转发"
+  description="把每一个存下的 span 复制到另一个 OTLP 端点，让 mcpd 成为遥测流水线上的一跳，而不是数据被困住的地方。本地存储永远先发生。"
+  lede="mcpd 在两个方向上都讲 OTLP。到达这里的东西，没有一样会被困在这里。"
+  og="docs"
+>
+  <h2>向外只讲一种协议，而不是十一个导出器</h2>
+  <p>
+    mcpd 接收 OTLP，它也能发出 OTLP。仅这一条性质，就顶替了一整套按厂商写的导出器
+    所做的大部分事情：Langfuse、Datadog、Honeycomb、Grafana，以及其他每一个值得
+    一提的目的地，都接受基于 HTTP 的 OTLP。于是转发是一套实现，而不是十一套，它
+    也不会落在某个厂商 SDK 的发布后面。
+  </p>
+  <p>
+    这同时意味着采用 mcpd 是可逆的。把它指向你之前在用的那个东西，两个星期里两边
+    都跑，然后对着眼前的数据来决定，而不是靠一次撤不回来的迁移。
+  </p>
+
+  <h2>把它打开</h2>
+
+  <Command
+    class="not-prose my-6"
+    title="存在本地，并向外复制一份"
+    command="mcpd serve --forward-endpoint https://otlp.example.com"
+  />
+
+  <p>
+    路径是追加上去的，所以请给基础 URL，不要给 <code>/v1/traces</code>。对于一个
+    需要凭据的目的地，加上请求头：
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="带上一个 authorization 请求头"
+    command={`mcpd serve \\
+  --forward-endpoint https://otlp.example.com \\
+  --forward-header 'Authorization: Bearer $TOKEN'`}
+  />
+
+  <p>
+    同样这些设置也在配置文件的 <code>forward</code> 下面，那里还可以用
+    <code>batch_size</code> 和 <code>enabled</code>。参数压过文件，所以可以把
+    某一个实例指向别处，而不必去改一份共享的 ConfigMap。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "forward": {
+    "endpoint": "https://otlp.example.com",
+    "headers": [["Authorization", "Bearer sk-..."]],
+    "batch_size": 256,
+    "enabled": true
+  }
+}`}</code></pre>
+
+  {/* 这张图属于这里，不属于页首。它画的摄取过程止于 Store，而这一节讲的正是
+      Store 之后发生的事，于是两者读起来是一条连贯的序列，而不是一张在主题开始
+      的地方就停住的图。 */}
+  <PipelineDiagram class="not-prose my-8" />
+
+  <h2>本地存储先发生</h2>
+  <p>
+    一个 span 在任何东西被转发之前，就先写进 mcpd 自己的存储，转发之后在它自己的
+    任务上运行。由此有两个后果，两个都是有意的。
+  </p>
+  <p>
+    一个慢的目的地，绝不会把它的延迟加到产生这个 span 的那次请求上。你的智能体
+    不会去等别人的 collector。
+  </p>
+  <p>
+    一个挂掉的目的地，绝不会变成一次被拒绝的摄取。mcpd 照常工作，转发在它自己的
+    任务上重试。另一种做法，也就是另一家公司的故障意味着你的遥测根本没被留下，正是
+    这个设计要避免的那种失败。
+  </p>
+  <p>
+    每个批次有三次尝试。429、5xx 或连接失败会在 250 ms 后重试，每次尝试之后等待
+    时间翻倍。以秒给出的 <code>Retry-After</code> 会取代这段等待，最多 30 秒。
+    其他任何 4xx 在第一次答复时就是最终结果，因为这个批次对那个目的地来说会一直是
+    格式错误的。守护进程正在停止时，它会立刻做完剩下的尝试。被最终拒绝、或在最后
+    一次尝试之后仍未投递的批次会记进日志，它的 span 会加到
+    <code>mcpd_forward_dropped_spans_total</code> 上，这样你能看到副本缺了多少。
+  </p>
+  <p>
+    一个接受连接却从不应答的目的地，同样占不走守护进程的内存。同一时刻最多有 64 次摄取请求的副本在等目的地。
+    已经有这么多在等的时候，新的副本会当场被丢弃，并计入 <code>mcpd_forward_dropped_spans_total</code>，
+    本地写入不受影响。
+  </p>
+  <p>
+    没有持久化的出站队列。批次在重试期间留在内存里等待；转发队列满了时，新的批次
+    会被丢掉，它的 span 计入同一个指标。持久化的队列是另一个产品，而一个悄悄落后
+    好几个小时的队列，比一个看得见的空档更糟。如果你需要有保证的投递，请在 mcpd
+    和目的地之间放一个真正的 collector，让它去做它本来就是为此而造的事。
+  </p>
+
+  <h2>脱敏对发出去的东西同样适用</h2>
+  <p>
+    转发发生在摄取流水线之后，而流水线在任何东西被写下之前就已就地脱敏。凡是 mcpd
+    被告知要藏起来的东西，也同样到不了下一跳。一条保护了你的存储、却不保护你的
+    出站流量的规则，算不上一项隐私控制手段。
+  </p>
+
+  <h2>什么会被转发</h2>
+  <p>
+    span。日志、指标、评分、反馈和方面注释留在 mcpd 里，因为人们转发去的那些
+    目的地是追踪后端，它们会把其余的丢掉，或者把它们硬塞成属性。
+  </p>
+  <p>
+    span 按服务分组装进 <code>resourceSpans</code>，这是接收方期待的形状；而不是
+    一个 span 一个 resource，那样虽然合法，却会让下游每一处都重新分组一遍。
+  </p>
+
+  <h2>mcpd 转发给 mcpd</h2>
+  <p>
+    因为两端讲的是同一种协议，一个本地的 mcpd 可以转发给一个共享的 mcpd。开发者
+    在自己机器上留一份带完整载荷的快速存储，团队的那个实例拿到同样这些运行，并在
+    到达时施加它自己的保留期和它自己的脱敏规则。
+  </p>
+
+  <h2>接下来</h2>
+  <ul>
+    <li>
+      把一套已有的 OpenTelemetry 配置指向 mcpd：
+      <a href={linkTo('/docs/opentelemetry')} class="link">OpenTelemetry</a>。
+    </li>
+    <li>
+      一个 span 在被存下或者被发出之前，什么会被移除：
+      <a href={linkTo('/docs/privacy')} class="link">脱敏与保留期</a>。
+    </li>
+    <li>
+      每一个参数和文件设置：
+      <a href={linkTo('/docs/configuration')} class="link">配置</a>。
+    </li>
+  </ul>
+</Doc>

@@ -1,0 +1,238 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="从 Mastra 过来"
+  description="mcpd 与 Mastra 的可观测性有哪些不同：它接收 OpenTelemetry 而不是导出，脱敏覆盖全部六种信号而不只是 span，采样是确定性的。以及它不做什么。"
+  lede="mcpd 是 Mastra 的可观测性和它的持久化工作流的一个免费、自托管的替代。这一页说清它在哪里领先，在哪里落后，以及怎么迁移过来。"
+  og="docs"
+>
+  <h2>这是什么</h2>
+  <p>
+    Mastra 是一个智能体框架：智能体、工作流、记忆、RAG 和可观测性，装在一个
+    TypeScript 依赖里。mcpd 是一个待在你代码旁边的守护进程：它在步骤之间保住
+    一条工作流，并记录每一步，把模型、提示词和工具留给你。它不是围着你的智能体
+    搭起来的框架，而且它就是照着不成为框架写的。
+  </p>
+  <p>
+    这个差别决定了后面大部分内容。Mastra 的可观测性了解你的智能体，是因为它就在
+    智能体里面。mcpd 了解你的智能体，是因为你的智能体在发 OpenTelemetry，这也
+    意味着它对智能体周围的那些服务同样有效，对那些从来不是用 TypeScript 写的
+    智能体也一样。
+  </p>
+
+  <h2>要紧的那些差别</h2>
+
+  <h3>工作流的步骤主体留在你的进程里，语言随你</h3>
+  <p>
+    两者都跑持久化工作流。Mastra 的步骤是 Mastra 进程里的 TypeScript 函数，通过
+    它的存储挂起和恢复。mcpd 的定义是守护进程持有的数据，而它的步骤主体是你的进程
+    持有的代码，通过一套六个 SDK 都会说、任何语言也都能说的 HTTP 协议，一次领
+    一个租约地取走。守护进程从不会看到模型、提示词或者凭据，而一个步骤主体可以在
+    定义不变的情况下改动。
+  </p>
+  <p>
+    守护进程持有的，是那些必须活下来的部分：游标、流水、重试预算、定时器，以及
+    一个可能要等上一周才等到的事件等待。一次运行活得比启动它的那个进程久，也
+    比服务了它最后一步的那个 worker 久。参见
+    <a href={linkTo('/docs/workflows')} class="link">工作流</a>。
+  </p>
+
+  <h3>它接收 OpenTelemetry，而不是从一个框架里导出</h3>
+  <p>
+    这就是全部论点。Mastra 的可观测性是从一个 Mastra 应用内部导出的，所以它能
+    看到的就是那个应用做了什么，而且是用它写成的那种语言。mcpd 就是那个
+    collector：它从任何语言的任何 OpenTelemetry SDK 接收 OTLP，你的应用里不需要
+    任何 mcpd 代码，而且它记录智能体周围的服务，和记录智能体一样顺手。
+  </p>
+  <p>
+    它也发出 OTLP，所以 mcpd 可以坐在你已经有的一条流水线中间，而不是坐在一条你
+    还得先搭起来的流水线末端。参见
+    <a href={linkTo('/docs/forwarding')} class="link">转发</a>。
+  </p>
+
+  <h3>脱敏覆盖全部六种信号</h3>
+  <p>
+    Mastra 的 <code>SensitiveDataFilter</code> 是一个 span 处理器。它只对 span
+    生效，别的都不管，所以一个传进结构化日志的密钥，或者一段被引在评分理由或
+    一条反馈里的机密，会原封不动地到达每一个导出器。
+  </p>
+  <p>
+    mcpd 对 span、日志、指标标签、评分、反馈和方面注释都做脱敏，默认开启，
+    在写入任何东西之前、也在转发任何东西之前就做。
+  </p>
+  <p>
+    它的键名匹配还是子串匹配，而不是全名相等，所以 <code>awsSecretAccessKey</code>
+    和 <code>X-API-Key</code> 会被 <code>secret</code> 和 <code>x-api-key</code>
+    这两条规则抓住。一套要求整个名字都对上的规则，两个都会漏掉。
+  </p>
+  <p>
+    这里的界限要说清楚：脱敏匹配的是一个字段的名字，不是它内容的形状。一个被粘
+    在提示词中间的令牌，或者被塞进一个存在无害键名下的 URL 里的令牌，两个工具
+    都去不掉。脱敏减少的是你不小心泄露出去的东西。它不是一份保证。
+  </p>
+  <p>
+    针对那种情况，mcpd 加的是一个评分器，而不是一个过滤器。内置的
+    <code>no_leaked_secret</code> 读一次运行的答案，按凭据的形状做匹配，所以一个
+    混进了补全里的密钥，至少会被报给你。参见
+    <a href={linkTo('/docs/testing')} class="link">回归测试</a>。
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <h3>采样是确定性的</h3>
+  <p>
+    Mastra 的按比例采样调用 <code>Math.random()</code>。于是负载均衡后面的每一个
+    副本，对同一条 trace 都会做出不同的决定，而一次跨了两个服务的运行，可能被
+    一边留下、被另一边丢掉。
+  </p>
+  <p>
+    mcpd 对 trace id 做哈希，所以每一个实例不用协调就得出同一个答案，被留下的
+    trace 是整条留下的。守护进程的那些参数能到达两种策略：全都留下，以及这个
+    确定性的比例；一种不管比例怎么设都会留下每一个错误的尾部策略，在策略类型里
+    是存在的，但在这个构建里从命令行够不到。参见
+    <a href={linkTo('/docs/sampling')} class="link">采样</a>。
+  </p>
+
+  <h2>其余的，简短地说</h2>
+  <table>
+    <thead>
+      <tr><th>方面</th><th>mcpd 怎么做</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>部署</td>
+        <td>一个静态二进制，存储和界面都编译在里面。不用 Node，不用 sidecar。</td>
+      </tr>
+      <tr>
+        <td>存储</td>
+        <td>笔记本上用 SQLite，团队用 Postgres 或 ClickHouse。三种都在 CI 里对着一台真实服务器测过。</td>
+      </tr>
+      <tr>
+        <td>检索</td>
+        <td>对每一条存下来的提示词和补全做全文检索。</td>
+      </tr>
+      <tr>
+        <td>指标</td>
+        <td>在摄取时聚合，带精确分位数，还带能回到一次运行的 exemplar。</td>
+      </tr>
+      <tr>
+        <td>成本</td>
+        <td>在摄取时定价并存下来。缓存的 token 按它自己的费率计价。一个未知的模型会被留成没有定价，而不是报成免费。</td>
+      </tr>
+      <tr>
+        <td>SDK</td>
+        <td>TypeScript、Python、Rust、Go、Kotlin 和 Elixir，由同一份规范生成，所以它们不可能各走各的。每一个都带一个工作流构建器和一个 worker。</td>
+      </tr>
+      <tr>
+        <td>工作流</td>
+        <td>九种构造，由守护进程持有：步骤、智能体回合、睡眠、等待事件、并行分支、foreach、有界循环和子运行。重试、副作用和上限都是按步骤设的。一致性套件用全部六种语言服务同一次运行。</td>
+      </tr>
+      <tr>
+        <td>评估</td>
+        <td>十三个确定性评分器，外加对任何 OpenAI 形状端点的模型打分。数据集从生产运行里采集，实验比较会把自己的样本量报出来。</td>
+      </tr>
+      <tr>
+        <td>许可证</td>
+        <td>Apache-2.0。可免账号自托管，也可在 mcpd.sh 免费使用托管版。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>mcpd 落后的地方</h2>
+  <p>
+    写在这里，而不是留给你自己去发现，因为一份只列胜绩的对比是广告。
+  </p>
+  <ul>
+    <li>
+      <strong>它不是围着你代码的框架。</strong>Mastra 在一个依赖里给你智能体、
+      记忆、RAG 和一个模型路由。mcpd 给你的是持久化的运行和它的记录，把模型、
+      提示词和工具留给你的代码。如果你想要一个什么都做的依赖，那个依赖是 Mastra。
+    </li>
+    <li>
+      <strong>没有点名的厂商导出器。</strong>Mastra 逐个点名地带了 Langfuse、
+      LangSmith、Braintrust、Arize、Datadog 等等的集成。mcpd 转发 OTLP，用一套
+      实现就能到达其中大多数，但一个只说自家协议的目的地就够不到了。
+    </li>
+    <li>
+      <strong>没有 SSO、SCIM 或 RBAC。</strong>认证就是六个 API 密钥作用域，
+      外加每把密钥一份项目清单。把它放在你已经在跑的身份代理后面。
+    </li>
+  </ul>
+
+
+  <h2>迁移过来</h2>
+  <p>
+    如果你的智能体已经在发 OpenTelemetry，这就是两个环境变量的事。mcpd 用 HTTP
+    说 OTLP，端点也正是每一个 OpenTelemetry SDK 早就知道怎么对话的那几个。trace
+    用 JSON 或 protobuf 都行；日志和指标必须是 JSON。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="把已有的 OpenTelemetry 配置指向 mcpd"
+    command={`export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json`}
+  />
+
+  <p>
+    协议那一行很要紧。按惯例 4317 是 gRPC 端口，而 mcpd 在它上面说 HTTP，所以
+    一个还停在 gRPC 默认值上的 SDK 会连对端口然后失败。
+    <a href={linkTo('/docs/opentelemetry')} class="link">OpenTelemetry</a>
+    一页把这一点和其余的设置都讲了一遍。
+  </p>
+
+  <p>
+    两边一起跑两个星期。mcpd 会把它存下的 span 转发到你之前在用的东西上，所以你
+    可以在同样的 trace 上比较它们，而不是在一次没法回头的迁移上比较。它只转发
+    span：日志、指标、评分、反馈和方面注释都留在 mcpd 里。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="在你拿定主意之前保住原来的目的地"
+    command="mcpd serve --forward-endpoint https://your-existing-collector"
+  />
+
+  <p>
+    如果你的智能体还没有在发 OpenTelemetry，那就从
+    <a href={linkTo('/docs/quickstart')} class="link">快速开始</a>着手，或者在
+    侧栏的“接入”下面挑你的语言。
+  </p>
+
+  <h2>这份对比是怎么做出来的</h2>
+  <p>
+    这一页上关于 Mastra 的说法，来自 2026 年 8 月读它的源码，不是来自它的文档，
+    也不是来自跑一次基准测试。这里没有任何性能数字，因为我们没有测出过任何我们
+    愿意为之背书的数字。
+  </p>
+  <p>
+    Mastra 在活跃开发中，上面任何一条都可能不再成立。如果你发现了过时的地方，
+    那就是这一页的缺陷：
+    <a href="https://github.com/mcpd/mcpd/issues" class="link">提一个 issue</a>，
+    它会被改正。
+  </p>
+
+  <h2>接下来</h2>
+  <ul>
+    <li>
+      把已有的 collector 指向 mcpd：
+      <a href={linkTo('/docs/opentelemetry')} class="link">OpenTelemetry</a>。
+    </li>
+    <li>
+      在存下任何东西之前会去掉什么：
+      <a href={linkTo('/docs/privacy')} class="link">脱敏与保留期</a>。
+    </li>
+    <li>
+      给一个团队跑起来：
+      <a href={linkTo('/deploy')} class="link">Docker 与 Kubernetes</a>。
+    </li>
+  </ul>
+</Doc>

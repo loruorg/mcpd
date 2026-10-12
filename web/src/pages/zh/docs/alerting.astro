@@ -1,0 +1,261 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import Annunciator from '@/components/Annunciator.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+/* 英文路由，按这个语言重新生成。 */
+const code = localeOf(Astro.url.pathname)
+const to = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="监视与告警"
+  description="mcpd 怎样在后台盯着错误率、延迟、成本和评分均值，监视器为什么会锁存状态，一段安静的窗口为什么不会解除一条仍然成立的告警，以及状态变化时它 POST 的那个请求体。"
+  lede="一个值得盯着的条件，就该被盯着。mcpd 按定时器评估，把发现的结果锁存，然后只告诉你一次。"
+  og="docs"
+>
+  <h2>监视器是什么</h2>
+  <p>
+    监视器是 mcpd 按定时器问自己的一个存下来的问题：这个项目最近五分钟的错误率
+    高于百分之五吗？这个评分器的均值低于我们约定的那个数字吗？它读的是界面读的
+    同一份存储，所以监视器能断言的，只有你本来自己也查得到的东西。
+  </p>
+  <p>
+    在你配置出一个之前，监视是关着的。mcpd 不会替你猜一个阈值，因为一个没人挑过
+    的阈值，是一个没人信的阈值。
+  </p>
+
+  <Annunciator class="not-prose my-8" />
+
+  <h2>它会锁存</h2>
+  <p>
+    一个在条件持续期间每次评估都触发的监视器，不出一天就会被静音，而一个被静音
+    的监视器比没有监视器更糟，因为它看起来像是有覆盖。所以 mcpd 报告的是状态
+    变化，而不是状态本身：进入麻烦时一次，走出麻烦时一次，中间什么都没有。
+  </p>
+
+  <h2>安静不等于恢复</h2>
+  <p>
+    这条规则让人付出过故障的代价。当流量停下来时，窗口里的运行少到没法判断，
+    而显而易见的那种实现会报告“没有问题”，并解除告警。但一个已经不再服务请求的
+    智能体，本身就是故障，而不是从故障中恢复。
+  </p>
+  <p>
+    一个里面运行太少的窗口，会让一条仍然成立的告警原样留在那里。只有当一次背后
+    有足够样本的读数回到阈值以内时，监视器才回到正常。
+  </p>
+  <p>
+    同样的道理定下了 <code>min_samples</code>。安静的一小时里失败了一次运行，
+    就是百分之百的错误率，mcpd 不会把那叫作故障。默认值是二十。
+  </p>
+
+  <h2>可以盯什么</h2>
+  <table>
+    <thead>
+      <tr><th>观察项</th><th>测的是什么</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>error_rate</code></td>
+        <td>窗口里失败的运行数除以总运行数。</td>
+      </tr>
+      <tr>
+        <td><code>latency_p95</code></td>
+        <td>运行时长的第九十五百分位，单位是毫秒。</td>
+      </tr>
+      <tr>
+        <td><code>cost</code></td>
+        <td>窗口里的总花费，用价目表的货币。</td>
+      </tr>
+      <tr>
+        <td><code>score_mean</code></td>
+        <td>
+          某一个评分器的均值，由 <code>scorer_id</code> 指名。这一项能抓住延迟
+          曲线看不见的质量退化。
+        </td>
+      </tr>
+      <tr>
+        <td><code>trace_count</code></td>
+        <td>窗口里的运行数。配上 <code>below</code> 来盯它，可以抓住一条突然安静下来的流水线。</td>
+      </tr>
+      <tr>
+        <td><code>step_count_divergence</code></td>
+        <td>窗口里那些相对自己的定义走了异常步数的运行。它是这里唯一一个不在所测之物的单位上设阈值的监视器。它读的是持久化运行，不是 trace。</td>
+      </tr>
+      <tr>
+        <td><code>run_repetition</code></td>
+        <td>一次运行自我重复的程度：把窗口里每次运行在自己定义的某一个节点上做过的最多尝试次数取出来，再取平均。1 表示没有任何节点跑过两次。它读的是持久化运行，不是 trace。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>目标，当阈值问的是错的问题时</h2>
+  <p>
+    监视器问的是错误率此刻是不是高于百分之五。SLO 问的是更有用的东西：我们会不会
+    错过承诺的那个目标，以及我们正以多快的速度奔向那里。
+  </p>
+  <p>
+    这个区别要紧，是因为一个阈值分不清一次两分钟的抖动和一次缓慢的渗漏，而这两者
+    需要相反的应对。把阈值收紧到能抓住渗漏，那次抖动就会在凌晨三点把你叫醒。把它
+    放松到能睡过那次抖动，渗漏就能跑上一个星期。
+  </p>
+
+  <h3>预算，以及它被消耗的速度</h3>
+  <p>
+    三十天里 <code>0.995</code> 的目标，是说允许千分之五的运行失败。那半个百分点
+    就是错误预算。消耗速率为 1，正好在三十天里把它花完；消耗速率为 10，三天就
+    花完。
+  </p>
+  <p>
+    mcpd 同时在两个窗口上度量消耗速度，只有两者一致时才跳闸：最近一小时快于
+    <span class="data">14.4x</span> <em>并且</em>最近六小时快于
+    <span class="data">6x</span>。这就是把那两种情况分开的办法。一次五分钟的故障
+    会推动一小时那个数字，推不动六小时那个，所以它不会呼叫人。一次跑了一下午的
+    渗漏，两个都推得动。
+  </p>
+  <p>
+    在你依赖它之前值得知道：在一个 99.5% 的目标上，那两个阈值对应的错误率大约是
+    7.2%。一个稳定在 5% 的失败率把预算消耗得快了十倍，会提前把它耗光，但它不会把
+    任何人叫醒。为此请盯着 <code>budget_remaining</code>；如果你想更早知道，就
+    再留一个 <code>score_mean</code> 或 <code>error_rate</code> 监视器。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "slos": [
+    {
+      "id": "support-availability",
+      "name": "99.5% of support runs succeed over 30 days",
+      "project": "support-desk",
+      "objective": 0.995,
+      "window_days": 30,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    <code>GET /v1/api/slos</code> 返回每一个目标，连同它的成功率、剩下的预算
+    比例，以及两个消耗速率。
+    <code>POST /v1/api/slos/&#123;id&#125;/ack</code> 确认其中一个。它们的锁存和
+    确认方式和监视器完全一样，而一个薄到没法判断的窗口，永远不会解除一条仍然
+    成立的告警。
+  </p>
+  <p>
+    预算超支之后 <code>budget_remaining</code> 会变成负数，而不是停在零。零和
+    “错过目标一百倍”是不同的处境，这个数字会说出是哪一种。
+  </p>
+
+  <h2>配置一个</h2>
+  <p>
+    监视器住在一个 JSON 文件里而不是命令行上，因为一个阈值、一个窗口和一次比较
+    放不进一个参数，而且它们应该像代码一样被评审。这个文件可以原样作为 Kubernetes
+    ConfigMap 挂载。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitor_interval_seconds": 60,
+  "monitors": [
+    {
+      "id": "support-error-rate",
+      "name": "Support agent error rate above 5%",
+      "project": "support-desk",
+      "watch": "error_rate",
+      "compare": "above",
+      "threshold": 0.05,
+      "window_seconds": 300,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    },
+    {
+      "id": "relevance-regression",
+      "name": "Answer relevance fell below 0.8",
+      "project": "support-desk",
+      "watch": "score_mean",
+      "scorer_id": "answer_relevance",
+      "compare": "below",
+      "threshold": 0.8,
+      "window_seconds": 3600
+    }
+  ]
+}`}</code></pre>
+
+  <Command
+    class="not-prose my-6"
+    title="带着已布防的监视器启动"
+    command="mcpd serve --config-file ./mcpd.json"
+  />
+
+  <p>
+    未知的键会让启动失败，而不是被忽略。<code>threshold</code> 里一个悄悄什么都
+    不监视的拼写错误，是所有结果里最糟的那个，所以 mcpd 会出声拒绝它。
+  </p>
+  <p>
+    设置 <code>"enabled": false</code> 可以保留一个监视器的定义而不去评估它。
+    <code>mcpd config</code> 会打印有多少个已经布防。
+  </p>
+
+  <h2>一次状态变化会去哪里</h2>
+  <p>
+    每一次状态变化都会被记进日志，监视器 id、项目、阈值和测得的值都作为结构化
+    字段，这样日志管道不用去解析一个句子就能路由它。如果你已经在跑一条日志管道，
+    那这就是全部的集成工作。
+  </p>
+  <p>
+    给监视器一个 <code>webhook</code>，mcpd 还会把这次状态变化 POST 出去。这个
+    请求体有意是通用的：Slack、PagerDuty、Opsgenie 和每一个流程工具都接受入站
+    webhook，而把载荷做成其中某一个的形状，就意味着要维护一套会过时的厂商集成。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitor_id": "support-error-rate",
+  "name": "Support agent error rate above 5%",
+  "project": "support-desk",
+  "condition": "tripped",
+  "watch": "error_rate",
+  "threshold": 0.05,
+  "value": 0.5,
+  "samples": 40,
+  "detail": "error rate is 0.5000, threshold above 0.0500, over 40 run(s)",
+  "at": "2026-08-28T02:13:54.687391446Z"
+}`}</code></pre>
+
+  <p>
+    一次失败的投递会被记进日志然后丢弃。重试要么会阻塞评估循环，要么需要一个
+    持久化的出站队列，而一条会悄悄落后的告警通路，比一条明显漏掉了一条消息的
+    更糟。
+  </p>
+
+  <h2>读取与确认</h2>
+  <p>
+    <code>GET /v1/api/monitors</code> 返回每一个监视器，连同它锁存的状态、它最近
+    一次的读数，以及它是什么时候跳闸的。
+  </p>
+  <p>
+    <code>POST /v1/api/monitors/&#123;id&#125;/ack</code> 确认其中一个。确认会让
+    这次状态变化安静下来，但不会假装条件已经解除：只要它仍然越界，这个监视器就
+    保持在已确认状态，等到那个数字恢复了，它自己回到正常。没有人需要记着去
+    取消静音。
+  </p>
+  <p>
+    监视器的状态放在内存里，每次启动时从读数重建。它不做持久化，因为一次重启把
+    一条其实已经恢复的告警复活过来，比一次重启重新评估一遍要糟糕得多。
+  </p>
+
+  <h2>接下来</h2>
+  <ul>
+    <li>
+      一个 <code>score_mean</code> 监视器盯着的那些评分器：
+      <a href={to('/docs/testing')} class="link">回归测试</a>。
+    </li>
+    <li>
+      mcpd 自己的健康状况，没有任何监视器覆盖它：
+      <a href={to('/docs/operations')} class="link">把它跑起来</a>。
+    </li>
+    <li>
+      每一个参数和文件设置：
+      <a href={to('/docs/configuration')} class="link">配置</a>。
+    </li>
+  </ul>
+</Doc>

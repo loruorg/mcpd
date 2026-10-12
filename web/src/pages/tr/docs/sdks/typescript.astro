@@ -1,0 +1,416 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (href: string) => urlFor(href, code)
+
+const nesting = `// Callback'in başlattığı her şey onun altına yerleşir. Aşağıya referans geçilmez.
+await mcpd.withSpan('support_agent', async (run) => {
+  const order = await mcpd.withSpan(
+    'lookup_order',
+    async (tool) => {
+      tool.setInput({ orderId: 'A-1042' })
+      mcpd.log('info', 'this line belongs to lookup_order')
+      return { status: 'in transit' }
+    },
+    { kind: 'tool_call' },
+  )
+  run.setOutput(order)
+})`
+
+const explicitParent = `// Her runtime'da doğru, AsyncLocalStorage olmayanlarda da.
+const run = mcpd.trace('support_agent')
+const step = run.child('call_model', { kind: 'model_generation' })
+step.end()
+
+await run.withChild('call_tool', async (tool) => {
+  tool.setOutput({ ok: true })
+})
+run.end()
+
+// Çalışma anında hangi mekanizmanın kullanıldığı.
+mcpd.stats().context // 'async-local-storage' | 'fallback'`
+
+const propagation = `// Giden: etkin span'i isteğe koyun.
+await fetch(url, {
+  headers: { traceparent: span.traceparent() },
+})
+
+// Gelen: yeni bir trace başlatmak yerine o trace'i sürdürün.
+const run = mcpd.trace('handle_request', {
+  traceparent: request.headers.get('traceparent'),
+})`
+
+const payload = `generation.setModel('claude-sonnet-4', 'anthropic')
+generation.setUsage({
+  inputTokens: 812,
+  outputTokens: 37,
+  inputDetails: { cacheRead: 640 },
+})
+
+// Kendiniz yakalayıp kendiniz işlediğiniz bir hata.
+generation.setError('the provider timed out', {
+  kind: 'TimeoutError',
+  retryable: true,
+})
+
+// Span içinde bir an; kendine ait bir süresi yoktur.
+generation.event('first_token', { kind: 'model_chunk' })`
+
+const recording = `import { Mcpd, RecordingSink } from '@mcpd/sdk'
+
+const sink = new RecordingSink()
+const mcpd = new Mcpd({ sink })
+
+await answerQuestion(mcpd)
+await mcpd.flush()
+
+expect(sink.spans.map((s) => s.name)).toEqual(['answer_question', 'model_call'])
+expect(sink.scores[0]?.scorerId).toBe('answer_relevance')`
+
+const finished = `// Çağıranın elinde zaten olan kimlikler, üst ve zamanlar. Verildiği gibi kuyruğa girer.
+mcpd.record({
+  traceId: otel.traceId,
+  spanId: otel.spanId,
+  parentSpanId: otel.parentSpanId,
+  name: 'GET /orders',
+  kind: 'http_request',
+  status: 'ok',
+  startTime: otel.startTime,
+  endTime: otel.endTime,
+  isRoot: false,
+  isEvent: false,
+  correlation: { project: 'support' },
+  receivedAt: otel.endTime,
+})
+
+// mcpd olmayan bir izleme sisteminden gelen bir üst, yalnızca ilişkilendirme için.
+const run = mcpd.trace('handle_request', { externalParentSpanId: otel.spanId })`
+
+const serverless = `export default async function handler(request: Request): Promise<Response> {
+  const answer = await mcpd.withSpan('answer', async (run) => {
+    run.setInput(await request.text())
+    return 'ok'
+  })
+
+  // Yığın burada hâlâ bellekte. Yanıt çıkmadan önce gönderin.
+  await mcpd.flush()
+  return new Response(answer)
+}`
+---
+
+<Doc
+  title="TypeScript"
+  description="TypeScript ve JavaScript için mcpd SDK'sı: Node, Deno, Bun, tarayıcılar ve edge runtime'ları. Bağımlılığı yok, bağlamı AsyncLocalStorage tutar, ölçümleme hiçbir zaman hata fırlatmaz."
+  lede="Bağımlılığı olmayan tek bir paket. Span, log, metrik, puan ve geri bildirim kaydeder ve bir ölçümleme çağrısından hiçbir zaman hata fırlatmaz."
+  og="docs"
+>
+  <h2>Kurulum</h2>
+  <p>
+    Node 20 veya üstü, Deno, Bun, tarayıcılar ve edge runtime'ları. Önce ESM,
+    <code>require</code> için de bir CommonJS derlemesi. Node'a özgü tek parçalar
+    olan <code>async_hooks</code> ve <code>zlib</code> çalışma anında yüklenir ve
+    bulunmadıkları yerde atlanır.
+  </p>
+
+  <Command command="npm install @mcpd/sdk" />
+
+  <h2>İstemciyi oluşturma</h2>
+  <p>
+    Süreç başına bir istemci. Her seçenek bir ortam değişkenini de okur, böylece
+    aynı kod tek bir düzenleme olmadan hem geliştirmede hem üretimde çalışır. Hiç
+    argüman verilmezse <code>http://localhost:4317</code> adresindeki bir daemon
+    ile konuşur.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="init" title="bağlanma" />
+
+  <p>Kod ortam değişkenine, ortam değişkeni de varsayılana üstün gelir.</p>
+
+  <table>
+    <thead>
+      <tr><th>Seçenek</th><th>Ortam değişkeni</th><th>Varsayılan</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>apiKey</code></td><td><code>MCPD_API_KEY</code></td><td>yok</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>yok</td></tr>
+      <tr><td><code>serviceName</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>yok</td></tr>
+      <tr><td><code>serviceVersion</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>yok</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capturePayloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>logLevel</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      <tr><td><code>batchSize</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flushIntervalMs</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2000</code></td></tr>
+      <tr><td><code>maxQueue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeoutMs</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10000</code></td></tr>
+      <tr><td><code>sink</code></td><td></td><td>HTTP taşıyıcısı</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>enabled: false</code> hiçbir şey kaydetmez ve hiçbir şey göndermez;
+    yine de her çağrı geçerli bir nesne döndürür ve liste okumaları boş bir sayfa
+    verir. Bir test takımı, ölçümlemenin tek satırına dokunmadan mcpd'yi
+    kapatabilir.
+  </p>
+  <p>
+    <code>capturePayloads: false</code> prompt'ları ve tamamlamaları sürecin
+    içinde tutar. Span yine de zamanlaması, durumu, token kullanımı, modeli,
+    ilişkilendirmesi ve hatalarıyla kaydedilir; <code>input</code> ve
+    <code>output</code> kuyruğa varmadan atılır, böylece bir flush sırasında
+    hassas hiçbir şey dışarı çıkamaz. Bir span, başlangıç seçeneklerindeki
+    <code>capturePayloads</code> ile bunu kendisi için iki yönde de geçersiz
+    kılar.
+  </p>
+
+  <h2>Bir çalıştırmayı kaydetme</h2>
+  <p>
+    <code>withSpan</code> kapsamlı biçimdir. Span'i açar, callback'in başlattığı
+    her şey için etkin tutar ve callback sonuçlandığında kapatır. Callback hata
+    fırlatırsa span, fırlatılan mesajla birlikte <code>error</code> olarak
+    işaretlenir ve hata olduğu gibi yeniden fırlatılır; yani gözleniyor olmak
+    kendi hata işleyişinizi değiştirmez.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="trace" title="bir çalıştırmayı kaydetme" />
+
+  <h2>Bağlam</h2>
+  <p>
+    Node ve Bun üzerinde etkin span bir <code>AsyncLocalStorage</code> içinde
+    durur. Bir <code>withSpan</code> callback'i içinde başlatılan her şey,
+    kendisine bir referans verilmeden onun altına yerleşir; tek bir olay
+    döngüsünde iç içe geçen iki çalıştırma da birbirinin span'lerini hiç görmez.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="iç içe geçme"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: nesting }]}
+  />
+
+  <p>
+    Tarayıcılarda ve çoğu edge runtime'ında <code>AsyncLocalStorage</code>
+    yoktur. Oralarda SDK bunun yerine tek bir saklı değer tutar. Bu değer doğru
+    iç içe geçer ve bir çalıştırmanın içindeki <code>await</code> ifadesini
+    aşar, ama eşzamanlı iki çalıştırmayı birbirinden ayıramaz; sonuç, bir
+    çalıştırmanın araç çağrısının başka bir çalıştırmanın ağacında görünmesi
+    olur. Ajanları bu runtime'larda eşzamanlı çalıştırıyorsanız üst span'i
+    açıkça geçirin.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="üst span'i açıkça vermek"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: explicitParent }]}
+  />
+
+  <p>
+    Servisler arasında bağlam, W3C <code>traceparent</code> başlığında taşınır.
+    Bir trace'in ağ üzerindeki bir sıçramayı atlatmasını sağlayan tek şey budur.
+    Bozuk bir başlık yok sayılır ve yeni bir kök trace başlatılır; çünkü
+    kimsenin okuyamadığı bir başlık, onu taşıyan isteği başarısız kılmak için
+    bir sebep değildir.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="servis sınırının ötesinde"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: propagation }]}
+  />
+
+  <h2>Model, kullanım ve hatalar</h2>
+  <p>
+    mcpd alım sırasında token sayılarını fiyatlandırır, dolayısıyla trace'te
+    gördüğünüz maliyet size faturalanan maliyettir. Token'ları kendiniz saymak
+    yerine sağlayıcının bildirdiğini raporlayın. Bir hata her zaman bir mesaj
+    taşır ve hatayı vermek aynı hamlede span'in durumunu <code>error</code>
+    yapar, böylece ikisi hiçbir zaman çelişemez.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="bir span neler taşır"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: payload }]}
+  />
+
+  <h2>Kalıcı çalıştırmalar</h2>
+  <p>
+    Daemon'ın kalıcı çalıştırmalarını da aynı istemci karşılar.
+    <code>workflow()</code> tanımı kurar ve adım gövdelerini saklar; bir
+    <code>Worker</code> bu tanımı kaydeder, lease'ler için uzun yoklama yapar ve
+    her birini karşılar; <code>mcpd.runs</code>, <code>mcpd.events</code> ve
+    <code>mcpd.definitions</code> ise çalıştırma yüzeyini bire bir yansıtır. Bir
+    gövde, adımın bütçesi içinde yeniden denenmek için <code>RetryableError</code>
+    fırlatır ve <code>StepContext</code> üzerinden kendi adımının altına span
+    kaydeder. Böyle kaydedilen bir span, altına yerleşen her span ile birlikte,
+    bittiğinde kendi kullanımını adımınkine ekler; böylece daemon trace'in
+    gösterdiğini fiyatlandırır ve gövde token'ları hiçbir zaman elle toplamaz;
+    <code>ctx.setUsage</code> açık bir geçersiz kılmadır. <code>onError</code>
+    yanında dört hook durur: <code>onLease</code>, <code>onStepStart</code>,
+    <code>onStepEnd</code> ve <code>onConflict</code>;
+    <code>worker.stats()</code> ise talepleri, tamamlamaları, sınıfına göre
+    başarısızlıkları ve nedenine göre çakışmaları sayar.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} example="workflow" region="workflow" title="bir iş akışı" />
+  <p>
+    Her yapının ne yaptığı, lease protokolü ve çalıştırma API'si şu sayfalarda:
+    <a href={linkTo('/docs/workflows')} class="link">İş akışları</a>,
+    <a href={linkTo('/docs/workers')} class="link">Worker'lar</a> ve
+    <a href={linkTo('/docs/runs')} class="link">Çalıştırmalar</a>.
+  </p>
+
+  <h2>Puanlar ve geri bildirim</h2>
+  <p>
+    <code>min</code> ile <code>max</code> alanlarını tip zorunlu kılar.
+    Bildirilmemiş bir ölçekteki 0.7'lik bir puan hiçbir şeyle karşılaştırılamaz
+    ve biri grafiği okuduğunda bunun ne anlama geldiğini sormak için artık çok
+    geçtir. Geri bildirim bir insanın yargısıdır ve puandan ayrı tutulur; çünkü
+    ikisi farklı sorulara yanıt verir ve asla birlikte ortalanmamalıdır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="score" title="puan ve geri bildirim" />
+
+  <p>
+    Bir trace vermezseniz ikisi de etkin span'in trace'ine bağlanır; böylece
+    kendi ürününüzdeki bir beğeni düğmesi, elinizde tuttuğunuz trace id'sinden
+    başka bir şey vermeden <code>feedback</code> çağırabilir.
+  </p>
+
+  <h2>Beş sinyalin hepsi, tek bir kimlik kümesi</h2>
+  <p>
+    Span'ler, loglar, metrikler, puanlar ve geri bildirimler aynı kuyruktan
+    geçer ve aynı trace ve span id'lerini taşır. Bir grafikteki sıçramadan onu
+    doğuran çalıştırmayı açabilmenizi sağlayan şey budur.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>Flush ve kapatma</h2>
+  <p>
+    Kayıt, kuyruğa ekleme demektir. Worker göndermeden hiçbir şey süreçten
+    çıkmaz; bunu her iki saniyede bir ya da bir yığın dolduğunda yapar.
+    <code>flush()</code> de <code>shutdown()</code> de beklenebilir ve
+    idempotenttir; <code>shutdown()</code> ayrıca worker'ı durdurur.
+  </p>
+  <p>
+    Serverless bir fonksiyonda bu isteğe bağlı değildir. Runtime, siz bir yanıt
+    döndürür döndürmez süreci dondurur ve worker bir daha çalışmaz,
+    yani son yığın kaybolur. Yanıt çıkmadan önce bir flush bekleyin.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="serverless bir handler"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: serverless }]}
+  />
+
+  <p>
+    Node üzerinde istemci <code>beforeExit</code> sırasında da flush eder;
+    böylece <code>shutdown()</code> çağırmayı unutan bir betik yine de son
+    yığınını gönderir. Bu hook açık bir <code>process.exit()</code> çağrısında
+    veya ölümcül bir sinyalde tetiklenmez, yani bir emniyet ağıdır,
+    <code>shutdown()</code> yerine geçmez.
+  </p>
+
+  <h2>Kaydettiğinizi doğrulama</h2>
+  <p>
+    <code>RecordingSink</code> ağın yerine belleği koyar; böylece bir test,
+    sınanan kodun ürettiği span'leri, logları, metrikleri, puanları ve geri
+    bildirimleri sunucu ve port olmadan geri okur. <code>ConsoleSink</code>
+    bunun yerine sinyal başına tek bir JSON satırı yazar ve
+    <code>export(batch, ingestKey)</code> metodu olan her nesne bir sink'tir.
+    Hata fırlatan bir sink, başarısız bir yığın ve bir tanı kaydı demektir,
+    kodunuzda asla bir istisna değil. <code>mcpd.stats()</code> şunları
+    yanıtlar: <code>queued</code>, <code>dropped</code>, <code>capacity</code>,
+    <code>exported</code>, <code>failed</code> ve <code>rejected</code>.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="sunucu olmadan bir test"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: recording }]}
+  />
+
+  <h2>Bitmiş bir span kaydetme</h2>
+  <p>
+    <code>mcpd.record(span)</code> kimliklerini, üstünü ve zamanlarını zaten
+    elinizde tuttuğunuz bir span'i kuyruğa alır: başka bir izleme sistemi için
+    yazılmış bir adaptörün, toplu bir içe aktarmanın veya bir yeniden
+    oynatmanın elindeki şeyi. Span verildiği gibi kuyruğa girer; üstü,
+    zamanları ve örneklemesi hiç değiştirilmez, yalnızca boş bıraktığı
+    ilişkilendirme alanları istemciden doldurulur. Kimlikleri OpenTelemetry
+    biçiminde olmayan, adı boş olan veya başlangıç zamanı eksik olan bir kayıt
+    atılır ve <code>stats().rejected</code> içinde sayılır. Her span'de
+    <code>externalParentSpanId</code>, mcpd olmayan bir izleme sisteminden gelen
+    bir üstü yalnızca ilişkilendirme için taşır.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="başka yerden gelen bir span"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: finished }]}
+  />
+
+  <h2>Güvenebilecekleriniz</h2>
+  <ul>
+    <li>
+      Ölçümleme hiçbir zaman hata fırlatmaz. Başarısız bir dışa aktarım,
+      erişilemeyen bir daemon veya serileştirilemeyen bir payload,
+      <code>onError</code> üzerinden aralık başına en çok bir kez bildirilir ve
+      sonra bırakılır. Gözlemlenebilirlik, gözlediği şeyi asla devirmemelidir.
+    </li>
+    <li>
+      Kayıt bloklamaz. Bir kuyruğa ekler ve döner; ağ işi worker'da
+      olur, yani ajanınızın gecikmesi mcpd'nin hızlı ya da ayakta olmasına hiç
+      bağlı değildir.
+    </li>
+    <li>
+      Bellek sınırlıdır. Kuyruk <code>maxQueue</code> kadar sinyal tutar.
+      Dolduğunda en eskisi atılır ve <code>mcpd.stats()</code> içinde sayılır;
+      çünkü sınırsız bir tampon, bir ağ kesintisini bellek yetersizliğinden
+      ölüme çevirir.
+    </li>
+    <li>
+      Örnekleme kararı bir kez, kökte verilir ve aşağıya kalıtılır. Yarısı
+      kaydedilmiş bir trace, sisteminizdeki bir hata gibi okunur.
+    </li>
+    <li>
+      Açık bir span de gönderilir. Bir span hem başladığında hem bittiğinde
+      kuyruğa girer, yani yolun ortasında çöken bir çalıştırma da görünür olur.
+      Başlangıç kaydı henüz çıkmamışsa bitiş kaydı onun yerini alır; böylece
+      hızlı bir span iki değil bir kayda mal olur.
+    </li>
+    <li>
+      Payload'ınız hiçbir zaman yeniden yazılmaz. Anahtarlar
+      <code>camelCase</code> ile daemon'ın <code>snake_case</code> biçimi
+      arasında dönüştürülür ve dönüşüm <code>input</code>, <code>output</code>,
+      <code>attributes</code>, <code>metadata</code>, <code>fields</code> ve
+      <code>labels</code> alanlarında durur. Prompt'unuz tam olarak yazdığınız
+      gibi ulaşır.
+    </li>
+  </ul>
+
+  <h2>Geri okuma</h2>
+  <p>
+    Okumayı da aynı istemci yapar. Her metot bir HTTP endpoint'ini yansıtır ve
+    üretilmiş tipleri döndürür. Okumalar başarısız olduğunda bir
+    <code>McpdError</code> fırlatır: beklediğiniz ve yanıtlanamayan bir sorgu,
+    dışa aktarılamayan bir span'in aksine, haber değeri taşır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="query" title="arama ve analiz" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">Çalıştırma bulma</a>
+    filtreleri eksiksiz anlatır.
+    <a href={linkTo('/docs/reference/data-model')} class="link">Veri modeli</a>
+    bu tiplerin taşıdığı her alanı listeler.
+  </p>
+</Doc>

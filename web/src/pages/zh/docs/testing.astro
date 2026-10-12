@@ -1,0 +1,279 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="回归测试"
+  description="把一次出了错的生产运行变成一个长期存在的测试用例，用 mcpd 内置的评分器给存下来的运行打分，并在比较一个智能体的两个版本时，把样本量和差值一起报出来。"
+  lede="周二坏掉的那次运行，会变成之后每一个版本都必须通过的用例。"
+  og="docs"
+>
+  <h2>这一切要闭合的那个环</h2>
+  <p>
+    一个智能体在一个真实问题上失败了。有人手工复现了它，改了一句提示词，看起来
+    好些了。三周之后它在同一个问题上又失败了，因为没有任何东西把这个问题留下来。
+  </p>
+  <p>
+    数据集会把它留下来。把失败的那次运行采集进去，它就不再是一则轶事，而变成一个
+    用例：有一份输入，在你写得出来的时候有一个期望答案，还有一个指回它来处的那条
+    trace 的指针。之后每一个版本都要拿它跑一遍。
+  </p>
+
+  <h2>采集一次运行</h2>
+  <p>
+    在界面里或者通过 API 找到那次运行，然后把它的 trace id 交给数据集。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="把一次失败的运行采集成用例"
+    command={`curl -X POST localhost:4317/v1/api/datasets/$DATASET/capture \\
+  -H 'content-type: application/json' \\
+  -d '{"trace_ids": ["b3d9e71a4c0f428eb6a5d2317f90c684"]}'`}
+  />
+
+  <p>
+    采集下来的用例保留 <code>source_trace_id</code>，所以几个月之后你还能打开
+    当初促成它的那次运行，去读真正发生了什么，而不是从输入里猜。
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <h2>运行自己的答案不是期望答案</h2>
+  <p>
+    <code>use_output_as_expected</code> 默认是关的，而这个默认值才是要紧的地方。
+    值得采集的运行，通常正是出了错的那些，把一个错答案记成参照，等于把这个缺陷
+    供起来：之后每一个版本都会按它复现这个错误的能力来衡量。
+  </p>
+  <p>
+    当你采集的是做对了的运行、想把一个你已经满意的行为固定下来时，就把它打开。
+    当你采集的是一次失败时，把它留在关上的状态，然后自己写出期望答案。
+  </p>
+
+  <h2>内置的评分器</h2>
+  <p>
+    mcpd 自带十三个确定性的评分器：就是普通代码，读一次存下来的运行，返回一个
+    数字。它们不花钱，从不调用模型，跑两遍给出同样的答案，而这正是一个回归测试
+    需要、一个裁判模型没有的性质。
+  </p>
+  <table>
+    <thead>
+      <tr><th>评分器</th><th>什么时候算通过</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>answered</code></td><td>这次运行给出了一个非空的答案。</td></tr>
+      <tr><td><code>no_errors</code></td><td>这次运行里没有 span 失败。</td></tr>
+      <tr><td><code>exact_match</code></td><td>答案与期望答案相等。</td></tr>
+      <tr><td><code>contains</code></td><td>答案里含有一个必须出现的字符串。</td></tr>
+      <tr><td><code>json_valid</code></td><td>答案能作为 JSON 解析。</td></tr>
+      <tr><td><code>latency_budget</code></td><td>这次运行在一个以毫秒计的预算内跑完了。</td></tr>
+      <tr><td><code>cost_budget</code></td><td>这次运行花的钱没有超过设定的数额。</td></tr>
+      <tr><td><code>no_tool_loop</code></td><td>没有哪个工具被用同样的输入调用了两次。</td></tr>
+      <tr><td><code>tool_efficiency</code></td><td>这次运行没有超出工具调用次数的预算。</td></tr>
+      <tr><td><code>not_a_refusal</code></td><td>答案不是一次拒答，也不是一句道歉。</td></tr>
+      <tr><td><code>no_leaked_secret</code></td><td>答案里没有出现密钥、令牌或凭据。</td></tr>
+      <tr><td><code>span_present</code></td><td>这次运行记录下了要求的那种类型或名字的 span。</td></tr>
+      <tr><td><code>tool_succeeded</code></td><td>要求的那个工具跑过了，并且至少有一次调用正常结束。</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>GET /v1/api/scorers</code> 返回同一份清单，外加一个
+    <code>needs_config</code> 标志。一个需要期望答案却没拿到的评分器会弃权，
+    而不是去猜，并且这次弃权会被报出来。
+  </p>
+
+  <h2>让模型来打分的时候</h2>
+  <p>
+    有些问题，写多少确定性的代码都答不上来。一个答案有没有真的回应问题，一份
+    摘要有没有保住原意，一种语气对不对：这些都需要一位读者，而模型是便宜的
+    那位读者。
+  </p>
+  <p>
+    在你配置之前，裁判打分是关着的；而且除非你点名要，一个裁判评分器不会运行。
+    这两个默认值出于同一个原因：打分会为它读过的每一次运行花钱，而一个悄悄这么
+    做的功能，是那种你在账单上才发现的功能。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "judge": {
+    "endpoint": "http://localhost:11434/v1",
+    "model": "qwen2.5:14b",
+    "api_key": "",
+    "timeout_seconds": 30,
+    "criteria": {
+      "answer_relevance": "Does the answer address the question that was asked?",
+      "no_hedging": "Does the answer commit, rather than hedge?"
+    }
+  }
+}`}</code></pre>
+
+  <p>
+    请求用的是 OpenAI chat-completions 的形状，这不是对某个厂商的偏好：Ollama、
+    vLLM、llama.cpp、LM Studio、OpenRouter 以及各家托管服务都接受它，所以同一份
+    配置既能连上你笔记本上的模型，也能连上生产环境里的网关。对一个不要密钥的
+    本地模型，把 <code>api_key</code> 留空。温度是零，因为一个每次答得都不一样的
+    裁判没法和它自己比较，而这正是评分唯一的用处。
+  </p>
+  <p>
+    准则是配置出来的，不是每次请求带上去的。一个评分器 id 会存在它产生的每一个
+    评分上，也是之后做比较时用来分组的东西，所以要是让每次调用都自己发明 id 和
+    问题，就会建起一列谁也不敢信的数据。
+  </p>
+  <p>
+    配置出来的准则不会出现在 <code>GET /v1/api/scorers</code> 里。那个端点只列
+    十三个内置评分器，别的什么都不列，所以一个照着它拼出评分器菜单的客户端，
+    不会把你的准则列出来。守护进程唯一一次把它们的名字报给你，是在你给出一个
+    未知评分器 id 时得到的那个错误里，它会把内置的和配置出来的准则一起列出来。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="对最近一次运行跑一个裁判评分器"
+    command={`curl -X POST localhost:4317/v1/api/score \\
+  -H 'content-type: application/json' \\
+  -d '{"limit": 1, "scorers": ["answer_relevance"]}'`}
+  />
+
+  <p>
+    <code>timeout_seconds</code> 是一次评分调用最多能花的时间，
+    从建立连接算到回复的最后一个字节：默认 30，范围 1 到 300。超过它的调用会弃权并写明这个键，
+    mcpd 最多只读回复的 1 MiB。
+  </p>
+  <p>
+    每个裁判评分器对每次运行就是一次模型调用，而请求必须在 <code>--request-timeout-seconds</code> 之内结束。
+    所以一次请求最多只评分这么多次运行：即使每次调用都用满 <code>timeout_seconds</code>，
+    也能在这个期限内完成。按默认的 30 和 30、一个裁判评分器来算，就是一次运行。
+    在 <code>trace_ids</code> 或 <code>limit</code> 里要求更多的请求，
+    会在调用任何模型之前，被一个写明上限的 400 拒绝。不写 <code>limit</code>，就按截止时间内能容纳的数量评最近的运行。
+    想一次评更多，就调高 <code>--request-timeout-seconds</code>。
+    每个裁判分数在模型一回答就保存，所以被中途截断的请求，也会保留已经完成的分数。
+  </p>
+
+  <h3>它宁可弃权，也不去猜</h3>
+  <p>
+    一个返回了并非自己推导出来的数字的裁判，比没有裁判更糟，因为它看起来像证据。
+    所以下面每一种情况都会带着理由写进 <code>skipped</code>，一个评分也不产生。
+  </p>
+  <table>
+    <thead>
+      <tr><th>发生了什么</th><th>mcpd 怎么做</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>这次运行没有记下答案</td>
+        <td>弃权。一次没有答案的运行不是在相关性上打得差，而是根本没有被衡量过。</td>
+      </tr>
+      <tr>
+        <td>模型用散文回话</td>
+        <td>弃权，并把回话原样引出来。包在代码围栏或一句话里的 JSON 仍然会被读出来。</td>
+      </tr>
+      <tr>
+        <td>模型答出了量程之外</td>
+        <td>弃权。一个满分为一的量程上的七不是十分之九，而截断它等于凭空造出一个数字。</td>
+      </tr>
+      <tr>
+        <td>连不上模型</td>
+        <td>弃权，并带上状态码和响应体。限流是一个理由，不是一个零分。</td>
+      </tr>
+      <tr>
+        <td>回复超过 1 MiB</td>
+        <td>不读剩下的部分就弃权。一个裁决只有几百字节，那么大的回复不会是裁决。</td>
+      </tr>
+      <tr>
+        <td>请求的截止时间已不够这次调用</td>
+        <td>不调用模型就拒绝。这一轮评分会在截止时间内用已完成的分数作答，而不是返回 503。</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    每一个由裁判给出的评分，都把模型记为自己的 <code>scorer_version</code>。
+    来自两个不同裁判的两个评分不可比较，而这个字段就是在记录上把这件事说出来的
+    地方。
+  </p>
+
+  <h2>打分是事后进行的</h2>
+  <p>
+    <code>POST /v1/api/score</code> 对已经存下来的运行跑评分器。没有任何东西在
+    链路里同步评估。一个放在请求路径上的评估，会把自己的延迟加到它所评判的东西
+    上；而一个抛了异常的评估，绝不该让用户的请求失败。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="给最近一百次运行打分"
+    command={`curl -X POST localhost:4317/v1/api/score \\
+  -H 'content-type: application/json' \\
+  -d '{"project": "support-desk", "limit": 100, "config": {"max_ms": 4000}}'`}
+  />
+
+  <p>
+    响应里带着它写下的那些评分，另外单独带着每一个弃权的评分器和它弃权的理由。
+    一个答不上来的评分器，比一个返回了数字的评分器更值得看，所以 mcpd 从不把它
+    咽下去。项目的接收上限也管到这道门：这一趟算出来、但会让项目越过
+    <code>--quota-per-minute</code> 的评分不会被存下，它会被列进
+    <code>skipped</code> 并说明原因，而不是越过上限写入，也不是悄悄丢掉。
+  </p>
+  <p>
+    发 <code>"dry_run": true</code>，就能看到这一趟会产生什么，而不存下任何东西。
+  </p>
+  <p>
+    一趟要读哪些运行，由 <code>trace_ids</code>、<code>from</code> 和
+    <code>limit</code> 决定。在 <code>trace_ids</code> 里点名，就正好给那些运行
+    打分。把它留空，这一趟就取项目里最新的 <code>limit</code> 次运行，最新的在
+    前，而 <code>from</code> 给这一页划出边界：带了 <code>from</code> 的一趟只读
+    在那个时刻或之后开始的运行，你就是这样在不列出任何 id 的情况下，给一次发布
+    以来的全部运行打分。
+  </p>
+
+  <h2>比较两个版本</h2>
+  <p>
+    为你想比较的每一个版本记一次实验，把它的评分打上那次实验的 id，然后向 mcpd
+    要它们的差别。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="新的提示词有没有起作用"
+    command="curl 'localhost:4317/v1/api/experiments/compare?baseline=v3&candidate=v4'"
+  />
+
+  <p>
+    答案是按评分器给出的差值，两边各自带着样本量，还有一个
+    <code>decidable</code> 标志。观测数不到二十个时，mcpd 会说这次比较判定不了，
+    而不是报出一个变化。
+  </p>
+  <p>
+    这是一条故意做得很钝的规则，不是显著性检验。它挡住的是那个常见的失败：一个
+    在四次运行上动了的均值，不带次数就印了出来，被当成结果读，然后被发了出去。
+    把次数印在差值旁边，才是让噪声不被误当作发现的那一步。
+  </p>
+
+  <h2>这些跑在哪里</h2>
+  <p>
+    这一切都是 HTTP API，所以这个环属于 CI：失败一出现就采集下来，给测试套件
+    产生的运行打分，把这次构建注册成一次实验，并在一次可判定的比较返回
+    <code>regressed</code> 为真时让这个任务失败。
+  </p>
+
+  <h2>接下来</h2>
+  <ul>
+    <li>
+      一个评分身边的那两种信号：
+      <a href={linkTo('/docs/evaluation')} class="link">评分与反馈</a>。
+    </li>
+    <li>
+      在生产环境里盯住一个评分器的均值：
+      <a href={linkTo('/docs/alerting')} class="link">监视与告警</a>。
+    </li>
+    <li>
+      每一个端点和字段：
+      <a href={linkTo('/docs/reference/api')} class="link">HTTP API</a>。
+    </li>
+  </ul>
+</Doc>

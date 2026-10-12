@@ -1,0 +1,212 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Unreleased from '@/components/Unreleased.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { Code } from 'astro:components'
+import { panelTheme } from '@/lib/shiki-theme'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* Internal links stay written as English routes and are localised here. A
+   route whose Japanese page is not written yet resolves to the English page
+   rather than to a Japanese URL with nothing behind it. */
+const code = localeOf(Astro.url.pathname)
+const url = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+
+/* Japanese prose is written one paragraph to a line on purpose. A newline
+   between two Japanese characters is only removed by the segment-break rule in
+   browsers that implement it; the rest render it as a space, and a stray space
+   inside a Japanese sentence is visible. */
+
+/* The compose file is written here rather than read from an example program,
+   because it is configuration for the reader's machine and not code that CI
+   compiles. Every key in it maps to a flag on the daemon. It is shown as one
+   file with no language tabs, because there is only one language it can be. */
+const compose = `services:
+  mcpd:
+    image: ghcr.io/mcpd/mcpd:latest
+    restart: unless-stopped
+    ports:
+      - "4317:4317"
+    volumes:
+      - mcpd-data:/data
+    environment:
+      MCPD_DATA: /data/mcpd.db
+      MCPD_PROJECT: default
+      # このポートに自分以外の誰かが届くようになる前に、次の 3 つを設定してください。
+      # MCPD_INGEST_KEYS: key-for-your-agents
+      # MCPD_READ_KEYS: key-for-your-team
+      # MCPD_RETENTION_DAYS: 30
+
+volumes:
+  mcpd-data:
+`
+---
+
+<Doc
+  title="インストール"
+  description="mcpd をインストールする方法をすべて挙げます。Docker イメージ、compose ファイル、Helm チャート、リリースのバイナリ、ソースからのビルド。最後に /healthz で応答を確認します。"
+  lede="mcpd はストレージを組み込んだ 1 つのバイナリなので、インストールとは、そのバイナリをどこかに置いて起動することです。以下から、いま運用しているやり方に合う道を選んでください。"
+  og="docs"
+>
+  <h2>Docker</h2>
+  <Unreleased class="not-prose my-6" />
+  <p>公開されたイメージがいちばん短い入口で、以降のドキュメントもこれを前提にしています。</p>
+
+  <Command
+    class="not-prose my-6"
+    command="docker run -p 4317:4317 -v mcpd-data:/data -e MCPD_DATA=/data/mcpd.db ghcr.io/mcpd/mcpd"
+  />
+
+  <p>ボリュームは重要です。mcpd は <code>MCPD_DATA</code> が指すパスに SQLite のデータベースを書きます。ボリュームのないコンテナは、停止するときにトレースも一緒に持っていきます。パスを明示するのはフラグ 1 つ分の手間で、ファイルがどこへ行ったのかという疑問がなくなります。</p>
+  <p>どのフラグにも環境変数があるので、コマンドラインで渡せるものは <code>-e</code> でも設定できます。大事なものでは <code>latest</code> を追いかけず、タグを固定してください。イメージは <code>linux/amd64</code> と <code>linux/arm64</code> 向けにビルドしてあり、Docker は手元のマシンに合うほうを取得します。</p>
+
+  <h2>Docker Compose</h2>
+  <p>同じコンテナを書き下したものです。mcpd を 1 台のホストでアプリケーションの隣に置くときは、この形を使います。</p>
+
+  <div class="not-prose panel-raised mcpd-yaml my-6 overflow-hidden">
+    <div class="border-b border-scribe-2 bg-panel-1 px-3.5 py-2.5">
+      <span class="legend text-ink-3">compose.yaml</span>
+    </div>
+    <div class="scroll-x bg-well p-4 text-[0.8125rem] leading-[1.65]">
+      <Code code={compose} lang="yaml" theme={panelTheme as any} />
+    </div>
+  </div>
+
+  <p>コメントにしてある 3 つのキーは、自分以外の人がいるネットワークに出す前に埋めるものです。キーを何も設定しなければ、取り込みも読み取りも開いたままです。手元のノート PC では正しく、それ以外の場所では誤りです。何を設定し、なぜそうするのかは<a href={url('/deploy')} class="link">デプロイ</a>で扱います。</p>
+
+  <h2>Kubernetes</h2>
+  <p>リリースのたびに、チャートはイメージと同じレジストリへ OCI アーティファクトとして push されます。先に追加するリポジトリはありません。チャートは取り込みキーと読み取りキーがないとインストールを拒否するので、先に両方を生成してください。</p>
+
+  <Command
+    class="not-prose my-6"
+    command="helm install mcpd oci://ghcr.io/mcpd/charts/mcpd -n mcpd --create-namespace --set keys.ingest=$INGEST_KEY --set keys.read=$READ_KEY"
+    secondary={[
+      { label: 'キーを生成する', command: 'export INGEST_KEY=$(openssl rand -hex 32) READ_KEY=$(openssl rand -hex 32)' },
+    ]}
+  />
+
+  <p>mcpd は <code>SIGTERM</code> を処理して正常に終了します。Kubernetes が送るのはこのシグナルです。liveness には <code>/healthz</code>、readiness には <code>/readyz</code> を公開しており、この 2 つは意図して別物です。liveness はストレージに一切触らないので、データベースが遅くても Pod が再起動を繰り返すことはありません。values、プローブ、Deployment の形は <a href={url('/deploy')} class="link">Docker と Kubernetes</a> にあります。</p>
+
+  <h2>リリースのバイナリ</h2>
+  <p>リリースのたびに、x86_64 と arm64 の Linux 向けのアーカイブと、Apple シリコンと Intel の macOS 向けのアーカイブを添付します。Linux 向けは musl に対してビルドした静的バイナリなので、合わせる libc はありません。<code>SHA256SUMS</code> ファイルとビルドの来歴証明も一緒に付きます。自分のマシン向けのアーカイブを展開して <code>./mcpd</code> を実行してください。引数なしで実行するとデーモンが起動します。</p>
+  <p><code>cargo install mcpd</code> はありません。crates.io には何も公開しておらず、レジストリからビルドしたクレートにはインターフェースを含められません。インターフェースは npm でビルドし、バイナリに組み込むものだからです。Rust のツールチェーンがあるなら、代わりにソースからビルドしてください。</p>
+
+  <h2>ソースから</h2>
+  <p>リポジトリをクローンして配布用ビルドを実行します。リンク時最適化を全面的に使い、コード生成ユニットを 1 つにするので、コンパイルは遅くなりますが、小さくて速いバイナリができます。<code>cargo</code> を直接ではなく <code>make</code> を通してください。インターフェースはバイナリに組み込まれており、<code>make dist</code> は先にそれをビルドします。クローンしたばかりの状態で <code>cargo build</code> だけを実行しても、この手順は行えません。この手順には、Rust のツールチェーンに加えて Node と npm が必要です。</p>
+
+  <Command
+    class="not-prose my-6"
+    command="git clone https://github.com/mcpd/mcpd && cd mcpd && make dist"
+    primaryLabel="配布用ビルド"
+    secondary={[{ label: '速いビルド', command: 'make build' }]}
+  />
+
+  <p>バイナリは <code>target/dist/mcpd</code> に、速いほうを選んだ場合は <code>target/release/mcpd</code> に書かれます。mcpd 自体に手を入れている間は <code>make build</code> を、実際に動かすものには <code>make dist</code> を使ってください。</p>
+
+  <h2>データの置き場所</h2>
+  <p><code>--data</code> は SQLite ファイルのパスで、既定は作業ディレクトリの <code>./mcpd.db</code> です。親ディレクトリは自動で作られます。</p>
+  <p><code>:memory:</code> を渡すと、すべてがメモリ上に置かれ、ディスクには何も書きません。テストスイート、他人のマシンでのデモ、そしてプロンプトを残したくない実行には、これが正しい選択です。ストアはプロセスと一緒に消えます。それが狙いです。</p>
+
+  <Command
+    class="not-prose my-6"
+    label="何も残さない"
+    command="mcpd --data :memory:"
+    primaryLabel="メモリ上"
+    secondary={[
+      { label: 'サンプルの実行を入れる', command: 'mcpd demo --data :memory:' },
+      { label: '別の場所', command: 'mcpd --data /var/lib/mcpd/mcpd.db' },
+    ]}
+  />
+
+  <p><code>mcpd demo</code> は、実際にありそうな失敗した実行をストアに入れてから待ち受けます。最初にインターフェースを開いたときに、中身があるようにするためです。</p>
+
+  <h2>起動する前に、何をするか確かめる</h2>
+  <p><code>mcpd config</code> は、その呼び出しで解決される設定を表示して終了します。フラグ、環境変数、既定値がひとつの一覧にまとまるので、何も起動せずに、どれが勝ったのかを確認できます。</p>
+
+  {/* Every line the binary prints, with nothing set. `make check` compares the
+      labels with the binary's own output, because this cast once stopped at
+      sixteen lines after the binary had grown to twenty-nine. */}
+  <TerminalCast
+    class="not-prose my-8"
+    title="解決された設定"
+    lines={[
+      { cmd: 'mcpd config' },
+      { out: 'listen          0.0.0.0:4317' },
+      { out: 'storage         sqlite at ./mcpd.db' },
+      { out: 'config file     none' },
+      { out: 'log format      text' },
+      { out: 'project         default' },
+      { out: 'projects        none' },
+      { out: 'retention       forever' },
+      { out: 'ingest auth     open', tone: 'warn' },
+      { out: 'read auth       open', tone: 'warn' },
+      { out: 'write auth      open', tone: 'warn' },
+      { out: 'admin auth      open', tone: 'warn' },
+      { out: 'execute auth    open', tone: 'warn' },
+      { out: 'worker auth     open', tone: 'warn' },
+      { out: 'signup          off' },
+      { out: 'runs            sqlite at ./mcpd.runs.db' },
+      { out: 'run settings    lease_ttl_ms 30000, reclaim_window_ms 30000, stall_window_ms 300000, idempotency_window_ms 86400000, park_ttl_ms 86400000, max_depth 8, max_step_repeats 16' },
+      { out: 'identity        off' },
+      { out: 'client ip       peer address' },
+      { out: 'sampling        keep everything' },
+      { out: 'quota           unlimited' },
+      { out: 'redaction       on', tone: 'ok' },
+      { out: 'redact key      built in, which is public; set --redact-key', tone: 'warn' },
+      { out: 'cors            same-origin only' },
+      { out: 'timeout         30s per request' },
+      { out: 'limits          32 MiB per request, 10000 signals per batch' },
+      { out: 'derived         duration and token metrics' },
+      { out: 'aspects         off' },
+      { out: 'monitors        none' },
+      { out: 'objectives      none' },
+      { out: 'judge           off' },
+      { out: 'forwarding      off' },
+    ]}
+  />
+
+  <h2>インストールを確認する</h2>
+  <p><code>/healthz</code> は「本当に動いているのか」への答えです。ストレージを読まないので、速いままで、ディスクではなくプロセスについて正直なままです。</p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="確認"
+    lines={[
+      { cmd: 'curl -s localhost:4317/healthz' },
+      {
+        out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0","uptime_seconds":8,"storage":"sqlite"}',
+        tone: 'ok',
+      },
+      { cmd: 'curl -s -o /dev/null -w "%{http_code}\\n" localhost:4317/readyz' },
+      { out: '200', tone: 'ok' },
+    ]}
+  />
+
+  <p><code>spec_version</code> は、このビルドが実装しているデータモデルのバージョンです。クライアントはこれを読んで、理解できないサーバーとの通信を断れます。フィールドごとに拒否されるバッチを送るよりも、そのほうが良い結果になります。</p>
+  <p><code>/readyz</code> はもう半分です。ストレージに疎通確認を行い、ストアに届かないときは <code>503</code> を返すので、読み取りに応えられないインスタンスへロードバランサーが読み取りを送らなくなります。liveness には <code>/healthz</code>、readiness には <code>/readyz</code> を使い、両方に同じものを使わないでください。</p>
+  <p>あとは <a href="http://localhost:4317" class="link" rel="noopener">localhost:4317</a> を開けば、そこがインターフェースです。</p>
+
+  <h2>次に</h2>
+  <ul>
+    <li>自分のエージェントからトレースを送る：<a href={url('/docs/quickstart')} class="link">クイックスタート</a>。</li>
+    <li>以降のドキュメントで使う言葉を知る：<a href={url('/docs/concepts')} class="link">概念</a>。</li>
+    <li>すべてのフラグと環境変数をひとつの表で：<a href={url('/docs/configuration')} class="link">設定</a>。</li>
+    <li>ポートに他の人が届くようになる前に：<a href={url('/deploy')} class="link">Docker と Kubernetes</a>。</li>
+  </ul>
+</Doc>
+
+<style>
+  /* Shiki emits its own <pre>. Strip its box so the recessed well shows
+     through, and set the data face, exactly as the language switcher does. */
+  .mcpd-yaml :global(pre.astro-code),
+  .mcpd-yaml :global(pre.astro-code code) {
+    font-family: var(--font-data);
+  }
+  .mcpd-yaml :global(pre.astro-code) {
+    background: transparent;
+    margin: 0;
+    padding: 0;
+  }
+</style>

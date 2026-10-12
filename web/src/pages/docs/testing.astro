@@ -1,0 +1,299 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import Waterfall from '@/components/Waterfall.astro'
+---
+
+<Doc
+  title="Regression testing"
+  description="Turn a production run that went wrong into a permanent test case, run mcpd's built-in scorers over stored runs, and compare two versions of an agent with the sample sizes reported beside the deltas."
+  lede="The run that broke on Tuesday becomes the case every later version has to pass."
+  og="docs"
+>
+  <h2>The loop this exists to close</h2>
+  <p>
+    An agent fails on a real question. Somebody reproduces it by hand, changes a
+    prompt, and it looks better. Three weeks later it fails on the same question
+    again, because nothing kept it.
+  </p>
+  <p>
+    A dataset keeps it. Capture the failing run, and it stops being an anecdote
+    and becomes a case with an input, an expected answer when you have one, and
+    a pointer back to the trace it came from. Every later version runs against
+    it.
+  </p>
+
+  <h2>Capturing a run</h2>
+  <p>
+    Find the run in the interface or through the API, then hand its trace id to
+    the dataset.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="capture a failed run as a case"
+    command={`curl -X POST localhost:4317/v1/api/datasets/$DATASET/capture \\
+  -H 'content-type: application/json' \\
+  -d '{"trace_ids": ["b3d9e71a4c0f428eb6a5d2317f90c684"]}'`}
+  />
+
+  <p>
+    The captured case keeps <code>source_trace_id</code>, so months later you can
+    open the run that motivated it and read what actually happened rather than
+    guessing from the input.
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <h2>The run's own answer is not the expected answer</h2>
+  <p>
+    <code>use_output_as_expected</code> is off by default, and that default is
+    the important part. The runs worth capturing are usually the ones that went
+    wrong, and recording a wrong answer as the reference would enshrine the bug:
+    every later version would then be measured on its ability to reproduce it.
+  </p>
+  <p>
+    Turn it on when you are capturing runs that were right, to hold a behaviour
+    you already like in place. Leave it off, and write the expected answer
+    yourself, when you are capturing a failure.
+  </p>
+
+  <h2>The built-in scorers</h2>
+  <p>
+    mcpd ships thirteen deterministic scorers: ordinary code that reads a stored
+    run and returns a number. They cost nothing, they never call a model, and
+    they give the same answer twice, which is the property a regression test
+    needs and a judge model does not have.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Scorer</th><th>Passes when</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>answered</code></td><td>The run produced a non-empty answer.</td></tr>
+      <tr><td><code>no_errors</code></td><td>No span in the run failed.</td></tr>
+      <tr><td><code>exact_match</code></td><td>The answer equals the expected one.</td></tr>
+      <tr><td><code>contains</code></td><td>The answer contains a required string.</td></tr>
+      <tr><td><code>json_valid</code></td><td>The answer parses as JSON.</td></tr>
+      <tr><td><code>latency_budget</code></td><td>The run finished inside a millisecond budget.</td></tr>
+      <tr><td><code>cost_budget</code></td><td>The run cost no more than a set amount.</td></tr>
+      <tr><td><code>no_tool_loop</code></td><td>No tool was called twice with the same input.</td></tr>
+      <tr><td><code>tool_efficiency</code></td><td>The run stayed inside a tool-call budget.</td></tr>
+      <tr><td><code>not_a_refusal</code></td><td>The answer is not a refusal or an apology.</td></tr>
+      <tr><td><code>no_leaked_secret</code></td><td>No key, token or credential appears in the answer.</td></tr>
+      <tr><td><code>span_present</code></td><td>The run recorded a span of the required kind or name.</td></tr>
+      <tr><td><code>tool_succeeded</code></td><td>The required tool ran, and at least one call of it ended ok.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>GET /v1/api/scorers</code> returns the same list with a
+    <code>needs_config</code> flag. A scorer that needs an expected answer and is
+    not given one declines rather than guessing, and the decline is reported.
+  </p>
+
+  <h2>When a model does the grading</h2>
+  <p>
+    Some questions no amount of deterministic code answers. Whether an answer
+    actually addressed the question, whether a summary kept the meaning, whether
+    a tone was right: those need a reader, and a model is the cheap reader.
+  </p>
+  <p>
+    Judged scoring is off until you configure it, and a judged scorer never runs
+    unless you name it. Both defaults exist for the same reason: grading spends
+    money on every run it reads, and a feature that quietly does that is a
+    feature you find out about on an invoice.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "judge": {
+    "endpoint": "http://localhost:11434/v1",
+    "model": "qwen2.5:14b",
+    "api_key": "",
+    "timeout_seconds": 30,
+    "criteria": {
+      "answer_relevance": "Does the answer address the question that was asked?",
+      "no_hedging": "Does the answer commit, rather than hedge?"
+    }
+  }
+}`}</code></pre>
+
+  <p>
+    The request is the OpenAI chat-completions shape, which is not a preference
+    for a vendor: Ollama, vLLM, llama.cpp, LM Studio, OpenRouter and the hosted
+    providers all accept it, so the same configuration reaches a model on your
+    laptop and a gateway in production. Leave <code>api_key</code> empty for a
+    local model that wants none. The temperature is zero, because a judge that
+    answers differently each time cannot be compared with itself, which is the
+    only thing scores are for.
+  </p>
+  <p>
+    Criteria are configured rather than passed on each request. A scorer id is
+    stored on every score it produces and is what a later comparison groups by,
+    so letting each call invent both the id and the question would build a
+    column nobody can trust.
+  </p>
+  <p>
+    Configured criteria do not appear in <code>GET /v1/api/scorers</code>. That
+    endpoint lists the thirteen built-in scorers and nothing else, so a client
+    that builds its scorer menu from it will not offer your criteria. The one
+    place the daemon names them back to you is the error you get for an unknown
+    scorer id, which lists the built-ins and the configured criteria together.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="run a judged scorer over the newest run"
+    command={`curl -X POST localhost:4317/v1/api/score \\
+  -H 'content-type: application/json' \\
+  -d '{"limit": 1, "scorers": ["answer_relevance"]}'`}
+  />
+
+  <p>
+    <code>timeout_seconds</code> is how long one grading call may take, from
+    connecting to the last byte of the reply: 30 by default, from 1 to 300. A
+    call that runs past it is declined with the key named, and mcpd reads at
+    most 1 MiB of a reply.
+  </p>
+  <p>
+    Each judged scorer is one model call per run, and the request has to finish
+    inside <code>--request-timeout-seconds</code>. So one request grades at most
+    as many runs as fit in that deadline if every call takes the whole of
+    <code>timeout_seconds</code>. With the defaults, 30 and 30, and one judged
+    scorer, that is one run. A request for more, in <code>trace_ids</code> or
+    <code>limit</code>, is refused with a 400 that names the cap, before any
+    model is called. Leave <code>limit</code> out and the request grades as many of
+    the newest runs as fit. Raise <code>--request-timeout-seconds</code> to grade more in one
+    request. Each judged score is stored as soon as the model answers, so a
+    request cut short keeps the scores it finished.
+  </p>
+
+  <h3>It declines rather than guesses</h3>
+  <p>
+    A judge that returns a number it did not derive is worse than no judge,
+    because it looks like evidence. So every one of these is reported in
+    <code>skipped</code> with its reason, and none of them produces a score.
+  </p>
+  <table>
+    <thead>
+      <tr><th>What happened</th><th>What mcpd does</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>The run recorded no answer</td>
+        <td>Declines. A run with no answer has not scored badly on relevance, it has not been measured.</td>
+      </tr>
+      <tr>
+        <td>The model replied in prose</td>
+        <td>Declines, quoting the reply. JSON wrapped in a fenced block or a sentence is still read.</td>
+      </tr>
+      <tr>
+        <td>The model answered outside the scale</td>
+        <td>Declines. A seven on a scale of one is not a nine tenths, and clamping it would invent a number.</td>
+      </tr>
+      <tr>
+        <td>The model could not be reached</td>
+        <td>Declines, with the status and the body. A rate limit is a reason, not a zero.</td>
+      </tr>
+      <tr>
+        <td>The reply was larger than 1 MiB</td>
+        <td>Declines without reading the rest. A verdict is a few hundred bytes, so a reply that size is not one.</td>
+      </tr>
+      <tr>
+        <td>The request deadline left no time for the call</td>
+        <td>Declines without calling the model. The pass answers with the scores it finished, inside the deadline, rather than a 503.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Every judged score records the model as its <code>scorer_version</code>.
+    Two scores from two different judges are not comparable, and that field is
+    what says so on the record.
+  </p>
+
+  <h2>Scoring happens after the fact</h2>
+  <p>
+    <code>POST /v1/api/score</code> runs scorers over runs that are already
+    stored. Nothing evaluates inline. An evaluation in the request path adds its
+    latency to the thing it is judging, and an evaluation that throws should
+    never fail a user's request.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="score the last hundred runs"
+    command={`curl -X POST localhost:4317/v1/api/score \\
+  -H 'content-type: application/json' \\
+  -d '{"project": "support-desk", "limit": 100, "config": {"max_ms": 4000}}'`}
+  />
+
+  <p>
+    The response carries the scores it wrote and, separately, every scorer that
+    declined with the reason it declined. A scorer that could not answer is more
+    interesting than one that returned a number, so mcpd never swallows it. The
+    project's ingest ceiling reaches this door too: a score the pass computed
+    that would take the project over <code>--quota-per-minute</code> is not
+    stored, and it is listed in <code>skipped</code> saying so, rather than
+    written past the ceiling or thrown away in silence.
+  </p>
+  <p>
+    Send <code>"dry_run": true</code> to see what a pass would produce without
+    storing anything.
+  </p>
+  <p>
+    Which runs a pass reads is decided by <code>trace_ids</code>,
+    <code>from</code> and <code>limit</code>. Name the runs in
+    <code>trace_ids</code> to score exactly those. Leave it empty and the pass
+    takes the newest <code>limit</code> runs in the project, newest first, and
+    <code>from</code> bounds that page: a pass sent <code>from</code> reads only
+    runs that started at or after it, which is how you score everything since a
+    deploy without listing ids.
+  </p>
+
+  <h2>Comparing two versions</h2>
+  <p>
+    Record an experiment for each version you want to compare, tag its scores
+    with that experiment's id, and ask mcpd for the difference.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="did the new prompt help"
+    command="curl 'localhost:4317/v1/api/experiments/compare?baseline=v3&candidate=v4'"
+  />
+
+  <p>
+    The answer is a per-scorer delta with the sample size on each side, and a
+    <code>decidable</code> flag. Below twenty observations mcpd says the
+    comparison cannot be decided rather than reporting a movement.
+  </p>
+  <p>
+    That is a deliberately blunt rule and not a significance test. The failure it
+    prevents is the common one: a mean that moved on four runs, printed without
+    its count, read as a result and shipped. Printing the counts beside the
+    delta is what stops noise being mistaken for a finding.
+  </p>
+
+  <h2>Where this runs</h2>
+  <p>
+    All of it is the HTTP API, so the loop belongs in CI: capture failures as
+    they happen, score the runs your test suite produces, register the build as
+    an experiment, and fail the job when <code>regressed</code> comes back true
+    on a decidable comparison.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>
+      The two signals a score sits beside:
+      <a href="/docs/evaluation" class="link">Scores and feedback</a>.
+    </li>
+    <li>
+      Watching a scorer's mean in production:
+      <a href="/docs/alerting" class="link">Monitors and alerts</a>.
+    </li>
+    <li>
+      Every endpoint and field:
+      <a href="/docs/reference/api" class="link">HTTP API</a>.
+    </li>
+  </ul>
+</Doc>

@@ -1,0 +1,166 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Encaminhamento"
+  description="Copie todo span armazenado para outro endpoint OTLP, para que o mcpd seja um salto em um pipeline de telemetria e não um lugar onde os dados ficam presos. O armazenamento local vem primeiro."
+  lede="O mcpd fala OTLP nos dois sentidos. Nada do que chega aqui fica preso."
+  og="docs"
+>
+  <h2>Um protocolo de saída, não onze exportadores</h2>
+  <p>
+    O mcpd recebe OTLP, e ele consegue emitir OTLP. Essa única propriedade
+    substitui a maior parte do que faz um conjunto de exportadores por
+    fornecedor: Langfuse, Datadog, Honeycomb, Grafana e todo outro destino que
+    valha citar aceitam OTLP sobre HTTP. O encaminhamento é, portanto, uma
+    implementação em vez de onze, e ele não tem como ficar para trás de um
+    lançamento do SDK de um fornecedor.
+  </p>
+  <p>
+    Isso também significa que adotar o mcpd é reversível. Aponte-o para o que
+    você usava antes, rode os dois por duas semanas, e decida com os dados na
+    sua frente, e não com base em uma migração que você não consegue desfazer.
+  </p>
+
+  <h2>Como ligar</h2>
+
+  <Command
+    class="not-prose my-6"
+    title="armazenar local e copiar adiante"
+    command="mcpd serve --forward-endpoint https://otlp.example.com"
+  />
+
+  <p>
+    O caminho é acrescentado, então informe a URL base e não
+    <code>/v1/traces</code>. Para um destino que precisa de credenciais,
+    acrescente cabeçalhos:
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="com um cabeçalho de autorização"
+    command={`mcpd serve \\
+  --forward-endpoint https://otlp.example.com \\
+  --forward-header 'Authorization: Bearer $TOKEN'`}
+  />
+
+  <p>
+    Os mesmos ajustes existem sob <code>forward</code> no arquivo de
+    configuração, onde <code>batch_size</code> e <code>enabled</code> também
+    estão disponíveis. A opção de linha de comando vence o arquivo, então uma
+    instância pode ser apontada para outro lugar sem editar um ConfigMap
+    compartilhado.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "forward": {
+    "endpoint": "https://otlp.example.com",
+    "headers": [["Authorization", "Bearer sk-..."]],
+    "batch_size": 256,
+    "enabled": true
+  }
+}`}</code></pre>
+
+  {/* The diagram belongs here, not at the top. It draws the intake ending at
+      Store, and this section is about what happens after Store, so the two read
+      as one sequence rather than as a picture that stops where the subject
+      begins. */}
+  <PipelineDiagram class="not-prose my-8" />
+
+  <h2>O armazenamento local acontece primeiro</h2>
+  <p>
+    Um span é gravado no armazenamento do próprio mcpd antes de qualquer coisa
+    ser encaminhada, e o encaminhamento roda depois, na sua própria tarefa. Duas
+    consequências, as duas deliberadas.
+  </p>
+  <p>
+    Um destino lento nunca soma a latência dele à requisição que produziu o
+    span. O seu agente não fica esperando o coletor de outra pessoa.
+  </p>
+  <p>
+    Um destino fora do ar nunca vira uma ingestão recusada. O mcpd continua
+    trabalhando e tenta o encaminhamento de novo na sua própria tarefa. A
+    alternativa, em que a indisponibilidade de outra empresa faz a sua
+    telemetria não ser guardada de jeito nenhum, é exatamente a falha que este
+    desenho existe para evitar.
+  </p>
+  <p>
+    Cada lote tem três tentativas. Um 429, um 5xx ou uma conexão que falhou é
+    tentado de novo depois de 250 ms, e a espera dobra a cada tentativa. Um
+    <code>Retry-After</code> em segundos substitui a espera, até 30 segundos.
+    Qualquer outro 4xx é definitivo na primeira resposta, porque o lote vai
+    continuar malformado para aquele destino. Quando o daemon está parando, ele
+    faz as tentativas restantes na hora. Um lote recusado de vez, ou ainda não
+    entregue depois da última tentativa, é registrado no log, e os spans dele
+    são somados a <code>mcpd_forward_dropped_spans_total</code>, para você ver
+    quanto da cópia está faltando.
+  </p>
+  <p>
+    Um destino que aceita a conexão e nunca responde também não consegue tomar a
+    memória do daemon. No máximo as cópias de 64 requisições de ingestão esperam
+    pelo destino ao mesmo tempo. Enquanto houver tantas esperando, uma cópia
+    nova é descartada na hora e contada em
+    <code>mcpd_forward_dropped_spans_total</code>, e a gravação local não é
+    afetada.
+  </p>
+  <p>
+    Não há uma fila de saída durável. Um lote espera na memória enquanto é
+    tentado de novo, e quando a fila de encaminhamento está cheia, um lote novo
+    é descartado e os spans dele são contados na mesma métrica. Uma fila durável
+    é outro produto, e uma fila silenciosa que fica horas atrasada é pior que
+    uma lacuna visível. Se você precisa de entrega garantida, coloque um coletor
+    de verdade entre o mcpd e o destino e deixe que ele faça o trabalho para o
+    qual foi construído.
+  </p>
+
+  <h2>A ocultação vale para o que sai</h2>
+  <p>
+    O encaminhamento acontece depois do pipeline de entrada, que oculta no lugar
+    antes de qualquer coisa ser gravada. O que o mcpd foi instruído a esconder
+    também não chega ao salto seguinte. Uma regra que protegesse o seu
+    armazenamento e não a sua saída não seria um controle de privacidade.
+  </p>
+
+  <h2>O que é encaminhado</h2>
+  <p>
+    Spans. Logs, métricas, notas, feedback e notas de aspecto ficam no mcpd,
+    porque os destinos para os quais as pessoas encaminham são backends de tracing e
+    descartariam o resto ou o amassariam dentro de atributos.
+  </p>
+  <p>
+    Os spans são agrupados por serviço em <code>resourceSpans</code>, o formato
+    que um receptor espera, em vez de um recurso por span, que é válido e
+    obriga todo destino seguinte a reagrupar.
+  </p>
+
+  <h2>mcpd encaminhando para mcpd</h2>
+  <p>
+    Como as duas pontas falam o mesmo protocolo, um mcpd local pode encaminhar
+    para um compartilhado. As pessoas do time mantêm um armazenamento rápido na
+    própria máquina, com os payloads completos, e a instância do time recebe as
+    mesmas execuções, com a retenção dela e as regras de ocultação dela
+    aplicadas na chegada.
+  </p>
+
+  <h2>A seguir</h2>
+  <ul>
+    <li>
+      Apontar uma instalação OpenTelemetry existente para o mcpd:
+      <a href={urlFor('/docs/opentelemetry', locale)} class="link">OpenTelemetry</a>.
+    </li>
+    <li>
+      O que é removido antes de um span ser armazenado ou enviado:
+      <a href={urlFor('/docs/privacy', locale)} class="link">Ocultação e retenção</a>.
+    </li>
+    <li>
+      Cada opção e ajuste de arquivo:
+      <a href={urlFor('/docs/configuration', locale)} class="link">Configuração</a>.
+    </li>
+  </ul>
+</Doc>

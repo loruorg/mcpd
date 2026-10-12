@@ -1,0 +1,82 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import Command from '@/components/Command.astro'
+import Unreleased from '@/components/Unreleased.astro'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* Internal links stay written as English routes and are localised here. A
+   route whose Japanese page is not written yet resolves to the English page
+   rather than to a Japanese URL with nothing behind it. */
+const code = localeOf(Astro.url.pathname)
+const url = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+
+/* Japanese prose is written one block element to a line on purpose. A newline
+   between two Japanese characters is only removed by the segment-break rule in
+   browsers that implement it; the rest render it as a space, and a stray space
+   inside a Japanese sentence is visible. */
+---
+
+<Doc
+  title="概要"
+  description="mcpd は AI エージェント向けの無料・オープンソースのデーモンです。ステップ間で実行を保持し、各ステップを記録します。1 プロセス、ストレージ組み込み、OpenTelemetry 対応、フレームワークは不要です。"
+  lede="エージェントの隣で動かすプロセスであって、エージェントをその周りに組み立てるライブラリではありません。ステップ間の実行を保持し、そのひとつずつを記録します。このページを読めば、全体の形がひととおり分かります。"
+  og="docs"
+>
+  <h2>1 つのプロセス</h2>
+  <p>mcpd は 1 つのプロセスで 2 つのことをします。ひとつは、永続実行をステップ間で保持することです。カーソル、リトライ、タイマー、待機がそれにあたり、各ステップの中身は任意の言語のあなた自身のコードが担当します。もうひとつは、エージェントがしたことを受け取って保存し、読める実行として返すことです。SQLite をリンクした 1 つのバイナリで、立ち上げるデータベースも、横で動かすコレクターも、どこかのアカウントもありません。</p>
+  <p>デーモンはポート <code>4317</code> で待ち受け、その 1 つのポートから 5 つのものを提供します。</p>
+  <ul>
+    <li><code>/v1/traces</code>、<code>/v1/logs</code>、<code>/v1/metrics</code> での OTLP 取り込み。すでにある OpenTelemetry の構成に、新しいコードは要りません。</li>
+    <li><code>/v1/ingest</code> でのネイティブ取り込み。OTLP に置き場所のないモデルの部分を運びます。スコアや人によるフィードバックもここに入ります。</li>
+    <li><code>/v1/api</code> 以下の読み取り API。インターフェースも SDK もこれを使います。あなたが手にするものの裏に、非公開の API はありません。</li>
+    <li><code>/v1/api/runs</code>、<code>/v1/api/events</code>、<code>/v1/api/steps</code> 以下の実行の面。定義、実行、待機に応えるイベント、そしてワーカーが話すプロトコルです。<a href={url('/docs/workflows')} class="link">ワークフロー</a>を参照してください。</li>
+    <li><code>/</code> にある運用者向けインターフェース。バイナリに組み込まれています。</li>
+  </ul>
+  <p>ポートを 1 つにしたのは近道ではなく、デプロイ上の判断です。コレクターとデータベースと UI があれば、動かすものが 3 つ、上げるものが 3 つ、そしてトレースが失われうる隙間が 3 か所になります。</p>
+
+  <Command
+    class="not-prose mt-8"
+    label="リリース後は、これがインストールのすべて"
+    command="docker run -p 4317:4317 ghcr.io/mcpd/mcpd"
+  />
+  <Unreleased class="not-prose mb-8 mt-3" />
+
+  <h2>あえてそうではないもの</h2>
+  <p>ここでの価値の多くは、mcpd がやらないと決めたことから来ています。ひとつ断るごとに、あなたがエージェントを変えなければならない理由がひとつ減ります。</p>
+  <ul>
+    <li><strong>フレームワークではありません。</strong>mcpd があなたのモデルを実行することも、選ぶことも、プロバイダーのクライアントを包むこともありません。ステップ間の実行を保持し、ステップの中身はすべてあなたのコードに任せます。mcpd を採り入れたあとも、コードからのモデルの呼び方は前と同じです。</li>
+    <li><strong>リクエストの経路にいません。</strong>エージェントとプロバイダーの間に入ることはありません。利用者が見るものは、何ひとつ mcpd が動いていることに依存しません。利用者が見るものは、そこを通らないからです。</li>
+    <li><strong>サービスではありません。</strong>デーモンは既定では何も呼び出しません。テレメトリーも、ライセンスの確認も、ベンダーのエンドポイントもありません。外に出る通信は、あなたが設定したものだけです。<code>--forward-endpoint</code>、モニターの webhook、ジャッジモデルがそれにあたります。どれも設定しなければ、プロンプトは動かしたマシンから出ません。</li>
+    <li><strong>必須の依存ではありません。</strong>インフラから mcpd を消しても、止まるのは記録だけです。</li>
+  </ul>
+
+  <h2>6 つのシグナル</h2>
+  <p>mcpd は 6 種類のものを、まとめて保存します。スパンは何が動いたか。ログは実行が出した行。メトリクスは時間に沿った数値。スコアは実行に対する機械の判断。フィードバックは人の判断。観点ノートは、終わった実行についてモデルが書いた 1 文です。</p>
+  <p>1 つのストアに置くことが要点です。どのシグナルも、自分が属する trace id と span id を持ちます。だから「この顧客が苦情を寄せた実行で、モデルは実際に何と言い、いくらかかったのか」という問いは、4 つのツールと目で合わせるタイムスタンプではなく、1 つのクエリになります。</p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <p>スコアとフィードバックは意図して分けてあります。スコアラーの 0.8 と人の低評価は別のものを測っており、平均を取れば意味のない数値になります。</p>
+
+  <h2>フレームワークではなくデーモンである理由</h2>
+  <p>フレームワークの可観測性は良いものですが、そのフレームワークに付いてきます。見えるようにするには、エージェントがそれで作られていること、たいていは 1 つの言語で作られていることが前提になります。新しいプロジェクトには公平な取引で、すでに存在して動いているエージェントには成り立たない取引です。フレームワークのワークフローも同じ取引です。すべてのステップがそのフレームワークの言語で書かれ、そのプロセスの中で動く限りは永続します。</p>
+  <p>デーモンはその両方をひっくり返します。ワークフローのグラフはデーモンが持つデータで、ステップの本体はあなたのプロセスが持つコードです。本体は、どの言語でも話せる HTTP のプロトコルで、リースを 1 件ずつ引き受けます。デーモンがモデルもプロンプトも資格情報も見ることはありません。<a href={url('/docs/workflows')} class="link">ワークフロー</a>と<a href={url('/docs/workers')} class="link">ワーカー</a>を参照してください。</p>
+  <p>デーモンはこの取引もひっくり返します。mcpd が話す OTLP は依存ではなくプロトコルなので、どの言語で書かれ、どのフレームワークを使ったエージェントでも記録できます。mcpd が存在する前に書かれたものも含みます。エージェントがすでに OpenTelemetry を出力しているなら、<code>OTEL_EXPORTER_OTLP_ENDPOINT</code> を mcpd に向けることが、統合のすべてです。</p>
+  <p>SDK があるのは、OTLP にプロンプト、補完、トークン数、スコアを表す語彙がないからです。そして、あなたが求めているのはまさにそのフィールドです。SDK を使うかどうかは選択であって、条件ではありません。6 つとも同じ振る舞いをします。スパンの記録は上限のあるキューに追加して戻るだけで、ネットワークの処理はバックグラウンドのワーカーが行い、計装の経路が例外を投げることはありません。観測している対象を落としかねない可観測性は、何もないよりも悪いものです。</p>
+
+  <h2>1 つのバイナリ、2 通りのデプロイ</h2>
+  <p>ノート PC で動かすコンテナは、誰かのクラスターで Deployment として動くコンテナと同じものです。保持期間、秘匿化、サンプリング、API キーは、その同じバイナリのフラグであって、別のビルドでも、ライセンスの区分でもありません。手に入らない版にしかない機能はありません。</p>
+  <p>既定値はノート PC に合わせてあるので、キーを設定しなければ取り込みも読み取りも開いたままです。その状態でループバック以外のアドレスを待ち受けているとき、mcpd は起動時にはっきり警告します。それでも起動はします。拒否すれば、対象としている人の 5 分の道筋を壊してしまうからです。とはいえ、黙っているのは無責任です。</p>
+
+  <h2>次に読むもの</h2>
+  <ul>
+    <li>今すぐ動かす：<a href={url('/docs/quickstart')} class="link">クイックスタート</a>は自分のエージェントのトレースを画面に出すまでを、<a href={url('/docs/install')} class="link">インストール</a>は入口をひととおり扱います。</li>
+    <li>用語を覚える：<a href={url('/docs/concepts')} class="link">概念</a>はトレース、スパン、種別、相関を定義します。以降のドキュメントはこれを前提にしています。</li>
+    <li>ステップ間で実行を保持する：<a href={url('/docs/workflows')} class="link">ワークフロー</a>、そのあとに<a href={url('/docs/workers')} class="link">ワーカー</a>と<a href={url('/docs/runs')} class="link">実行</a>。</li>
+    <li>すでに OpenTelemetry がある：<a href={url('/docs/opentelemetry')} class="link">OTLP の経路</a>の全体。標準の属性から mcpd が何を推測するかも含みます。</li>
+    <li>他の人のために動かす：<a href={url('/deploy')} class="link">Docker と Kubernetes</a>、そのあとに<a href={url('/docs/privacy')} class="link">マスキングと保持</a>。</li>
+  </ul>
+  <p>mcpd は Apache-2.0 ライセンスです。入ってくるプロトコルも、出ていく形式も、その周りのライセンスもすべて開かれているので、離れるのは来るのと同じくらい安く済みます。</p>
+</Doc>

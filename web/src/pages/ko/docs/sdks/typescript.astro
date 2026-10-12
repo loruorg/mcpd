@@ -1,0 +1,397 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+const nesting = `// Anything the callback starts nests under it. No handle is passed down.
+await mcpd.withSpan('support_agent', async (run) => {
+  const order = await mcpd.withSpan(
+    'lookup_order',
+    async (tool) => {
+      tool.setInput({ orderId: 'A-1042' })
+      mcpd.log('info', 'this line belongs to lookup_order')
+      return { status: 'in transit' }
+    },
+    { kind: 'tool_call' },
+  )
+  run.setOutput(order)
+})`
+
+const explicitParent = `// Correct on every runtime, including ones with no AsyncLocalStorage.
+const run = mcpd.trace('support_agent')
+const step = run.child('call_model', { kind: 'model_generation' })
+step.end()
+
+await run.withChild('call_tool', async (tool) => {
+  tool.setOutput({ ok: true })
+})
+run.end()
+
+// Which mechanism is in use, at runtime.
+mcpd.stats().context // 'async-local-storage' | 'fallback'`
+
+const propagation = `// Outbound: put the active span on the request.
+await fetch(url, {
+  headers: { traceparent: span.traceparent() },
+})
+
+// Inbound: continue that trace instead of starting a new one.
+const run = mcpd.trace('handle_request', {
+  traceparent: request.headers.get('traceparent'),
+})`
+
+const payload = `generation.setModel('claude-sonnet-4', 'anthropic')
+generation.setUsage({
+  inputTokens: 812,
+  outputTokens: 37,
+  inputDetails: { cacheRead: 640 },
+})
+
+// A failure you caught and handled yourself.
+generation.setError('the provider timed out', {
+  kind: 'TimeoutError',
+  retryable: true,
+})
+
+// A point in time inside the span, with no duration of its own.
+generation.event('first_token', { kind: 'model_chunk' })`
+
+const recording = `import { Mcpd, RecordingSink } from '@mcpd/sdk'
+
+const sink = new RecordingSink()
+const mcpd = new Mcpd({ sink })
+
+await answerQuestion(mcpd)
+await mcpd.flush()
+
+expect(sink.spans.map((s) => s.name)).toEqual(['answer_question', 'model_call'])
+expect(sink.scores[0]?.scorerId).toBe('answer_relevance')`
+
+const finished = `// Ids, parent and times the caller already holds. Queued as given.
+mcpd.record({
+  traceId: otel.traceId,
+  spanId: otel.spanId,
+  parentSpanId: otel.parentSpanId,
+  name: 'GET /orders',
+  kind: 'http_request',
+  status: 'ok',
+  startTime: otel.startTime,
+  endTime: otel.endTime,
+  isRoot: false,
+  isEvent: false,
+  correlation: { project: 'support' },
+  receivedAt: otel.endTime,
+})
+
+// A parent from a tracing system that is not mcpd, for correlation only.
+const run = mcpd.trace('handle_request', { externalParentSpanId: otel.spanId })`
+
+const serverless = `export default async function handler(request: Request): Promise<Response> {
+  const answer = await mcpd.withSpan('answer', async (run) => {
+    run.setInput(await request.text())
+    return 'ok'
+  })
+
+  // The batch is still in memory here. Send it before the response goes out.
+  await mcpd.flush()
+  return new Response(answer)
+}`
+---
+
+<Doc
+  title="TypeScript"
+  description="TypeScript와 JavaScript를 위한 mcpd SDK. Node, Deno, Bun, 브라우저, 엣지 런타임에서 동작합니다. 런타임 의존성이 없고, AsyncLocalStorage 컨텍스트를 쓰며, 계측은 절대 예외를 던지지 않습니다."
+  lede="의존성 없는 패키지 하나. 스팬, 로그, 메트릭, 점수, 피드백을 기록하며, 계측 호출에서 예외를 던지는 일이 없습니다."
+  og="docs"
+>
+  <h2>설치</h2>
+  <p>
+    Node 20 이상, Deno, Bun, 브라우저, 엣지 런타임에서 동작합니다. ESM이 기본이고,
+    <code>require</code>를 위한 CommonJS 빌드도 함께 들어 있습니다. Node에만 있는
+    부분은 <code>async_hooks</code>와 <code>zlib</code> 둘뿐이며, 런타임에 불러오고
+    없는 곳에서는 건너뜁니다.
+  </p>
+
+  <Command command="npm install @mcpd/sdk" />
+
+  <h2>클라이언트 만들기</h2>
+  <p>
+    프로세스마다 클라이언트 하나입니다. 모든 옵션은 환경 변수도 읽으므로, 같은 코드가
+    고치는 곳 없이 개발과 운영 양쪽에서 돌아갑니다. 인자를 하나도 주지 않으면
+    <code>http://localhost:4317</code>의 데몬과 대화합니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="init" title="연결" />
+
+  <p>코드가 환경 변수를 이기고, 환경 변수가 기본값을 이깁니다.</p>
+
+  <table>
+    <thead>
+      <tr><th>옵션</th><th>환경 변수</th><th>기본값</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>apiKey</code></td><td><code>MCPD_API_KEY</code></td><td>없음</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>없음</td></tr>
+      <tr><td><code>serviceName</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>없음</td></tr>
+      <tr><td><code>serviceVersion</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>없음</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capturePayloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>logLevel</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      <tr><td><code>batchSize</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flushIntervalMs</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2000</code></td></tr>
+      <tr><td><code>maxQueue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeoutMs</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10000</code></td></tr>
+      <tr><td><code>sink</code></td><td></td><td>HTTP 전송 계층</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>enabled: false</code>는 아무것도 기록하지 않고 아무것도 보내지 않습니다.
+    그래도 모든 호출은 올바른 객체를 돌려주고, 목록 읽기는 빈 페이지를 돌려줍니다.
+    테스트 스위트는 계측 코드를 한 줄도 건드리지 않고 mcpd를 끌 수 있습니다.
+  </p>
+  <p>
+    <code>capturePayloads: false</code>는 프롬프트와 컴플리션을 프로세스 안에 붙들어
+    둡니다. 스팬은 시각과 상태와 사용량과 모델과 상관 정보와 오류를 그대로 실은 채
+    기록되고, <code>input</code>과 <code>output</code>은 큐에 닿기 전에 버려집니다.
+    그래서 민감한 것이 플러시를 타고 나갈 수 없습니다. 스팬 하나는 시작 옵션의
+    <code>capturePayloads</code>로 자기 몫만 어느 방향으로든 덮어쓸 수 있습니다.
+  </p>
+
+  <h2>실행 기록하기</h2>
+  <p>
+    <code>withSpan</code>은 범위를 가진 형태입니다. 스팬을 열고, 콜백이 시작하는 모든
+    것에 대해 그 스팬을 활성 상태로 두며, 콜백이 끝나면 스팬도 끝냅니다. 콜백이 예외를
+    던지면 스팬은 던져진 메시지와 함께 <code>error</code>로 표시되고, 오류는 바뀌지
+    않은 채 다시 던져집니다. 관측된다고 해서 오류 처리가 달라지지 않습니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="trace" title="실행 기록하기" />
+
+  <h2>컨텍스트</h2>
+  <p>
+    Node와 Bun에서는 활성 스팬이 <code>AsyncLocalStorage</code>에 삽니다.
+    <code>withSpan</code> 콜백 안에서 시작된 것은 참조를 건네받지 않고도 그 아래에
+    중첩되고, 이벤트 루프 하나에서 서로 엇갈려 도는 두 실행은 상대의 스팬을 보지
+    못합니다.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="중첩"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: nesting }]}
+  />
+
+  <p>
+    브라우저와 대부분의 엣지 런타임에는 <code>AsyncLocalStorage</code>가 없습니다.
+    거기서는 SDK가 대신 저장된 값 하나를 들고 있습니다. 그것도 중첩은 제대로 되고 실행
+    하나 안의 <code>await</code>를 넘어 살아남지만, 동시에 도는 두 실행을 구분하지는
+    못합니다. 그 결과는 한 실행의 도구 호출이 다른 실행의 트리 안에 나타나는 것입니다.
+    그런 런타임에서 에이전트를 동시에 돌린다면 부모를 명시적으로 넘기십시오.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="명시적 부모"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: explicitParent }]}
+  />
+
+  <p>
+    서비스 사이에서 컨텍스트는 W3C <code>traceparent</code> 헤더에 실려 갑니다.
+    트레이스 하나가 네트워크를 한 번 건너 살아남게 하는 것은 이것이 전부입니다. 형식이
+    깨진 헤더는 무시하고 새 루트 트레이스를 시작합니다. 아무도 읽을 수 없는 헤더가, 그
+    헤더를 실어 온 요청까지 실패시킬 이유는 아니기 때문입니다.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="서비스 경계를 넘어"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: propagation }]}
+  />
+
+  <h2>모델, 사용량, 오류</h2>
+  <p>
+    mcpd가 수집 시점에 값을 매기는 대상이 토큰 수이므로, 트레이스에 적힌 비용이 곧
+    청구받은 비용입니다. 토큰을 직접 세지 말고 제공자가 알려 준 값을 보고하십시오.
+    오류에는 언제나 메시지가 붙고, 오류를 설정하면 같은 동작으로 스팬의 상태도
+    <code>error</code>가 됩니다. 그래서 둘이 어긋날 수 없습니다.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="스팬이 싣는 것"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: payload }]}
+  />
+
+  <h2>지속성 실행</h2>
+  <p>
+    같은 클라이언트가 데몬의 지속성 실행도 다룹니다. <code>workflow()</code>는 정의를
+    만들고 단계 본문을 들고 있습니다. <code>Worker</code>는 그 정의를 등록하고, 리스를
+    롱 폴링으로 기다렸다가 하나씩 처리합니다. <code>mcpd.runs</code>,
+    <code>mcpd.events</code>, <code>mcpd.definitions</code>는 실행 표면을 하나씩 그대로
+    옮겨 놓은 것입니다. 본문은 단계의 예산 안에서 다시 시도되도록
+    <code>RetryableError</code>를 던지고, <code>StepContext</code>를 통해 자기 단계
+    아래에 스팬을 기록합니다. 그렇게 기록된 스팬과 그 아래에 중첩된 모든 스팬은 끝날 때
+    자기 사용량을 그 단계의 사용량에 더합니다. 그래서 데몬은 트레이스가 보여 주는 그대로
+    값을 매기고, 본문은 토큰을 손으로 합산하지 않습니다. <code>ctx.setUsage</code>는
+    명시적인 덮어쓰기입니다. <code>onError</code> 옆에 훅이 넷 있습니다.
+    <code>onLease</code>, <code>onStepStart</code>, <code>onStepEnd</code>,
+    <code>onConflict</code>입니다. 그리고 <code>worker.stats()</code>는 클레임과 완료와
+    분류별 실패와 사유별 충돌을 셉니다.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} example="workflow" region="workflow" title="워크플로 하나" />
+  <p>
+    각 구성 요소가 무엇을 하는지, 리스 프로토콜, 실행 API는
+    <a href={linkTo('/docs/workflows')} class="link">워크플로</a>,
+    <a href={linkTo('/docs/workers')} class="link">워커</a>,
+    <a href={linkTo('/docs/runs')} class="link">실행</a>에 있습니다.
+  </p>
+
+  <h2>점수와 피드백</h2>
+  <p>
+    <code>min</code>과 <code>max</code>는 타입이 요구합니다. 척도를 밝히지 않은 0.7이라는
+    점수는 무엇과도 비교할 수 없고, 누군가 차트를 읽고 있을 때쯤이면 그것이 무슨
+    뜻이었는지 물어보기에는 이미 늦습니다. 피드백은 사람의 판단이고 점수와 따로
+    보관합니다. 둘은 서로 다른 질문에 답하는 것이라 함께 평균 내서는 안 되기
+    때문입니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="score" title="점수와 피드백" />
+
+  <p>
+    대상을 지정하지 않으면 둘 다 활성 스팬의 트레이스에 붙습니다. 그래서 제품 안의
+    좋아요 컨트롤은 보관해 둔 트레이스 id 하나만 가지고 <code>feedback</code>을 호출할 수
+    있습니다.
+  </p>
+
+  <h2>다섯 시그널, 하나의 id</h2>
+  <p>
+    스팬, 로그, 메트릭, 점수, 피드백은 같은 큐를 지나가고 같은 트레이스 id와 스팬 id를
+    싣습니다. 차트 위의 치솟은 봉우리에서 그것을 일으킨 실행을 열 수 있는 것이 이
+    때문입니다.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>플러시와 종료</h2>
+  <p>
+    기록은 큐에 덧붙이는 일입니다. 워커가 보내기 전까지는 아무것도 프로세스를 떠나지
+    않았고, 워커는 2초마다 또는 배치가 찰 때 보냅니다. <code>flush()</code>와
+    <code>shutdown()</code>은 둘 다 await할 수 있고 멱등합니다.
+    <code>shutdown()</code>은 워커도 멈춥니다.
+  </p>
+  <p>
+    서버리스 함수에서는 이것이 선택 사항이 아닙니다. 런타임은 응답을 돌려주는 순간
+    프로세스를 얼리고 백그라운드 워커는 다시 돌지 않으므로, 마지막 배치를 잃습니다.
+    응답이 나가기 전에 플러시를 await 하십시오.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="서버리스 핸들러"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: serverless }]}
+  />
+
+  <p>
+    Node에서는 클라이언트가 <code>beforeExit</code>에서도 플러시합니다. 그래서
+    <code>shutdown()</code>을 잊은 스크립트도 마지막 배치를 보냅니다. 이 훅은 명시적인
+    <code>process.exit()</code>나 치명적인 종료 신호에서는 발화하지 않습니다. 안전망이지
+    대체물이 아닙니다.
+  </p>
+
+  <h2>기록한 것을 검증하기</h2>
+  <p>
+    <code>RecordingSink</code>는 네트워크를 메모리로 바꿉니다. 그래서 테스트는 서버도
+    포트도 없이, 시험 대상 코드가 만들어 낸 스팬과 로그와 메트릭과 점수와 피드백을 다시
+    읽습니다. <code>ConsoleSink</code>는 대신 시그널마다 JSON 한 줄을 출력하고,
+    <code>export(batch, ingestKey)</code> 메서드를 가진 객체라면 무엇이든 싱크입니다.
+    예외를 던지는 싱크는 실패한 배치이자 진단 정보이며, 호출한 코드에서 나는 예외가 되는
+    일은 없습니다. <code>mcpd.stats()</code>는 <code>queued</code>,
+    <code>dropped</code>, <code>capacity</code>, <code>exported</code>,
+    <code>failed</code>, <code>rejected</code>를 답합니다.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="서버 없는 테스트"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: recording }]}
+  />
+
+  <h2>끝난 스팬 기록하기</h2>
+  <p>
+    <code>mcpd.record(span)</code>은 id와 부모와 시각을 이미 손에 들고 있는 스팬을 큐에
+    넣습니다. 다른 트레이싱 시스템의 어댑터나 일괄 가져오기나 리플레이가 손에 쥐고 있는
+    것이 바로 그것입니다. 준 그대로 큐에 들어가며, 부모가 다시 매겨지지도, 시각이 다시
+    매겨지지도, 샘플링이 다시 결정되지도 않습니다. 비워 둔 <code>correlation</code>만
+    클라이언트에서 채웁니다. id가 OpenTelemetry 형태가 아니거나, 이름이 비었거나, 시작
+    시각이 없는 레코드는 버려지고 <code>stats().rejected</code>에 셉니다. 어느
+    스팬에서든 <code>externalParentSpanId</code>는 mcpd가 아닌 트레이싱 시스템의 부모를
+    싣고, 상관 정보로만 씁니다.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="다른 곳에서 온 스팬"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: finished }]}
+  />
+
+  <h2>믿어도 되는 것</h2>
+  <ul>
+    <li>
+      계측은 절대 예외를 던지지 않습니다. 실패한 내보내기, 닿지 않는 데몬, 직렬화되지
+      않는 페이로드는 <code>onError</code>를 통해 한 주기에 많아야 한 번 보고되고 그대로
+      넘어갑니다. 관측 가능성이 관측 대상을 무너뜨리는 일은 절대 없어야 합니다.
+    </li>
+    <li>
+      기록은 블로킹하지 않습니다. 큐에 덧붙이고 바로 돌아옵니다. 네트워크는 백그라운드
+      워커에서 일어나므로, 에이전트의 지연 시간이 mcpd가 빠른지, 살아 있는지에 달리는
+      일이 없습니다.
+    </li>
+    <li>
+      메모리에는 상한이 있습니다. 큐는 <code>maxQueue</code>개의 시그널을 담습니다. 가득
+      차면 가장 오래된 것을 버리고 <code>mcpd.stats()</code>에 셉니다. 상한 없는 버퍼는
+      네트워크 장애를 메모리 부족으로 인한 강제 종료로 바꿔 놓기 때문입니다.
+    </li>
+    <li>
+      샘플링 결정은 루트에서 한 번 내리고 아래로 물려받습니다. 절반만 기록된 트레이스는
+      관측 중인 시스템에 있는 버그처럼 읽힙니다.
+    </li>
+    <li>
+      열려 있는 스팬도 보냅니다. 스팬은 시작할 때 한 번, 끝날 때 다시 한 번 큐에
+      들어가므로 도중에 죽은 실행도 보입니다. 시작 레코드가 아직 나가지 않았다면 종료
+      레코드가 그것을 대신합니다. 그래서 빨리 끝나는 스팬은 레코드 둘이 아니라 하나만
+      씁니다.
+    </li>
+    <li>
+      페이로드를 다시 쓰는 일은 없습니다. 키는 <code>camelCase</code>와 데몬의
+      <code>snake_case</code> 사이에서 변환되고, 변환은 <code>input</code>,
+      <code>output</code>, <code>attributes</code>, <code>metadata</code>,
+      <code>fields</code>, <code>labels</code>에서 멈춥니다. 프롬프트는 쓴 그대로
+      도착합니다.
+    </li>
+  </ul>
+
+  <h2>다시 읽기</h2>
+  <p>
+    읽기도 같은 클라이언트로 합니다. 모든 메서드는 HTTP 엔드포인트 하나를 그대로 옮긴
+    것이고 생성된 타입을 돌려줍니다. 읽기는 실패하면 <code>McpdError</code>를 던집니다.
+    내보내지 못한 스팬과 달리, await 해 놓고 답을 얻지 못한 쿼리는 알려야 할 소식이기
+    때문입니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="query" title="검색과 분석" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">실행 찾기</a>가 필터 전체를
+    다룹니다. <a href={linkTo('/docs/reference/data-model')} class="link">데이터 모델</a>은
+    이 타입들이 싣는 모든 필드를 나열합니다.
+  </p>
+</Doc>

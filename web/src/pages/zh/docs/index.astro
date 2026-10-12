@@ -1,0 +1,78 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import Command from '@/components/Command.astro'
+import Unreleased from '@/components/Unreleased.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+/* English routes, rebuilt for this locale. */
+const code = localeOf(Astro.url.pathname)
+const to = (route: string) => urlFor(route, code)
+
+/* Chinese runs are written one element to a line. A newline between two Han
+   characters is only dropped by the browsers that implement the segment-break
+   rule; the rest render it as a space in the middle of a sentence. */
+---
+
+<Doc
+  title="总览"
+  description="mcpd 是面向 AI 智能体的免费开源守护进程：在步骤之间保住持久化运行，并记录每一步。一个进程，存储已编译在内，接收 OpenTelemetry，不用改用任何框架。"
+  lede="它是你跑在智能体旁边的一个进程，不是你的智能体围着搭起来的库。它在步骤之间保住这次运行，并记录每一步。这一页用一次阅读讲清整件事的形状。"
+  og="docs"
+>
+  <h2>一个进程</h2>
+  <p>mcpd 用一个进程做两件事。它在步骤之间保住一次持久化运行：游标、重试、定时器和等待都归它，而每个步骤内部的工作由你自己的代码用任意语言完成。同时它接收你的智能体做过的事，把它存下来，再以你读得懂的运行还给你。它是一个把 SQLite 链接进去的二进制文件。没有数据库要搭，没有 collector 要在旁边跑，任何地方都不用账号。</p>
+  <p>守护进程监听 <code>4317</code> 端口，并从这一个端口提供五样东西：</p>
+  <ul>
+    <li>OTLP 摄取，在 <code>/v1/traces</code>、<code>/v1/logs</code> 和 <code>/v1/metrics</code> 上，所以已有的 OpenTelemetry 配置不需要新代码。</li>
+    <li>原生摄取，在 <code>/v1/ingest</code> 上，它承载数据模型中 OTLP 放不下的那些部分，包括评分和人工反馈。</li>
+    <li>读取 API，在 <code>/v1/api</code> 下，界面和 SDK 都用它。你拿到的这套 API 背后没有另一套私有 API。</li>
+    <li>运行接口，在 <code>/v1/api/runs</code>、<code>/v1/api/events</code> 和 <code>/v1/api/steps</code> 下：定义、运行、回应等待的事件，以及一个 worker 所讲的协议。见<a href={to('/docs/workflows')} class="link">工作流</a>。</li>
+    <li>运维界面，在 <code>/</code> 上，内嵌在二进制文件里。</li>
+  </ul>
+  <p>只用一个端口是一项部署决定，不是抄近路。一个 collector、一个数据库和一个 UI，是三样要跑的东西、三样要升级的东西，也是一条 trace 可能在中间丢掉的三处夹缝。</p>
+
+  <Command
+    class="not-prose mt-8"
+    label="发布之后，安装就这一条"
+    command="docker run -p 4317:4317 ghcr.io/mcpd/mcpd"
+  />
+  <Unreleased class="not-prose mb-8 mt-3" />
+
+  <h2>它刻意不是什么</h2>
+  <p>这里大部分价值来自 mcpd 拒绝去做的事。每一次拒绝，都少给你一个必须改动智能体的理由。</p>
+  <ul>
+    <li><strong>不是框架。</strong>mcpd 从不运行你的模型，不替你选模型，也不包装你的供应商客户端。它在步骤之间保住一次运行，步骤内部的一切留给你的代码。用上 mcpd 之后，你的代码调用模型的方式和之前一样。</li>
+    <li><strong>不在请求路径上。</strong>它从不坐在你的智能体和供应商之间。你的用户看到的任何东西都不依赖 mcpd 在线，因为你的用户看到的任何东西都不经过它。</li>
+    <li><strong>不是一项服务。</strong>守护进程默认谁也不调用。没有遥测，没有许可证检查，也没有厂商端点。它唯一会发出的出站流量，就是你配置的那些：一个 <code>--forward-endpoint</code>、一个监视器的 webhook，或者一个裁判模型。这些都不设置，你的提示词就永远不会离开你运行它的那台机器。</li>
+    <li><strong>不是必需的依赖。</strong>把 mcpd 从你的基础设施里删掉，停下来的只有记录本身。</li>
+  </ul>
+
+  <h2>六种信号</h2>
+  <p>mcpd 存六类东西，而且存在一起。span 是跑过的那些工作。日志是一次运行输出的行。指标是随时间变化的数字。评分是机器对一次运行的判断。反馈是人的判断。方面注释是模型在一次运行结束后写下的一句话。</p>
+  <p>把它们放在一个存储里，正是关键所在。每一种信号都带着它所属的 trace id 和 span id，所以“这位客户投诉的那次运行里，模型到底说了什么，又花了多少钱”这个问题，是一次查询，而不是四个工具加一个要靠眼睛去对的时间戳。</p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <p>评分和反馈是有意分开的。一个评分器给的 0.8 和一个人点的踩，衡量的不是同一件事，把它们平均起来只会得到一个没有意义的数字。</p>
+
+  <h2>为什么是守护进程，而不是框架</h2>
+  <p>框架自带的可观测性是好东西，但它跟着框架一起来。要被看见，智能体就得是用这个框架写的，通常还得是同一种语言。对一个新项目来说这笔交易还算公平，对一个已经存在、已经在工作的智能体来说则根本做不到。框架的工作流是同一笔交易：确实持久，前提是每个步骤都用框架的语言写，并在它的进程里运行。</p>
+  <p>守护进程把两者都反了过来。工作流的图是守护进程持有的数据；它的步骤主体是你的进程持有的代码，通过任何语言都能讲的 HTTP 协议，一次领一个租约。守护进程从不看见模型、提示词或凭据。见<a href={to('/docs/workflows')} class="link">工作流</a>和 <a href={to('/docs/workers')} class="link">worker</a>。</p>
+  <p>守护进程也把这笔交易反了过来。mcpd 讲 OTLP，那是一种协议，不是一个依赖，所以它记录任何语言、任何框架写出来的智能体，包括在 mcpd 出现之前就写好的那些。如果你的智能体已经在导出 OpenTelemetry，把 <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> 指向 mcpd 就是全部的集成工作。</p>
+  <p>SDK 之所以存在，是因为 OTLP 没有描述提示词、补全、token 数或评分的词汇，而这些正是你冲着来的字段。用不用 SDK 是一个选择，不是一个条件。六个 SDK 的行为完全一致：记录一个 span 只是往一个有上限的队列里追加一条然后返回，网络工作发生在后台 worker 上，接入路径上没有任何东西会抛异常。会拖垮被观测系统的可观测性，比没有还糟。</p>
+
+  <h2>一个二进制文件，两种部署</h2>
+  <p>你在笔记本上跑的那个容器，就是在别人集群里作为 Deployment 运行的那个容器。保留期、脱敏、采样和 API 密钥都是同一个二进制文件上的参数，不是另一个构建，也不是某个许可证档位。没有哪个功能只存在于你拿不到的版本里。</p>
+  <p>默认值是按笔记本设的，也就是说没有配置密钥时，摄取和读取都是开放的。在这种状态下监听非回环地址时，mcpd 会在启动时大声警告。它仍然会启动，因为拒绝启动会毁掉它所面向的那个人的五分钟路径，但沉默是不负责任的。</p>
+
+  <h2>接下来读什么</h2>
+  <ul>
+    <li>现在就跑起来：<a href={to('/docs/quickstart')} class="link">快速开始</a>能把你自己智能体的一条 trace 显示在屏幕上，<a href={to('/docs/install')} class="link">安装</a>则讲了进来的每一条路。</li>
+    <li>认识这套词汇：<a href={to('/docs/concepts')} class="link">概念</a>定义了 trace、span、类型和关联，文档其余部分默认你已经知道它们。</li>
+    <li>在步骤之间保住一次运行：<a href={to('/docs/workflows')} class="link">工作流</a>，然后是 <a href={to('/docs/workers')} class="link">Worker</a> 和<a href={to('/docs/runs')} class="link">运行</a>。</li>
+    <li>已经有 OpenTelemetry：完整的 <a href={to('/docs/opentelemetry')} class="link">OTLP 路径</a>，包括 mcpd 会从标准属性里推断出什么。</li>
+    <li>把它跑给别人用：<a href={to('/deploy')} class="link">Docker 与 Kubernetes</a>，然后是<a href={to('/docs/privacy')} class="link">脱敏与保留期</a>。</li>
+  </ul>
+  <p>mcpd 采用 Apache-2.0 许可证。进来的协议、出去的格式，以及包在外面的许可证都是开放的，所以离开和到来一样省事。</p>
+</Doc>

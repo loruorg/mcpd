@@ -1,0 +1,278 @@
+---
+/**
+ * The strip chart. The signature instrument of this site.
+ *
+ * A chart recorder works by pulling paper past a fixed pen. That is exactly what
+ * happens here: the ruled field and its ink traces translate leftwards while the
+ * pen arm stays put, so the motion reads as a recording being made rather than
+ * as a decoration being animated.
+ *
+ * The waveform is generated here, at build time, from a sum of sines whose
+ * periods all divide the half-width exactly. That makes the second half of the
+ * path identical to the first, so the loop closes with no crossfade and no
+ * visible jump, the failure that makes most looping backgrounds look cheap.
+ *
+ * The trace is drawn into the markup. If the animation never runs, the
+ * instrument is still there, still legible, still showing data.
+ */
+
+interface Props {
+  /** Height of the chart field in pixels. */
+  height?: number
+  /** Seconds for one full paper feed. Slower reads as calmer. */
+  period?: number
+  /** Show the second, quieter trace. */
+  dual?: boolean
+  /**
+   * How far from the left of the field the pen arm stands, in the SVG's own
+   * units, which are CSS pixels here.
+   *
+   * It has to be given, not assumed, because the field is as wide as its
+   * container and the pen is placed at a fixed distance inside it. At the
+   * default the arm stands 760px in, which is off the right-hand edge of any
+   * screen narrower than about 800px: on a phone the recorder lost its
+   * recorder and the instrument read as a picture of a line.
+   */
+  pen?: number
+  class?: string
+}
+
+const {
+  height = 280,
+  period = 42,
+  dual = true,
+  pen = 760,
+  class: className = '',
+} = Astro.props
+
+const W = 1200 // half-width; the path is drawn twice so the loop closes cleanly
+const H = height
+
+/** A deterministic pseudo-random in [0,1), so every build renders identically. */
+function rnd(i: number, salt: number) {
+  const x = Math.sin(i * 12.9898 + salt * 78.233) * 43758.5453
+  return x - Math.floor(x)
+}
+
+/**
+ * One closed trace. Every component period divides W, so f(0) === f(W).
+ * `spikes` adds occasional latency excursions, because a real latency chart is
+ * mostly flat with rare tall outliers, and a pure sine reads as wallpaper.
+ */
+function trace(salt: number, amp: number, base: number, spikes: number) {
+  const step = 4
+  const pts: string[] = []
+  for (let x = 0; x <= W; x += step) {
+    const t = x / W
+    let y =
+      Math.sin(t * Math.PI * 2 * 3) * amp * 0.42 +
+      Math.sin(t * Math.PI * 2 * 7) * amp * 0.2 +
+      Math.sin(t * Math.PI * 2 * 13) * amp * 0.1 +
+      Math.sin(t * Math.PI * 2 * 23) * amp * 0.05
+
+    // Spikes are placed on the same divisor grid so they too repeat exactly.
+    for (let s = 0; s < spikes; s++) {
+      const centre = ((s + 0.5) / spikes) * W
+      const width = 26 + rnd(s, salt) * 34
+      const d = Math.abs(x - centre)
+      if (d < width) {
+        const fall = 1 - d / width
+        y -= fall * fall * amp * (1.5 + rnd(s, salt + 9) * 1.9)
+      }
+    }
+    pts.push(`${x.toFixed(1)},${(base + y).toFixed(1)}`)
+  }
+  return pts
+}
+
+const primary = trace(1, H * 0.11, H * 0.62, 5)
+const secondary = trace(37, H * 0.07, H * 0.85, 3)
+
+/**
+ * Draw the run three times, end to end.
+ *
+ * Twice was not enough: the animation translates by one run width, so on a
+ * field wider than one run the end of the path came into view and the right of
+ * the instrument went blank once per cycle. Three copies keep the field covered
+ * at every width this chart is used at.
+ */
+function repeated(pts: string[], times = 3) {
+  const all: string[] = []
+  for (let n = 0; n < times; n++) {
+    for (const p of pts) {
+      const [x, y] = p.split(',')
+      all.push(`${(Number(x) + W * n).toFixed(1)},${y}`)
+    }
+  }
+  return `M ${all.join(' L ')}`
+}
+
+const dPrimary = repeated(primary)
+const dSecondary = repeated(secondary)
+
+/**
+ * The pen sits a fixed distance from the left of the chart, measured in the
+ * SVG's own units so its position does not depend on the field's rendered
+ * width. Wrapped so a caller cannot stand the arm outside its own paper.
+ */
+const PEN_SVG_X = ((pen % W) + W) % W
+
+/**
+ * The pen rides the trace.
+ *
+ * A recorder's nib is always ON the ink. A marker parked at a guessed height is
+ * the tell that the instrument is only a picture of one. The paper translates
+ * by exactly one run width over one period, so the value under a fixed pen at
+ * progress `t` is the trace sampled at `PEN_SVG_X + W * t`. These keyframes are
+ * computed from the same array the path is drawn from, so the nib cannot drift
+ * off the line.
+ */
+// One keyframe every few path units. At 48 steps each sample spanned 25 units,
+// wider than a latency spike, so the nib cut the corner off every excursion and
+// visibly left the ink. This is ~6 KB of keyframes that gzip to very little.
+const PEN_STEPS = 240
+const penFrames = Array.from({ length: PEN_STEPS + 1 }, (_, i) => {
+  const t = i / PEN_STEPS
+  const idx = Math.round((((PEN_SVG_X + W * t) % W) + W) % W / 4) % primary.length
+  const y = Number(primary[idx].split(',')[1])
+  return { pct: (t * 100).toFixed(2), top: ((y / H) * 100).toFixed(3) }
+})
+---
+
+<figure class={`relative overflow-hidden ${className}`} style={`height:${H}px`}>
+  <div class="well absolute inset-0 overflow-hidden">
+    {/* The ruled field. Chart paper, so the rules belong here and nowhere else
+        on the page: this is a measured instrument, not a background grid. */}
+    <div
+      class="absolute inset-0"
+      style={`background-color: var(--color-chart);
+              background-image:
+                repeating-linear-gradient(to bottom, var(--color-scribe-2) 0 1px, transparent 1px 28px),
+                repeating-linear-gradient(to right, var(--color-scribe-2) 0 1px, transparent 1px 28px);`}
+      aria-hidden="true"
+    >
+    </div>
+
+    {/* The traces. Two SVG layers so the quieter one can feed at a different
+        rate, which is what makes the depth read as physical. */}
+    <svg
+      class="absolute inset-0 h-full"
+      style={`width:${W * 2}px`}
+      viewBox={`0 0 ${W * 2} ${H}`}
+      preserveAspectRatio="none"
+      aria-hidden="true"
+    >
+      {
+        dual && (
+          <path
+            class="mcpd-feed mcpd-feed--slow"
+            d={dSecondary}
+            fill="none"
+            stroke="var(--color-slate)"
+            stroke-width="1"
+            stroke-opacity="0.42"
+            vector-effect="non-scaling-stroke"
+          />
+        )
+      }
+      <path
+        class="mcpd-feed"
+        d={dPrimary}
+        fill="none"
+        stroke="var(--color-ink)"
+        stroke-width="1.4"
+        stroke-linejoin="round"
+        stroke-linecap="round"
+        vector-effect="non-scaling-stroke"
+      />
+    </svg>
+
+    {/* The pen arm. Fixed, as it is on a real recorder; the nib rides the ink. */}
+    <div
+      class="pointer-events-none absolute inset-y-0"
+      style={`left:${PEN_SVG_X}px`}
+      aria-hidden="true"
+    >
+      <div class="h-full w-px bg-oxide/35"></div>
+      <div class="mcpd-nib absolute -translate-x-1/2 -translate-y-1/2">
+        <div class="h-2 w-2 rotate-45 border border-oxide bg-oxide/85"></div>
+      </div>
+    </div>
+
+    {/* Calibration down the left edge: this field is measuring milliseconds.
+        The gutter is opaque, not tinted: a translucent one lets the ink trace
+        run straight through the numbers, which makes both unreadable. It is
+        also wide enough for a four-digit reading, so no label is clipped by
+        the panel edge. */}
+    <div
+      class="pointer-events-none absolute inset-y-0 left-0 w-12 border-r border-scribe/60 bg-chart"
+      aria-hidden="true"
+    >
+      {
+        [0, 1, 2, 3].map((i) => (
+          <div
+            class="absolute right-0 flex items-center gap-1 pr-1"
+            style={`top:${12 + i * 26}%; transform: translateY(-50%)`}
+          >
+            <span class="data text-[9px] leading-none text-ink-3">{900 - i * 250}</span>
+            <span class="block h-px w-1.5 bg-ink-3/60" />
+          </div>
+        ))
+      }
+    </div>
+  </div>
+
+  <figcaption class="sr-only">
+    A strip chart recording model latency over the last hour: a baseline near
+    420 milliseconds with five occasional excursions towards 800 milliseconds.
+  </figcaption>
+</figure>
+
+{/* The nib's keyframes are computed from the trace data, so they cannot be a
+    static stylesheet. `define:vars` is deliberately not used here: on an inline
+    block it emits a bare custom property outside any selector, which no rule can
+    read, and the animation shorthand then silently becomes invalid. The period
+    is interpolated straight into the text instead. */}
+<style is:inline set:html={`
+  /* The resting position is on the base rule, not only in the reduced-motion
+     branch. The utility class sets position and nothing else, so with the
+     animation engine dead the nib had no vertical offset at all and sat at the
+     top of the chart, off the ink it is supposed to ride. The keyframes below
+     override this while they run. */
+  .mcpd-nib { top: ${penFrames[0].top}%; animation: mcpd-pen ${period}s linear infinite; }
+  @keyframes mcpd-pen {
+${penFrames.map((f) => `    ${f.pct}% { top: ${f.top}%; }`).join('\n')}
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .mcpd-nib { animation: none; }
+  }
+`}></style>
+
+<style define:vars={{ feedPeriod: `${period}s` }}>
+  /* The paper feeds. Linear, because a chart recorder's motor is constant
+     speed, and any easing here would read as a wobble. */
+  .mcpd-feed {
+    animation: mcpd-feed var(--feedPeriod) linear infinite;
+  }
+  .mcpd-feed--slow {
+    animation-duration: calc(var(--feedPeriod) * 1.55);
+  }
+
+  @keyframes mcpd-feed {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      /* Exactly one run width, which is why the loop has no seam. */
+      transform: translateX(-1200px);
+    }
+  }
+
+  /* With motion reduced the paper simply stops, mid-recording. The instrument
+     is still populated and still readable; nothing is hidden. */
+  @media (prefers-reduced-motion: reduce) {
+    .mcpd-feed {
+      animation: none;
+    }
+  }
+</style>

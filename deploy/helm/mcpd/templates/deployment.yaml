@@ -1,0 +1,328 @@
+{{- include "mcpd.validate" . }}
+{{- $type := include "mcpd.storeType" . }}
+{{- $external := include "mcpd.externalStore" . }}
+{{- $runs := include "mcpd.runsEnabled" . }}
+{{- $local := include "mcpd.localState" . }}
+{{- $configSource := include "mcpd.configFileSource" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mcpd.fullname" . }}
+  labels:
+    {{- include "mcpd.labels" . | nindent 4 }}
+spec:
+  # More than one replica only with no SQLite file in the pod: an external
+  # signal store and the run surface off. mcpd.validate refuses any other
+  # count, so this is always the number that was asked for.
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    # Recreate while the pod keeps a file, because a rolling update would
+    # briefly run two pods against the one volume. With nothing local there is
+    # no volume to contend for.
+    type: {{ if $local }}Recreate{{ else }}RollingUpdate{{ end }}
+    {{- if $local }}
+    # Cleared, not left out. A release that ran with RollingUpdate holds the
+    # API server's `rollingUpdate` defaults, an upgrade merges them into this
+    # one, and a Deployment with Recreate and `rollingUpdate` is rejected.
+    rollingUpdate: null
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "mcpd.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcpd.selectorLabels" . | nindent 8 }}
+      annotations:
+        # A key rotation changes the Secret, and the pod has to restart to read
+        # it. This checksum is what makes `helm upgrade` do that.
+        checksum/keys: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if .Values.configFile.content }}
+        # The same for the config file the chart renders.
+        checksum/config: {{ include (print $.Template.BasePath "/configfile.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (include "mcpd.serviceAccountName" .) }}
+      serviceAccountName: {{ . }}
+      # Repeated on the pod because the pod-level field is the one that wins.
+      # Setting it on the ServiceAccount alone leaves the token mounted for any
+      # pod that does not also say no.
+      automountServiceAccountToken: {{ $.Values.serviceAccount.automountServiceAccountToken }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: mcpd
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ include "mcpd.port" . }}
+          env:
+            - name: MCPD_LISTEN
+              value: {{ .Values.config.listen | quote }}
+            {{- if not $external }}
+            - name: MCPD_DATA
+              value: {{ .Values.config.dataPath | quote }}
+            {{- end }}
+            {{- if eq $type "postgres" }}
+            - name: MCPD_POSTGRES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpd.secretName" . }}
+                  key: postgres-url
+            {{- end }}
+            {{- if eq $type "clickhouse" }}
+            - name: MCPD_CLICKHOUSE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpd.secretName" . }}
+                  key: clickhouse-url
+            - name: MCPD_CLICKHOUSE_DATABASE
+              value: {{ .Values.externalStore.clickhouseDatabase | quote }}
+            {{- if .Values.externalStore.clickhouseUser }}
+            - name: MCPD_CLICKHOUSE_USER
+              value: {{ .Values.externalStore.clickhouseUser | quote }}
+            {{- end }}
+            {{- if or .Values.externalStore.clickhouseUser .Values.externalStore.clickhousePassword .Values.keys.existingSecret }}
+            - name: MCPD_CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpd.secretName" . }}
+                  key: clickhouse-password
+                  optional: true
+            {{- end }}
+            {{- end }}
+            # Written out in every mode. With an external store and no value
+            # here, the daemon would derive the run store from a data path that
+            # nothing mounts, on a read-only root filesystem.
+            - name: MCPD_RUNS_DATA
+              value: {{ if $runs }}{{ include "mcpd.runsPath" . | quote }}{{ else }}"off"{{ end }}
+            - name: MCPD_PROJECT
+              value: {{ .Values.config.project | quote }}
+            - name: MCPD_LOG_FORMAT
+              value: {{ .Values.config.logFormat | quote }}
+            {{- /* Empty and 0 both mean keep everything, which is what an
+                   unset variable already means to the daemon. */}}
+            {{- if gt (int (default 0 .Values.config.retentionDays)) 0 }}
+            - name: MCPD_RETENTION_DAYS
+              value: {{ .Values.config.retentionDays | int64 | toString | quote }}
+            {{- end }}
+            {{- if .Values.config.sample }}
+            - name: MCPD_SAMPLE
+              value: {{ .Values.config.sample | quote }}
+            {{- end }}
+            {{- if .Values.config.noRedact }}
+            - name: MCPD_NO_REDACT
+              value: "true"
+            {{- end }}
+            - name: MCPD_INGEST_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpd.secretName" . }}
+                  key: ingest-keys
+            - name: MCPD_READ_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpd.secretName" . }}
+                  key: read-keys
+            {{- if or .Values.keys.write .Values.keys.existingSecret }}
+            - name: MCPD_WRITE_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpd.secretName" . }}
+                  key: write-keys
+                  optional: true
+            {{- end }}
+            {{- if or .Values.keys.admin .Values.keys.existingSecret }}
+            - name: MCPD_ADMIN_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpd.secretName" . }}
+                  key: admin-keys
+                  optional: true
+            {{- end }}
+            {{- if or .Values.keys.execute .Values.keys.existingSecret }}
+            - name: MCPD_EXECUTE_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpd.secretName" . }}
+                  key: execute-keys
+                  optional: true
+            {{- end }}
+            {{- if or .Values.keys.worker .Values.keys.existingSecret }}
+            - name: MCPD_WORKER_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpd.secretName" . }}
+                  key: worker-keys
+                  optional: true
+            {{- end }}
+            {{- if .Values.config.corsOrigins }}
+            - name: MCPD_CORS_ORIGINS
+              value: {{ join "," .Values.config.corsOrigins | quote }}
+            {{- end }}
+            {{- if .Values.config.requestTimeoutSeconds }}
+            - name: MCPD_REQUEST_TIMEOUT_SECONDS
+              value: {{ .Values.config.requestTimeoutSeconds | int64 | toString | quote }}
+            {{- end }}
+            {{- if .Values.config.redactKeyContains }}
+            - name: MCPD_REDACT_KEY_CONTAINS
+              value: {{ join "," .Values.config.redactKeyContains | quote }}
+            {{- end }}
+            {{- if .Values.config.redactMaxString }}
+            - name: MCPD_REDACT_MAX_STRING
+              value: {{ .Values.config.redactMaxString | int64 | toString | quote }}
+            {{- end }}
+            {{- if .Values.maxBodyBytes }}
+            - name: MCPD_MAX_BODY_BYTES
+              value: {{ .Values.maxBodyBytes | int64 | toString | quote }}
+            {{- end }}
+            {{- if .Values.maxBatchSignals }}
+            - name: MCPD_MAX_BATCH_SIGNALS
+              value: {{ .Values.maxBatchSignals | int64 | toString | quote }}
+            {{- end }}
+            {{- if .Values.quotaPerMinute }}
+            - name: MCPD_QUOTA_PER_MINUTE
+              value: {{ .Values.quotaPerMinute | int64 | toString | quote }}
+            {{- end }}
+            {{- if or .Values.identity.header .Values.identity.clientIpHeader }}
+            {{- if not .Values.identity.trustedProxyCidrs }}
+            {{- fail "identity.header or identity.clientIpHeader is set but identity.trustedProxyCidrs is empty. Both halves are required: a header is a string anyone who can reach the port may send, so mcpd reads it only from addresses you name. Set trustedProxyCidrs to the range your ingress runs in, for example [\"10.42.0.0/16\"]. The daemon refuses to start with only one of them, so rendering this would produce a crash loop." }}
+            {{- end }}
+            {{- if .Values.identity.header }}
+            - name: MCPD_TRUSTED_IDENTITY_HEADER
+              value: {{ .Values.identity.header | quote }}
+            {{- end }}
+            {{- if .Values.identity.clientIpHeader }}
+            - name: MCPD_CLIENT_IP_HEADER
+              value: {{ .Values.identity.clientIpHeader | quote }}
+            {{- end }}
+            - name: MCPD_TRUSTED_PROXY_CIDRS
+              value: {{ join "," .Values.identity.trustedProxyCidrs | quote }}
+            {{- end }}
+            {{- if .Values.signup.enabled }}
+            - name: MCPD_SIGNUP
+              value: "true"
+            {{- if .Values.signup.accountsData }}
+            - name: MCPD_ACCOUNTS_DATA
+              value: {{ .Values.signup.accountsData | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.forward.endpoint }}
+            - name: MCPD_FORWARD_ENDPOINT
+              value: {{ .Values.forward.endpoint | quote }}
+            {{- end }}
+            {{- if .Values.forward.headers }}
+            - name: MCPD_FORWARD_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpd.secretName" . }}
+                  key: forward-headers
+                  optional: true
+            {{- end }}
+            {{- if or .Values.keys.redact .Values.keys.existingSecret }}
+            - name: MCPD_REDACT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpd.secretName" . }}
+                  key: redact-key
+                  optional: true
+            {{- end }}
+            {{- if $configSource }}
+            - name: MCPD_CONFIG_FILE
+              value: /etc/mcpd/mcpd.json
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 45
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # The root filesystem is read-only, so this mount is the one place the
+          # daemon can write. It is mounted in every mode: the image's working
+          # directory is /data, and SQLite falls back to the working directory
+          # for its temporary files when nothing else is writable.
+          volumeMounts:
+            - name: data
+              mountPath: {{ dir .Values.config.dataPath }}
+            {{- if $configSource }}
+            - name: config
+              mountPath: /etc/mcpd
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if and $local .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "mcpd.claimName" . }}
+          {{- else }}
+          # Nothing here outlives the pod. Either nothing local needs keeping
+          # (an external store with runs off), or persistence.enabled is false
+          # and you chose to lose it.
+          emptyDir: {}
+          {{- end }}
+        {{- if $configSource }}
+        - name: config
+          {{- if eq $configSource "Secret" }}
+          secret:
+            secretName: {{ .Values.configFile.existingSecret | default (printf "%s-config" (include "mcpd.fullname" .)) }}
+            defaultMode: 0440
+            items:
+              - key: {{ if .Values.configFile.existingSecret }}{{ .Values.configFile.existingSecretKey }}{{ else }}mcpd.json{{ end }}
+                path: mcpd.json
+          {{- else }}
+          configMap:
+            name: {{ printf "%s-config" (include "mcpd.fullname" .) }}
+            items:
+              - key: mcpd.json
+                path: mcpd.json
+          {{- end }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

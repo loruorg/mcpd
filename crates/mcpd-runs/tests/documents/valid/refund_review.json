@@ -1,0 +1,268 @@
+{
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "order_id": {
+        "type": "string"
+      },
+      "ticket_id": {
+        "type": "string"
+      },
+      "not_before": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "required": [
+      "order_id",
+      "ticket_id"
+    ]
+  },
+  "limits": {
+    "max_steps": 200,
+    "run_timeout_ms": 900000,
+    "max_cost_usd": 2.5
+  },
+  "steps": [
+    {
+      "id": "order",
+      "kind": "task",
+      "input": {
+        "order_id": "${input.order_id}"
+      },
+      "retry": {
+        "max_attempts": 3,
+        "backoff": "exponential",
+        "initial_ms": 500,
+        "max_ms": 30000
+      },
+      "step_timeout_ms": 30000
+    },
+    {
+      "id": "fraud_check",
+      "kind": "subworkflow",
+      "definition": "fraud_check",
+      "version": 2,
+      "when": {
+        "path": "steps.order.output.amount_usd",
+        "op": "gt",
+        "value": 100
+      },
+      "on_error": "continue",
+      "input": {
+        "order_id": "${input.order_id}",
+        "amount_usd": "${steps.order.output.amount_usd}"
+      }
+    },
+    {
+      "id": "small_refund",
+      "kind": "task",
+      "effect": "at_most_once",
+      "on_error": "continue",
+      "when": {
+        "path": "steps.order.output.amount_usd",
+        "op": "lte",
+        "value": 100
+      },
+      "input": {
+        "order_id": "${input.order_id}",
+        "amount_usd": "${steps.order.output.amount_usd}"
+      }
+    },
+    {
+      "id": "escalate",
+      "kind": "task",
+      "when": {
+        "any": [
+          {
+            "path": "steps.small_refund.status",
+            "op": "eq",
+            "value": "failed"
+          },
+          {
+            "path": "steps.fraud_check.output.verdict",
+            "op": "in",
+            "value": [
+              "suspect",
+              "blocked"
+            ]
+          },
+          {
+            "path": "steps.fraud_check.output.confidence",
+            "op": "lt",
+            "value": 0.5
+          }
+        ]
+      },
+      "input": {
+        "ticket_id": "${input.ticket_id}",
+        "note": "Refund of ${steps.order.output.amount_usd} USD for ${input.order_id} needs a person: ${steps.small_refund.error.message}"
+      }
+    },
+    {
+      "id": "not_before",
+      "kind": "sleep_until",
+      "at": "${input.not_before}",
+      "when": {
+        "path": "input.not_before",
+        "op": "exists"
+      }
+    },
+    {
+      "id": "approval",
+      "kind": "wait_event",
+      "event": "approval",
+      "key": "${input.order_id}",
+      "timeout_ms": 259200000,
+      "accept_parked": true,
+      "on_timeout": "fail",
+      "when": {
+        "all": [
+          {
+            "path": "steps.order.output.amount_usd",
+            "op": "gt",
+            "value": 100
+          },
+          {
+            "not": {
+              "path": "steps.fraud_check.output.verdict",
+              "op": "eq",
+              "value": "blocked"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "large_refund",
+      "kind": "task",
+      "effect": "at_most_once",
+      "when": {
+        "path": "steps.approval.output.approved",
+        "op": "eq",
+        "value": true
+      },
+      "input": {
+        "order_id": "${input.order_id}",
+        "amount_usd": "${steps.order.output.amount_usd}",
+        "approved_by": "${steps.approval.output.approver}"
+      }
+    },
+    {
+      "id": "settle",
+      "kind": "loop",
+      "max_iterations": 12,
+      "when": {
+        "any": [
+          {
+            "path": "steps.small_refund.status",
+            "op": "eq",
+            "value": "succeeded"
+          },
+          {
+            "path": "steps.large_refund.status",
+            "op": "eq",
+            "value": "succeeded"
+          }
+        ]
+      },
+      "body": {
+        "id": "poll_refund",
+        "kind": "task",
+        "input": {
+          "order_id": "${input.order_id}",
+          "poll": "${iter.index}"
+        },
+        "step_timeout_ms": 10000
+      },
+      "until": {
+        "path": "steps.poll_refund.output.state",
+        "op": "matches",
+        "value": "^(settled|reversed)$"
+      }
+    },
+    {
+      "id": "restock",
+      "kind": "foreach",
+      "over": "steps.order.output.lines",
+      "concurrency": 4,
+      "max_items": 100,
+      "when": {
+        "all": [
+          {
+            "path": "steps.order.output.lines",
+            "op": "exists"
+          },
+          {
+            "path": "steps.settle.outputs",
+            "op": "ne",
+            "value": []
+          }
+        ]
+      },
+      "body": {
+        "id": "restock_line",
+        "kind": "task",
+        "input": {
+          "sku": "${item.sku}",
+          "qty": "${item.qty}",
+          "position": "${index}"
+        },
+        "retry": {
+          "max_attempts": 2,
+          "backoff": "fixed",
+          "initial_ms": 2000
+        }
+      }
+    },
+    {
+      "id": "notify",
+      "kind": "parallel",
+      "branches": [
+        {
+          "id": "email",
+          "kind": "task",
+          "on_error": "continue",
+          "input": {
+            "order_id": "${input.order_id}",
+            "to": "${steps.order.output.customer_email}"
+          }
+        },
+        {
+          "id": "ticket",
+          "kind": "task",
+          "input": {
+            "ticket_id": "${input.ticket_id}",
+            "note": "Refund of ${steps.order.output.amount_usd} USD handled."
+          }
+        }
+      ]
+    },
+    {
+      "id": "cool_down",
+      "kind": "sleep",
+      "ms": 60000,
+      "when": {
+        "path": "steps.order.output.amount_usd",
+        "op": "gte",
+        "value": 1000
+      }
+    },
+    {
+      "id": "reply",
+      "kind": "agent",
+      "step_timeout_ms": 120000,
+      "input": {
+        "prompt": "Tell the customer what happened with order ${input.order_id}.",
+        "ticket": "${steps.notify.ticket.output}",
+        "run": "${run.run_id}"
+      }
+    }
+  ],
+  "output": {
+    "text": "${steps.reply.output.text}",
+    "refunded_usd": "${steps.order.output.amount_usd}",
+    "restocked": "${steps.restock.outputs}",
+    "definition_version": "${run.definition_version}"
+  }
+}

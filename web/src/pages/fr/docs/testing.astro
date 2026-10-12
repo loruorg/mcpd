@@ -1,0 +1,321 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Tests de régression"
+  description="Faites d’une exécution de production ratée un cas de test permanent, passez les scorers intégrés de mcpd sur les exécutions stockées, et comparez deux versions d’un agent, effectifs à l’appui."
+  lede="L’exécution qui a cassé mardi devient le cas que toutes les versions suivantes devront passer."
+  og="docs"
+>
+  <h2>La boucle qu’il s’agit de fermer</h2>
+  <p>
+    Un agent échoue sur une vraie question. Quelqu’un la reproduit à la main,
+    change un prompt, et cela semble aller mieux. Trois semaines plus tard, il
+    échoue de nouveau sur la même question, parce que rien ne l’avait retenue.
+  </p>
+  <p>
+    Un dataset la retient. Capturez l’exécution en échec : ce n’est plus
+    une anecdote, c’est un cas, avec une entrée, une réponse attendue quand vous
+    en avez une, et un renvoi vers la trace dont il vient. Toutes les versions
+    suivantes s’y confrontent.
+  </p>
+
+  <h2>Capturer une exécution</h2>
+  <p>
+    Trouvez l’exécution dans l’interface ou par l’API, puis donnez son
+    identifiant de trace au dataset.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="capturer une exécution ratée comme cas"
+    command={`curl -X POST localhost:4317/v1/api/datasets/$DATASET/capture \\
+  -H 'content-type: application/json' \\
+  -d '{"trace_ids": ["b3d9e71a4c0f428eb6a5d2317f90c684"]}'`}
+  />
+
+  <p>
+    Le cas capturé conserve <code>source_trace_id</code> : des mois plus tard,
+    vous pouvez ouvrir l’exécution qui l’a motivé et lire ce qui s’est vraiment
+    passé au lieu de le deviner d’après l’entrée.
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <h2>La réponse de l’exécution n’est pas la réponse attendue</h2>
+  <p>
+    <code>use_output_as_expected</code> est désactivé par défaut, et ce défaut
+    est le point important. Les exécutions qui valent la peine d’être capturées
+    sont en général celles qui ont mal tourné, et enregistrer une mauvaise
+    réponse comme référence graverait le défaut dans le marbre : toutes les
+    versions suivantes seraient alors mesurées sur leur aptitude à le
+    reproduire.
+  </p>
+  <p>
+    Activez-le quand vous capturez des exécutions qui étaient justes, pour
+    figer un comportement qui vous convient déjà. Laissez-le désactivé, et
+    écrivez vous-même la réponse attendue, quand vous capturez un échec.
+  </p>
+
+  <h2>Les scorers intégrés</h2>
+  <p>
+    mcpd est livré avec treize scorers déterministes : du code ordinaire qui lit
+    une exécution stockée et renvoie un nombre. Ils ne coûtent rien, ils
+    n’appellent jamais de modèle, et ils donnent deux fois la même réponse, ce
+    qui est la propriété dont un test de régression a besoin et qu’un modèle
+    juge n’a pas.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Scorer</th><th>Réussit quand</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>answered</code></td><td>L’exécution a produit une réponse non vide.</td></tr>
+      <tr><td><code>no_errors</code></td><td>Aucun span de l’exécution n’a échoué.</td></tr>
+      <tr><td><code>exact_match</code></td><td>La réponse est égale à celle attendue.</td></tr>
+      <tr><td><code>contains</code></td><td>La réponse contient une chaîne exigée.</td></tr>
+      <tr><td><code>json_valid</code></td><td>La réponse s’analyse comme du JSON.</td></tr>
+      <tr><td><code>latency_budget</code></td><td>L’exécution a fini dans un budget exprimé en millisecondes.</td></tr>
+      <tr><td><code>cost_budget</code></td><td>L’exécution n’a pas coûté plus qu’un montant fixé.</td></tr>
+      <tr><td><code>no_tool_loop</code></td><td>Aucun outil n’a été appelé deux fois avec la même entrée.</td></tr>
+      <tr><td><code>tool_efficiency</code></td><td>L’exécution est restée dans un budget d’appels d’outils.</td></tr>
+      <tr><td><code>not_a_refusal</code></td><td>La réponse n’est ni un refus ni une excuse.</td></tr>
+      <tr><td><code>no_leaked_secret</code></td><td>Aucune clé, aucun token et aucun secret d’accès n’apparaît dans la réponse.</td></tr>
+      <tr><td><code>span_present</code></td><td>Le run a enregistré un span du type ou du nom exigé.</td></tr>
+      <tr><td><code>tool_succeeded</code></td><td>L’outil exigé s’est exécuté, et au moins un appel s’est terminé correctement.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>GET /v1/api/scorers</code> renvoie la même liste avec un indicateur
+    <code>needs_config</code>. Un scorer qui a besoin d’une réponse attendue et
+    n’en reçoit pas se récuse au lieu de deviner, et sa récusation est
+    rapportée.
+  </p>
+
+  <h2>Quand c’est un modèle qui note</h2>
+  <p>
+    Certaines questions ne se règlent par aucun code déterministe. Savoir si une
+    réponse a vraiment traité la question, si un résumé a gardé le sens, si le
+    ton était juste : cela demande un lecteur, et un modèle est le lecteur bon
+    marché.
+  </p>
+  <p>
+    La notation par juge est inactive tant que vous ne l’avez pas configurée, et
+    un scorer par juge ne tourne jamais sans que vous le nommiez. Ces deux
+    défauts existent pour la même raison : noter dépense de l’argent à chaque
+    exécution lue, et une fonctionnalité qui le fait sans le dire est une
+    fonctionnalité que vous découvrez sur une facture.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "judge": {
+    "endpoint": "http://localhost:11434/v1",
+    "model": "qwen2.5:14b",
+    "api_key": "",
+    "timeout_seconds": 30,
+    "criteria": {
+      "answer_relevance": "Does the answer address the question that was asked?",
+      "no_hedging": "Does the answer commit, rather than hedge?"
+    }
+  }
+}`}</code></pre>
+
+  <p>
+    La requête a la forme des chat completions d’OpenAI, ce qui n’est pas une
+    préférence pour un fournisseur : Ollama, vLLM, llama.cpp, LM Studio,
+    OpenRouter et les fournisseurs hébergés l’acceptent tous, donc la même
+    configuration atteint un modèle sur votre portable et une passerelle en
+    production. Laissez <code>api_key</code> vide pour un modèle local qui n’en
+    veut pas. La température est à zéro, parce qu’un juge qui répond
+    différemment à chaque fois ne peut pas être comparé à lui-même, ce qui est
+    la seule chose à quoi servent les scores.
+  </p>
+  <p>
+    Les critères se configurent au lieu d’être passés à chaque requête. Un
+    identifiant de scorer est stocké sur chaque score qu’il produit et c’est sur
+    lui qu’une comparaison ultérieure regroupe : laisser chaque appel inventer à
+    la fois l’identifiant et la question construirait une colonne à laquelle
+    personne ne peut se fier.
+  </p>
+  <p>
+    Les critères configurés n’apparaissent pas dans
+    <code>GET /v1/api/scorers</code>. Cet endpoint liste les treize scorers
+    intégrés et rien d’autre, donc un client qui construit son menu de scorers à
+    partir de là ne proposera pas vos critères. Le seul endroit où le daemon
+    vous les nomme est l’erreur renvoyée pour un identifiant de scorer inconnu,
+    qui liste ensemble les scorers intégrés et les critères configurés.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="passer un scorer par juge sur l’exécution la plus récente"
+    command={`curl -X POST localhost:4317/v1/api/score \\
+  -H 'content-type: application/json' \\
+  -d '{"limit": 1, "scorers": ["answer_relevance"]}'`}
+  />
+
+  <p>
+    <code>timeout_seconds</code> est la durée qu’un appel de notation peut
+    prendre, de la connexion au dernier octet de la réponse : 30 par défaut, de
+    1 à 300. Au-delà, le scorer se récuse en nommant la clé, et mcpd lit au plus
+    1 MiB d’une réponse.
+  </p>
+  <p>
+    Chaque scorer par juge est un appel au modèle par exécution, et la requête
+    doit se terminer dans <code>--request-timeout-seconds</code>. Une requête
+    note donc au plus autant d’exécutions qu’il en tient dans ce délai si chaque
+    appel prend tout son <code>timeout_seconds</code>. Avec les valeurs par
+    défaut, 30 et 30, et un seul scorer par juge, cela fait une exécution. Une
+    requête qui en demande plus, dans <code>trace_ids</code> ou
+    <code>limit</code>, est refusée par un 400 qui nomme le plafond, avant tout
+    appel au modèle. Sans <code>limit</code>, la requête note autant
+    d’exécutions récentes qu’il en tient. Augmentez <code>--request-timeout-seconds</code> pour
+    noter davantage en une requête. Chaque score par juge est enregistré dès que
+    le modèle répond, donc une requête interrompue garde les scores qu’elle a
+    terminés.
+  </p>
+
+  <h3>Il se récuse au lieu de deviner</h3>
+  <p>
+    Un juge qui renvoie un nombre qu’il n’a pas dérivé est pire que pas de juge
+    du tout, parce qu’il a l’air d’une preuve. Chacun des cas ci-dessous est
+    donc rapporté dans <code>skipped</code> avec son motif, et aucun ne produit
+    de score.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Ce qui s’est passé</th><th>Ce que fait mcpd</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>L’exécution n’a enregistré aucune réponse</td>
+        <td>Se récuse. Une exécution sans réponse n’a pas mal noté en pertinence, elle n’a pas été mesurée.</td>
+      </tr>
+      <tr>
+        <td>Le modèle a répondu en prose</td>
+        <td>Se récuse, en citant la réponse. Du JSON entouré d’un bloc de code ou d’une phrase reste lu.</td>
+      </tr>
+      <tr>
+        <td>Le modèle a répondu hors de l’échelle</td>
+        <td>Se récuse. Un sept sur une échelle qui s’arrête à un ne vaut pas neuf dixièmes, et le ramener dans les bornes inventerait un nombre.</td>
+      </tr>
+      <tr>
+        <td>Le modèle n’a pas pu être joint</td>
+        <td>Se récuse, avec le statut et le corps de la réponse. Une limite de débit est un motif, pas un zéro.</td>
+      </tr>
+      <tr>
+        <td>La réponse dépassait 1 MiB</td>
+        <td>Se récuse sans lire la suite. Un verdict fait quelques centaines d’octets, donc une réponse de cette taille n’en est pas un.</td>
+      </tr>
+      <tr>
+        <td>Le délai de la requête ne laissait pas le temps de l’appel</td>
+        <td>Refuse sans appeler le modèle. La passe répond avec les scores qu’elle a terminés, dans le délai, plutôt qu’avec un 503.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Chaque score par juge enregistre le modèle comme son
+    <code>scorer_version</code>. Deux scores issus de deux juges différents ne
+    sont pas comparables, et ce champ est ce qui le dit sur l’enregistrement.
+  </p>
+
+  <h2>La notation se fait après coup</h2>
+  <p>
+    <code>POST /v1/api/score</code> passe des scorers sur des exécutions déjà
+    stockées. Rien n’est évalué en ligne. Une évaluation placée dans le chemin
+    de la requête ajoute sa latence à ce qu’elle juge, et une évaluation qui
+    lève une exception ne doit jamais faire échouer la requête d’un
+    utilisateur.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="noter les cent dernières exécutions"
+    command={`curl -X POST localhost:4317/v1/api/score \\
+  -H 'content-type: application/json' \\
+  -d '{"project": "support-desk", "limit": 100, "config": {"max_ms": 4000}}'`}
+  />
+
+  <p>
+    La réponse porte les scores qu’elle a écrits et, séparément, chaque scorer
+    qui s’est récusé avec le motif de sa récusation. Un scorer qui n’a pas pu
+    répondre est plus intéressant qu’un scorer qui a renvoyé un nombre, donc
+    mcpd ne l’avale jamais. Le plafond d’ingestion du projet vaut aussi à cette
+    porte : un score calculé par la passe qui ferait dépasser
+    <code>--quota-per-minute</code> au projet n’est pas stocké, et il est listé
+    dans <code>skipped</code> avec ce motif, plutôt qu’écrit au-delà du plafond
+    ou jeté en silence.
+  </p>
+  <p>
+    Envoyez <code>"dry_run": true</code> pour voir ce qu’une passe produirait
+    sans rien stocker.
+  </p>
+  <p>
+    Les exécutions qu’une passe lit sont décidées par <code>trace_ids</code>,
+    <code>from</code> et <code>limit</code>. Nommez les exécutions dans
+    <code>trace_ids</code> pour noter exactement celles-là. Laissez le champ
+    vide et la passe prend les <code>limit</code> exécutions les plus récentes
+    du projet, de la plus récente à la plus ancienne, et <code>from</code>
+    borne cette page : une passe qui reçoit <code>from</code> ne lit que les
+    exécutions démarrées à cet instant ou après, ce qui vous permet de tout
+    noter depuis un déploiement sans lister d’identifiants.
+  </p>
+
+  <h2>Comparer deux versions</h2>
+  <p>
+    Enregistrez une expérience pour chaque version que vous voulez comparer,
+    étiquetez ses scores avec l’identifiant de cette expérience, et demandez
+    l’écart à mcpd.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="le nouveau prompt a-t-il aidé"
+    command="curl 'localhost:4317/v1/api/experiments/compare?baseline=v3&candidate=v4'"
+  />
+
+  <p>
+    La réponse est un écart par scorer, avec l’effectif de chaque côté et un
+    indicateur <code>decidable</code>. En dessous de vingt observations, mcpd
+    dit que la comparaison ne peut pas être tranchée au lieu d’annoncer un
+    mouvement.
+  </p>
+  <p>
+    C’est une règle volontairement grossière, pas un test de significativité.
+    L’échec qu’elle évite est le plus courant : une moyenne qui a bougé sur
+    quatre exécutions, publiée sans son effectif, lue comme un résultat et mise
+    en production. Imprimer les effectifs à côté de l’écart est ce qui empêche
+    de prendre du bruit pour un constat.
+  </p>
+
+  <h2>Où cela tourne</h2>
+  <p>
+    Tout ceci passe par l’API HTTP, donc la boucle a sa place dans la CI :
+    capturez les échecs quand ils arrivent, notez les exécutions que produit
+    votre suite de tests, enregistrez le build comme une expérience, et faites
+    échouer le job quand <code>regressed</code> revient à vrai sur une
+    comparaison tranchable.
+  </p>
+
+  <h2>Ensuite</h2>
+  <ul>
+    <li>
+      Les deux signaux auprès desquels un score se range :
+      <a href={urlFor('/docs/evaluation', locale)} class="link">Scores et retours</a>.
+    </li>
+    <li>
+      Surveiller la moyenne d’un scorer en production :
+      <a href={urlFor('/docs/alerting', locale)} class="link">Moniteurs et alertes</a>.
+    </li>
+    <li>
+      Chaque endpoint et chaque champ :
+      <a href={urlFor('/docs/reference/api', locale)} class="link">API HTTP</a>.
+    </li>
+  </ul>
+</Doc>

@@ -1,0 +1,306 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import RunCursor from '@/components/RunCursor.astro'
+import { exampleLanguages } from '@/lib/snippets'
+
+const langs = exampleLanguages('workflow')
+---
+
+<Doc
+  title="Runs"
+  description="A durable run in mcpd: starting one idempotently, the journal, events and waits, cancellation, timers and limits, why a step failed and which green step caused it, and the run in its trace."
+  lede="A run is a row, a cursor, a journal of attempts, a set of deadlines and a set of suspensions. This page is what you can do to one, and what it tells you back."
+  og="docs"
+>
+  <h2>Starting one</h2>
+  <p>
+    A run starts with a definition id and an input. The daemon validates the
+    input against the definition's schema when it has one, pins the highest
+    stored version, mints the run and its trace, and answers with the run as
+    stored. From then on the run moves on its own: the daemon offers its steps
+    to workers, walks its sleeps and waits, and writes what happens to the
+    journal.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" example="workflow" region="run" only={langs} title="start, answer, follow" />
+
+  <p>
+    Send an <code>idempotency_key</code> from any caller that can be retried.
+    It is unique per project while the run is held, and a retry of the same
+    call answers the same run rather than starting a second one. A webhook
+    that fires twice, or a job runner that restarts, then costs nothing.
+  </p>
+
+  <RunCursor class="not-prose my-8" />
+
+  <h2>The journal</h2>
+  <p>
+    Every change to a run is an event with a sequence number, from zero and
+    without gaps: the run started, the cursor moved, a step was leased,
+    started, finished or failed, the run waited and resumed, the run ended.
+    Each carries a payload shaped by its kind. The journal is the run's
+    history and it is what the interface draws.
+  </p>
+  <p>
+    Read it as pages from <code>after</code>, or hold the events endpoint open
+    with <code>Accept: text/event-stream</code> and receive each event as it
+    is committed. A client that stops and starts again passes the last
+    sequence number it saw and misses nothing. Every SDK's
+    <code>watch</code> does this for you and ends when the run does, and
+    <code>wait</code> follows the journal to the end and hands back the
+    output, or a typed failure carrying the run when it did not succeed.
+  </p>
+
+  <h2>Events and waits</h2>
+  <p>
+    A <code>wait_event</code> step holds the run until an event with its name
+    and its rendered key arrives. The event comes in through one door:
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="answer a wait"
+    command={`curl -X POST http://localhost:4317/v1/api/events \\
+  -H 'content-type: application/json' \\
+  -d '{"project":"support","event":"approved","key":"Q-42","payload":{"by":"ops"},"event_id":"hook-1"}'`}
+  />
+
+  <p>
+    The answer is one of three outcomes. <code>delivered</code>: a run was
+    waiting and took the event in the same transaction, so by the time you
+    read the receipt the run has moved. <code>parked</code>: no run was
+    waiting, and the event is held for a wait that opens later and says it
+    accepts parked events. <code>duplicate</code>: the <code>event_id</code>
+    was seen before and nothing was written. Send your own id from anything
+    that can fire twice.
+  </p>
+  <p>
+    A wait that reaches its deadline does what its <code>on_timeout</code>
+    says: fails, and then its <code>on_error</code> decides, or continues with
+    no output. Sending to one run directly, through its own open wait, is
+    <code>POST /v1/api/runs/{'{run}'}/signal</code>; it takes the same body
+    without a key, because the run is the address.
+  </p>
+
+  <h2>Cancelling</h2>
+  <p>
+    <code>POST /v1/api/runs/{'{run}'}/cancel</code> ends a run and every child
+    run under it. A step in flight is not interrupted on the wire: the worker
+    learns at its next heartbeat that the run ended, its context signals the
+    body, and whatever the body posts afterwards is refused
+    <code>run_terminal</code>. Cancelling a run that already ended changes
+    nothing and answers the run as it is.
+  </p>
+
+  <h2>Timers and limits</h2>
+  <p>
+    Sleeps, wait deadlines, retry backoffs and lease expiries are all timers
+    the daemon holds. They fire on the daemon's clock, once a second, so a
+    <code>retry_after_ms</code> of a hundred milliseconds is honoured as at
+    least that and not exactly that. A daemon restart loses none of them;
+    they are rows, and the run resumes from the row. No duration may be
+    longer than 3650 days, and a longer <code>retry_after_ms</code> from a
+    worker is refused with a 400. A <code>sleep_until</code> past the year 2262
+    is held as never coming due.
+  </p>
+  <p>
+    A definition's <code>max_steps</code>, <code>run_timeout_ms</code> and
+    <code>max_cost_usd</code> end a run at the ceiling with the ceiling named
+    as the error. The cost is the sum of what the steps' reported usage priced
+    to, in the same book that prices spans, so an agent step that reports its
+    tokens is charged against the run's budget the moment it completes.
+  </p>
+
+  <h2>Why a step failed</h2>
+  <p>
+    A definition's templates are declared edges. When one step's input reads
+    <code>{'${steps.classify.output.kind}'}</code>, it names another step's
+    output, in the document version this run pinned at start, and the daemon
+    has to resolve that reference to render the input at all. So the daemon can
+    answer, for a step of a run, which ancestors' output that step consumed,
+    directly and through the steps in between.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="explain a step"
+    command={`curl -G http://localhost:4317/v1/api/runs/run_1c4f9b02e7d3a856/cause \\
+  -H 'authorization: Bearer $MCPD_API_KEY' \\
+  --data-urlencode 'step=charge'`}
+  />
+
+  <p>
+    The answer is worth reading because of what it finds. The step that
+    produced the bad value has usually <strong>succeeded</strong>: a classifier
+    returned an empty list rather than an error, the step after it passed the
+    empty list along without noticing, and the step after that failed with
+    nothing to work on. Every status on that path is <code>succeeded</code>
+    except the last, so no search over statuses reaches the step that did it.
+    Each hop in the chain carries the template path the value flowed through
+    and <code>silent_producer</code>, which is true when that ancestor ended
+    <code>succeeded</code> and every step between it and the failure did too.
+    That is the reading a status code cannot give you: this step is green, and
+    it is where your problem came from.
+  </p>
+  <p>
+    <code>value_kind</code> and <code>value_empty</code> report the shape of
+    what flowed through the path, never the value. An ancestor that ended
+    <code>succeeded</code> and handed over an empty array is the case the whole
+    endpoint exists for, and the shape is enough to see it without the daemon
+    holding anything a caller owns.
+  </p>
+  <p>
+    The step key is a query parameter and not a path segment, because a key may
+    hold a slash: <code>refund/issue</code> is a branch of a
+    <code>parallel</code>, and an encoded slash inside a path segment is
+    rewritten or refused by enough proxies to make it a bad contract. Keys with
+    an index work the same way: <code>classify[3]</code> is a
+    <code>foreach</code> item and <code>poll[7]/classify</code> is a loop
+    iteration. A nested step also carries what its container read, because the
+    container decided it: a <code>foreach</code> item names the step the array
+    it fanned out over came from, which is why that item exists at all. A
+    <code>subworkflow</code> is one hop, read from the child run's own row; why
+    a step of the child failed is the child's own answer, asked for by the
+    child's run id. A template that reads <code>input</code> names no ancestor,
+    and the chain is then empty rather than invented.
+  </p>
+  <p>
+    <code>max_depth</code> bounds the walk and defaults to 32, which is also
+    its ceiling. A walk that stopped with ancestors left unvisited sets
+    <code>truncated</code>, so a short chain is never mistaken for a complete
+    one. Nothing here reads a prompt, a completion or a model: the answer comes
+    from the journal and the definition, so it is the same with span payload
+    capture off.
+  </p>
+
+  <h2>A run that repeats itself</h2>
+  <p>
+    A run whose same step key keeps failing with an identical rendered input is
+    making no progress. The step key folds in the branch, the item and the
+    iteration, so an identical key is an identical position in the graph, and
+    an identical input on top of that means the context it renders from has not
+    moved either. The daemon counts those failures and ends the run when they
+    reach <code>max_step_repeats</code>, naming the step and the count, the way
+    a spent <code>max_steps</code> ends one.
+  </p>
+  <p>
+    <code>retry.max_attempts</code> does not cover this, which is why the
+    ceiling exists. Two paths retry while spending no retry budget at all: a
+    failure classified <code>unservable</code> comes back after one lease
+    length for ever, because the worker said the step was not theirs to serve
+    rather than that it failed, and a reclaimed lease is requeued free, because
+    the daemon lost contact and charging that to the step would let one deploy
+    end every run. A run stuck on either retries the same work until something
+    else stops it.
+  </p>
+  <p>
+    The ceiling is the daemon's, not a definition's: it is set with the rest of
+    the run store's timings in the <code>runs</code> block of the config file
+    and defaults to 16. Zero turns it off. It counts identical inputs and not
+    failures, so a step whose input moves between attempts, because a parallel
+    branch beside it finished, is left alone. It stands in front of a retry and
+    nowhere else, so a failure that was going to end the run or continue past
+    it keeps its own error.
+  </p>
+
+  <h2>The run in its trace</h2>
+  <p>
+    Every run is also a trace. The daemon opens a root span for the run and
+    one span per attempt, with the step's input and output, and a body that
+    records its own spans through the step context puts them underneath. So
+    the model call inside an agent step sits under that step, under that run,
+    and the search, the cost accounting and the scorers that work on any trace
+    work on a run's trace unchanged. Those spans are written through the same
+    ingest path an SDK's spans take, so they are sampled, redacted, priced and
+    forwarded the same way. The tokens live on the model spans that
+    spent them; the step span carries the priced sum in its attributes, so a
+    trace total counts every token once. The run carries its
+    <code>trace_id</code>, and the interface links the two.
+  </p>
+  <p>
+    The daemon writes those spans through an outbox on its own clock, after
+    the row that made them is committed. A trace read a moment after a step
+    completes may not carry that step's span yet; the run's own detail always
+    does.
+  </p>
+
+  <h2>Reading runs back</h2>
+  <p>
+    <code>GET /v1/api/runs</code> lists a project's runs, most recently updated
+    first, filtered by status or definition. <code>GET /v1/api/runs/{'{run}'}</code>
+    is the run and everything durable about it: every attempt with its lease
+    owner, timings, error and usage; the timers still pending; the waits still
+    open. The <a href="/app?screen=workflows" class="link">Workflows screen</a>
+    of the interface is this endpoint drawn, with the journal live beside it.
+  </p>
+  <p>
+    Both hand back what the run was given, so both are recorded in the audit
+    log, as <code>list_runs</code> and <code>get_run</code>, and so are the
+    journal (<code>list_run_events</code>, once per request, a stream
+    included), the cause walk (<code>get_step_cause</code>) and a cancel
+    (<code>cancel_run</code>). A refused read is recorded against the project
+    that owns the run. The worker calls are not recorded; see
+    <a href="/docs/workers" class="link">Workers</a>.
+  </p>
+
+  <h2 id="storage">Storage</h2>
+  <p>
+    Runs live in their own SQLite file beside the trace store,
+    <code>&lt;data&gt;.runs.&lt;ext&gt;</code> unless <code>--runs-data</code>
+    says otherwise, and <code>--runs-data off</code> turns the run surface off
+    entirely, in which case every run endpoint answers 503. Back it up with
+    the trace store; <code>mcpd doctor</code> grades it as its own group.
+  </p>
+  <p>
+    The run store keeps payloads as they were sent. A run's input, state,
+    output and correlation, every step's input, output and error, every event
+    payload, and the span payloads still waiting to be written to the trace
+    store are stored unredacted, and the <code>user_id</code> in a run's
+    correlation is stored unhashed. That is deliberate: they are the workflow's
+    working state, a later step reads them back, and a value the redactor had
+    rewritten would change what the run does. The spans the daemon writes into
+    the trace store go through the same redaction and identifier hashing as a
+    span an SDK sends, so the trace store holds the redacted copy. Treat the
+    run file as holding everything your steps were given, and protect and back
+    it up accordingly.
+  </p>
+  <p>
+    Retention reaches the run store. The hourly pass that trims the trace store
+    also deletes, on the same per-project window, every run whose root ended
+    before the cutoff, with its child runs and everything stored for them:
+    attempts, events, deadlines, waits, queued spans and the events those runs
+    consumed. A run that has not ended is never deleted, however old it is.
+    Definitions are kept.
+  </p>
+  <p>
+    Erasure reaches it too. <code>DELETE /v1/api/subjects/{'{user_id}'}</code>
+    deletes every ended run in the project whose correlation carries that
+    <code>user_id</code>, as you started the run with it, with its whole tree
+    of child runs and everything stored for them, and reports the count as
+    <code>runs_erased</code>. A run of that person that has not ended is left
+    whole, counted in <code>runs_in_flight</code>, and named in the reply's
+    <code>note</code>: cancel it, or let it end, and send the erasure again.
+    An event parked for a run that has not reached its wait is keyed by its
+    correlation key and not by a person, so erasure does not reach it; it is
+    deleted when it expires, after 24 hours. See
+    <a href="/docs/privacy" class="link">Privacy</a> for the rest of the reply.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>
+      What a definition can say:
+      <a href="/docs/workflows" class="link">Workflows</a>.
+    </li>
+    <li>
+      The process that serves the steps:
+      <a href="/docs/workers" class="link">Workers</a>.
+    </li>
+    <li>
+      Every run endpoint, generated from the specification:
+      <a href="/docs/reference/api#runs" class="link">HTTP API, Runs</a>.
+    </li>
+  </ul>
+</Doc>

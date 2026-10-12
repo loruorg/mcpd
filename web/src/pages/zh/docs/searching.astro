@@ -1,0 +1,619 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import SearchDemo from '@/components/SearchDemo.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code0 = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code0)
+
+/* 这些示例写在这里，而不是从示例程序里读，因为它们是读者对着自己的守护进程
+   运行的查询，不是 CI 能执行的代码。其中每一个参数都是服务端会解析的。 */
+const finding = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# 最近一天里失败的运行，且在 span 名称、提示词或补全中的任何位置
+# 同时提到这两个词。
+curl -s --get http://localhost:4317/v1/api/traces \\
+  --data-urlencode 'q=Leeds depot' \\
+  --data-urlencode 'status=error' \\
+  --data-urlencode 'from=-24h'
+
+# 一次跨所有运行，找出调用了某个模型并且失败了的每一个步骤。
+curl -s --get http://localhost:4317/v1/api/spans \\
+  --data-urlencode 'model=gpt-4o-mini' \\
+  --data-urlencode 'status=error' \\
+  --data-urlencode 'min_duration_ms=2000'
+`,
+  },
+  {
+    lang: 'typescript' as const,
+    label: 'TypeScript',
+    shiki: 'typescript',
+    code: `import { Mcpd } from '@mcpd/sdk'
+
+const mcpd = new Mcpd()
+
+const bad = await mcpd.listTraces({
+  q: 'Leeds depot',
+  status: 'error',
+  from: '-24h',
+  limit: 20,
+})
+
+for (const trace of bad.traces) {
+  console.log(trace.traceId, trace.name, trace.status)
+}`,
+  },
+  {
+    lang: 'python' as const,
+    label: 'Python',
+    shiki: 'python',
+    code: `from mcpd import Mcpd
+
+mcpd = Mcpd()
+
+bad = mcpd.list_traces(q="Leeds depot", status="error", from_="-24h", limit=20)
+
+for trace in bad.traces:
+    print(trace.trace_id, trace.name, trace.status.value)`,
+  },
+]
+
+const discovery = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# 这个项目上报过的每一个环境，用来填一个过滤框。
+curl -s --get http://localhost:4317/v1/api/discovery \\
+  --data-urlencode 'project=default' \\
+  --data-urlencode 'facet=environment'
+
+# 输入联想：以 "check" 开头的那些服务名。
+curl -s --get http://localhost:4317/v1/api/discovery \\
+  --data-urlencode 'facet=service_name' \\
+  --data-urlencode 'prefix=check'
+
+# 某一个指标标签取过的那些值。
+curl -s --get http://localhost:4317/v1/api/discovery \\
+  --data-urlencode 'facet=metric_label_value' \\
+  --data-urlencode 'key=model'
+`,
+  },
+  {
+    lang: 'curl' as const,
+    label: '200 OK',
+    shiki: 'json',
+    code: `{
+  "facet": "environment",
+  "values": [
+    { "value": "production", "last_seen": "2026-09-03T08:04:18Z" },
+    { "value": "staging", "last_seen": "2026-09-02T17:41:02Z" }
+  ]
+}`,
+  },
+  {
+    lang: 'curl' as const,
+    label: '501 Not Implemented',
+    shiki: 'json',
+    code: `{
+  "error": "not_implemented",
+  "capability": "discovery",
+  "message": "this deployment stores signals in <backend>, which does not support discovery: ... GET /v1/api/capabilities lists what it does support."
+}`,
+  },
+]
+
+const badParam = [
+  {
+    lang: 'curl' as const,
+    label: '400 Bad Request',
+    shiki: 'json',
+    code: `{
+  "error": "bad_parameter",
+  "field": "from",
+  "message": "\\"yesterday\\" is not an RFC 3339 timestamp or a relative duration like -1h"
+}`,
+  },
+]
+
+const paging = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# 第一页会在 page.next_cursor 里交回一个游标。
+curl -s --get http://localhost:4317/v1/api/traces \\
+  --data-urlencode 'q=refund' \\
+  --data-urlencode 'sort=cost' \\
+  --data-urlencode 'limit=100'
+
+# 下一页：同样的过滤条件、同样的排序，再加上那个游标。
+curl -s --get http://localhost:4317/v1/api/traces \\
+  --data-urlencode 'q=refund' \\
+  --data-urlencode 'sort=cost' \\
+  --data-urlencode 'limit=100' \\
+  --data-urlencode 'cursor=MzEzNzQyfDBhZjM...'
+`,
+  },
+  {
+    lang: 'typescript' as const,
+    label: 'TypeScript',
+    shiki: 'typescript',
+    code: `let cursor: string | undefined
+
+do {
+  const page = await mcpd.listTraces({
+    q: 'refund',
+    sort: 'cost',
+    order: 'desc',
+    limit: 100,
+    cursor,
+  })
+
+  for (const trace of page.traces) {
+    console.log(trace.traceId, trace.cost?.totalCost ?? 'not priced')
+  }
+
+  // 按 hasMore 循环。没有总数可以数到。
+  cursor = page.page.hasMore ? page.page.nextCursor : undefined
+} while (cursor)`,
+  },
+  {
+    lang: 'python' as const,
+    label: 'Python',
+    shiki: 'python',
+    code: `cursor = None
+
+while True:
+    page = mcpd.list_traces(
+        q="refund", sort="cost", order="desc", limit=100, cursor=cursor
+    )
+
+    for trace in page.traces:
+        cost = trace.cost.total_cost if trace.cost else "not priced"
+        print(trace.trace_id, cost)
+
+    # 按 has_more 循环。没有总数可以数到。
+    if not page.page.has_more:
+        break
+    cursor = page.page.next_cursor`,
+  },
+]
+---
+
+<Doc
+  title="查找一次运行"
+  description="对提示词和补全做全文检索，mcpd 在 trace 和 span 上接受的每一个过滤条件，以及找出被某个评分器打了低分的那些回答的查询。"
+  lede="一次排查是从一条抱怨开始的，不是从一块仪表盘开始的。这一页讲的是你怎么把一条抱怨变成引起它的那一次运行。"
+  og="docs"
+>
+  <h2>搜索载荷，而不是标签</h2>
+  <p>
+    多数追踪工具只索引名称和属性。mcpd 把提示词和补全也一起索引，因为人抱怨的
+    是模型说过的某句话，而他们回敬给你的那几个词，是你手上唯一的抓手。
+    <code>q</code> 参数就是这个索引。
+  </p>
+
+  <SearchDemo class="not-prose my-8" />
+
+  <h2>q 到底覆盖什么</h2>
+  <p>
+    索引为每个 span 保存三个字段：它的名称、它的输入和它的输出。输入和输出都是
+    JSON，所以在建索引之前，mcpd 会走一遍载荷，只留下里面的字符串和数字，把
+    花括号、引号和键都丢掉。直接索引原始 JSON 会让每一个标点都变成一个词元，
+    把你真正要找的那些词埋起来。
+  </p>
+  <p>在依赖它之前，有六个结论值得知道：</p>
+  <ul>
+    <li>
+      只要一次运行里<strong>有任何一个 span</strong> 命中，这次运行就命中。你
+      拿回的是整次运行；打开它才看得到是哪一个步骤。
+    </li>
+    <li>
+      多个词之间是 AND。<code>q=refund delayed</code> 找的是同时包含这两个词的
+      span，位置在被索引文本的任何地方，不要求彼此相邻。
+    </li>
+    <li>
+      匹配按整词进行，不区分大小写，变音符号会被折叠，所以
+      <code>resume</code> 找得到 <code>résumé</code>。没有词干还原：
+      <code>refund</code> 找不到 <code>refunds</code>。
+    </li>
+    <li>
+      输入和输出各自的前 64 KiB 进入索引。更长的载荷会被完整存储和完整显示；
+      只有一个非常大的提示词的尾部搜不到。
+    </li>
+    <li>
+      脱敏在存储之前进行，所以脱敏器去掉的东西也从来没有进过索引。参见
+      <a href={linkTo('/docs/privacy')} class="link">脱敏与保留期</a>。
+    </li>
+    <li>
+      一个被写了不止一次的 span，比如一个长时间运行的 span 在结束时那次，会替换
+      掉自己的索引行，所以搜索永远反映的是当前这个版本。
+    </li>
+  </ul>
+
+  <h2>一个多余的引号是一次搜索，不是一个错误</h2>
+  <p>
+    底下的索引有它自己的查询语言：一个双引号开启一个短语，而 <code>NEAR</code>、
+    <code>OR</code> 和 <code>*</code> 都是运算符。把你的文本原样交给它，就意味着
+    一条带引号的客户消息换回来的是一个语法错误，而不是一份结果；而一个会抛错的
+    搜索框，是一个大家会不再用的搜索框。
+  </p>
+  <p>
+    所以你的文本根本到不了那个解析器。mcpd 按空白把你输入的东西切开，把每个词
+    里的双引号去掉，把每个词包成一个字面词项，再用 AND 连起来。
+    <code>q=say "no"</code> 搜的是 <em>say</em> 和 <em>no</em> 这两个词。
+    <code>q=NEAR</code> 搜的是 NEAR 这个词。你能输入的任何东西都不会是语法错误，
+    而你也用不上任何运算符。这是一笔交换，并且是有意朝这个方向做的。
+  </p>
+  <p>
+    只包含空白的 <code>q</code> 会被丢掉，而不是什么都匹配不上；空的
+    <code>q=</code> 被当作没有给。每一个参数都是这样，所以一个把空过滤框也提交
+    上来的表单，不会误按空字符串去过滤。
+  </p>
+
+  <h2>缩小一份运行列表</h2>
+  <p>
+    <code>GET /v1/api/traces</code> 接受下面这些。你没有给的，就不会被应用。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>参数</th><th>它选出什么</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>q</code></td>
+        <td>在每个 span 的名称、输入和输出上做全文检索。</td>
+      </tr>
+      <tr>
+        <td><code>status</code></td>
+        <td>
+          <code>unset</code>、<code>ok</code>、<code>error</code> 或
+          <code>cancelled</code>。只要一次运行里有任何一个 span 失败了，这次运行
+          就是 <code>error</code>，哪怕那个错误已经被接住了。
+        </td>
+      </tr>
+      <tr>
+        <td><code>kind</code></td>
+        <td>
+          这次运行的根 span 的类型，比如 <code>agent_run</code> 或
+          <code>workflow_run</code>。
+        </td>
+      </tr>
+      <tr>
+        <td><code>name</code></td>
+        <td>根 span 的名称，完全相等。不是前缀，也不是模式。</td>
+      </tr>
+      <tr>
+        <td><code>tags</code></td>
+        <td>
+          用逗号分隔。一次运行必须带上列出的<em>每一个</em>标签，而不是其中任意
+          一个。
+        </td>
+      </tr>
+      <tr><td><code>session_id</code></td><td>同一次会话里的每一次运行。</td></tr>
+      <tr><td><code>thread_id</code></td><td>同一个对话线程里的每一次运行。</td></tr>
+      <tr><td><code>user_id</code></td><td>同一个最终用户的每一次运行。</td></tr>
+      <tr><td><code>environment</code></td><td>某一个环境，比如 <code>production</code>。</td></tr>
+      <tr>
+        <td><code>model</code></td>
+        <td>至少有一个 span 用了这个模型 id 的那些运行。</td>
+      </tr>
+      <tr>
+        <td><code>from</code>、<code>to</code></td>
+        <td>时间窗口，按这次运行的开始时间来比。</td>
+      </tr>
+      <tr>
+        <td><code>min_duration_ms</code></td>
+        <td>至少这么慢的运行，单位是毫秒。</td>
+      </tr>
+      <tr>
+        <td><code>min_cost</code></td>
+        <td>
+          至少花了这么多钱的运行。一次没有任何 span 被定价的运行算作零，所以
+          任何正值都会把它排除掉。
+        </td>
+      </tr>
+      <tr>
+        <td><code>has_score</code></td>
+        <td>带着这个评分器 id 给出的评分的那些运行。</td>
+      </tr>
+      <tr>
+        <td><code>score_below</code></td>
+        <td>和 <code>has_score</code> 一起用：那个评分器打到这个值以下的运行。</td>
+      </tr>
+      <tr>
+        <td><code>sort</code></td>
+        <td>
+          <code>start_time</code>、<code>duration</code>、<code>cost</code>、
+          <code>span_count</code> 或 <code>score</code>。默认是
+          <code>start_time</code>。<code>score</code> 按任何一个评分器给一次运行
+          的最低分排序，所以升序会把最差的那次运行排在最前；没有评分的运行按零
+          计。
+        </td>
+      </tr>
+      <tr>
+        <td><code>order</code></td>
+        <td><code>asc</code> 或 <code>desc</code>。默认是 <code>desc</code>。</td>
+      </tr>
+      <tr>
+        <td><code>limit</code></td>
+        <td>每页大小，会被夹在 1 到 500 之间。默认是 50。</td>
+      </tr>
+      <tr>
+        <td><code>cursor</code></td>
+        <td>上一页给出的那个不透明游标。</td>
+      </tr>
+      <tr>
+        <td><code>project</code></td>
+        <td>
+          要读哪个项目。默认是守护进程自己的默认项目，所以只有一个项目的安装
+          从来不用传它。
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>name</code>、那些关联 id 和 <code>environment</code> 都是相等判断，
+    这也是它们便宜的原因。如果你想对名称做部分匹配，用 <code>q</code>：span
+    的名称也在文本索引里。
+  </p>
+
+  <h2>一行列表的代价</h2>
+  <p>
+    这里没有第二份更轻的运行列表，因为第一份已经足够轻了。存下来的 trace 投影
+    完全不带输入、不带输出、不带任何属性：只有名称、计数、时间、成本、标签和
+    关联信息，没有一句模型说过的话。打开一次运行，才是去取载荷的时候。
+  </p>
+  <p>
+    在一次真实的运行上量过：一个八步的客服智能体，检索三份政策文档，调用两个
+    工具，做两次带真实提示词和补全的模型调用。它的列表行是
+    <strong>577 字节</strong>，而整次运行是 <strong>10,717 字节</strong>，
+    <strong>减少了 94.6%</strong>。这是这一个守护进程、在那一次运行上、经过真实
+    HTTP 接口测出来的。你的运行会不一样，重要的是方向：提示词越大，省下的越多，
+    因为长大的那一部分正是列表不带的那一部分。
+  </p>
+  <p>
+    这个数字是由一个测试产生的，而不是手写在这里的，所以它不可能在一处过时而
+    另一处不失败。运行
+    <code>cargo test -p mcpd-server --test payload_size -- --nocapture</code>，
+    它会把两个字节数都打印出来。往投影里加一个带载荷的字段，那个测试就会失败。
+  </p>
+
+  <h2>其余的一律具名拒绝</h2>
+  <p>
+    那张表就是全部的词汇。不在表里的参数会以一个 400 被拒绝，并把它的名字说
+    出来，而不是接受了再丢掉。这一点变过：mcpd 从前会忽略它不认识的参数，于是
+    <code>?statuss=error</code> 会以 200 返回项目里的每一次运行，而响应里没有
+    任何东西说明这个过滤条件没有生效。一个看着合理的错误答案比一个错误更糟，
+    因为没有东西让人察觉。
+  </p>
+  <p>
+    这里做的取舍值得点明。一个客户端发出较新的守护进程认识的过滤条件时，从较旧
+    的那个拿到的现在是 400，而不是一个更宽的结果集。这是两种失败里比较好的
+    那种：这个 400 会说出参数名，然后停下。
+  </p>
+  <p>
+    有些拒绝说的不止“未知”两个字。mcpd 在每一条 trace 上都记录
+    <code>service_name</code>、<code>service_version</code>、
+    <code>resource_id</code>、<code>run_id</code>、<code>request_id</code>、
+    <code>experiment_id</code> 和 <code>release</code>，但运行列表还不能按它们
+    过滤。这七个里，只有 <code>service_name</code> 是
+    <a href="#filling-a-filter-box" class="link">发现接口</a>的一个维度，所以
+    发现接口只会列出它的取值，其他几个的不会列。这七个会被拒绝，并附上一条说明
+    这件事的消息，因为 <code>service_name=checkout-api</code> 不是打错字，告诉
+    别人这是个未知参数，会让他们去找一个根本不存在的拼写错误。
+  </p>
+
+  <p>
+    这条规则不是运行列表独有的。<code>GET /v1/api/spans</code>、
+    <code>/v1/api/logs</code>、<code>/v1/api/scores</code>、
+    <code>/v1/api/metrics</code> 和 <code>/v1/api/feedback</code> 各自用同样的
+    方式守着自己的词汇。有两点值得在遇到之前就知道：评分列表不接受
+    <code>order</code>，因为它是最新的在前，而它的游标只朝一个方向比较；反馈
+    列表要求给出 <code>trace_id</code>，因为 mcpd 还不能列出整个项目的反馈，
+    而一份空列表读起来会像是一条反馈都没有。
+  </p>
+
+  <h2 id="filling-a-filter-box">把过滤框填起来</h2>
+  <p>
+    一个过滤条件只有在你知道该往里面填什么的时候才好用，而这些值不是一份固定的
+    清单：它们是向一个项目上报的那些服务恰好发过来的东西。
+    <code>GET /v1/api/discovery</code> 回答这个问题。用 <code>facet</code>
+    一次问一个维度，它会返回这个维度在这个项目里取过的那些值，按值排序，每个值
+    还带着最后一次有信号携带它的时间。
+  </p>
+  <table>
+    <thead>
+      <tr><th>分面</th><th>它列出什么</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>entity_kind</code></td><td>智能体、工作流、工具、模型、评分器、处理器、流水线或服务。</td></tr>
+      <tr><td><code>entity_name</code></td><td>这些东西的名字，比如被调用过的那些工具。</td></tr>
+      <tr><td><code>service_name</code></td><td>上报过数据的那些服务。</td></tr>
+      <tr><td><code>environment</code></td><td>见过的那些环境，比如 <code>production</code>。</td></tr>
+      <tr><td><code>tag</code></td><td>任何一次运行带过的每一个标签。</td></tr>
+      <tr><td><code>metric_name</code></td><td>记录过的指标名，包括 mcpd 自己推导出来的那些。</td></tr>
+      <tr><td><code>metric_label_key</code></td><td>这个项目里见过的每一个标签键。</td></tr>
+      <tr><td><code>metric_label_value</code></td><td>某一个标签的那些值。需要 <code>key</code>。</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>prefix</code> 为输入联想缩小这份列表，它按字面匹配并且区分大小写，
+    因为这些值就是过滤条件将要拿去比对的东西，在这里做折叠会给出一个之后什么
+    都匹配不上的值。<code>limit</code> 把答案封顶在 1000。值是按值排序的，不按
+    时间新旧，所以有人正在读的一份列表，不会在两次轮询之间在他眼皮底下重排。
+  </p>
+  <p>
+    有一个限制值得在动手之前知道。<code>metric_label_key</code> 列的是这个项目
+    里任何地方见过的每一个标签键，而不是某一个指定指标的键：这份去重值列表是按
+    标签建的索引，不是按携带它的那个指标。
+  </p>
+
+  <h2>刷新一份列表，而不重新查一遍</h2>
+  <p>
+    <code>GET /v1/api/deltas</code> 返回自某个游标以来到达的东西，最早的在前，
+    可用于 <code>traces</code>、<code>spans</code> 或 <code>logs</code>。留着
+    上一次轮询给的游标，把它发回去，再把这些行应用到你已经拿着的那份列表上。
+  </p>
+  <p>
+    一次轮询不是一页，这两种游标是有意做成不可互换的。分页是在你选定的排序里，
+    沿着一个固定的结果集往回走；轮询是按到达顺序往前走，而且永远不结束。水位线
+    是一行的到达时间加上它的 id，因为一个批次里的每一行都写着同一个时间戳，而
+    一条只能说“在这一纳秒之后”的水位线，要么会把整个批次重放一遍，要么会把这个
+    批次剩下的部分跳过去。一次空的轮询会原样返回那个游标：把它往前挪，会漏掉
+    稍后才落地、而到达时间更早的一行。
+  </p>
+  <p>
+    评分和反馈不能轮询。它们打的是调用方发来的那个时间戳，不带服务端设置的到达
+    时间，所以在它们上面做水位线，要么会跳过一行迟到的，要么会永远重复每一行。
+    <code>signal=scores</code> 会被拒绝，而不是回一个空页。
+  </p>
+
+  <h2>这套部署能做什么</h2>
+  <p>
+    mcpd 只有一个存储 trait，它背后有三个后端，而它们并不等价。在 ClickHouse 上，
+    一次删除被接受后，要等调用返回之后才执行，所以它答复里的计数说的是匹配到了
+    什么，而不是什么已经离开了磁盘。在 SQLite 和 Postgres 上，调用返回时这些行
+    就已经没了。<code>GET /v1/api/capabilities</code> 就是把这件事写下来的
+    地方：守护进程背后是哪个后端，<code>q</code> 匹配什么，ASCII 之外的大小写
+    是否折叠，一次删除在调用返回时是否已经落盘，以及发现接口和增量轮询到底答
+    不答。
+  </p>
+  <p>
+    在连接时读一次，然后只提供这套部署答得上的东西。一个能力为 false 的端点会
+    以 <code>501</code> 拒绝，响应体里 <code>capability</code> 字段写的词，和
+    能力集里发布的是同一个词，所以两者永远不会互相矛盾；碰到这个拒绝的客户端
+    可以去查它，而不是去重试一件永远不会变的事。
+  </p>
+  <p>
+    今天发布的三个后端，发现接口和增量轮询都是答的，所以下面那个 501 是之后
+    新增的某个后端拒绝时会有的形状，而不是你会从 SQLite、Postgres 或 ClickHouse
+    看到的响应。能力集才是告诉你这是哪一种的东西，而且它现在就值得一读：这三个
+    后端在删除返回时是否已经落盘上、以及在保留期怎么执行上，都不一样。ASCII
+    之外的大小写，三个后端都会折叠。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={discovery} title="我能按什么过滤？" />
+
+  <h2>时间窗口</h2>
+  <p>
+    <code>from</code> 和 <code>to</code> 接受一个 RFC 3339 时间戳，或者一个相对
+    的简写：一个减号、一个数字，再加上 <code>s</code>、<code>m</code>、
+    <code>h</code> 或 <code>d</code> 之一。<code>-15m</code>、<code>-1h</code>
+    和 <code>-7d</code> 都可以。这个简写之所以存在，是因为为了看最近一小时而
+    手敲一个 ISO 时间戳，是没人该付的摩擦。
+  </p>
+  <p>
+    <code>from</code> 含边界，<code>to</code> 不含，两者比的都是这次运行
+    <em>开始</em>的时间。一次在你的窗口之前就开始、并且在窗口里还在跑的长运行，
+    不会被返回。如果你在找 09:00 那一刻正在跑的东西，请把 <code>from</code>
+    往前放宽，而不是把它收窄。
+  </p>
+  <p>
+    一个既不是时间戳也不是时长的值会被具名拒绝，而不是被忽略。每一个列表端点上
+    的每一个参数都是这样失败的，因为一个被悄悄丢掉的过滤条件会返回一个看着合理
+    的错误答案，而一个看着合理的错误答案比一个错误更糟。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={badParam} title="from=yesterday" />
+
+  <h2>找出糟糕回答的那个查询</h2>
+  <p>
+    <code>has_score=answer_relevance&amp;score_below=0.5</code> 返回那个评分器
+    打到 0.5 以下的每一次运行。当抱怨是关于质量而不是关于失败时，就用这一个，
+    因为一个糟糕的回答，通常出自一次成功的运行。
+  </p>
+  <p>
+    只给 <code>has_score</code>，返回的是那个评分器看过的每一次运行。只给
+    <code>score_below</code> 则什么也不做：一个不挂在任何评分器上的阈值没有
+    意义，mcpd 只能去猜你指的是哪个评分器。它不猜。
+    <a href={linkTo('/docs/evaluation')} class="link">评分与反馈</a>讲了这些值
+    是从哪里来的。
+  </p>
+
+  <h2>搜索步骤，而不是运行</h2>
+  <p>
+    <code>GET /v1/api/spans</code> 一次跨所有运行搜索单个步骤。用它来问关于
+    一个步骤而不是一次会话的问题：哪一次工具调用慢，对某个模型的哪些调用出了
+    错，一次检索要花多久。
+  </p>
+  <p>
+    它接受 <code>q</code>、<code>kind</code>、<code>status</code>、
+    <code>name</code>、<code>model</code>、<code>trace_id</code>、
+    <code>from</code>、<code>to</code>、<code>min_duration_ms</code>、
+    <code>sort</code>、<code>order</code>、<code>limit</code> 和
+    <code>cursor</code>，含义和默认值都一样。这里没有 <code>tags</code>、
+    <code>session_id</code> 或 <code>user_id</code> 过滤条件，因为那些属于运行；
+    这三个都会被具名拒绝，而不是接受了再丢掉。
+  </p>
+  <p>
+    <code>sort</code> 在这里能取的值比在运行列表上少：<code>start_time</code>、
+    <code>duration</code> 或 <code>cost</code>，此外没有别的。一个 span 不带
+    span 数，也不带评分汇总，所以 <code>span_count</code> 和 <code>score</code>
+    没有东西可排，会被具名拒绝，而不是被忽略。
+  </p>
+  <p>
+    在一次运行上，<code>model</code> 问的是有没有任何一个 span 用过它。在一个
+    span 上，<code>model</code> 就是这个 span 自己的模型。同一个词，两个问题。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={finding} title="把它找出来" />
+
+  <h2>分页，以及游标为什么是不透明的</h2>
+  <p>
+    一份列表最多返回 <code>limit</code> 行，外加一个 <code>page</code> 对象。
+    还有更多时 <code>page.next_cursor</code> 就在那里，而
+    <code>page.has_more</code> 用一个布尔值说同一件事。
+  </p>
+  <p>
+    分页是键集分页，不是偏移分页。游标指的是给过你的最后一行，下一页从它之后
+    严格开始。偏移分页会漂移：trace 是持续到达的，所以等你去要第 50 到 99 行
+    时，窗口已经在你脚下移动了，于是你把一次运行读了两遍，而另一次根本没出现。
+    在一次排查里，你漏掉的那一次运行，正是你要找的那一次。
+  </p>
+  <p>
+    游标是排序值和行 id 这一对经十六进制编码后的结果，你应该把它当作没有含义的
+    东西。它之所以不透明，是为了让编码可以改变而不弄坏每一个调用方，也因为
+    它里面的值在每种排序下都是不同的量：<code>start_time</code> 和
+    <code>duration</code> 是纳秒，<code>cost</code> 是一个缩放过的整数，
+    <code>span_count</code> 是一个普通计数，<code>score</code> 是这次运行的
+    最低分。
+  </p>
+  <p>
+    这件事带着一条规则。<strong>把游标发回去时，要配上产生它的那些过滤条件、
+    那个 <code>sort</code> 和那个 <code>order</code>。</strong>mcpd 不会检查你
+    是否照做了，而一个在不同排序下重放的游标，比的是错的那一列，会跳过一些行。
+    一个被改过或者被截断的游标会以 <code>invalid_query</code> 被拒绝，消息是
+    <code>malformed cursor</code>。
+  </p>
+  <p>
+    没有总数。<code>page.total</code> 是给某个能便宜地数出匹配数的后端留的，
+    而内置的 SQLite 存储不会填它，所以请按 <code>has_more</code> 循环，而不是
+    朝着一个数字去数。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={paging} title="一页一页翻" />
+
+  <h2>拿到那次运行之后</h2>
+  <p>
+    上面任何一个查询给出的 trace id，都可以交给
+    <code>GET /v1/api/traces/{'{trace_id}'}</code>，它返回这次运行和它里面的
+    每一个 span，并且已经排好序，画一张瀑布图不需要第二个请求。加上
+    <code>include=logs,scores,feedback</code>，就能在同一个响应里拿到附在它上面
+    的一切。
+  </p>
+  <p>
+    从这里往下，
+    <a href={linkTo('/docs/cost')} class="link">成本核算</a>解释每个步骤上的那些
+    数字，而
+    <a href={linkTo('/docs/reference/api')} class="link">HTTP API 参考</a>按规范
+    声明的样子列出每一个端点和字段。
+  </p>
+</Doc>

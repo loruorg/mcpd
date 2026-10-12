@@ -1,0 +1,211 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import Command from '@/components/Command.astro'
+import Unreleased from '@/components/Unreleased.astro'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* İç bağlantılar İngilizce route olarak yazılır ve burada yerelleştirilir.
+   Türkçesi henüz yazılmamış bir route, arkasında hiçbir şey olmayan bir Türkçe
+   adrese değil, İngilizce sayfaya gider. */
+const code = localeOf(Astro.url.pathname)
+const url = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+---
+
+<Doc
+  title="Genel bakış"
+  description="mcpd, yapay zekâ ajanları için ücretsiz, açık kaynaklı bir daemon: adımlar arasında tutulan kalıcı çalıştırmalar ve her adımın gözlemlenebilirliği. Tek süreç, gömülü depolama, framework yok."
+  lede="Ajanınızın yanında çalıştırdığınız bir süreç; ajanınızın etrafına kurulduğu bir kütüphane değil. Çalıştırmayı adımlar arasında tutar ve her adımı kaydeder. Bu sayfa, bütünün biçimini tek okumada verir."
+  og="docs"
+>
+  <h2>Tek bir süreç</h2>
+  <p>
+    mcpd tek bir süreçle iki iş yapar. Kalıcı bir çalıştırmayı adımları arasında
+    tutar: imleci, yeniden denemeleri, zamanlayıcıları ve beklemeleri; işi her
+    adımın içinde, istediğiniz dilde, sizin kodunuz yapar. Bir de ajanınızın
+    yaptıklarını alır, saklar ve okuyabileceğiniz çalıştırmalar olarak size geri
+    verir. SQLite kendisine bağlanmış tek bir ikili dosyadır. Ayağa kaldırılacak
+    bir veritabanı, yanında çalıştırılacak bir collector ve hiçbir yerde hesap
+    yoktur.
+  </p>
+  <p>
+    Daemon <code>4317</code> portunu dinler ve o tek porttan beş şey sunar:
+  </p>
+  <ul>
+    <li>
+      <code>/v1/traces</code>, <code>/v1/logs</code> ve
+      <code>/v1/metrics</code> üzerinde OTLP alımı; böylece var olan bir
+      OpenTelemetry kurulumu için yeni kod gerekmez.
+    </li>
+    <li>
+      <code>/v1/ingest</code> üzerinde yerel alım; modelin OTLP'de yeri olmayan
+      parçalarını, puanlar ve insan geri bildirimi dahil, bu taşır.
+    </li>
+    <li>
+      <code>/v1/api</code> altındaki okuma API'si; arayüz de SDK'lar da bunu
+      kullanır. Elinizdekinin ardında ayrı bir özel API yoktur.
+    </li>
+    <li>
+      <code>/v1/api/runs</code>, <code>/v1/api/events</code> ve
+      <code>/v1/api/steps</code> altındaki çalıştırma yüzeyi: tanımlar,
+      çalıştırmalar, bir beklemeyi yanıtlayan olaylar ve bir worker'ın konuştuğu
+      protokol. Bakınız
+      <a href={url('/docs/workflows')} class="link">İş akışları</a>.
+    </li>
+    <li><code>/</code> adresindeki operatör arayüzü, ikili dosyanın içine gömülü.</li>
+  </ul>
+  <p>
+    Tek port bir kısayol değil, bir dağıtım kararıdır. Bir collector, bir
+    veritabanı ve bir arayüz; çalıştırılacak üç şey, yükseltilecek üç şey ve bir
+    trace'in arada kaybolabileceği üç yer demektir.
+  </p>
+
+  <Command
+    class="not-prose mt-8"
+    label="Sürüm çıktığında kurulumun tamamı"
+    command="docker run -p 4317:4317 ghcr.io/mcpd/mcpd"
+  />
+  <Unreleased class="not-prose mb-8 mt-3" />
+
+  <h2>Bilerek ne değildir</h2>
+  <p>
+    Buradaki değerin çoğu, mcpd'nin yapmayı reddettiği şeylerden gelir. Her ret,
+    ajanınızı değiştirmek zorunda kalmanız için bir nedeni ortadan kaldırır.
+  </p>
+  <ul>
+    <li>
+      <strong>Framework değil.</strong> mcpd modelinizi asla çalıştırmaz, sizin
+      için seçmez, sağlayıcı istemcinizi sarmalamaz. Çalıştırmayı adımlar
+      arasında tutar ve bir adımın içindeki her şeyi kodunuza bırakır. Kodunuz,
+      mcpd'yi benimsedikten sonra da modeli önceki gibi çağırır.
+    </li>
+    <li>
+      <strong>İstek yolunda değil.</strong> Ajanınızla bir sağlayıcı arasında
+      asla durmaz. Kullanıcılarınızın gördüğü hiçbir şey mcpd'nin ayakta
+      olmasına bağlı değildir, çünkü gördükleri hiçbir şey onun içinden geçmez.
+    </li>
+    <li>
+      <strong>Servis değil.</strong> Daemon varsayılan olarak hiçbir yeri
+      çağırmaz. Telemetri, lisans denetimi ve satıcı endpoint'i yoktur. Yapacağı
+      tek giden trafik, sizin yapılandırdığınızdır: bir
+      <code>--forward-endpoint</code>, bir monitörün webhook'u ya da bir yargıç
+      modeli. Bunların hiçbirini ayarlamazsanız prompt'larınız, onu
+      çalıştırdığınız makineden hiç çıkmaz.
+    </li>
+    <li>
+      <strong>Zorunlu bir bağımlılık değil.</strong> mcpd'yi altyapınızdan
+      silerseniz duran tek şey kayıt olur.
+    </li>
+  </ul>
+
+  <h2>Altı sinyal</h2>
+  <p>
+    mcpd altı tür şey saklar ve onları bir arada saklar. Span'ler, işin
+    kendisidir. Loglar, bir çalıştırmanın ürettiği satırlardır. Metrikler zaman
+    içindeki sayılardır. Puanlar, bir çalıştırma hakkında makinenin yargısıdır.
+    Geri bildirim ise insanın yargısıdır. Yön notu ise bir modelin, bitmiş
+    bir çalıştırma hakkında yazdığı tek cümledir.
+  </p>
+  <p>
+    Hepsini tek bir depoda tutmak işin bütün amacıdır. Her sinyal, ait olduğu trace
+    kimliğini ve span kimliğini taşır; böylece “bu müşterinin şikâyet ettiği
+    çalıştırmada model gerçekte ne söyledi ve bu ne kadara mal oldu” sorusu,
+    dört ayrı araç ve gözle eşleştirilecek bir zaman damgası değil, tek bir
+    sorgu olur.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <p>
+    Puanlar ile geri bildirim bilerek ayrı tutulur. Bir puanlayıcının 0.8'i ile
+    bir insanın beğenmemesi farklı şeyleri ölçer; ikisinin ortalamasını almak
+    hiçbir anlamı olmayan bir sayı üretir.
+  </p>
+
+  <h2>Neden framework değil de daemon</h2>
+  <p>
+    Framework'ün getirdiği gözlemlenebilirlik iyidir ve framework'e bağlı gelir.
+    Görülebilmesi için ajanın onunla, çoğunlukla tek bir dilde yazılmış olması
+    beklenir. Bu, yeni bir proje için makul, hâlihazırda var olan ve çalışan bir
+    ajan için imkânsız bir ödünleşimdir. Framework iş akışları da aynı ödünleşim: her
+    adım framework'ün dilinde yazıldığı ve onun süreci içinde çalıştığı sürece
+    kalıcıdır.
+  </p>
+  <p>
+    Daemon ikisini de tersine çevirir. Bir iş akışının grafiği, daemon'un
+    tuttuğu veridir; adım gövdeleri ise sizin sürecinizin tuttuğu koddur ve her
+    dilin konuşabildiği bir HTTP protokolü üzerinden teker teker kiralanarak
+    alınır. Daemon bir modeli, bir prompt'u ya da bir kimlik bilgisini hiç
+    görmez. Bakınız <a href={url('/docs/workflows')} class="link">İş akışları</a>
+    ve <a href={url('/docs/workers')} class="link">Worker'lar</a>.
+  </p>
+  <p>
+    Daemon ödünleşimi tersine çevirir. mcpd, bir bağımlılık değil bir protokol olan
+    OTLP'yi konuşur; bu yüzden her dilde ve her framework'le yazılmış ajanları,
+    mcpd var olmadan önce yazılmış olanlar dahil kaydeder. Ajanınız zaten
+    OpenTelemetry dışa aktarıyorsa
+    <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> değişkenini mcpd'ye yöneltmek
+    entegrasyonun tamamıdır.
+  </p>
+  <p>
+    SDK'lar, OTLP'nin prompt, tamamlama, token sayısı ya da puan için bir sözcük
+    dağarcığı olmadığı için vardır; oysa sizin aradığınız alanlar bunlardır.
+    Birini kullanmak bir seçimdir, koşul değil. Altısı da aynı davranır: bir
+    span kaydetmek sınırlı bir kuyruğa ekleyip döner, ağ işi arka plandaki bir
+    worker'da olur ve ölçümleme yolunda hiçbir şey hata fırlatmaz. Gözlediği
+    sistemi çökertebilen gözlemlenebilirlik, hiç olmamasından kötüdür.
+  </p>
+
+  <h2>Tek ikili dosya, iki dağıtım</h2>
+  <p>
+    Dizüstünüzde çalıştırdığınız konteyner, birinin kümesinde Deployment olarak
+    çalışan konteynerin aynısıdır. Saklama, maskeleme, örnekleme ve API
+    anahtarları aynı ikili dosyanın seçenekleridir; farklı bir derleme ya da bir
+    lisans katmanı değil. Yalnızca sahip olamayacağınız bir sürümde bulunan
+    özellik yoktur.
+  </p>
+  <p>
+    Varsayılanlar dizüstü için ayarlanmıştır; yani hiçbir anahtar
+    yapılandırılmamışken alım da okuma da açıktır. mcpd bu durumdayken loopback
+    dışı bir adresi dinliyorsa başlangıçta yüksek sesle uyarır. Yine de başlar,
+    çünkü başlamamak hedeflediği kişi için beş dakikalık yolu bozardı; ama
+    susmak sorumsuzluk olurdu.
+  </p>
+
+  <h2>Bundan sonra nereye</h2>
+  <ul>
+    <li>
+      Şimdi çalıştırmak:
+      <a href={url('/docs/quickstart')} class="link">Hızlı başlangıç</a> kendi
+      ajanınızdan bir trace'i ekrana getirir,
+      <a href={url('/docs/install')} class="link">Kurulum</a> ise bütün yolları
+      anlatır.
+    </li>
+    <li>
+      Sözcükleri öğrenmek:
+      <a href={url('/docs/concepts')} class="link">Kavramlar</a>, belgelerin
+      geri kalanının varsaydığı trace, span, tür ve ilişkilendirmeyi tanımlar.
+    </li>
+    <li>
+      Bir çalıştırmayı adımlar arasında tutmak:
+      <a href={url('/docs/workflows')} class="link">İş akışları</a>, ardından
+      <a href={url('/docs/workers')} class="link">Worker'lar</a> ve
+      <a href={url('/docs/runs')} class="link">Çalıştırmalar</a>.
+    </li>
+    <li>
+      Zaten OpenTelemetry kullanıyorsanız:
+      <a href={url('/docs/opentelemetry')} class="link">OTLP yolunun</a> tamamı,
+      mcpd'nin standart özniteliklerden çıkardıkları dahil.
+    </li>
+    <li>
+      Bunu başkaları için çalıştırmak:
+      <a href={url('/deploy')} class="link">Docker ve Kubernetes</a>, ardından
+      <a href={url('/docs/privacy')} class="link">Maskeleme ve saklama</a>.
+    </li>
+  </ul>
+  <p>
+    mcpd, Apache-2.0 lisanslıdır. Girişteki protokol, çıkıştaki biçim ve
+    etrafındaki lisans açıktır; bu yüzden ayrılmak, gelmek kadar ucuzdur.
+  </p>
+</Doc>

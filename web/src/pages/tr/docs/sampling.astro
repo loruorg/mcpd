@@ -1,0 +1,207 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import StripChart from '@/components/StripChart.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Örnekleme"
+  description="mcpd'nin uyguladığı beş örnekleme stratejisi, kararın neden kökte bir kez verildiği, deterministik özetin bir filoyu nasıl anlaştırdığı ve kuyruk örneklemesinin neyi tuttuğu."
+  lede="Trace'lerin bir kısmını tutmak, her birinin bir kısmını tutmadan."
+  og="docs"
+>
+  <h2>Karar bir kez, kökte verilir</h2>
+  <p>
+    Bir trace bütün olarak tutulur veya bütün olarak düşürülür. Karar, kök span
+    başladığında verilir ve her alt span tarafından devralınır, yani bir
+    çalıştırma hiçbir zaman yarım kaydedilmez.
+  </p>
+  <p>
+    Geri kalan her şey bu kuraldan çıkar. Span'lerinin rastgele %30'u eksik
+    olan bir trace, örneklenmiş bir trace gibi okunmaz. Gözlemlediğiniz
+    sistemdeki bir hata gibi okunur: hiç olmamış görünen bir araç çağrısı,
+    ebeveyni olmayan bir model çağrısı, geri getirmenin olması gereken yerde bir
+    boşluk. Boşluğun ajanınız değil gözlemlenebilirlik aracınız olduğunu
+    anlayana kadar bir öğleden sonranızı buna verirsiniz.
+  </p>
+
+  <h2>Varsayılan her şeyi tutar</h2>
+  <p>
+    Örnekleme yapılandırılmadığında politika <code>always</code> olur ve hacim
+    aksini söyleyene kadar doğru varsayılan budur. Örnekleme, okumak
+    isteyeceğiniz çalıştırmayı gözden çıkarır. Bunu yalnızca depolama veya bant
+    genişliği sizi zorladığında ödeyin.
+  </p>
+
+  <h2>Beş strateji</h2>
+  <table>
+    <thead>
+      <tr><th>Strateji</th><th>Davranış</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>always</code></td>
+        <td>Her şeyi tutar. Varsayılan.</td>
+      </tr>
+      <tr>
+        <td><code>never</code></td>
+        <td>Hiçbir şey tutmaz.</td>
+      </tr>
+      <tr>
+        <td><code>ratio</code></td>
+        <td>Sabit bir kesir tutar; kesir, trace başına bir kez kökte rastgele çekilir.</td>
+      </tr>
+      <tr>
+        <td><code>deterministic</code></td>
+        <td>Sabit bir kesir tutar; karar trace kimliği özetlenerek verilir. Her collector, başka hiçbiriyle konuşmadan aynı yanıta ulaşır.</td>
+      </tr>
+      <tr>
+        <td><code>tail</code></td>
+        <td>Kararı trace bitene kadar erteler, sonra oran ne derse desin her hatayı ve her yavaş çalıştırmayı tutar.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Oran ayarlamak</h2>
+  <p>
+    <code>--sample</code> veya <code>MCPD_SAMPLE</code>, 0.0 ile 1.0 arasında bir
+    kesir alır ve deterministik stratejiyi yapılandırır. Bu aralığın dışındaki
+    bir değer, ne verdiğinizi adlandıran bir iletiyle daemon'u açılışta durdurur.
+    Değeri aralığa kırpmaz, çünkü sessizce 1.0'a dönüşen yanlış yazılmış bir
+    oran bir ay sonra depolama faturasından fark edilir.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="on trace'ten birini tut"
+    command="mcpd --sample 0.1"
+    primaryLabel="Seçenek olarak"
+    secondary={[
+      { label: 'ortam değişkeniyle', command: 'MCPD_SAMPLE=0.1 mcpd' },
+      { label: 'neyi okuduğunu doğrulayın', command: 'mcpd config' },
+    ]}
+  />
+
+  <p>
+    Her SDK aynı kesri okur: istemci yapılandırmasında <code>sample</code>,
+    ortamda <code>MCPD_SAMPLE</code>. İstemcide örneklemek daha ucuzdur:
+    örneklenmemiş bir span hiç kuyruğa alınmaz ve hiç dışa aktarılmaz, yani hiç
+    bant genişliği harcamaz. Daemon'da örneklemek size gidiş dönüşe mal olur ama
+    oranı tek bir yerde tutar; bir düzine servis tek bir örneğe rapor
+    verdiğinde istediğiniz şey budur.
+  </p>
+  <p>
+    Beş stratejiden daemon <code>always</code> ve <code>deterministic</code>
+    stratejilerine ulaşır: <code>--sample</code> ve yapılandırma dosyasındaki
+    bir projenin <code>sample</code> değeri, ikisi de deterministic stratejiyi
+    ayarlar. <code>never</code>, <code>ratio</code> ve <code>tail</code>
+    politika türünde uygulanmıştır, ama bu yapıda ne bir seçenekten ne de
+    yapılandırma dosyasından erişilebilir.
+  </p>
+
+  <h2>Özetleme bir filoyu neden anlaştırır</h2>
+  <p>
+    Bir yük dengeleyicinin arkasında birkaç mcpd örneği çalıştırın; tek bir
+    trace'in span'lerinin hepsi aynı örneğe ulaşmaz. Örnek başına ya da span
+    başına yazı tura atan bir örnekleyici, bir trace'in bir kısmını tutar, geri
+    kalanını düşürür; ilk kural tam olarak bu başarısızlığı önlemek için vardır.
+  </p>
+  <p>
+    Deterministik strateji, trace kimliğini 64 bitlik aralığın tamamına eşler ve
+    bu değer oranın gerektirdiği eşiğin altına düştüğünde trace'i tutar. Her
+    örnek, aynı kimlikten aynı sayıyı hesaplar, yani hepsi anlaşır: paylaşılan
+    durum yok, eşgüdüm protokolü yok, senkronu bozulacak bir şey yok. Aynı
+    kimlik bir yeniden denemede de aynı yanıtı verir, yani yeniden oynatılan bir
+    yığın yarım ulaşamaz.
+  </p>
+  <p>
+    Bu eşlemeyi dürüst kılan iki ayrıntı var. Kimliğin <em>sondaki</em> on altı
+    onaltılık karakterini okur: OpenTelemetry trace kimliklerinin rastgele
+    olmasını ister, ama bazı üreticiler baştaki baytları bir zaman damgasından
+    türetir ve onları okuyan bir örnekleyici örneklemek yerine günün saatiyle
+    ilişkilenir. Kimlik hiç onaltılık değilse, her şeyi tutmaya indirgenmek
+    yerine sonlandırıcı bir karıştırma içeren gerçek bir özete iner, yani
+    gerçekleşen oran istediğiniz orana yakın kalır.
+  </p>
+
+  <h2>SDK'larda yukarıdan gelen karar kazanır</h2>
+  <p>
+    Bir SDK gelen bir W3C <code>traceparent</code> üzerinden bir trace'i
+    sürdürdüğünde, örneklendi bayrağını kimliklerle birlikte devralır ve kendi
+    oranını uygulamaz. Bu iki yönde de geçerlidir: bayrak açıksa trace yerel oran
+    ne olursa olsun tutulur, kapalıysa yerel oran ne olursa olsun düşürülür.
+  </p>
+  <p>
+    Bu sürümde daemon bunu yapmaz. OTLP üzerinden gelen bir span'in trace-flags
+    baytını daemon <code>mcpd.otlp.flags</code> özniteliğinde saklar, ama
+    daemon'un örnekleyicisi onu okumaz. Oran ayarlanmış bir daemon, bayrak ne
+    derse desin bu oranı her trace'e uygular.
+  </p>
+  <p>
+    Alternatifi kulağa geldiğinden daha kötüdür. Her servis kendi oranını
+    uygulasaydı, dört servisten geçen bir trace ikisi tarafından tutulur ikisi
+    tarafından düşürülürdü ve sonunda elinizdeki şey dağıtık bir trace olmazdı.
+    Bir trace biçiminde bir delikler kümesi olurdu.
+  </p>
+
+  <h2>Kuyruk örneklemesi okunmaya değer çalıştırmaları tutar</h2>
+  <p>
+    Baş örnekleyici hiçbir şey bilmeden karar verir. Ucuzdur ve kördür: onda bir
+    oranda hataların da onda birini tutar. Gerçekte açtığınız trace'ler seyrek
+    olanlardır ve bir oran örnekleyicisinin en kötü olduğu şey tam olarak
+    seyrekliktir.
+  </p>
+
+  {/* The pen stands 200 units in rather than at the component's default. An
+      article column is 662px wide at every desktop size here, and the default
+      arm stands at 760, so this chart had never once drawn its pen: the one
+      element that makes a recorder a recorder was outside the field at every
+      width, including a phone's. */}
+  <StripChart class="not-prose my-8" height={260} pen={200} />
+
+  <p>
+    Bir gecikme kaydı böyle görünür: düz bir taban çizgisi ve birkaç sapma.
+    Hacim taban çizgisindedir, yanıtlar sapmalardadır. Kuyruk örneklemesi
+    trace'i bitene kadar tutar, sonra içinde bir şey hata verdiyse saklar,
+    ayarladığınız eşikten uzun sürdüyse saklar, aksi hâlde önceki deterministik
+    özetin aynısını uygular. Hataları tutmak varsayılan olarak açıktır, çünkü en
+    çok ihtiyaç duyduğunuz trace'ler seyrek olanlardır ve bir oran örnekleyicisi
+    de en çok onları atar.
+  </p>
+  <p>
+    Bedeli tamponlamadır. Bir kuyruk örnekleyicisi, karar verebilene kadar
+    bitmemiş her trace'i bellekte tutmalıdır; varsayılan değil de bilinçli bir
+    seçim olmasının nedeni budur. Yukarıdaki gibi, kuyruk stratejisi politika
+    türünde uygulanmıştır ve bu yapıda ne bir seçenekten ne de
+    yapılandırma dosyasından erişilebilir; daemon'un alım yolu baş kararını uygular.
+  </p>
+
+  <h2>Neyin düşürüldüğünü bilmek</h2>
+  <p>
+    Örnekleyicinin attığı her span
+    <code>mcpd_traces_sampled_out_total</code> sayacını artırır; bu sayaç
+    <code>/metrics</code> altında Prometheus metin biçiminde dışa aktarılır.
+    Oranı ekibinizin okuduğu bir yere yazın. Belgelenmiş bir örnekleme oranıyla
+    eksik bir trace bir açıklamadır; açıklaması olmayan eksik bir trace bir
+    destek kaydıdır ve onu açan kişi genellikle sizsinizdir.
+  </p>
+
+  <h2>Sonraki</h2>
+  <ul>
+    <li>
+      Daha az saklamanın diğer yolu:
+      <a href={urlFor('/docs/privacy', code)} class="link">Maskeleme ve saklama</a>.
+    </li>
+    <li>
+      Her seçenek ve ortam değişkeni:
+      <a href={urlFor('/docs/configuration', code)} class="link">Yapılandırma</a>.
+    </li>
+    <li>
+      <code>/metrics</code> ve daemon'un kendi sinyallerinin geri kalanını
+      okumak: <a href={urlFor('/docs/operations', code)} class="link">İşletme</a>.
+    </li>
+  </ul>
+</Doc>

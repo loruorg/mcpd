@@ -1,0 +1,292 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="회귀 테스트"
+  description="잘못된 프로덕션 실행 하나를 영구적인 테스트 케이스로 바꾸고, 저장된 실행에 mcpd의 내장 스코어러를 돌리고, 차이 옆에 표본 수를 붙여 에이전트의 두 버전을 비교합니다."
+  lede="화요일에 망가진 그 실행이, 이후의 모든 버전이 통과해야 하는 케이스가 됩니다."
+  og="docs"
+>
+  <h2>닫으려는 고리</h2>
+  <p>
+    에이전트가 실제 질문 하나에서 실패합니다. 누군가 손으로 재현해 보고,
+    프롬프트를 바꾸고, 나아진 것처럼 보입니다. 세 주 뒤 같은 질문에서 다시
+    실패합니다. 아무것도 그것을 붙들어 두지 않았기 때문입니다.
+  </p>
+  <p>
+    데이터셋은 그것을 붙들어 둡니다. 실패한 실행을 담아 두면 그것은 일화이기를
+    그치고, 입력과 (있다면) 기대하는 답과 그것이 나온 트레이스로 돌아가는 포인터를
+    갖춘 케이스가 됩니다. 이후의 모든 버전이 그것을 상대로 돕니다.
+  </p>
+
+  <h2>실행 담아 두기</h2>
+  <p>
+    인터페이스나 API로 실행을 찾은 다음, 그 트레이스 id를 데이터셋에 넘기십시오.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="실패한 실행을 케이스로 담아 두기"
+    command={`curl -X POST localhost:4317/v1/api/datasets/$DATASET/capture \\
+  -H 'content-type: application/json' \\
+  -d '{"trace_ids": ["b3d9e71a4c0f428eb6a5d2317f90c684"]}'`}
+  />
+
+  <p>
+    담아 둔 케이스는 <code>source_trace_id</code>를 지니고 있어서, 몇 달 뒤에도
+    그 케이스를 만들게 한 실행을 열어 입력으로 짐작하는 대신 실제로 무슨 일이
+    있었는지 읽을 수 있습니다.
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <h2>실행이 내놓은 답은 기대하는 답이 아닙니다</h2>
+  <p>
+    <code>use_output_as_expected</code>는 기본값이 꺼짐이고, 그 기본값이 중요한
+    부분입니다. 담아 둘 만한 실행은 대개 잘못된 실행이고, 잘못된 답을 기준으로
+    기록하는 것은 그 버그를 규범으로 새겨 넣는 일입니다. 그러면 이후의 모든
+    버전이 그 버그를 재현하는 능력으로 측정됩니다.
+  </p>
+  <p>
+    이미 마음에 드는 동작을 그대로 붙들어 두려고 올바르게 끝난 실행을 담아 둘
+    때는 켜십시오. 실패를 담아 둘 때는 꺼 둔 채로, 기대하는 답은 직접
+    쓰십시오.
+  </p>
+
+  <h2>내장 스코어러</h2>
+  <p>
+    mcpd에는 결정론적 스코어러 열세 개가 들어 있습니다. 저장된 실행을 읽고 숫자를
+    돌려주는 평범한 코드입니다. 비용이 들지 않고, 모델을 부르지 않으며, 두 번
+    물으면 같은 답을 줍니다. 회귀 테스트에 필요하지만 판정 모델에는 없는 성질이
+    바로 이것입니다.
+  </p>
+  <table>
+    <thead>
+      <tr><th>스코어러</th><th>통과하는 조건</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>answered</code></td><td>실행이 비어 있지 않은 답을 내놓았습니다.</td></tr>
+      <tr><td><code>no_errors</code></td><td>실행 안의 어떤 스팬도 실패하지 않았습니다.</td></tr>
+      <tr><td><code>exact_match</code></td><td>답이 기대하는 답과 같습니다.</td></tr>
+      <tr><td><code>contains</code></td><td>답이 요구된 문자열을 담고 있습니다.</td></tr>
+      <tr><td><code>json_valid</code></td><td>답이 JSON으로 파싱됩니다.</td></tr>
+      <tr><td><code>latency_budget</code></td><td>실행이 밀리초 예산 안에서 끝났습니다.</td></tr>
+      <tr><td><code>cost_budget</code></td><td>실행 비용이 정해 둔 금액을 넘지 않았습니다.</td></tr>
+      <tr><td><code>no_tool_loop</code></td><td>같은 입력으로 두 번 불린 도구가 없습니다.</td></tr>
+      <tr><td><code>tool_efficiency</code></td><td>실행이 도구 호출 예산 안에 머물렀습니다.</td></tr>
+      <tr><td><code>not_a_refusal</code></td><td>답이 거절이나 사과가 아닙니다.</td></tr>
+      <tr><td><code>no_leaked_secret</code></td><td>답에 키, 토큰, 자격 증명이 나타나지 않습니다.</td></tr>
+      <tr><td><code>span_present</code></td><td>실행이 요구된 종류나 이름의 스팬을 기록했습니다.</td></tr>
+      <tr><td><code>tool_succeeded</code></td><td>요구된 도구가 실행되었고, 적어도 한 번의 호출이 정상으로 끝났습니다.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>GET /v1/api/scorers</code>는 같은 목록을 <code>needs_config</code>
+    플래그와 함께 돌려줍니다. 기대하는 답이 필요한데 받지 못한 스코어러는
+    짐작하는 대신 거절하고, 그 거절은 보고됩니다.
+  </p>
+
+  <h2>모델이 채점할 때</h2>
+  <p>
+    결정론적인 코드를 아무리 써도 답할 수 없는 질문이 있습니다. 답이 실제로 그
+    질문에 응했는지, 요약이 뜻을 지켰는지, 어조가 알맞았는지. 이런 것에는
+    읽는 이가 필요하고, 모델은 값싼 독자입니다.
+  </p>
+  <p>
+    모델 판정 채점은 설정하기 전까지 꺼져 있고, 판정 스코어러는 이름으로
+    지목하지 않는 한 절대 돌지 않습니다. 두 기본값 모두 같은 이유로
+    존재합니다. 채점은 읽는 실행마다 돈을 쓰고, 그것을 조용히 하는 기능은
+    청구서에서 알게 되는 기능입니다.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "judge": {
+    "endpoint": "http://localhost:11434/v1",
+    "model": "qwen2.5:14b",
+    "api_key": "",
+    "timeout_seconds": 30,
+    "criteria": {
+      "answer_relevance": "Does the answer address the question that was asked?",
+      "no_hedging": "Does the answer commit, rather than hedge?"
+    }
+  }
+}`}</code></pre>
+
+  <p>
+    요청은 OpenAI 채팅 완성 형태인데, 이는 특정 공급자를 편들어서가 아닙니다.
+    Ollama, vLLM, llama.cpp, LM Studio, OpenRouter와 호스팅 공급자들이 모두 그
+    형태를 받으므로, 같은 설정으로 노트북 위의 모델에도 프로덕션의 게이트웨이에도
+    닿습니다. 키를 요구하지 않는 로컬 모델이라면 <code>api_key</code>를 비워
+    두십시오. 온도는 0입니다. 매번 다르게 답하는 판정 모델은 자기 자신과 비교할
+    수 없는데, 점수는 오직 그 비교를 위해 있기 때문입니다.
+  </p>
+  <p>
+    기준은 요청마다 넘기는 것이 아니라 설정에 둡니다. 스코어러 id는 그것이 낸
+    모든 점수에 저장되고 나중의 비교가 묶는 기준이 되므로, 호출마다 id와 질문을
+    함께 지어내게 하면 아무도 믿을 수 없는 열이 만들어집니다.
+  </p>
+  <p>
+    설정한 기준은 <code>GET /v1/api/scorers</code>에 나타나지 않습니다. 그
+    엔드포인트는 내장 스코어러 열세 개만 나열하므로, 거기에서 스코어러 메뉴를
+    만드는 클라이언트는 직접 설정한 기준을 내놓지 않습니다. 데몬이 그 기준들을 다시
+    이름으로 불러 주는 곳은 알 수 없는 스코어러 id에 대한 오류 하나이며, 거기에는
+    내장 스코어러와 설정한 기준이 함께 나열됩니다.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="최근 실행 한 건에 판정 스코어러 돌리기"
+    command={`curl -X POST localhost:4317/v1/api/score \\
+  -H 'content-type: application/json' \\
+  -d '{"limit": 1, "scorers": ["answer_relevance"]}'`}
+  />
+
+  <p>
+    <code>timeout_seconds</code>는 채점 호출 한 번에 걸려도 되는 시간으로, 연결부터 응답의 마지막 바이트까지를
+    셉니다. 기본값은 30이고 범위는 1에서 300입니다. 이 시간을 넘긴 호출은 키 이름을 알려 주며 거절되고, mcpd는 응답을 최대 1
+    MiB까지만 읽습니다.
+  </p>
+  <p>
+    판정 스코어러 하나는 실행 한 건마다 모델 호출 한 번이며, 요청은 <code>--request-timeout-seconds</code>
+    안에 끝나야 합니다. 그래서 요청 한 번이 채점하는 실행은, 모든 호출이 <code>timeout_seconds</code>를 다
+    쓰더라도 그 기한 안에 들어가는 만큼까지입니다. 기본값 30과 30에 판정 스코어러 하나라면 한 건입니다.
+    <code>trace_ids</code>나 <code>limit</code>로 그보다 많이 요청하면, 모델을 부르기 전에 상한을 알려
+    주는 400으로 거부됩니다. <code>limit</code>를 빼면 들어가는 만큼의 최근 실행을 채점합니다. 한 번에 더 많이 채점하려면
+    <code>--request-timeout-seconds</code>를 올리십시오. 판정 점수는 모델이 답하는 즉시 저장되므로, 중간에
+    끊긴 요청도 끝낸 점수는 남깁니다.
+  </p>
+
+  <h3>짐작하는 대신 거절합니다</h3>
+  <p>
+    끌어내지 않은 숫자를 돌려주는 판정 모델은 판정 모델이 없는 것보다 나쁩니다.
+    증거처럼 보이기 때문입니다. 그래서 아래의 경우는 모두 그 이유와 함께
+    <code>skipped</code>에 보고되고, 어느 것도 점수를 만들지 않습니다.
+  </p>
+  <table>
+    <thead>
+      <tr><th>무슨 일이 있었는가</th><th>mcpd가 하는 일</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>실행에 답이 기록되지 않음</td>
+        <td>거절합니다. 답이 없는 실행은 관련성에서 낮은 점수를 받은 것이 아니라, 아직 측정되지 않은 것입니다.</td>
+      </tr>
+      <tr>
+        <td>모델이 산문으로 답함</td>
+        <td>그 답을 인용하며 거절합니다. 코드 펜스나 문장에 싸인 JSON은 그래도 읽습니다.</td>
+      </tr>
+      <tr>
+        <td>모델이 척도 밖의 값을 답함</td>
+        <td>거절합니다. 1점 척도에서의 7은 10분의 9가 아니고, 잘라 맞추는 것은 숫자를 지어내는 일입니다.</td>
+      </tr>
+      <tr>
+        <td>모델에 닿지 못함</td>
+        <td>상태와 본문을 함께 붙여 거절합니다. 요청 한도는 0점이 아니라 하나의 이유입니다.</td>
+      </tr>
+      <tr>
+        <td>응답이 1 MiB를 넘었다</td>
+        <td>나머지를 읽지 않고 거절합니다. 판정은 수백 바이트이므로, 그만한 크기의 응답은 판정이 아닙니다.</td>
+      </tr>
+      <tr>
+        <td>요청 기한에 호출할 시간이 남지 않았음</td>
+        <td>모델을 부르지 않고 거절합니다. 그 채점 패스는 503 대신 기한 안에 끝낸 점수로 답합니다.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    모델이 판정한 점수는 모두 그 모델을 자기 <code>scorer_version</code>으로
+    기록합니다. 서로 다른 두 판정 모델에서 나온 두 점수는 비교할 수 없으며, 그
+    필드가 레코드 위에서 그렇게 말해 줍니다.
+  </p>
+
+  <h2>채점은 일이 끝난 뒤에 일어납니다</h2>
+  <p>
+    <code>POST /v1/api/score</code>는 이미 저장된 실행에 스코어러를 돌립니다.
+    무엇도 인라인으로 평가하지 않습니다. 요청 경로 안의 평가는 자기 지연 시간을
+    자기가 판정하는 대상에 더하고, 예외를 던지는 평가가 사용자의 요청을
+    실패시켜서는 안 됩니다.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="최근 실행 백 건 채점하기"
+    command={`curl -X POST localhost:4317/v1/api/score \\
+  -H 'content-type: application/json' \\
+  -d '{"project": "support-desk", "limit": 100, "config": {"max_ms": 4000}}'`}
+  />
+
+  <p>
+    응답은 기록한 점수와, 그와 별개로 거절한 모든 스코어러를 그 이유와 함께
+    싣습니다. 답하지 못한 스코어러가 숫자를 돌려준 스코어러보다 더 흥미로우므로,
+    mcpd는 그것을 삼키지 않습니다. 프로젝트의 수집 상한도 이 문에 닿습니다. 한
+    번의 채점이 계산한 점수가 프로젝트를 <code>--quota-per-minute</code> 너머로
+    넘긴다면 그 점수는 저장되지 않고, 상한을 넘겨 쓰이거나 조용히 버려지는 대신
+    그렇게 말하며 <code>skipped</code>에 나열됩니다.
+  </p>
+  <p>
+    <code>"dry_run": true</code>를 보내면 아무것도 저장하지 않고 한 번의 채점이
+    무엇을 낼지 볼 수 있습니다.
+  </p>
+  <p>
+    한 번의 채점이 어떤 실행을 읽을지는 <code>trace_ids</code>,
+    <code>from</code>, <code>limit</code>이 정합니다. 정확히 그 실행들만 채점하려면
+    <code>trace_ids</code>에 이름을 적으십시오. 비워 두면 프로젝트에서 가장 최근
+    실행 <code>limit</code>개를 최신순으로 가져가고, <code>from</code>이 그 페이지의
+    경계를 정합니다. <code>from</code>과 함께 보낸 채점은 그 시각 이후에 시작된
+    실행만 읽으므로, id를 나열하지 않고 배포 이후의 모든 것을 채점하는 방법이
+    이것입니다.
+  </p>
+
+  <h2>두 버전 비교하기</h2>
+  <p>
+    비교하고 싶은 버전마다 실험을 하나씩 기록하고, 그 점수에 해당 실험의 id를
+    붙인 다음, mcpd에 차이를 물어보십시오.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="새 프롬프트가 도움이 되었는가"
+    command="curl 'localhost:4317/v1/api/experiments/compare?baseline=v3&candidate=v4'"
+  />
+
+  <p>
+    답은 스코어러별 차이이며, 양쪽의 표본 수와 <code>decidable</code> 플래그가
+    함께 옵니다. 관측이 스무 개 아래이면 mcpd는 움직임을 보고하는 대신 그 비교를
+    판정할 수 없다고 말합니다.
+  </p>
+  <p>
+    이것은 의도적으로 무딘 규칙이며 유의성 검정이 아닙니다. 이 규칙이 막는 것은
+    흔한 실패입니다. 네 번의 실행에서 움직인 평균이 개수 없이 인쇄되고, 결과로
+    읽히고, 그대로 배포되는 것입니다. 차이 옆에 개수를 함께 인쇄하는 것이 잡음을
+    발견으로 오해하지 않게 막아 줍니다.
+  </p>
+
+  <h2>이것이 도는 곳</h2>
+  <p>
+    전부 HTTP API이므로 이 고리는 CI에 어울립니다. 실패가 생기는 대로 담아 두고,
+    테스트 스위트가 만들어 낸 실행을 채점하고, 빌드를 실험으로 등록하고, 판정할
+    수 있는 비교에서 <code>regressed</code>가 참으로 돌아오면 잡을 실패시키십시오.
+  </p>
+
+  <h2>다음</h2>
+  <ul>
+    <li>
+      점수가 나란히 놓이는 두 시그널:
+      <a href={urlFor('/docs/evaluation', locale)} class="link">점수와 피드백</a>.
+    </li>
+    <li>
+      프로덕션에서 스코어러의 평균을 지켜보기:
+      <a href={urlFor('/docs/alerting', locale)} class="link">모니터와 알림</a>.
+    </li>
+    <li>
+      모든 엔드포인트와 필드:
+      <a href={urlFor('/docs/reference/api', locale)} class="link">HTTP API</a>.
+    </li>
+  </ul>
+</Doc>

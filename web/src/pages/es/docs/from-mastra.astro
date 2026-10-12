@@ -1,0 +1,264 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Vienes de Mastra"
+  description="En qué se diferencia mcpd de la observabilidad de Mastra: recibe OpenTelemetry en vez de exportarlo, oculta las seis señales y no solo los spans, y muestrea de forma determinista. Y lo que no hace."
+  lede="mcpd es una alternativa gratuita y autoalojada a la observabilidad de Mastra y a sus workflows duraderos. Esta página dice dónde va por delante, dónde va por detrás, y cómo migrar."
+  og="docs"
+>
+  <h2>Qué es esto</h2>
+  <p>
+    Mastra es un framework de agentes: agentes, workflows, memoria, RAG y
+    observabilidad, en una sola dependencia de TypeScript. mcpd es un daemon al
+    lado de tu código: conserva un workflow entre sus pasos y registra cada paso,
+    y te deja a ti los modelos, los prompts y las herramientas. No es un
+    framework alrededor de tu agente, y está escrito para no llegar a serlo.
+  </p>
+  <p>
+    Esa diferencia decide casi todo lo que sigue. La observabilidad de Mastra
+    conoce tu agente porque está dentro de él. mcpd conoce tu agente porque tu
+    agente emite OpenTelemetry, lo que significa que también sirve para los
+    servicios que rodean a tu agente, y para agentes que nunca se escribieron en
+    TypeScript.
+  </p>
+
+  <h2>Las diferencias que importan</h2>
+
+  <h3>Los cuerpos del workflow se quedan en tu proceso, en cualquier lenguaje</h3>
+  <p>
+    Los dos ejecutan workflows duraderos. Los pasos de Mastra son funciones de
+    TypeScript dentro del proceso de Mastra, suspendidas y reanudadas a través de
+    su almacenamiento. La definición de mcpd son datos que conserva el daemon, y
+    los cuerpos de sus pasos son código que conserva tu proceso, reclamados de
+    lease en lease mediante un protocolo HTTP que hablan seis SDK y puede hablar
+    cualquier lenguaje. El daemon nunca ve un modelo, un prompt ni una
+    credencial, y un cuerpo puede cambiar sin que cambie la definición.
+  </p>
+  <p>
+    Lo que el daemon sí conserva es la parte que tiene que sobrevivir: el cursor,
+    el diario, el presupuesto de reintentos, los temporizadores, y una espera de
+    un evento que puede tardar una semana en llegar. Una ejecución sobrevive al
+    proceso que la empezó y al worker que sirvió su último paso. Consulta
+    <a href={urlFor('/docs/workflows', code)} class="link">Workflows</a>.
+  </p>
+
+  <h3>Recibe OpenTelemetry en vez de exportarlo desde un solo framework</h3>
+  <p>
+    Esta es la tesis entera. La observabilidad de Mastra exporta desde dentro de
+    una aplicación de Mastra, así que lo que puede ver es lo que hace esa
+    aplicación, en el lenguaje en que está escrita. mcpd es el colector: recibe
+    OTLP de cualquier SDK de OpenTelemetry, en cualquier lenguaje, sin ningún
+    código de mcpd en tu aplicación, y registra los servicios que rodean al
+    agente con la misma facilidad que al agente.
+  </p>
+  <p>
+    También emite OTLP, así que mcpd puede colocarse en medio de un pipeline que
+    ya tienes en lugar de al final de otro que tendrías que construir. Consulta
+    <a href={urlFor('/docs/forwarding', code)} class="link">Reenvío</a>.
+  </p>
+
+  <h3>La ocultación cubre las seis señales</h3>
+  <p>
+    El <code>SensitiveDataFilter</code> de Mastra es un procesador de spans. Se
+    ejecuta sobre spans y sobre nada más, así que una clave pasada a un log
+    estructurado, o un secreto citado en el motivo de una puntuación o en un
+    feedback, llega a todos los exportadores sin ocultar.
+  </p>
+  <p>
+    mcpd oculta en spans, logs, etiquetas de métricas, puntuaciones, feedback y
+    notas de aspecto, activado por defecto, antes de escribir nada y antes de
+    reenviar nada.
+  </p>
+  <p>
+    Además, su coincidencia de claves es por subcadena y no por nombre exacto,
+    así que <code>awsSecretAccessKey</code> y <code>X-API-Key</code> quedan
+    atrapados por las reglas de <code>secret</code> y <code>x-api-key</code>. Un
+    conjunto de reglas que exige que coincida el nombre entero se pierde los dos.
+  </p>
+  <p>
+    Que quede claro el límite: la ocultación coincide con el nombre de un
+    campo, no con la forma de su contenido. Un token pegado en medio de un
+    prompt, o dentro de una URL guardada bajo una clave inofensiva, no lo quita
+    ninguna de las dos herramientas. La ocultación reduce lo que filtras por
+    descuido. No es una garantía.
+  </p>
+  <p>
+    Lo que mcpd añade para ese caso es un evaluador, no un filtro. El evaluador
+    integrado <code>no_leaked_secret</code> lee la respuesta de una ejecución y
+    busca la forma de una credencial, así que una clave que acabó en una
+    completion al menos te la informan. Consulta
+    <a href={urlFor('/docs/testing', code)} class="link">Pruebas de regresión</a>.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <h3>El muestreo es determinista</h3>
+  <p>
+    El muestreo por proporción de Mastra llama a <code>Math.random()</code>. Por
+    eso cada réplica detrás de un balanceador de carga decide algo distinto sobre
+    la misma traza, y una ejecución que cruza dos servicios puede quedar guardada
+    por uno y descartada por el otro.
+  </p>
+  <p>
+    mcpd calcula un hash del id de traza, así que cada instancia llega
+    a la misma respuesta sin coordinarse y una traza guardada se guarda entera.
+    Las opciones del daemon alcanzan dos estrategias, guardarlo todo y esta
+    fracción determinista; una estrategia de cola que guardaría todos los errores
+    diga lo que diga la proporción existe en el tipo de política y no se puede
+    alcanzar desde la línea de comandos en esta versión. Consulta
+    <a href={urlFor('/docs/sampling', code)} class="link">Muestreo</a>.
+  </p>
+
+  <h2>El resto, en breve</h2>
+  <table>
+    <thead>
+      <tr><th>Área</th><th>Qué hace mcpd</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Despliegue</td>
+        <td>Un binario estático con el almacén y la interfaz compilados dentro. Sin Node, sin sidecar.</td>
+      </tr>
+      <tr>
+        <td>Almacenamiento</td>
+        <td>SQLite para un portátil, Postgres o ClickHouse para un equipo. Los tres probados contra un servidor real en CI.</td>
+      </tr>
+      <tr>
+        <td>Búsqueda</td>
+        <td>Texto completo sobre cada prompt y cada completion guardados.</td>
+      </tr>
+      <tr>
+        <td>Métricas</td>
+        <td>Agregadas en la ingesta, con cuantiles exactos y exemplars que llevan de vuelta a una ejecución.</td>
+      </tr>
+      <tr>
+        <td>Costo</td>
+        <td>Valorado en la ingesta y guardado. Los tokens en caché se cobran a su propia tarifa. Un modelo desconocido se deja sin valorar en vez de informarse como gratis.</td>
+      </tr>
+      <tr>
+        <td>SDK</td>
+        <td>TypeScript, Python, Rust, Go, Kotlin y Elixir, generados desde una sola especificación para que no puedan divergir. Cada uno trae un constructor de workflows y un worker.</td>
+      </tr>
+      <tr>
+        <td>Workflows</td>
+        <td>Nueve construcciones, en manos del daemon: pasos, turnos de agente, pausas, esperas de eventos, ramas paralelas, foreach, bucles acotados y ejecuciones hijas. Los reintentos, los efectos y los límites son por paso. Una suite de conformidad sirve la misma ejecución desde los seis lenguajes.</td>
+      </tr>
+      <tr>
+        <td>Evaluación</td>
+        <td>Trece evaluadores deterministas, más puntuación calificada por modelo contra cualquier endpoint con forma de OpenAI. Datasets capturados de ejecuciones de producción, y comparación de experimentos que informa de su tamaño de muestra.</td>
+      </tr>
+      <tr>
+        <td>Licencia</td>
+        <td>Apache-2.0. Autoalojado y sin cuenta, o alojado gratis en mcpd.sh.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Dónde mcpd va por detrás</h2>
+  <p>
+    Se dice aquí en vez de dejar que lo descubras tú, porque una comparación que
+    solo enumera victorias es un anuncio.
+  </p>
+  <ul>
+    <li>
+      <strong>No es un framework alrededor de tu código.</strong> Mastra te da
+      agentes, memoria, RAG y un enrutador de modelos en una sola dependencia.
+      mcpd te da la ejecución duradera y su registro, y deja los modelos, los
+      prompts y las herramientas a tu código. Si quieres una sola dependencia que
+      lo haga todo, esa dependencia es Mastra.
+    </li>
+    <li>
+      <strong>Sin exportadores por proveedor.</strong> Mastra trae integraciones
+      con Langfuse, LangSmith, Braintrust, Arize, Datadog y otros, nombre por
+      nombre. mcpd reenvía OTLP, que llega a casi todos ellos con una sola
+      implementación, pero un destino que solo habla su propio protocolo queda
+      fuera de alcance.
+    </li>
+    <li>
+      <strong>Sin SSO, SCIM ni RBAC.</strong> La autenticación son seis
+      ámbitos de clave de API y una lista de proyectos por clave. Ponlo detrás
+      del proxy de identidad que ya ejecutas.
+    </li>
+  </ul>
+
+
+  <h2>Cómo migrar</h2>
+  <p>
+    Si tu agente ya emite OpenTelemetry, esto son dos variables de entorno. mcpd
+    habla OTLP sobre HTTP, en los endpoints con los que todo SDK de
+    OpenTelemetry ya sabe hablar. Las trazas pueden ir en JSON o en protobuf;
+    los logs y las métricas tienen que ir en JSON.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="apuntar a mcpd una instalación de OpenTelemetry existente"
+    command={`export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json`}
+  />
+
+  <p>
+    La línea del protocolo importa. Por convención el puerto 4317 es gRPC, y mcpd
+    habla HTTP en él, así que un SDK dejado en su valor gRPC por defecto se
+    conecta al puerto correcto y falla.
+    <a href={urlFor('/docs/opentelemetry', code)} class="link">OpenTelemetry</a> repasa esto y
+    el resto de los ajustes.
+  </p>
+
+  <p>
+    Ejecuta los dos durante dos semanas. mcpd reenvía los spans que guarda a lo
+    que usabas antes, así que puedes compararlos sobre las mismas trazas en vez
+    de sobre una migración que no puedes deshacer. Solo reenvía spans: los logs,
+    las métricas, las puntuaciones, el feedback y las notas de aspecto se
+    quedan en mcpd.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="conservar el destino antiguo mientras decides"
+    command="mcpd serve --forward-endpoint https://your-existing-collector"
+  />
+
+  <p>
+    Si tu agente todavía no emite OpenTelemetry, empieza por
+    <a href={urlFor('/docs/quickstart', code)} class="link">Inicio rápido</a>, o elige tu
+    lenguaje bajo Instrument en la barra lateral.
+  </p>
+
+  <h2>Cómo se hizo esta comparación</h2>
+  <p>
+    Las afirmaciones sobre Mastra de esta página vienen de leer su código fuente
+    en agosto de 2026, no de su documentación ni de ejecutar una prueba de
+    rendimiento. Aquí no hay cifras de rendimiento porque no hemos medido ninguna
+    que estuviéramos dispuestos a defender.
+  </p>
+  <p>
+    Mastra se desarrolla de forma activa y cualquier cosa de esto puede dejar de
+    ser cierta. Si encuentras algo desactualizado, es un fallo de esta página:
+    <a href="https://github.com/mcpd/mcpd/issues" class="link">abre una incidencia</a>
+    y se corregirá.
+  </p>
+
+  <h2>A continuación</h2>
+  <ul>
+    <li>
+      Apuntar a mcpd un colector existente:
+      <a href={urlFor('/docs/opentelemetry', code)} class="link">OpenTelemetry</a>.
+    </li>
+    <li>
+      Qué se quita antes de guardar nada:
+      <a href={urlFor('/docs/privacy', code)} class="link">Ocultación y retención</a>.
+    </li>
+    <li>
+      Ejecutarlo para un equipo:
+      <a href={urlFor('/deploy', code)} class="link">Docker y Kubernetes</a>.
+    </li>
+  </ul>
+</Doc>

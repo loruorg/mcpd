@@ -1,0 +1,620 @@
+---
+/**
+ * 部署 mcpd。
+ *
+ * 这一页上的清单不是抄写来的。它们在构建时从 `deploy/` 读取，所以读者复制走的
+ * 那个文件，就是仓库里的那个文件。一个漂移了的示例，比没有示例更糟。
+ */
+import fs from 'node:fs'
+import path from 'node:path'
+import Doc from '@/layouts/Doc.astro'
+import Unreleased from '@/components/Unreleased.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+/* 英文路由，按这个语言重新生成。 */
+const code = localeOf(Astro.url.pathname)
+const to = (route: string) => urlFor(route, code)
+
+const ROOT = path.resolve(process.cwd(), '..')
+const read = (rel: string) => fs.readFileSync(path.join(ROOT, rel), 'utf8').trimEnd()
+
+const docker = [
+  {
+    lang: 'curl' as const,
+    label: 'docker-compose.yml',
+    shiki: 'yaml',
+    code: read('deploy/docker/docker-compose.yml'),
+  },
+  {
+    lang: 'kotlin' as const,
+    label: '.env.example',
+    shiki: 'bash',
+    code: read('deploy/docker/.env.example'),
+  },
+]
+
+const kubernetes = [
+  { lang: 'typescript' as const, label: 'deployment.yaml', shiki: 'yaml', code: read('deploy/k8s/deployment.yaml') },
+  { lang: 'python' as const, label: 'service.yaml', shiki: 'yaml', code: read('deploy/k8s/service.yaml') },
+  { lang: 'go' as const, label: 'pvc.yaml', shiki: 'yaml', code: read('deploy/k8s/pvc.yaml') },
+  { lang: 'rust' as const, label: 'secret.yaml.example', shiki: 'yaml', code: read('deploy/k8s/secret.yaml.example') },
+]
+
+const chartValues = [
+  { lang: 'curl' as const, label: 'values.yaml', shiki: 'yaml', code: read('deploy/helm/mcpd/values.yaml') },
+]
+---
+
+<Doc
+  title="Docker 与 Kubernetes"
+  description="把 mcpd 作为容器或者在 Kubernetes 上运行：一个 compose 文件、带真实探针的清单、一个 Helm chart，以及在端口能被别的东西访问之前要设置的那两把密钥。"
+  lede="一个进程，一个卷，一个要备份的文件。这一页最长的那一节，讲的是在除你之外的人能够到它之前，你要先设置些什么。"
+  og="docs"
+>
+  <h2>一个容器</h2>
+  <Unreleased class="not-prose my-6" />
+  <p>
+    mcpd 是一个单进程，存储被编译在里面。旁边没有数据库要跑，没有 sidecar，
+    也没有静态文件服务器：摄取、查询 API 和界面全都由一个端口提供。
+  </p>
+
+  <Command
+    command="docker run -p 4317:4317 -v mcpd-data:/data -e MCPD_DATA=/data/mcpd.db ghcr.io/mcpd/mcpd:0.1.0"
+    secondary={[
+      { label: '打印配置然后退出', command: 'docker run --rm ghcr.io/mcpd/mcpd:0.1.0 config' },
+      { label: '什么都不留下', command: 'docker run -p 4317:4317 -e MCPD_DATA=:memory: ghcr.io/mcpd/mcpd:0.1.0' },
+    ]}
+  />
+
+  <p>
+    这个卷是值得读两遍的部分。没有它，SQLite 文件就住在容器的可写层里，容器一
+    消失，trace 也跟着消失。<code>MCPD_DATA</code> 被显式设置也是出于同一个理由：
+    如果守护进程写入的路径和你挂载的路径哪天分了家，mcpd 会照常工作，而那个卷
+    一直是空的，这种错误你会在需要那份数据的那天才发现。
+  </p>
+  <p>
+    请固定标签。<code>latest</code> 会把一次重启变成一次升级，而且发生在没人挑过
+    的时刻。每个标签都为 <code>linux/amd64</code> 和 <code>linux/arm64</code>
+    构建，并以 uid 10001 运行，镜像里的 <code>/data</code> 正归这个 uid 所有。
+  </p>
+
+  <h2>这个端口，以及上面回应的是什么</h2>
+  <p>
+    一切都在 4317 上。这就是这份部署只需要一个容器的原因，也是你在写一条入口
+    规则或者一条网络策略时需要知道的事情，因为这些路径承担的风险并不相同。
+  </p>
+
+  <div class="scroll-x">
+  <table>
+    <thead>
+      <tr>
+        <th>路径</th>
+        <th>它是什么</th>
+        <th>需要哪种密钥</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>/v1/traces</code>、<code>/v1/logs</code>、<code>/v1/metrics</code></td>
+        <td>OTLP 摄取，供任何 OpenTelemetry SDK 使用</td>
+        <td>摄取</td>
+      </tr>
+      <tr>
+        <td><code>/v1/ingest</code></td>
+        <td>原生摄取，一个请求承载完整的数据模型</td>
+        <td>摄取</td>
+      </tr>
+      <tr>
+        <td><code>/v1/api/…</code></td>
+        <td>查询 API：trace、span、日志、评分、分析</td>
+        <td>读取</td>
+      </tr>
+      <tr>
+        <td><code>/</code></td>
+        <td>运维界面，内嵌在二进制文件里</td>
+        <td>无</td>
+      </tr>
+      <tr>
+        <td><code>/healthz</code>、<code>/readyz</code>、<code>/metrics</code></td>
+        <td>存活、就绪，以及 mcpd 自己的 Prometheus 计数器</td>
+        <td>无</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    一次摄取请求的上限是 32 MiB。提示词很大，所以这个限制是有意放宽的，但站在
+    mcpd 前面的代理通常有一个更小的上限：一个反向代理拒掉了一个 3 MiB 的批次，
+    是一条 trace 从来没到达的最常见原因。
+  </p>
+
+  <h2>Compose</h2>
+  <p>
+    这个文件里有两个决定值得解释，因为它们看起来都像是遗漏。端口发布在
+    <code>127.0.0.1</code> 上，所以在你还在设置密钥期间，宿主机之外的任何东西都
+    够不到它。另外这个文件里没有 healthcheck，因为镜像自带一个：它用镜像里
+    busybox 的 <code>wget</code>，每 30 秒请求一次 <code>MCPD_LISTEN</code>
+    端口上的 <code>/healthz</code>，结果显示在 <code>docker compose ps</code>
+    里。Docker 不会因为容器不健康就重启它；重启策略只在进程退出时起作用。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={docker} title="deploy/docker" />
+
+  <Command
+    class="my-6"
+    command="docker compose -f deploy/docker/docker-compose.yml up -d"
+    secondary={[
+      { label: '日志', command: 'docker compose -f deploy/docker/docker-compose.yml logs -f mcpd' },
+    ]}
+  />
+
+  <p>
+    每一行密钥里的那个 <code>:?</code> 不是装饰。变量没设置时 Compose 会拒绝
+    启动这个服务，这就把一把忘掉的密钥，从一个安静敞开的端口，变成了一条错误
+    消息。两把运行用的密钥在文件里根本没有值，所以只有 <code>.env</code> 设置了
+    它们时，Compose 才会传过去：一个空值到了守护进程那里，会是一把空密钥，而不是
+    没有密钥。
+  </p>
+
+  <h2>Kubernetes</h2>
+  <p>
+    四个对象：一个 Deployment、一个 Service、一个 PersistentVolumeClaim，以及
+    一个由你自己创建的 Secret。这个 Deployment 以 <code>Recreate</code> 策略运行一个副本，而那是
+    这些清单里你不该改的那一行。mcpd 把一切存在单个 SQLite 文件里，由一个进程
+    写它，而一次滚动更新会在第一个 Pod 还握着这个卷的时候，在同一个卷上启动
+    第二个 Pod。那不是一个扩容的故事，那是一个数据损坏的故事。
+  </p>
+  <p>
+    这个 Secret 不在 <code>kubectl apply</code> 读取的文件之列。
+    <code>secret.yaml.example</code> 展示了它的形状，而这个扩展名让它不会被
+    apply，因为一个原样应用的 Secret 会把其中的占位字符串变成你的密钥。请改为在
+    命令行上创建它，密钥当场生成。Pod 以 uid 10001 运行，根文件系统只读，没有
+    任何 capability，使用运行时默认的 seccomp 配置，这正是 Pod Security 的
+    <code>restricted</code> 级别所要求的。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={kubernetes} title="deploy/k8s" />
+
+  <pre><code class="language-bash">{`export INGEST_KEY=$(openssl rand -hex 32) READ_KEY=$(openssl rand -hex 32) ADMIN_KEY=$(openssl rand -hex 32)
+kubectl create namespace mcpd
+kubectl -n mcpd create secret generic mcpd-keys \\
+  --from-literal=ingest-keys=$INGEST_KEY \\
+  --from-literal=read-keys=$READ_KEY \\
+  --from-literal=admin-keys=$ADMIN_KEY \\
+  --from-literal=redact-key=$(openssl rand -hex 32)
+kubectl -n mcpd apply -f deploy/k8s/`}</code></pre>
+
+  <p>
+    把这三把密钥放在你的团队存放机密的地方：摄取密钥交给每一个智能体，读取密钥
+    交给阅读界面的人，管理密钥交给可以删除数据的人。一旦有 worker 在集群之外
+    运行，就用同样的方式加上 <code>execute-keys</code> 和
+    <code>worker-keys</code>；在那之前，这两者都接受摄取密钥。
+  </p>
+
+  <pre class="my-6"><code>{`export EXECUTE_KEY=$(openssl rand -hex 32) WORKER_KEY=$(openssl rand -hex 32)
+kubectl -n mcpd patch secret mcpd-keys --type merge \\
+  -p '{"stringData":{"execute-keys":"'$EXECUTE_KEY'","worker-keys":"'$WORKER_KEY'"}}'
+kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
+
+  <Command
+    class="my-6"
+    command="kubectl -n mcpd port-forward svc/mcpd 4317:4317"
+    primaryLabel="从你的机器上访问它"
+  />
+
+  <p>
+    集群内的智能体指向这个 Service。SDK 从环境里读取下面这两项，所以已经接入的
+    代码不需要任何改动：
+  </p>
+
+  <Command command="MCPD_ENDPOINT=http://mcpd.mcpd.svc:4317 MCPD_API_KEY=$INGEST_KEY" />
+
+  <h3>探针</h3>
+  <p>
+    这两个端点有意做着不同的事，把它们对调会引发一种很具体、也很难看的故障。
+  </p>
+  <ul>
+    <li>
+      <code>/healthz</code> 从不碰存储。它只根据进程状态作答。一个会去查数据库
+      的存活探针，会在每次大查询把守护进程拖慢时重启一个健康的守护进程，而在
+      预写日志正被刷盘的时候，重启恰恰是你最不想要的。
+    </li>
+    <li>
+      <code>/readyz</code> 会 ping 一下存储，做不到时返回 503，带着
+      <code>"status": "degraded"</code> 和一行说明哪里不对。这样能把流量挡在一个
+      服务不了它的实例之外，而不用把它杀掉。
+    </li>
+  </ul>
+  <p>
+    启动探针之所以在那里，是因为迁移在启动时运行。它们是幂等的，通常一瞬间就完，
+    但在一个很大的数据库上，它们可能久到超出存活探针能容忍的程度，而一个每次
+    尝试都在迁移中途被杀掉的 Pod，永远起不来。
+  </p>
+
+  <h3>要给它多少资源</h3>
+  <p>
+    这些数字来自这个进程实际在做的事，不是来自某次基准测试，我们也没有声称做过
+    基准测试。
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>资源</th>
+        <th>取值</th>
+        <th>为什么</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>CPU request</td>
+        <td><code>100m</code></td>
+        <td>空闲时的开销接近于零。这个 request 存在，是为了让调度器不要把它塞在某个吵闹的东西下面。</td>
+      </tr>
+      <tr>
+        <td>CPU limit</td>
+        <td>不设</td>
+        <td>摄取是成阵到达的。在一阵流量里限制写入者，正是客户端队列被填满、span 被丢掉的方式。</td>
+      </tr>
+      <tr>
+        <td>内存 request</td>
+        <td><code>128Mi</code></td>
+        <td>一个静态二进制、五个 SQLite 连接，以及它们的页缓存。</td>
+      </tr>
+      <tr>
+        <td>内存 limit</td>
+        <td><code>512Mi</code></td>
+        <td>为并发摄取留的余量。一个请求可以持有 32 MiB 的提示词文本，所以内存跟的是同时到达多少个大批次。</td>
+      </tr>
+      <tr>
+        <td>卷</td>
+        <td><code>20Gi</code>，ReadWriteOnce</td>
+        <td>按你自己的载荷来定容量。文本占大头，而且搜索索引不是外部内容型的，所以被索引的提示词和补全会被存第二遍。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    把这个卷放在本地块设备上。SQLite 的加锁只在那里是正确的：在 NFS 或者别的
+    共享文件系统上，锁最多只是建议性的，而且这种故障不会以一条错误的形式出现，
+    它会在几周之后以一个损坏的数据库的形式出现。
+  </p>
+
+  <h2>Helm chart</h2>
+  <p>
+    这个 chart 渲染出同样的四个对象，前面加了一层 values，另外还有六个默认关闭、
+    要靠某个值打开的对象：一个 Ingress、一个 NetworkPolicy、一个
+    PodDisruptionBudget、一个 ServiceAccount、一个 ServiceMonitor，以及一个存放
+    配置文件的 ConfigMap 或 Secret。每次发布都会把它推送到与镜像相同的镜像仓库。
+    请先生成密钥，并把它们放在你的团队存放机密的地方，因为安装过程不会把它们回显
+    给你：
+  </p>
+
+  <Command
+    command="helm install mcpd oci://ghcr.io/mcpd/charts/mcpd -n mcpd --create-namespace --set keys.ingest=$INGEST_KEY --set keys.read=$READ_KEY"
+    primaryLabel="从镜像仓库安装"
+    secondary={[
+      { label: '生成密钥', command: 'export INGEST_KEY=$(openssl rand -hex 32) READ_KEY=$(openssl rand -hex 32)' },
+      { label: '从一份克隆安装', command: 'helm install mcpd ./deploy/helm/mcpd -n mcpd --create-namespace -f values.yaml' },
+      { label: '升级', command: 'helm upgrade mcpd oci://ghcr.io/mcpd/charts/mcpd -n mcpd --reset-then-reuse-values' },
+    ]}
+  />
+
+  <p>
+    <code>keys.ingest</code> 或 <code>keys.read</code> 没有设置时安装会失败，
+    并说明原因。一个让你事后才发现摄取端点是敞开的 chart，没有尽到它的职责。
+    如果 Secret 由你自己管理，就改设 <code>keys.existingSecret</code>，chart
+    就不会创建任何 Secret。
+  </p>
+  <p>
+    Pod 模板带着这个 Secret 的校验和，所以轮换一把密钥再跑
+    <code>helm upgrade</code> 会重启 Pod。没有这一点，新密钥躺在集群里，守护
+    进程还在执行旧的那一把。
+  </p>
+  <p>
+    监控、SLO、评判模型、按项目划分的密钥，以及运行存储的计时，都从守护进程的
+    配置文件读取，而不是从参数。把那个 JSON 对象写在
+    <code>configFile.content</code> 下，chart 就会以只读方式挂载它，并让
+    <code>MCPD_CONFIG_FILE</code> 指向它。按项目划分的密钥、评判模型的
+    <code>api_key</code> 和转发用的请求头都是凭据，所以 chart 拒绝把带有其中任何
+    一项的内容放进 ConfigMap：请把 <code>configFile.kind</code> 设为
+    <code>Secret</code>，或者把文件放进你自己管理的 Secret，并在
+    <code>configFile.existingSecret</code> 里写上它的名字。其余的需求，比如私有
+    CA 证书包，由 <code>extraEnv</code>、<code>extraVolumes</code> 和
+    <code>extraVolumeMounts</code> 处理。
+  </p>
+  <p>
+    chart 处理不了的每一种组合，都会在安装时被拒绝，并附上一条消息，点名要改的
+    那个值，绝不会留到安装之后去崩溃循环。chart 的 README 列出了每一种拒绝。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={chartValues} title="deploy/helm/mcpd" />
+
+  <h2>在别的东西能够到它之前</h2>
+  <p>
+    摄取默认是开放的。对笔记本上的头五分钟来说，那是一个有意的选择，在那里，
+    在第一条 trace 之前先要一份凭据，是只有摩擦没有收益的；而在这个端口能被
+    别的东西访问的那一刻起，它就是错的默认值。所以每一次在非回环地址上、没有
+    密钥地启动时，守护进程都会说出来：
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="一次不设防的启动是什么样子"
+    lines={[
+      { cmd: 'docker run -p 4317:4317 -v mcpd-data:/data ghcr.io/mcpd/mcpd:0.1.0' },
+      { out: 'mcpd 0.1.0 listening on http://0.0.0.0:4317', tone: 'ok' },
+      { out: 'WARN listening on 0.0.0.0:4317 with open ingest. Anyone who can', tone: 'warn' },
+      { out: '     reach this port can write to it. Set --ingest-key (or', tone: 'warn' },
+      { out: '     MCPD_INGEST_KEYS) before exposing it.', tone: 'warn' },
+      { out: 'WARN listening on 0.0.0.0:4317 with an open read API. Stored', tone: 'warn' },
+      { out: '     prompts and completions are readable by anyone who can reach', tone: 'warn' },
+      { out: '     this port. Set --read-key to require a key.', tone: 'warn' },
+    ]}
+  />
+
+  <p>
+    mcpd 选择警告而不是拒绝启动，因为拒绝会切断那条让它值得被跑起来的路。这条
+    警告就是契约：如果你在一份部署日志里看到它，那份部署就是敞开的。
+  </p>
+
+  <h3>六把密钥，六个作用域</h3>
+  <p>
+    <code>--ingest-key</code> 允许写入信号。<code>--read-key</code> 允许读取
+    它们。<code>--write-key</code> 允许改动已存的数据：评分、反馈、数据集、实验
+    和确认。<code>--execute-key</code> 允许启动、取消运行，并向运行发送信号。<code>--worker-key</code> 允许认领步骤并回报结果，它就是待在运行你的步骤代码的那个进程里的密钥。<code>--admin-key</code> 允许删除一条 trace 和读取审计日志。
+  </p>
+  <p>
+    第一道分界决定了你的影响半径，因为两边的人群规模不同：你集群里的每一个
+    智能体进程都需要摄取密钥，而需要其他任何一把的人少得多。给你的集群一把
+    同时还能读的密钥，等于把一份能读到所有已存提示词的凭据，放进每一个会发出
+    span 的容器里，包括那些跑着第三方代码的容器。
+  </p>
+  <p>
+    这也是为什么把一次运行采集进数据集被挪进了写入作用域。它在途中会读这次运行
+    的输入和输出，所以用你集群携带的那把密钥去授权它，等于给了那些容器中的每
+    一个一条把任意已存提示词复制出去的路。
+  </p>
+  <p>
+    每个参数都接受一个逗号分隔的列表，每个也都有对应的环境变量：
+    <code>MCPD_INGEST_KEYS</code>、<code>MCPD_READ_KEYS</code>、
+    <code>MCPD_WRITE_KEYS</code> 和 <code>MCPD_ADMIN_KEYS</code>。请设置不止
+    一把：一个团队或一个集群一把密钥，意味着一把泄露的密钥是靠把它从列表里去掉
+    来吊销的，而不是靠重新部署所有会发出 span 的东西。密钥以
+    <code>Authorization: Bearer …</code> 或者 <code>X-Mcpd-Key</code> 头的形式
+    出示，比较是恒定时间的。
+  </p>
+  <p>
+    要知道的那处不对称，是你把较新的那两个参数留空时会发生什么。空的写入列表
+    接受摄取密钥，空的管理员列表接受读取密钥，所以一次升级永远不会吊销一把
+    本来在用的密钥。在你设置 <code>--admin-key</code> 之前，读取密钥是一把既能读
+    又能删的密钥，而不是严格只读的那种，守护进程会在启动时说明这一点。请照这个
+    事实来分发它，或者把那个参数设上。
+  </p>
+
+  <h3>谁读了什么</h3>
+  <p>
+    那些会把载荷交回去的处理函数会记下这次访问：trace 详情、span 和日志的搜索、
+    反馈、数据集条目、采集和删除。一行记录带着时间、动作那把密钥的短摘要、动作、
+    项目、资源，以及授权是否放行。密钥本身永远不会被写下来，所以这份日志不会
+    成为你的凭据的第二个落脚点。
+  </p>
+  <p>
+    用 <code>GET /v1/api/audit</code> 读它，它需要 admin 作用域。在你依赖它之前，
+    有两条性质值得知道。它不受 <code>--retention-days</code> 裁剪，因为一份和
+    它所描述的数据同步删除自己的日志，没办法说出谁读过那些已经消失的数据。另外，
+    写一行审计从不会让它所描述的那次读取失败：写不进去的行会在
+    <code>/metrics</code> 上计入 <code>mcpd_audit_write_failures_total</code>，
+    那就是要配告警的那个计数器。
+  </p>
+
+  <h3>密钥不覆盖什么</h3>
+  <ul>
+    <li>
+      <strong>界面。</strong><code>/</code> 上的那些标记会发给任何能连到这个端口
+      的人。它背后的数据不会：它发出的每一个请求都走查询 API，而那里会强制要求
+      读取密钥。守护进程里没有登录界面，所以如果需要访问的是人而不是服务，请把
+      它放到你已经在运行的那个身份代理后面。
+    </li>
+    <li>
+      <strong>两个探针和 <code>/metrics</code>。</strong>它们有意不做认证，因为
+      一个 kubelet 和一个 Prometheus 抓取器都带不了密钥。它们暴露的是计数器和
+      运行时长，从不暴露载荷。
+    </li>
+    <li>
+      <strong>传输。</strong>mcpd 说的是明文 HTTP，不终结 TLS。请在你的入口网关
+      或者服务网格里终结它。提示词和补全会完整地穿过那一段链路。
+    </li>
+    <li>
+      <strong>脱敏载荷里的哈希。</strong>除非你传了 <code>--no-redact</code>，
+      脱敏是开着的；而在它对一个标识符做哈希的地方，这个摘要的私密程度只等于
+      它的盐的私密程度。请设置 <code>--redact-key</code>，否则短的标识符可以靠
+      猜被还原出来。见
+      <a href={to('/docs/privacy')} class="link">脱敏与保留期</a>。
+    </li>
+  </ul>
+
+  <h3>在暴露它之前先检查</h3>
+  <p>
+    <code>mcpd config</code> 打印一次调用将会使用的配置，然后退出。要发现你设错
+    地方的那个环境变量什么都没起作用，这是代价最小的办法：
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="起飞前检查"
+    lines={[
+      { cmd: 'docker compose -f deploy/docker/docker-compose.yml run --rm mcpd config' },
+      { out: 'listen          0.0.0.0:4317' },
+      { out: 'storage         sqlite at /data/mcpd.db' },
+      { out: 'config file     none' },
+      { out: 'log format      json' },
+      { out: 'project         default' },
+      { out: 'projects        none' },
+      { out: 'retention       30 days' },
+      { out: 'ingest auth     key required', tone: 'ok' },
+      { out: 'read auth       key required', tone: 'ok' },
+      { out: 'write auth      key required (ingest keys)', tone: 'ok' },
+      { out: 'admin auth      key required (read keys)', tone: 'warn' },
+      { out: 'execute auth    key required (ingest keys)', tone: 'warn' },
+      { out: 'worker auth     key required (ingest keys)', tone: 'warn' },
+      { out: 'signup          off' },
+      { out: 'runs            sqlite at /data/mcpd.runs.db' },
+      { out: 'run settings    lease_ttl_ms 30000, reclaim_window_ms 30000, stall_window_ms 300000, idempotency_window_ms 86400000, park_ttl_ms 86400000, max_depth 8, max_step_repeats 16' },
+      { out: 'identity        off' },
+      { out: 'client ip       peer address' },
+      { out: 'sampling        keep everything' },
+      { out: 'quota           unlimited' },
+      { out: 'redaction       on' },
+      { out: 'redact key      set', tone: 'ok' },
+      { out: 'cors            same-origin only' },
+      { out: 'timeout         30s per request' },
+      { out: 'limits          32 MiB per request, 10000 signals per batch' },
+      { out: 'derived         duration and token metrics' },
+      { out: 'aspects         off' },
+      { out: 'monitors        none' },
+      { out: 'objectives      none' },
+      { out: 'judge           off' },
+      { out: 'forwarding      off' },
+    ]}
+  />
+
+  <p>
+    这里有六行要紧。任何一行 auth 显示 <code>open</code>，就说明那个作用域对
+    任何能连到这个端口的人开放。括号里的一行写明这个作用域正在继承的那份更宽的
+    列表：上面这次调用没有设置 <code>--admin-key</code>，所以它的读取密钥既能读
+    也能删。它也没有设置 <code>--execute-key</code> 或
+    <code>--worker-key</code>，所以它的摄取密钥还能启动运行、认领步骤，mcpd
+    启动时会对此发出警告。这里打印的每一个参数，都记录在
+    <a href={to('/docs/configuration')} class="link">配置</a>页上。
+  </p>
+
+  <h2>备份</h2>
+  <p>
+    备份就是一个文件。mcpd 存的一切，包括搜索索引，都在 <code>MCPD_DATA</code>
+    指向的那个文件里。
+  </p>
+  <p>
+    在守护进程运行期间复制那个文件，是唯一不该做的事。mcpd 以 WAL 模式运行
+    SQLite，所以最近的写入住在它旁边的一个 <code>-wal</code> 文件里，而只复制
+    数据库本身，得到的副本正好缺了它们。请改为取一份一致的副本，从任何一个装了
+    <code>sqlite3</code> 工具、并挂载了同一个卷的镜像里执行：
+  </p>
+
+  <Command
+    command={`sqlite3 /data/mcpd.db ".backup '/backup/mcpd-$(date -u +%Y%m%dT%H%M).db'"`}
+    primaryLabel="在线备份"
+    secondary={[
+      { label: '压紧的副本', command: 'sqlite3 /data/mcpd.db "VACUUM INTO \'/backup/mcpd.db\'"' },
+    ]}
+  />
+
+  <p>
+    两条命令都在写入继续的同时读出一份一致的快照。你的 CSI 驱动拍的卷快照也
+    可以，前提是这个驱动的快照是原子的；对一个活着的目录做 <code>tar</code>
+    则不行。恢复就是停掉守护进程，把文件放回 <code>MCPD_DATA</code>，删掉它旁边
+    的 <code>-wal</code> 和 <code>-shm</code> 文件，然后再启动守护进程；
+    <a href={to('/docs/operations')} class="link">把它跑起来</a>把这个过程走了
+    一遍。
+  </p>
+  <p>
+    删掉的行会释放文件内部的页，但不会让文件变小，所以一个淘汰掉大量数据的
+    数据库，还是原来那么大。想把磁盘收回来时，执行 <code>VACUUM</code>。
+  </p>
+
+  <h2>升级</h2>
+  <p>
+    改标签，重启。迁移在启动时运行，而且在每次启动时运行都是安全的，所以没有
+    哪一步发生在进程之外。不过还是先做备份：迁移是唯一一个表结构会在你的数据
+    底下发生变化的时刻。
+  </p>
+  <p>
+    这次重启是一次短暂的中断，而不是滚动更新，理由和只有一个副本是同一个。
+    智能体挺得过去：SDK 在内存里排队并重试，而这个队列是有界的，所以一次几秒钟
+    的重启不会有任何代价，而一次持续一小时的重启会丢掉最旧的那些 span，并在
+    客户端日志里说明。
+  </p>
+  <p>
+    mcpd 处理 SIGTERM 并优雅停机，那正是 Kubernetes 发的信号。
+    <code>terminationGracePeriodSeconds</code> 必须比最长的请求更长，否则
+    kubelet 会在写入中途杀掉进程。一个请求可能一直跑到 30 秒的请求超时，所以清单
+    和 chart 给 Pod 45 秒，compose 文件也给容器同样的时间。要调大时，两者一起调。
+  </p>
+
+  <h2>一个 SQLite 文件到哪里为止，以及那时该怎么办</h2>
+  <p>
+    内嵌文件是正确的默认值，而它有两条硬限制。两条都属于 SQLite，不属于 mcpd。
+  </p>
+  <ul>
+    <li>
+      <strong>一个写入者。</strong>读跑在它们自己的连接上，从不阻塞写入者，
+      WAL 模式就是为这个而存在的；但这个文件归一个进程所有。你把那个实例做大，
+      而不是做多。
+    </li>
+    <li>
+      <strong>一个卷，一个可用区。</strong>一个 ReadWriteOnce 声明会把 Pod 钉死。
+      没有那种数据完好地切换到另一个节点的故障转移。
+    </li>
+  </ul>
+  <p>
+    有两项设置，通常比换一个新后端换回来的还多。
+    <a href={to('/docs/sampling')} class="link">采样</a>保留一部分 trace，并且
+    保留下来的每条 trace 都是整条，它靠对 trace id 做哈希来决定，所以一个集群里
+    的每个实例意见一致。保留期则限定这个文件往回追到多远。给每个团队跑一个实例、
+    各自带一个卷，同样可行，而且能让一个吵闹的团队填不满所有人的磁盘。
+  </p>
+  <p>
+    当这些也用尽时，把 mcpd 指向一个数据库。在 chart 里把
+    <code>externalStore.type</code> 设为 <code>postgres</code> 或
+    <code>clickhouse</code>，连接串写在 <code>externalStore.postgresUrl</code> 或
+    <code>externalStore.clickhouseUrl</code> 里。连接串放在 chart 的 Secret 里，
+    而不是在 Pod 规格里。如果想让它完全不出现在你的 values 里，就把它放进你自己
+    管理的 Secret，键名为 <code>postgres-url</code> 或
+    <code>clickhouse-url</code>，在 <code>keys.existingSecret</code> 里写上这个
+    Secret 的名字，同时照样设置 type：选择后端的是 type，而不是 URL。
+  </p>
+  <p>
+    这样会把信号移走，但磁盘上还留着一个文件：运行存储。不管信号存储是什么，它都
+    是内嵌的 SQLite。<code>runs.enabled</code> 为 true（默认值）时，chart 把它
+    留在卷上，并运行一个副本。要运行多个 Pod，就关掉运行功能。这时 chart 会运行
+    <code>replicaCount</code> 个 Pod，从 <code>Recreate</code> 切换到滚动更新，
+    并去掉那个 PersistentVolumeClaim，因为本地已经没有可争抢的东西，而守护进程会
+    对运行相关的端点返回一个说明这一点的 503。运行功能开着时，chart 会拒绝大于 1
+    的 <code>replicaCount</code>，而不是启动一批各自持有一份运行存储的 Pod。
+  </p>
+
+  <pre><code class="language-bash">{`helm install mcpd ./deploy/helm/mcpd \\
+  --set keys.ingest=$INGEST_KEY \\
+  --set keys.read=$READ_KEY \\
+  --set externalStore.type=postgres \\
+  --set externalStore.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
+  --set runs.enabled=false \\
+  --set replicaCount=3`}</code></pre>
+
+  <p>
+    先考虑 Postgres：它在一个多数团队本来就在运维、备份和监控的数据库上解除了
+    这两条限制。迁移会取一把顾问锁，表结构已经是最新时会被跳过，所以若干个副本
+    一起启动是安全的。当保留量要以十亿条 span 计时，再考虑 ClickHouse。type
+    没有点名的后端的 URL 会被拒绝，而不是被忽略。
+  </p>
+  <p>
+    有一件事不会随后端而改变。
+    <strong>保留期只覆盖你写下来的那些项目。</strong>每小时的那次清理，会删除
+    <code>--project</code> 指名的那个项目、以及 <code>projects</code> 块里每一个
+    项目中早于 <code>--retention-days</code> 的信号，其中设了自己的
+    <code>retention_days</code> 的按自己的来。用两处都没出现的项目名发来的 trace
+    没有窗口，永远不会被清理，所以如果你的智能体自己指定项目名，请盯着数据量。
+  </p>
+
+  <h2>接下来</h2>
+  <ul>
+    <li>每一个参数和环境变量：<a href={to('/docs/configuration')} class="link">配置</a>。</li>
+    <li>探针、计数器和日常运行：<a href={to('/docs/operations')} class="link">把它跑起来</a>。</li>
+    <li>什么永远不会写到磁盘上：<a href={to('/docs/privacy')} class="link">脱敏与保留期</a>。</li>
+    <li>还什么都没部署：<a href={to('/docs/quickstart')} class="link">快速开始</a>。</li>
+  </ul>
+</Doc>

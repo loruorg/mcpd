@@ -1,0 +1,696 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Masquage et conservation"
+  description="Les règles de masquage que mcpd applique avant d’écrire quoi que ce soit, les quatre modes, pourquoi le hachage est à clé, et comment les données stockées expirent ou sont effacées sur demande."
+  lede="Ce qui n’est jamais stocké, et ce qui cesse de l’être. Le masquage tourne avant l’écriture, parce qu’un secret supprimé après coup a quand même été écrit."
+  og="docs"
+>
+  <h2>Le masquage tourne avant le stockage</h2>
+  <p>
+    Les prompts et les complétions sont ce que mcpd détient de plus précieux et
+    de plus dangereux. Le masquage est la troisième étape du pipeline
+    d’ingestion, avant l’écriture, si bien qu’une valeur reconnue par une règle
+    n’atteint jamais la base de données.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    L’ordre est tout l’enjeu. Une valeur nettoyée après coup a déjà été sur le
+    disque, dans le journal d’écriture anticipée, et sans doute dans la
+    sauvegarde de la nuit dernière. Jamais écrit est une garantie différente de
+    supprimé plus tard, et c’est la seule que vous pouvez énoncer sans détour à
+    quelqu’un qui pose la question.
+  </p>
+  <p>
+    Le masquage est actif par défaut. Un outil qui ne vous protège qu’une fois
+    configuré ne protège personne. <code>--no-redact</code>, ou
+    <code>MCPD_NO_REDACT</code>, le désactive, ce qui n’a de sens que si quelque
+    chose en amont masque déjà.
+  </p>
+  <p>
+    Le masquage est le bout du fil côté daemon. Les SDK tiennent l’autre bout :
+    <code>MCPD_CAPTURE_PAYLOADS=false</code>, ou <code>capture_payloads</code>
+    dans le code, garde les prompts et les complétions dans le processus. Un
+    span arrive quand même avec ses temps, son statut, sa consommation, son
+    modèle, sa corrélation et ses erreurs, et <code>input</code> et
+    <code>output</code> sont retirés avant la mise en file : ils ne traversent donc jamais le
+    réseau. Une équipe qui ne doit pas envoyer les octets du tout règle cela, et
+    un span qui ne porte rien de sensible peut se réactiver pour lui-même.
+  </p>
+
+  <h2>Les règles par défaut</h2>
+  <p>
+    Une règle est un ensemble de sous-chaînes en minuscules et un mode. Une clé
+    correspond quand son nom, mis en minuscules, contient l’une d’elles. C’est
+    parce que la correspondance porte sur une sous-chaîne que
+    <code>X-API-Key</code>, <code>authorization</code> et
+    <code>customer_email</code> sont tous attrapés sans avoir à lister chaque
+    casse et chaque préfixe.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Mode</th><th>Noms de clés qui correspondent</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>mask</code></td>
+        <td>
+          <code>api_key</code>, <code>apikey</code>, <code>api-key</code>,
+          <code>secret</code>, <code>password</code>, <code>passwd</code>,
+          <code>access_token</code>, <code>refresh_token</code>,
+          <code>id_token</code>, <code>bearer</code>,
+          <code>authorization</code>, <code>auth_token</code>,
+          <code>private_key</code>, <code>client_secret</code>,
+          <code>session_token</code>, <code>credential</code>,
+          <code>signature</code>, <code>x-api-key</code>
+        </td>
+      </tr>
+      <tr>
+        <td><code>partial</code></td>
+        <td>
+          <code>email</code>, <code>phone</code>, <code>ssn</code>,
+          <code>credit_card</code>, <code>card_number</code>, <code>iban</code>
+        </td>
+      </tr>
+      <tr>
+        <td><code>hash</code></td>
+        <td><code>user_id</code>, <code>userid</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Quand une clé reconnue porte un objet ou un tableau, tout ce qui se trouve
+    dessous est masqué aussi.
+    <code>{'{"credential": {"value": "hunter2", "note": "prod"}}'}</code>
+    perd les deux champs, pas seulement celui dont le nom semblait dangereux.
+  </p>
+  <p>
+    La limite mérite d’être dite sans détour : les règles portent sur les
+    <strong>noms de clés, pas sur les valeurs</strong>. Une clé d’API qu’un
+    utilisateur a collée au milieu d’un prompt, stockée sous une clé nommée
+    <code>content</code>, n’est reconnue par rien ici. Le masquage arrête la
+    capture structurée des secrets et des identifiants. Ce n’est pas un
+    analyseur de contenu, et la prendre pour tel vous décevra.
+  </p>
+
+  <h2>Les quatre modes</h2>
+  <table>
+    <thead>
+      <tr><th>Mode</th><th>Ce qui arrive à la valeur</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>drop</code></td>
+        <td>La clé est retirée entièrement, comme si elle n’avait jamais été envoyée.</td>
+      </tr>
+      <tr>
+        <td><code>mask</code></td>
+        <td>La valeur est remplacée par <code>[redacted]</code>.</td>
+      </tr>
+      <tr>
+        <td><code>partial</code></td>
+        <td>
+          Les deux premiers et les deux derniers caractères survivent, réunis
+          par des points de suspension : <code>alice@example.com</code> devient
+          <code>al…om</code>. De quoi reconnaître une valeur que vous connaissez
+          déjà, pas de quoi l’utiliser. Une valeur de six caractères ou moins
+          est remplacée entièrement, parce que garder quatre caractères sur cinq
+          en divulgue l’essentiel.
+        </td>
+      </tr>
+      <tr>
+        <td><code>hash</code></td>
+        <td>
+          La valeur est remplacée par <code>sha256:</code> suivi des douze
+          premiers octets d’une empreinte SHA-256 à clé, en vingt-quatre
+          caractères hexadécimaux.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Les règles intégrées en utilisent trois sur quatre. Rien n’est supprimé par
+    défaut : <code>drop</code> est là pour une règle que vous ajoutez, quand
+    même la présence d’un champ est plus que ce que vous voulez garder.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="ce qui est ressorti"
+    lines={[
+      { cmd: 'curl -s "$MCPD/v1/api/traces/$TRACE" | jq .spans[0].input' },
+      { out: '{' },
+      { out: '  "question": "Where is my order A-1042?",' },
+      { out: '  "api_key": "[redacted]",', tone: 'note' },
+      { out: '  "email": "al…om",', tone: 'note' },
+      { out: '  "user_id": "sha256:9f2c1b7d4a08e5c3f6b1d0a4"', tone: 'note' },
+      { out: '}' },
+    ]}
+  />
+
+  <h2>Pourquoi le hachage est à clé</h2>
+  <p>
+    Le hachage garde un champ utile. Sous une même clé, des entrées égales
+    donnent des empreintes égales : vous pouvez donc encore regrouper par
+    identifiant d’utilisateur masqué, compter combien de personnes distinctes
+    ont rencontré une panne, et suivre l’une d’elles au fil d’une session, sans
+    détenir qui elles sont.
+  </p>
+  <p>
+    Sans clé, cette propriété est un trou. Les identifiants viennent d’espaces
+    petits et devinables, et quiconque a l’empreinte et ce code source peut
+    hacher des candidats jusqu’à ce que l’un corresponde. C’est la clé qui rend
+    l’empreinte irrécupérable plutôt que simplement pénible à retrouver.
+  </p>
+  <p>
+    La clé intégrée est une constante dans le code source, donc elle est
+    publique. Définissez la vôtre dans tout déploiement qui hache quoi que ce
+    soit.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="un déploiement qui hache et qui expire"
+    command={'mcpd --redact-key "$MCPD_REDACT_KEY" --retention-days 30'}
+    secondary={[
+      { label: 'en environnement', command: 'MCPD_REDACT_KEY=… MCPD_RETENTION_DAYS=30 mcpd' },
+      { label: 'masquage désactivé', command: 'mcpd --no-redact' },
+    ]}
+  />
+
+  <p>
+    Changer la clé rompt le lien, volontairement. Toutes les empreintes
+    changent, donc les lignes écrites avant la rotation ne peuvent plus être
+    jointes à celles écrites après. C’est à cela que sert une rotation, et c’est
+    aussi ce qu’elle coûte. Tournez la clé quand vous voulez le lien rompu, pas
+    par habitude sur un calendrier.
+  </p>
+  <p>
+    Lisez la seconde moitié de ce coût avant de tourner la clé. L’effacement par
+    sujet compare l’empreinte stockée : dès que la nouvelle clé est en vigueur,
+    toute ligne écrite sous l’ancienne est hors de portée d’une demande de
+    suppression. mcpd ne peut pas vous dire que c’est ce qui s’est passé, parce
+    que rien n’enregistre quelle clé a écrit quelle ligne. Tout ce qu’il peut
+    faire, c’est refuser de laisser le zéro qui en résulte passer pour une
+    réponse, et la section sur le zéro plus bas est ce refus.
+  </p>
+
+  <h2>Tous les signaux, pas seulement les spans</h2>
+  <p>
+    Un secret fuit aussi facilement par une ligne de log que par un prompt :
+    le même masquage passe donc sur les six signaux à l’entrée.
+  </p>
+  <ul>
+    <li>Spans : <code>input</code>, <code>output</code>, <code>attributes</code> et <code>metadata</code>.</li>
+    <li>Logs : les <code>fields</code> structurés.</li>
+    <li>Métriques : les <code>labels</code>.</li>
+    <li>Scores : les <code>metadata</code>.</li>
+    <li>Retours : les <code>metadata</code>, et le <code>comment</code> en texte libre.</li>
+    <li>Notes d’aspect : la phrase, dans <code>text</code>.</li>
+  </ul>
+  <p>
+    Le nom d’un span et le message d’un enregistrement de log ne passent pas par
+    le masquage. Ce sont des identifiants, pas des payloads, et les réécrire
+    casserait le regroupement. Ne construisez pas un nom de span à partir de
+    l’adresse e-mail d’un client.
+  </p>
+
+  <h3>Le stockage des exécutions n’est pas masqué</h3>
+  <p>
+    Les exécutions durables sont l’exception, et c’est délibéré. Le stockage
+    des exécutions garde l’entrée, l’état, la sortie et la corrélation d’une
+    exécution, et l’entrée, la sortie et l’erreur de chaque étape, exactement
+    tels qu’ils ont été envoyés, avec <code>user_id</code> non haché. Ce sont
+    les données de travail du workflow : une étape ultérieure les relit, et une
+    valeur que le masquage aurait réécrite changerait ce que fait l’exécution.
+    Les spans qu’une exécution écrit dans le stockage des traces prennent le
+    chemin d’ingestion ordinaire : le stockage des traces les détient donc
+    masqués et hachés comme tout autre span. La conservation et l’effacement
+    atteignent tous deux le stockage des exécutions, comme le disent les
+    sections ci-dessous, et chaque lecture d’une exécution par l’API est
+    enregistrée dans le journal d’audit.
+  </p>
+
+  <h2>Chaînes longues et documents profonds</h2>
+  <p>
+    Deux bornes s’appliquent à tout, qu’une règle ait reconnu quelque chose ou
+    non.
+  </p>
+  <p>
+    Toute chaîne de plus de 128 KiB est tronquée, avec
+    <code>… [N bytes truncated]</code> ajouté à la fin pour que le lecteur sache
+    que la valeur est incomplète et non courte. La coupe tombe sur une frontière
+    de caractère, jamais à l’intérieur d’un point de code multioctet. Un seul
+    prompt emballé ne doit pas décider de la taille de votre base.
+  </p>
+  <p>
+    Le parcours s’arrête à une profondeur de 32, et tout ce qui est en dessous
+    est remplacé par <code>[too deeply nested]</code>. Un document pathologique
+    ou autoréférent qui arrive sur un port d’ingestion ouvert ne peut pas
+    saturer un CPU.
+  </p>
+
+  <h2>Conservation</h2>
+  <p>
+    <code>--retention-days</code>, ou <code>MCPD_RETENTION_DAYS</code>, supprime
+    les signaux plus vieux que ce nombre de jours. Omettez l’option et rien
+    n’est jamais supprimé. Garder les données par défaut est dans le bon sens :
+    un outil qui jetterait sans bruit les traces du mois dernier se ferait
+    découvrir au pire moment.
+  </p>
+  <p>
+    La passe tourne sur un minuteur horaire dans le daemon, pas au moment d’une
+    requête. Une passe peut supprimer un très grand nombre de lignes, et ce
+    travail ne doit jamais tomber dans la requête de quelqu’un.
+    Chaque passe retire, en une seule transaction, les spans, les logs, les
+    métriques et les lignes de trace dont le <code>received_at</code> est
+    antérieur à la coupure, ainsi que les scores, les retours et les notes
+    d’aspect dont l’horodatage propre l’est, puis journalise combien de lignes
+    sont parties. Les entrées de l’index plein texte sont effacées d’abord,
+    tant que les lignes qui les nomment existent encore, pour que rien ne reste
+    orphelin.
+  </p>
+  <p>
+    La même passe, sur la même fenêtre, élague le stockage des exécutions. Elle
+    supprime chaque exécution durable dont la racine s’est terminée avant la
+    coupure, avec ses exécutions filles et tout ce qui est stocké pour elles,
+    par lots, pour que les workers ne soient pas retenus pendant ce travail.
+    Une exécution qui n’est pas terminée n’est jamais supprimée, quelle que
+    soit la durée de son attente. Les définitions ne sont pas élaguées.
+  </p>
+  <p>
+    La passe couvre le projet nommé par <code>--project</code> et chaque projet
+    du bloc <code>projects</code> du fichier de configuration, pas seulement le
+    projet par défaut. Un projet qui y définit son propre
+    <code>retention_days</code> est balayé sur cette valeur, et les autres sur
+    celle du daemon. Un projet absent des deux endroits, celui qu’un émetteur a
+    nommé de lui-même, n’a pas de fenêtre et n’est jamais élagué. Cela compte
+    quand un seul daemon sert plusieurs équipes : une équipe qui a convenu de
+    garder trente jours ne les garde pas en silence parce que le réglage d’une
+    autre équipe était le seul que la passe ait lu, et une équipe que personne
+    n’a inscrite garde tout.
+  </p>
+
+  <h2>Une demande d’effacement concernant une personne</h2>
+  <p>
+    <code>DELETE /v1/api/subjects/{'{user_id}'}</code> répond en un seul appel à
+    une demande concernant une personne. Envoyez l’identifiant tel que votre
+    instrumentation l’a posé. Le daemon applique le même hachage qu’à
+    l’ingestion : un déploiement qui hache <code>user_id</code> n’exige donc pas
+    que vous le hachiez d’abord.
+  </p>
+  <p>
+    L’unité d’effacement est l’exécution, pas la ligne. Seul un span racine
+    porte en général un <code>user_id</code>, et ce sont les spans enfants qui
+    détiennent le prompt et la complétion : supprimer les lignes qui nomment le
+    sujet laisserait donc le payload debout. Une exécution entre dans le
+    périmètre quand la projection de sa trace nomme le sujet ou quand l’un de
+    ses spans le nomme, et alors l’exécution part en entier :
+  </p>
+  <ul>
+    <li>Chaque span de cette exécution, avec les entrées et les sorties qu’il portait.</li>
+    <li>Les logs, les métriques, les scores, les retours et les notes d’aspect qui en dépendent.</li>
+    <li>
+      Les signaux qui nomment un <code>span_id</code> et aucun
+      <code>trace_id</code>. Un score ou une ligne de log épinglée à une étape
+      de l’exécution du sujet est atteinte par les identifiants de span des
+      exécutions du périmètre, pas seulement par leurs identifiants de trace.
+    </li>
+    <li>
+      Les lignes de log enregistrées au nom de la personne sans exécution à
+      laquelle se rattacher, reconnues sur leur propre <code>user_id</code>.
+    </li>
+    <li>
+      Le retour que la personne a écrit, reconnu sur <code>author_id</code>,
+      où qu’il soit rattaché. Cette ligne contient sa propre prose, et elle peut
+      être rattachée à l’exécution de quelqu’un d’autre, et c’est justement là
+      qu’elle survivait avant.
+    </li>
+    <li>
+      Les cas de dataset capturés depuis une exécution du périmètre. Ceux-là
+      sont vidés plutôt que supprimés. La section qui suit la prochaine dit
+      pourquoi.
+    </li>
+    <li>
+      Sur un daemon qui sert des exécutions durables, chaque exécution durable
+      terminée dont la corrélation porte le <code>user_id</code>, reconnu tel que
+      vous l’avez donné au démarrage de l’exécution, puisque le stockage des
+      exécutions le garde non haché, avec tout son arbre d’exécutions filles et
+      tout ce que le stockage des exécutions détient pour elles. Une exécution
+      de cette personne qui n’est pas terminée n’est pas touchée : la supprimer
+      corromprait le workflow dont elle fait partie. Elle est comptée dans
+      <code>runs_in_flight</code> et nommée dans <code>note</code>, pour que vous
+      puissiez l’annuler, ou la laisser se terminer, puis renvoyer la demande.
+    </li>
+  </ul>
+  <p>
+    Le stockage des exécutions est effacé en premier. Les spans d’une exécution
+    attendent dans son outbox jusqu’à leur écriture dans le stockage des
+    traces : effacer d’abord les exécutions supprime donc tout span encore en
+    attente, et l’effacement du stockage des traces retire ensuite ceux qui y
+    sont déjà écrits.
+  </p>
+
+  <h3>Ce que porte la réponse</h3>
+  <p>
+    Un compte par signal, deux comptes pour le stockage des exécutions, et six
+    champs à côté qui portent ce qu’un compte ne peut pas dire : ce qui a été
+    laissé là volontairement, et si un petit nombre peut se lire comme « rien
+    sur cette personne n’est stocké ici ». <code>deleted</code> est le total des
+    six comptes par signal. Les comptes d’exécutions et
+    <code>aspect_notes_erased</code> sont rapportés à côté, sans y être
+    ajoutés.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="une demande, une personne"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq' },
+      { out: '{' },
+      { out: '  "project": "checkout",' },
+      { out: '  "traces": 1,', tone: 'note' },
+      { out: '  "spans": 2,', tone: 'note' },
+      { out: '  "logs": 1,', tone: 'note' },
+      { out: '  "metrics": 0,', tone: 'note' },
+      { out: '  "scores": 1,', tone: 'note' },
+      { out: '  "feedback": 1,', tone: 'note' },
+      { out: '  "deleted": 6,' },
+      { out: '  "runs_erased": 1,', tone: 'note' },
+      { out: '  "runs_in_flight": 0,' },
+      { out: '  "dataset_items_erased": 1,', tone: 'warn' },
+      { out: '  "aspect_notes_erased": 0,' },
+      { out: '  "datasets": [' },
+      { out: '    "checkout-regressions"' },
+      { out: '  ],' },
+      { out: '  "deletes_pending": false,' },
+      { out: '  "unmatchable_identifiers": 0,' },
+      { out: '  "note": "1 captured dataset cases were emptied in place rather', tone: 'warn' },
+      { out: '           than deleted, so a regression test is not destroyed', tone: 'warn' },
+      { out: '           without anyone being told. They hold no payload any', tone: 'warn' },
+      { out: '           more."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Champ</th><th>Ce qu’il vous dit</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>runs_erased</code></td>
+          <td>
+            Les exécutions durables supprimées du stockage des exécutions,
+            exécutions filles comprises. Elles ne sont pas comptées dans
+            <code>deleted</code>. Absent quand le daemon ne sert aucune
+            exécution
+          </td>
+        </tr>
+        <tr>
+          <td><code>runs_in_flight</code></td>
+          <td>
+            Les exécutions durables de la personne laissées entières parce
+            qu’elles ne sont pas terminées. <code>note</code> nomme les
+            exécutions à annuler. Absent quand le daemon ne sert aucune
+            exécution
+          </td>
+        </tr>
+        <tr>
+          <td><code>dataset_items_erased</code></td>
+          <td>
+            Les cas capturés vidés sur place. Ils ne sont pas comptés dans
+            <code>deleted</code>, parce que les lignes sont toujours là
+          </td>
+        </tr>
+        <tr>
+          <td><code>aspect_notes_erased</code></td>
+          <td>
+            Les notes d’aspect supprimées. Elles ne sont pas comptées dans
+            <code>deleted</code>, qui totalise les six comptes par signal
+            affichés au-dessus
+          </td>
+        </tr>
+        <tr>
+          <td><code>datasets</code></td>
+          <td>Dans quels datasets se trouvent ces cas, pour que vous puissiez aller les regarder</td>
+        </tr>
+        <tr>
+          <td><code>deletes_pending</code></td>
+          <td>
+            Vrai quand le backend applique les suppressions après avoir répondu :
+            les comptes disent alors ce qui a correspondu, pas ce qui a déjà
+            quitté le disque
+          </td>
+        </tr>
+        <tr>
+          <td><code>unmatchable_identifiers</code></td>
+          <td>
+            Les identifiants stockés dans ce projet qui sont sous une forme que
+            cette demande ne pouvait pas reconnaître
+          </td>
+        </tr>
+        <tr>
+          <td><code>note</code></td>
+          <td>
+            Pourquoi les nombres ci-dessus peuvent ne pas être toute la réponse.
+            Absent quand ils le sont
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Les cas capturés sont vidés, pas supprimés</h3>
+  <p>
+    Un cas de dataset capturé en production détient une copie mot pour mot de
+    l’entrée : effacer l’exécution en laissant la copie laisserait donc les mots
+    de la personne dans le dataset. Supprimer le cas purement et simplement est
+    un tort d’une autre nature : quelqu’un a capturé cette exécution pour
+    empêcher un bug de revenir, et détruire son test de régression sans un mot
+    n’est pas une décision que mcpd doit prendre tout seul.
+  </p>
+  <p>
+    Le payload est donc écrasé et la ligne survit. Le cas affiche
+    <code>{'{"erased": true}'}</code> là où étaient son entrée et ses
+    métadonnées, son lien vers l’exécution source est effacé, et la réponse
+    nomme combien de cas et quels datasets. Le cas est visiblement vide, ce sur
+    quoi un opérateur peut agir.
+  </p>
+  <p>
+    Un cas reste entièrement hors d’atteinte, et le cloisonnement en est la
+    raison. Un cas capturé dans un dataset qui appartient à un
+    <em>autre</em> projet n’est ni vidé ni compté. L’appel est autorisé pour un
+    projet et touche un projet, et un effacement qui franchirait cette frontière
+    serait un moyen d’apprendre ce que contient un dataset que vous ne pouvez
+    pas lire. Effacez aussi la personne de ce projet, avec une clé qui
+    l’atteint.
+  </p>
+
+  <h3>Ce que cela ne fait pas</h3>
+  <p>
+    Cela touche un seul projet. <code>?project=</code> le nomme, et le projet
+    par défaut du daemon est utilisé quand vous l’omettez. Une clé qui n’atteint
+    pas ce projet est refusée par un 403 et rien n’est supprimé. Les lignes de
+    la même personne dans un projet que la clé ne peut pas ouvrir ne sont ni
+    touchées ni comptées, si bien qu’un compte ne peut jamais révéler que le
+    sujet existe ailleurs. Effacer une personne de plusieurs projets, c’est un
+    appel par projet, avec une clé qui atteint chacun.
+  </p>
+  <p>
+    Un sujet dont rien n’est stocké donne un 200 portant des zéros, pas un 404.
+    L’état que vous avez demandé est bien celui qui tient, et un 404 répondrait
+    à une question que personne n’a le droit de poser : si cette personne existe
+    quelque part que cette clé peut voir. C’est aussi pourquoi il est sûr de
+    répéter la demande après une expiration de délai. Le second appel rapporte
+    les comptes plus petits d’une seconde passe plutôt qu’une erreur.
+  </p>
+  <p>
+    Ce n’est pas un moyen d’effacer une personne de vos propres systèmes. mcpd
+    supprime ce que mcpd a stocké. Tout ce que vous avez transféré vers un autre
+    endpoint OTLP doit être effacé là-bas aussi, et mcpd ne sait pas ce qu’il en
+    est advenu.
+  </p>
+
+  <h3>Les clés, et la trace qui en est gardée</h3>
+  <p>
+    L’effacement exige une clé d’administration quand des clés sont configurées,
+    et se replie sur les clés de lecture quand aucune clé d’administration n’est
+    définie, pour qu’un déploiement existant garde la portée qu’il avait. Il est
+    écrit dans le journal d’audit avec l’action, le projet et une empreinte de
+    la clé qui a demandé, et une tentative refusée est enregistrée de la même
+    façon. Là où <code>user_id</code> est haché, c’est l’empreinte que la ligne
+    nomme : le journal d’audit survit aux données qu’il décrit, donc y écrire
+    l’identifiant en clair laisserait le nom que la personne vous a demandé de
+    retirer dans une table que la conservation ne balaie pas.
+  </p>
+  <p>
+    Une exécution à la fois reste possible.
+    <code>DELETE /v1/api/traces/{'{trace_id}'}</code> retire une seule exécution
+    et tout ce qui y est attaché, en une seule transaction, en renvoyant le
+    nombre de lignes supprimées.
+  </p>
+
+  <h2>Le zéro d’un effacement est la valeur dont il faut se méfier</h2>
+  <p>
+    Un zéro, c’est ce qu’un opérateur répète à une personne sous la forme
+    « nous ne détenons rien sur vous », et c’est le seul nombre que cet endpoint
+    ne peut pas prouver. Les identifiants stockés sont hachés avec la clé de
+    masquage, et rien n’enregistre quelle clé a haché quelle ligne : un zéro
+    peut donc tout aussi bien vouloir dire que la clé a changé après
+    l’écriture de ces lignes. mcpd ne peut pas distinguer les deux. Ce qu’il
+    peut faire, c’est ne jamais renvoyer un zéro nu qui se lirait comme le
+    premier.
+  </p>
+  <p>
+    Voici le même sujet, effacé sous une clé de masquage qui a tourné depuis
+    l’enregistrement de l’exécution. Les comptes sont tous à zéro et la ligne
+    est toujours là :
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="après une rotation, la même demande ne correspond à rien"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq "{deleted, unmatchable_identifiers, note}"' },
+      { out: '{' },
+      { out: '  "deleted": 0,', tone: 'warn' },
+      { out: '  "unmatchable_identifiers": 0,' },
+      { out: '  "note": "Nothing matched. Stored identifiers are hashed with', tone: 'warn' },
+      { out: '           the redaction key, so this means no stored identifier', tone: 'warn' },
+      { out: '           hashes to this subject under the key in force now. It', tone: 'warn' },
+      { out: '           does not mean nothing about this person was ever', tone: 'warn' },
+      { out: '           stored: rows written under a different redaction key', tone: 'warn' },
+      { out: '           cannot be matched by this endpoint."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <p>
+    Ce que la note peut prouver dépend du projet. Quand rien n’y est attribué à
+    qui que ce soit, il n’y a aucune ligne qu’un changement de clé pourrait
+    cacher, et la note le dit exactement. Sinon, un zéro n’est pas prouvé :
+    rétablissez la clé de masquage sous laquelle ces lignes ont été écrites et
+    répétez la demande.
+  </p>
+  <p>
+    Il signale plutôt qu’il refuse, et c’est un compromis délibéré. Refuser
+    casserait la répétition après une expiration de délai, ferait différer la
+    réponse pour « jamais vu » de celle pour « effacé il y a une heure », ce qui
+    ferait de l’endpoint un moyen de demander si une personne est connue d’un
+    projet, et bloquerait tout effacement dans un déploiement dont le réglage
+    de masquage a changé un jour, y compris ceux qui, à juste titre, ne
+    correspondent à rien.
+  </p>
+
+  <h3>Les identifiants que cette demande ne pouvait pas reconnaître</h3>
+  <p>
+    Une rotation est invisible. Un changement sur le fait <em>même</em> de
+    hacher les identifiants ne l’est pas, et <code>unmatchable_identifiers</code>
+    est ce que mcpd peut voir. Un identifiant haché se reconnaît à son préfixe
+    <code>sha256:</code>, donc le stockage compte combien des identifiants qu’il
+    détient sont sous la forme opposée à celle que portait cette demande : des
+    lignes en clair face à une demande hachée, ou l’inverse. Ces lignes ont été
+    écrites sous un autre réglage de masquage, elles peuvent appartenir au
+    sujet, et cette demande ne peut rien pour elles.
+  </p>
+
+  <p>
+    Le compte est fait à chaque effacement, pas seulement sur un zéro, et la
+    réponse ci-dessous dit pourquoi. Ce projet a été écrit avec le masquage
+    actif, puis de nouveau avec le masquage désactivé. La demande a reconnu les
+    lignes récentes et les a supprimées, et les deux identifiants plus anciens
+    sont hachés, donc cette demande ne pouvait pas les adresser. Un compte qui
+    se serait arrêté à <code>deleted</code> se serait lu comme une réponse
+    complète :
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="un effacement partiel, le cas qu’il faut attraper"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq "{deleted, unmatchable_identifiers, note}"' },
+      { out: '{' },
+      { out: '  "deleted": 2,' },
+      { out: '  "unmatchable_identifiers": 2,', tone: 'warn' },
+      { out: '  "note": "2 stored identifiers in this project are in a form', tone: 'warn' },
+      { out: '           this request could not match, so rows written under a', tone: 'warn' },
+      { out: '           different redaction setting were not searched and rows', tone: 'warn' },
+      { out: '           about this person may remain. Restore the redaction', tone: 'warn' },
+      { out: '           setting those rows were written under and repeat the', tone: 'warn' },
+      { out: '           request."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <p>
+    Le compte porte sur tous les identifiants du projet, pas sur les seules
+    lignes du sujet, donc ces deux-là peuvent très bien appartenir à quelqu’un
+    d’autre. C’est le maximum de ce qu’il peut dire. Ce qu’il écarte, c’est de
+    lire un effacement d’apparence réussie comme un effacement complet.
+  </p>
+
+  <h2>La garantie n’est pas la même sur les trois backends</h2>
+  <p>
+    SQLite et Postgres suppriment dans la transaction qui vous a répondu. Quand
+    la réponse arrive, les lignes sont parties, et <code>deletes_pending</code>
+    vaut <code>false</code>.
+  </p>
+  <p>
+    ClickHouse, non. La suppression y est une mutation asynchrone : le serveur
+    accepte l’instruction et l’applique en arrière-plan, donc la réponse dit ce
+    qui a correspondu et non ce qui a déjà quitté le disque. Ces effacements
+    reviennent avec <code>deletes_pending</code> à <code>true</code>, ce qui est
+    la façon dont mcpd vous dit que c’est la plus faible des deux garanties qui
+    s’applique. Les cas de dataset sont l’exception sur ce backend. Ils sont
+    réécrits sous leur propre clé plutôt que mutés, donc le cas vidé est ce que
+    toute lecture renvoie dès l’envoi de la réponse. Une mutation aurait laissé
+    l’ancien texte lisible jusqu’à son achèvement.
+  </p>
+  <p>
+    Si vous devez certifier à quelqu’un que les données sont parties à un moment
+    donné, c’est la différence à noter. Sur ClickHouse, confirmez que la
+    mutation s’est achevée sur le serveur avant de répondre.
+  </p>
+
+  <h2>Avant que le port soit joignable</h2>
+  <p>
+    Le masquage protège les valeurs à l’intérieur d’une trace. Il ne change
+    rien à qui peut lire la trace. mcpd avertit au démarrage quand il écoute sur
+    une adresse autre que la boucle locale avec une ingestion ouverte ou une
+    API de lecture ouverte, parce que les prompts et les complétions stockés
+    sont alors lisibles par quiconque atteint le port. Définissez d’abord
+    <code>--ingest-key</code> et <code>--read-key</code>, et lisez
+    <a href={urlFor('/deploy', code)} class="link">Docker et Kubernetes</a>.
+  </p>
+
+  <h2>La suite</h2>
+  <ul>
+    <li>
+      En garder moins dès le départ :
+      <a href={urlFor('/docs/sampling', code)} class="link">Échantillonnage</a>.
+    </li>
+    <li>
+      Toutes les options et variables d’environnement :
+      <a href={urlFor('/docs/configuration', code)} class="link">Configuration</a>.
+    </li>
+    <li>
+      Sondes, sauvegardes et mises à niveau :
+      <a href={urlFor('/docs/operations', code)} class="link">Exploitation</a>.
+    </li>
+  </ul>
+</Doc>

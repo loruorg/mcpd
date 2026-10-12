@@ -1,0 +1,450 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import Conformance from '@/components/Conformance.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="導入"
+  description="稼働中の mcpd に到達する 3 つの経路。HTTP API をそのまま使う、6 つの SDK のいずれかを使う、エージェントが呼び出せる MCP サーバーとして使う。それぞれの代償と、得られるもの。"
+  lede="デーモンがどこかで動いています。ほかのものがそこへ到達する経路は 3 つです。その選び方もここで説明します。"
+  og="docs"
+>
+  <p>
+    mcpd の入口は 1 つで、そこを通る道が 3 つあります。以下で説明するものはすべて
+    同じ HTTP 面に対して通信します。SDK はその上に載せた便利な層であり、MCP
+    サーバーはその面のクライアントです。
+  </p>
+
+  <h2>1 つのポート、4 つの面</h2>
+  <p>
+    単一のプロセスが、既定では 4317 番の 1 つのポートですべてを提供します。
+    サイドカーはなく、横で動かすコレクターもなく、インターフェース用の静的
+    ファイルサーバーも要りません。
+  </p>
+  <table>
+    <thead>
+      <tr><th>パス</th><th>内容</th><th>キー</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>/v1/traces</code>、<code>/v1/logs</code>、<code>/v1/metrics</code></td>
+        <td>OpenTelemetry の取り込み口。どの OTel SDK でも使え、アプリケーションに mcpd 固有のコードは要りません。</td>
+        <td>ingest</td>
+      </tr>
+      <tr>
+        <td><code>/v1/ingest</code></td>
+        <td>ネイティブの取り込み口。1 つのバッチが 6 種類のシグナルを任意に混ぜて運び、データモデル全体を扱えます。1 つのリクエストはバッチの連なりを運べます。</td>
+        <td>ingest</td>
+      </tr>
+      <tr>
+        <td><code>/v1/api/…</code></td>
+        <td>クエリ API。インターフェースも SDK も、読み取りはここだけを通ります。</td>
+        <td>read、write、admin、execute、worker のいずれか。エンドポイントごとに宣言されます</td>
+      </tr>
+      <tr>
+        <td><code>/</code></td>
+        <td>運用インターフェース。バイナリに組み込まれています。</td>
+        <td>ページ自体には不要。そのデータはクエリ API を通ります</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    もう 2 つ、<code>/healthz</code> と <code>/readyz</code> は認証なしで、
+    プローブが到達できるようにしてあります。エンドポイントにそもそも到達できるのか
+    を調べるときは、ここから始めてください。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="そこにいるか"
+    lines={[
+      { cmd: 'curl -s "$MCPD/healthz"' },
+      { out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0",…}', tone: 'ok' },
+      { cmd: 'curl -s "$MCPD/readyz"' },
+      { out: 'storage is not reachable: …', tone: 'warn' },
+      { out: '# readyz はストアに触れるので、ここで 503 が返るのはデーモンが生きていて' },
+      { out: '# その背後のデータベースが生きていない、という意味です。' },
+    ]}
+  />
+
+  <h2>SDK を使わない HTTP API</h2>
+  <p>
+    あなたの言語に HTTP クライアントがあれば、mcpd と通信できます。登録するものは
+    なく、あらかじめ作っておくプロジェクトもなく、ハンドシェイクもありません。
+    どの SDK も以下のリクエストの上に載せた便利な層にすぎず、この経路を選ぶと
+    バッチ処理、リトライ、id の生成を失い、それらは自分で書くことになります。
+  </p>
+
+  <h3>実行の書き込み</h3>
+  <p>
+    <code>POST /v1/ingest</code> は 1 つのバッチを受け取ります。バッチはスパン、
+    ログ、メトリクス、スコア、フィードバック、観点ノートをまとめて運べます。
+    ネイティブの入口が OTLP の入口と並んで存在する理由はここにあります。6 種類の
+    シグナルはトレース id
+    とスパン id を共有するので、1 つのリクエストで送れば、二度目の照合なしに
+    対応づいたままになります。
+  </p>
+
+  <p>
+    このエンドポイントには 3 つの形が届き、どれであるかは content type が決めます。
+    バイト列から推測されるものは何もないので、文字列の中に改行を足しても本文の
+    意味が変わることはありません。
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Content type</th><th>本文</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>application/json</code></td>
+          <td>バッチオブジェクト 1 つ。どの SDK もこれを送ります</td>
+        </tr>
+        <tr>
+          <td><code>application/json</code></td>
+          <td>バッチオブジェクトの配列。手元に複数ある送信側のためのもの</td>
+        </tr>
+        <tr>
+          <td><code>application/x-ndjson</code></td>
+          <td>1 行につき 1 バッチ。全体を抱えずに本文が届いた順に読みます。<code>application/jsonl</code> も同じ意味です</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    それぞれの要素はそれ自体が 1 つのバッチです。<code>ingest_key</code> を持つ
+    要素は自分のトランザクションで保存されるので、再送されたストリームは一塊
+    としてではなく行ごとに認識されます。キーを持たない要素はまとめて保存され
+    ます。いずれかの行が読めない場合、またはリクエスト全体がどちらかの上限を
+    超えた場合は、何も保存せずにリクエスト全体を拒否します。応答は全体をまとめた
+    1 つの <code>IngestResult</code> です。
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <CodeSwitcher class="not-prose my-6" only={['curl']} region="trace" title="1 つのバッチ" />
+
+  <p>リクエストが正しく満たすべきことが 4 つあります。</p>
+  <ul>
+    <li>
+      <strong>id は OpenTelemetry の形です。</strong>トレースは小文字の 16 進 32
+      文字、スパンは 16 文字で、すべてゼロは不可です。それ以外は、あなたが動かして
+      いる他のあらゆるツールとの対応づけを壊します。
+    </li>
+    <li>
+      <strong><code>ingest_key</code> がリトライを安全にします。</strong>これは
+      バッチに対して安定した冪等キーで、再送は重複として認識され数えられ、二重に
+      書き込まれることはありません。
+    </li>
+    <li>
+      <strong>キーはヘッダーに入れます。</strong>
+      <code>Authorization: Bearer …</code> か <code>X-Mcpd-Key</code> です。
+      取り込みには ingest キーが必要で、必要になるのはデーモンにキーが設定されて
+      いるときだけです。
+    </li>
+    <li>
+      <strong>バッチには上限があります。</strong>既定で本文 32 MiB、シグナル
+      10,000 件で、どちらも <code>--max-body-bytes</code> と
+      <code>--max-batch-signals</code> で変えられます。シグナルの上限はリクエスト
+      全体を数えるので、同じシグナルを複数行に分けても回避できません。大きなものは
+      <code>content-encoding: gzip</code> を付けて送ってください。
+    </li>
+  </ul>
+  <p>
+    応答はシグナルごとに何が起きたかを報告します。
+    <code>{'{"accepted":2,"rejected":0,"duplicate":0}'}</code> の形で、拒否された
+    ものについては添字と理由を挙げる <code>errors</code> 配列が付きます。OTLP の
+    エンドポイントは代わりに OTLP 自身の形で答え、拒否件数を運ぶ
+    <code>partialSuccess</code> オブジェクトを返します。OpenTelemetry の送信側が
+    読むのはそちらだからです。
+  </p>
+
+  <h3>読み返し</h3>
+  <CodeSwitcher class="not-prose my-6" only={['curl']} region="query" title="読み取り" />
+
+  <p>
+    フィルターは重ねられ、ページ送りはカーソル方式で、<code>project</code> を
+    省くとデーモンの既定プロジェクトになります。保存されたペイロードに対する
+    全文検索は <code>q</code> パラメーターで、これがあるおかげで「モデルがこう
+    言った実行を探す」が grep ではなくクエリになります。
+  </p>
+  <p>
+    mcpd 自身が出す失敗は JSON で返り、機械が読める安定した <code>error</code>
+    コード、直す人に向けて書かれた <code>message</code>、そして 1 つの
+    パラメーターに原因があるときは <code>field</code> を含みます。コードで分岐し、
+    メッセージを表示してください。
+  </p>
+  <p>
+    1 種類の失敗だけはこの形を取らないので、この形だと決めてかかるクライアントは
+    応答の解析に失敗します。エンドポイントが期待する型に復号できないリクエスト
+    本文は、mcpd のコードが動く前に Web フレームワークが拒否します。したがって
+    <code>422</code> と <code>content-type: text/plain</code> で、
+    <code>missing field `scorer_id`</code> のようなメッセージが返ります。そもそも
+    JSON ですらない構文の本文には <code>400</code> が、これもテキストで返ります。
+    どちらの場合も分岐できる <code>error</code> コードはありません。これは型付きの
+    本文を取るすべてのエンドポイントに当てはまります。
+    <code>POST /v1/api/scores</code>、<code>/v1/api/feedback</code>、
+    <code>/v1/api/score</code>、<code>/v1/api/datasets</code> とその
+    <code>items</code> および <code>capture</code> のルート、そして
+    <code>/v1/api/experiments</code> です。取り込み口は本文を自分で読むので、
+    <code>/v1/ingest</code> と OTLP のルートは JSON の形を返します。4xx で本文が
+    JSON でないときは、自分のコードから出た不正なリクエストだとみなし、テキスト
+    として読んでください。
+  </p>
+
+  <h2>SDK</h2>
+  <p>
+    6 つの言語があります。<a href={linkTo('/docs/sdks/typescript')} class="link">TypeScript</a>、
+    <a href={linkTo('/docs/sdks/python')} class="link">Python</a>、
+    <a href={linkTo('/docs/sdks/rust')} class="link">Rust</a>、
+    <a href={linkTo('/docs/sdks/go')} class="link">Go</a>、
+    <a href={linkTo('/docs/sdks/kotlin')} class="link">Kotlin</a>、
+    <a href={linkTo('/docs/sdks/elixir')} class="link">Elixir</a> です。
+    それぞれ、できるところではその言語らしく、重要なところでは同一です。
+    TypeScript のクイックスタートを読んだ人は、Kotlin のそれを予想できます。
+  </p>
+  <p>生の HTTP に対して得られるものは次のとおりです。</p>
+  <ul>
+    <li>バッチ処理とバックグラウンドワーカー。スパンの記録はキューへの追加で終わり、すぐ戻ります。</li>
+    <li>429 とリトライする価値のある 5xx でのバックオフ付きリトライ。不正なままになる 4xx では決してリトライしません。</li>
+    <li>id の生成、コンテキストの伝播、そして W3C の <code>traceparent</code> を受信時に解析し送信時に出力すること。これによりトレースはサービス境界を越えても続きます。</li>
+    <li>デーモンと同じ仕様から生成された型。あるフィールドが SDK とストアで別の意味になることはありません。</li>
+  </ul>
+  <p>
+    どの言語でも成り立つ約束が 3 つあり、これが SDK をホットパスに置いても安全な
+    理由です。計装は例外を投げません。デーモンに到達できないことは間隔ごとに多くて
+    一度だけ記録され、あとは飲み込まれます。ブロックもしません。ネットワークの処理は
+    ワーカーで行われるので、あなたのエージェントのレイテンシが mcpd の稼働に
+    左右されることはありません。そしてキューには上限があります。いっぱいになると
+    古いスパンから捨てられ、カウンターが増えます。上限のないバッファーは、
+    ネットワーク障害をメモリ不足による強制終了に変えてしまうからです。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="init" title="接続" />
+
+  <p>
+    引数なしで作ったクライアントは、ローカルのデーモンに対して動きます。すべては
+    コードでも環境変数でも設定でき、コードが勝ちます。変数名はどの言語でも同じなので、
+    2 つのサービスの間でコピーした値は、それらが別々の言語で書かれていても効き続けます。
+    <code>MCPD_ENDPOINT</code>、<code>MCPD_API_KEY</code>、
+    <code>MCPD_PROJECT</code>、<code>MCPD_ENVIRONMENT</code>、
+    <code>MCPD_SERVICE_NAME</code>、<code>MCPD_SERVICE_VERSION</code>、
+    <code>MCPD_SAMPLE</code>、<code>MCPD_ENABLED</code> です。
+    <code>MCPD_ENABLED=false</code> にすると、すべての呼び出しは有効な
+    オブジェクトを返したまま何もしなくなるので、テストではコードに触れずに mcpd を
+    切れます。
+  </p>
+
+  <h3>6 つが交換可能であることの検証</h3>
+  <p>
+    ユニットテストが証明するのは、それぞれの SDK が自分の作者の意図どおりに動く
+    ことだけです。6 つが一致するかどうかについては何も証明しません。そこで適合
+    スイートが、1 つの生きたデーモンに対して各言語から基準となる同じ実行を書き込み、
+    さらに <code>curl</code> だけで同じ実行を送る 7 つ目の経路も加えて、返ってくる
+    ものが構造として同一であることを確かめます。
+  </p>
+
+  <Conformance class="not-prose my-8" />
+
+  <p>
+    新しいサービスの言語を選んでいるなら、これが「トレースは今あるものと同じに
+    見えるか」への答えです。
+  </p>
+
+  <h3>あなたの言語が 6 つに入っていないとき</h3>
+  <p>
+    OpenTelemetry の SDK を <code>/v1/traces</code> に向ければ、新しいコードは
+    要りません。mcpd は OTLP の受信側であり、OpenTelemetry の
+    <code>gen_ai.*</code> 規約と OpenInference の <code>llm.*</code> 規約の両方を
+    対応づけるので、すでにある計装がそのまま正しく届きます。
+    <a href={linkTo('/docs/opentelemetry')} class="link">OpenTelemetry</a> を
+    参照してください。
+  </p>
+
+  <h2>AI エージェントから、MCP 経由で</h2>
+  <p>
+    3 つ目の経路は、サービスではなくエージェントのためのものです。あなたのコードが
+    トレースを読むのではなく、コーディングやサポートのエージェントがあなたに
+    代わって読み、それについての質問に答えます。「直近の実行はなぜ失敗したのか」、
+    「今週スコアラーが低く付けた実行を見せて」、「このセッションはいくらかかったか」。
+    mcpd はこれを Model Context Protocol で提供します。
+  </p>
+
+  <h3>3 つのツール</h3>
+  <p>
+    30 ではなく 3 つです。これは 1 つの調査の 3 つの動きにあたります。どの実行か、
+    その中で何が起きたか、そしてそれが 1 つの実行の問題かすべての問題か、です。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>ツール</th><th>答えるもの</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>find_runs</code></td>
+        <td>
+          どの実行か。1 件 1 行で、id、経過時間、状態、所要時間、コスト、ステップ数
+          を出します。状態、モデル、ユーザー、セッション、自由文で絞り込み、所要
+          時間で並べ替えれば最も遅いものが出ます。既定は直近 24 時間です。
+        </td>
+      </tr>
+      <tr>
+        <td><code>get_run</code></td>
+        <td>
+          何が起きたか。ウォーターフォール、失敗したステップとその理由、プロンプトと
+          補完、ログ、スコア。ペイロードには上限があるので、1 つの実行が
+          コンテキストウィンドウを埋め尽くすことはありません。
+        </td>
+      </tr>
+      <tr>
+        <td><code>run_stats</code></td>
+        <td>
+          1 つの実行か、全体か。ある期間のコスト、失敗率、レイテンシ、トークンを、
+          モデル、名前、状態、環境、ユーザーで分けて出します。失敗率が 40% なら、
+          いま読んでいる実行は問題ではありません。
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    結果は JSON ではなくテキストで返ります。誰のコンテキストを使うかを考えた、
+    意図的な選択です。スパンオブジェクト 40 個はほとんどが記号であり、
+    同じ実行をウォーターフォールとして描けば数百トークンで済み、エージェントは
+    その形を見て取れます。
+  </p>
+
+  <h3>その姿</h3>
+  <p>
+    MCP サーバーは 2 つ目のサービスではなく、同じバイナリのサブコマンドです。
+    <code>mcpd mcp</code> として動き、標準入出力で JSON-RPC を話し、自分のデータは
+    持ちません。開けるポートもなく、生かし続けるプロセスもなく、デプロイするものも
+    ありません。エージェントのホストが、会話で必要になったときに子プロセスとして
+    起動し、終わったら止めます。
+  </p>
+  <p>
+    持っているのはデーモンへの接続です。ツールの呼び出しはすべて、上で説明した同じ
+    クエリ API へのリクエストになり、同じ read キーと同じプロジェクトの範囲が
+    適用されます。したがってエージェントは、渡されたキーが届かないプロジェクトには
+    届きません。このサーバーをエージェントに渡すことの影響範囲は、そのキーを渡す
+    ことの影響範囲とちょうど同じです。設定する前に確かめるべきはそこです。
+  </p>
+  <p>
+    ツールの数は意図的に少なくしてあります。選べるものが多いとモデルは選び方を誤りますし、
+    エージェントの挙動についての質問はたいてい、実行を並べ、1 つを開き、ある期間に
+    ついて数値を尋ねる、という形に行き着きます。クライアントは、ここに書き下ろされて
+    古びるかもしれない一覧ではなく、プロトコル自身の <code>tools/list</code>
+    呼び出しで現在の一式を知ります。
+  </p>
+
+  <h3>クライアントの設定</h3>
+  <p>
+    MCP のホストは、コマンド、いくつかの引数、環境からサーバーを起動します。
+    どのファイルでどのキーを使うかはホスト側の事情であって mcpd の事情ではないので、
+    ホストのドキュメントを確認してください。ホストがあなたから必要とする 3 つの値は
+    どこでも同じです。
+  </p>
+  <table>
+    <thead>
+      <tr><th>ホストが必要とするもの</th><th>値</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>コマンド</td><td>ホストが実行できるパスに置かれた <code>mcpd</code> のバイナリ。</td></tr>
+      <tr>
+        <td>引数</td>
+        <td>
+          <code>mcp</code> サブコマンド。環境より引数のほうが渡しやすいホストの
+          ために、問い合わせ先のデーモンを指す <code>--endpoint</code> と、その
+          read キーである <code>--api-key</code> を取ります。
+        </td>
+      </tr>
+      <tr>
+        <td>環境</td>
+        <td>
+          <code>MCPD_ENDPOINT</code> と <code>MCPD_API_KEY</code> という同じ 2 つの
+          値。エンドポイントの既定は <code>http://127.0.0.1:4317</code> で、
+          デーモンにキーが設定されていなければキーは省けます。
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <Command
+    class="not-prose my-6"
+    label="ホストが実行するもの"
+    command="MCPD_ENDPOINT=https://mcpd.internal MCPD_API_KEY=$READ mcpd mcp"
+    primaryLabel="環境変数で"
+    secondary={[
+      { label: 'フラグで', command: 'mcpd mcp --endpoint https://mcpd.internal --api-key $READ' },
+      { label: 'Docker から', command: 'docker run -i --rm -e MCPD_ENDPOINT -e MCPD_API_KEY ghcr.io/mcpd/mcpd mcp' },
+    ]}
+  />
+
+  <p>そのキーを発行するときに押さえておくことが 3 つあります。</p>
+  <ul>
+    <li>
+      エージェントには <code>ingest</code> キーではなく <code>read</code> キーを
+      渡してください。スコープが分かれているのは、スパンを書くための資格情報が、
+      保存されたすべてのプロンプトを読むための資格情報にならないようにするため
+      です。
+    </li>
+    <li>
+      キーはプロジェクトに絞ってください。最上位で設定したキーは、デーモン上の
+      すべてのプロジェクトに届きます。
+    </li>
+    <li>
+      <code>admin</code> の一覧を設定するまでは、read キーでトレースを削除できる
+      ことを知っておいてください。admin スコープは未設定のとき read の一覧に
+      戻るからです。admin の一覧を一度も与えられていないデーモンでは、read キーを
+      持つエージェントが実行を削除できます。
+    </li>
+  </ul>
+  <p>3 つとも<a href={linkTo('/docs/security')} class="link">セキュリティ</a>にあります。</p>
+
+  <h2>どれを使うか</h2>
+  <table>
+    <thead>
+      <tr><th>経路</th><th>選ぶとき</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>HTTP</td>
+        <td>あなたの言語に SDK がない、シェルやジョブから送っている、あるいは依存を一切増やしたくないとき。</td>
+      </tr>
+      <tr>
+        <td>SDK</td>
+        <td>アプリケーションに計装を入れていて、バッチ処理、リトライ、例外を投げないことが依存の重さに見合うとき。</td>
+      </tr>
+      <tr>
+        <td>OpenTelemetry</td>
+        <td>すでに OTel を出していて、ライブラリを足すより URL を変えるほうがよいとき。</td>
+      </tr>
+      <tr>
+        <td>MCP</td>
+        <td>コードが定期的に読むのではなく、人がエージェントに保存済みの実行について尋ねるとき。</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    これらは混ざります。TypeScript の SDK で送信する多数のサービス、
+    <code>curl</code> でスコアを投げる夜間ジョブ、そしてそのすべてを MCP 経由で
+    読み返すエージェントは、3 つではなく 1 つのデプロイです。
+  </p>
+
+  <h2>次に</h2>
+  <ul>
+    <li>何が保存され、誰が読めるか。<a href={linkTo('/docs/security')} class="link">セキュリティ</a>。</li>
+    <li>既存の OTel の設定を mcpd に向ける。<a href={linkTo('/docs/opentelemetry')} class="link">OpenTelemetry</a>。</li>
+    <li>仕様から生成された全エンドポイント。<a href={linkTo('/docs/reference/api')} class="link">HTTP API</a>。</li>
+    <li>知っておく価値のあるクエリ。<a href={linkTo('/docs/searching')} class="link">実行を探す</a>。</li>
+  </ul>
+</Doc>

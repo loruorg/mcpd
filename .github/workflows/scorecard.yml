@@ -1,0 +1,79 @@
+# OpenSSF Scorecard: an outside opinion on how this repository is run.
+#
+# Why this exists: every other check here reads the code. This one reads the
+# project. It asks whether branch protection is on, whether actions are pinned
+# to a commit rather than a moving tag, whether releases are signed, whether
+# dangerous workflow patterns are present, and whether anyone reviews what
+# merges. Those are the failures that let a supply-chain attack in, and no
+# amount of clippy will find one of them.
+#
+# The result is a number that a person deciding whether to run mcpd in
+# production can look up, which is the other half of the point.
+#
+# What a maintainer must configure: nothing, on a public repository. The
+# analysis runs on GITHUB_TOKEN and publishes with the workflow's OIDC
+# identity, so there is no secret to create. Two things are worth knowing:
+#   - `publish_results: true` sends the score to the public OpenSSF API. Set
+#     it to false if that is not wanted; the SARIF upload still works.
+#   - The Branch-Protection check reads a settings API that GITHUB_TOKEN
+#     cannot see. To score it, create a fine-grained personal access token
+#     with read access to administration and metadata, save it as the
+#     SCORECARD_TOKEN secret, and pass it as `repo_token` below.
+name: scorecard
+
+on:
+  branch_protection_rule:
+  schedule:
+    # Weekly. The score answers questions about repository settings, and those
+    # change without a commit.
+    - cron: '23 6 * * 3'
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  analysis:
+    name: scorecard analysis
+    # A fork's score would be a score of the fork, published under this
+    # workflow's name. Skip it.
+    if: github.repository == 'mcpd/mcpd'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # Uploading the SARIF result to the code scanning dashboard.
+      security-events: write
+      # Publishing the result to the OpenSSF API, which authenticates the
+      # workflow by its OIDC token rather than by a secret.
+      id-token: write
+      # The Dangerous-Workflow and Token-Permissions checks read this
+      # repository's own workflow runs.
+      actions: read
+      contents: read
+    steps:
+      - name: check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: run the analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      # Kept for 30 days so a bad score can be read back and compared, rather
+      # than only seen as annotations that scroll away.
+      - name: keep the raw result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 30
+
+      - name: upload to code scanning
+        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
+        with:
+          sarif_file: results.sarif

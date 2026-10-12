@@ -1,0 +1,589 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="脱敏与保留期"
+  description="mcpd 在写下任何东西之前施加的脱敏规则、四种模式、这个哈希为什么要带密钥，以及存下的数据怎样过期、或者应请求被擦除。"
+  lede="什么从来不会被存下，什么会不再被存下。脱敏在写入之前运行，因为一份事后被删掉的密文，毕竟已经被写下来过。"
+  og="docs"
+>
+  <h2>脱敏在存储之前运行</h2>
+  <p>
+    提示词和补全是 mcpd 持有的最有价值的东西，也是最危险的东西。脱敏是摄取流水线
+    的第三级，排在写入之前，所以一个被规则命中的值根本不会到达数据库。
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    顺序就是全部意义所在。一个事后才被抹掉的值，毕竟已经躺在过磁盘上、躺在过预写
+    日志里，很可能还躺在昨晚的备份里。“从未被写下”和“之后被删掉”是不同的保证，
+    而只有前者，是你可以对着一个来问的人平实地说出口的。
+  </p>
+  <p>
+    脱敏默认开启。一个要等你配置了才保护你的工具，谁也保护不了。
+    <code>--no-redact</code>，或者 <code>MCPD_NO_REDACT</code>，会把它关掉，只有
+    在上游已经做了脱敏时这才说得通。
+  </p>
+  <p>
+    脱敏是这条线路上守护进程这一端。SDK 握着另一端：
+    <code>MCPD_CAPTURE_PAYLOADS=false</code>，或者代码里的
+    <code>capture_payloads</code>，会把提示词和补全留在进程里。一个 span 照样带着
+    它的各项时间、状态、用量、模型、关联字段和错误到达，而 <code>input</code> 和
+    <code>output</code> 在入队之前就被丢掉了，所以它们从不越过网络。一个绝不能把
+    这些字节发出去的团队会设置它，而一个不含敏感内容的 span 可以为自己重新选择
+    发出来。
+  </p>
+
+  <h2>默认规则</h2>
+  <p>
+    一条规则是一组小写子串加上一个模式。当一个键的名字转成小写后包含其中任意一个，
+    它就被命中。正因为匹配的是子串，<code>X-API-Key</code>、
+    <code>authorization</code> 和 <code>customer_email</code> 才都被抓住，而不必把
+    每一种大小写和前缀都列出来。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>模式</th><th>会被命中的键名</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>mask</code></td>
+        <td>
+          <code>api_key</code>、<code>apikey</code>、<code>api-key</code>、
+          <code>secret</code>、<code>password</code>、<code>passwd</code>、
+          <code>access_token</code>、<code>refresh_token</code>、
+          <code>id_token</code>、<code>bearer</code>、
+          <code>authorization</code>、<code>auth_token</code>、
+          <code>private_key</code>、<code>client_secret</code>、
+          <code>session_token</code>、<code>credential</code>、
+          <code>signature</code>、<code>x-api-key</code>
+        </td>
+      </tr>
+      <tr>
+        <td><code>partial</code></td>
+        <td>
+          <code>email</code>、<code>phone</code>、<code>ssn</code>、
+          <code>credit_card</code>、<code>card_number</code>、<code>iban</code>
+        </td>
+      </tr>
+      <tr>
+        <td><code>hash</code></td>
+        <td><code>user_id</code>、<code>userid</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    当一个被命中的键持有一个对象或者一个数组时，它下面的一切也会被脱敏。
+    <code>{'{"credential": {"value": "hunter2", "note": "prod"}}'}</code>
+    会丢掉两个字段，而不只是那个名字看着危险的字段。
+  </p>
+  <p>
+    它的边界值得平实地说出来：规则匹配的是<strong>键名，不是值</strong>。一把用户
+    粘在提示词中间的 API 密钥，存在一个叫 <code>content</code> 的键下面，这里没有
+    任何东西会命中它。脱敏挡住的是凭据和标识符的结构化采集。它不是一个内容扫描器，
+    把它当成内容扫描器只会让你失望。
+  </p>
+
+  <h2>四种模式</h2>
+  <table>
+    <thead>
+      <tr><th>模式</th><th>这个值会怎样</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>drop</code></td>
+        <td>这个键被整个移除，就像它从没被发来过。</td>
+      </tr>
+      <tr>
+        <td><code>mask</code></td>
+        <td>这个值被替换成 <code>[redacted]</code>。</td>
+      </tr>
+      <tr>
+        <td><code>partial</code></td>
+        <td>
+          头两个和末两个字符留下，中间用省略号连起来：
+          <code>alice@example.com</code> 变成 <code>al…om</code>。够你认出一个
+          你本来就知道的值，但不够拿来用。一个不超过六个字符的值会整个被遮蔽，
+          因为五个字符里留下四个等于把它大半都说了出来。
+        </td>
+      </tr>
+      <tr>
+        <td><code>hash</code></td>
+        <td>
+          这个值被替换成 <code>sha256:</code> 加上一段带密钥的 SHA-256 摘要的
+          前十二个字节，写成二十四个十六进制字符。
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    内置规则用了四种里的三种。默认不丢弃任何东西：<code>drop</code> 是留给你自己
+    添加的规则用的，用在连一个字段的存在本身都超出你想保留的范围时。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="返回来的是什么"
+    lines={[
+      { cmd: 'curl -s "$MCPD/v1/api/traces/$TRACE" | jq .spans[0].input' },
+      { out: '{' },
+      { out: '  "question": "Where is my order A-1042?",' },
+      { out: '  "api_key": "[redacted]",', tone: 'note' },
+      { out: '  "email": "al…om",', tone: 'note' },
+      { out: '  "user_id": "sha256:9f2c1b7d4a08e5c3f6b1d0a4"', tone: 'note' },
+      { out: '}' },
+    ]}
+  />
+
+  <h2>这个哈希为什么要带密钥</h2>
+  <p>
+    哈希让一个字段仍然有用。在同一把密钥下，相同的输入给出相同的摘要，所以你还是
+    可以按一个脱敏后的用户 id 分组，数一数有多少个不同的人碰到了某次失败，并在
+    一次会话里跟着其中一个人走，同时并不持有他们是谁。
+  </p>
+  <p>
+    不带密钥的话，这个性质就是一个漏洞。标识符来自很小的、可以猜的取值空间，任何
+    拿到摘要又有这份源码的人，都可以一个个哈希候选值，直到有一个对上。密钥正是让
+    这段摘要变成不可反推，而不只是变得麻烦一点的那样东西。
+  </p>
+  <p>
+    内置的那把密钥是源码里的一个常量，所以它是公开的。任何会哈希点什么的部署，
+    都请设置你自己的密钥。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="一个会哈希也会过期的部署"
+    command={'mcpd --redact-key "$MCPD_REDACT_KEY" --retention-days 30'}
+    secondary={[
+      { label: '用环境变量', command: 'MCPD_REDACT_KEY=… MCPD_RETENTION_DAYS=30 mcpd' },
+      { label: '关掉脱敏', command: 'mcpd --no-redact' },
+    ]}
+  />
+
+  <p>
+    轮换密钥会有意地把这条链接断开。每一段摘要都变了，所以轮换之前写下的数据行，
+    再也没法和轮换之后写下的行连起来。这正是轮换的用处，也正是它的代价。想把这条
+    链接切断时再轮换，而不是出于习惯按时间表来。
+  </p>
+  <p>
+    在轮换之前，请把这笔代价的后半段也读完。按主体擦除靠的是匹配存下的摘要，所以
+    从新密钥生效的那一刻起，每一行在旧密钥下写成的数据，都在一次删除请求够不到的
+    地方。mcpd 没法告诉你事情就是这样，因为没有任何东西记录了哪把密钥写了哪一行。
+    它能做的只是不让由此得来的那个零冒充一个答案，而下面关于零的那一节，就是这份
+    拒绝。
+  </p>
+
+  <h2>六种信号，不只是 span</h2>
+  <p>
+    一份密文经由一行日志泄露出去，和经由一段提示词一样容易，所以同一个脱敏器在写入
+    时会跑过全部六种信号：
+  </p>
+  <ul>
+    <li>Span：<code>input</code>、<code>output</code>、<code>attributes</code> 和 <code>metadata</code>。</li>
+    <li>日志：结构化的 <code>fields</code>。</li>
+    <li>指标：<code>labels</code>。</li>
+    <li>评分：<code>metadata</code>。</li>
+    <li>反馈：<code>metadata</code>，以及自由文本的 <code>comment</code>。</li>
+    <li>方面注释：那句话本身，也就是 <code>text</code>。</li>
+  </ul>
+  <p>
+    一个 span 的名称和一条日志记录的消息不经过脱敏器。它们是标识符，不是载荷，改写
+    它们会把分组破坏掉。不要用客户的邮箱地址去拼一个 span 的名称。
+  </p>
+
+  <h3>运行存储不经脱敏</h3>
+  <p>
+    持久化运行是例外，而且是有意的。运行存储把一次运行的输入、状态、输出和关联
+    信息，以及每个步骤的输入、输出和错误，按发来时的原样保存，<code>user_id</code>
+    不做哈希。它们是工作流的工作状态：后面的步骤会把它们读回去，而一个被脱敏器
+    改写过的值会改变这次运行的行为。一次运行写进 trace 存储的 span 走的是普通的
+    摄取路径，所以 trace 存储里的它们和其他任何 span 一样，经过了脱敏和哈希。
+    保留期和擦除都作用于运行存储，下面几节会讲到；通过 API 对一次运行的每一次
+    读取，都会记进审计日志。
+  </p>
+
+  <h2>长字符串与深文档</h2>
+  <p>
+    有两条上限适用于一切，无论规则是否命中。
+  </p>
+  <p>
+    任何单个字符串超过 128 KiB 都会被截断，并在后面附上
+    <code>… [N bytes truncated]</code>，好让读者知道这个值是不完整，而不是本来就短。
+    切口落在一个字符边界上，绝不落在一个多字节码点中间。一段失控的提示词不该决定
+    你数据库的大小。
+  </p>
+  <p>
+    遍历在 32 层深度处停止，再往下的一切都被替换成
+    <code>[too deeply nested]</code>。一份到达敞开摄取端口的病态文档或自引用文档，
+    没法把一个 CPU 钉住。
+  </p>
+
+  <h2>保留期</h2>
+  <p>
+    <code>--retention-days</code>，或者 <code>MCPD_RETENTION_DAYS</code>，会删除
+    超过那么多天的信号。不写它就什么都不会被删掉。默认把数据留着是对的方向：一个会
+    悄悄丢掉上个月 trace 的工具，只会在最糟糕的时刻被发现。
+  </p>
+  <p>
+    这次清理由守护进程内部一个每小时的定时器来跑，不在查询时跑。一次保留期扫描可能
+    删掉极多的行，这份工作绝不能落进某个人的请求里。每一次清理都在一个事务里，移除
+    <code>received_at</code> 早于截止点的 span、日志、指标和 trace 行，以及
+    自身时间戳早于截止点的评分、反馈和方面注释，然后记下有多少行走掉了。全文
+    索引的条目先被清掉，此时指向它们的行还在，所以不会留下任何孤儿。
+  </p>
+  <p>
+    同一次清理，按同一个窗口，也修剪运行存储。它删除根运行在截止点之前结束的
+    每一次持久化运行，连同它的子运行，以及为它们存下的一切；删除分批进行，这样
+    它工作时不会让 worker 卡住。一次还没有结束的运行永远不会被删除，不管它已经
+    等了多久。定义不会被修剪。
+  </p>
+  <p>
+    这次清理覆盖 <code>--project</code> 写明的那个项目，以及配置文件
+    <code>projects</code> 块里的每一个项目，不只是默认项目。在那里设了自己的
+    <code>retention_days</code> 的项目按它自己的数字清理，其余的按守护进程的数字
+    清理。两处都不在的项目，也就是某个发送方自作主张写下的项目，没有窗口，永远不会
+    被修剪。当一个守护进程服务好几个团队时，这一点很要紧：一个约定保留三十天的团队，
+    不会因为扫描只读到了另一个团队的设置就悄悄保留三十天，而一个谁也没写下来的团队
+    则什么都留着。
+  </p>
+
+  <h2>一次关于某个人的擦除请求</h2>
+  <p>
+    <code>DELETE /v1/api/subjects/{'{user_id}'}</code> 用一次调用回应一次关于某个人
+    的请求。把标识符按你的接入代码设置它的样子发过来。守护进程会施加它在摄取时施加
+    的同一套哈希，所以一个会哈希 <code>user_id</code> 的部署，不需要你先自己哈希。
+  </p>
+  <p>
+    擦除的单位是一次运行，不是一行数据。通常只有根 span 带着 <code>user_id</code>，
+    而持有提示词和补全的是子 span，所以只删掉写明了主体的那些行，会把载荷留在原地。
+    一次运行只要它的 trace 投影写明了这个主体，或者它的任何一个 span 写明了，就在
+    范围之内，然后整次运行都要走：
+  </p>
+  <ul>
+    <li>这次运行的每一个 span，连同它带着的 input 和 output。</li>
+    <li>挂在它上面的日志、指标、评分、反馈和方面注释。</li>
+    <li>
+      那些写明了 <code>span_id</code> 而没有 <code>trace_id</code> 的信号。一条钉在
+      这位主体某次运行的某一个步骤上的评分或日志，是通过范围内那些运行的 span id
+      触及的，不只是通过它们的 trace id。
+    </li>
+    <li>
+      记在这个人名下、却没有运行可挂的日志行，靠它们自己的 <code>user_id</code>
+      匹配。
+    </li>
+    <li>
+      这个人写下的反馈，靠 <code>author_id</code> 匹配，无论它挂在哪里。那一行持有的
+      是他本人的文字，而它可能挂在别人的运行上，那正是它过去得以幸存的地方。
+    </li>
+    <li>
+      从范围内某次运行采集来的数据集用例。它们是被清空，而不是被删除。再下一节说明
+      了为什么。
+    </li>
+    <li>
+      在一个服务持久化运行的守护进程上，关联信息带着这个 <code>user_id</code>
+      的每一次已经结束的运行，连同它整棵子运行树，以及运行存储为它们持有的一切。
+      匹配按你启动这次运行时给的原样进行，因为运行存储不对它做哈希。这个人的一次
+      还没有结束的运行不会被触及：删掉它会破坏它所属的那个工作流。它会计入
+      <code>runs_in_flight</code>，并在 <code>note</code> 里写明，所以你可以取消
+      它，或者等它结束，然后再发一次请求。
+    </li>
+  </ul>
+  <p>
+    运行存储先被擦除。一次运行的 span 在写进 trace 存储之前，都在它的 outbox 里
+    等着，所以先擦除运行，会删掉任何还在等着的 span，然后 trace 存储的擦除再移除
+    那些已经写进去的。
+  </p>
+
+  <h3>回复里带着什么</h3>
+  <p>
+    按信号分别给出的计数，运行存储的两个计数，以及旁边的六个字段，带着计数说不出
+    的东西：什么被有意留下了，以及一个很小的数字能不能读作“这里没有存下关于这个人
+    的任何东西”。<code>deleted</code> 是那六个信号计数的总和；两个运行计数和
+    <code>aspect_notes_erased</code> 报在它旁边，不加进它里面。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="一次请求，一个人"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq' },
+      { out: '{' },
+      { out: '  "project": "checkout",' },
+      { out: '  "traces": 1,', tone: 'note' },
+      { out: '  "spans": 2,', tone: 'note' },
+      { out: '  "logs": 1,', tone: 'note' },
+      { out: '  "metrics": 0,', tone: 'note' },
+      { out: '  "scores": 1,', tone: 'note' },
+      { out: '  "feedback": 1,', tone: 'note' },
+      { out: '  "deleted": 6,' },
+      { out: '  "runs_erased": 1,', tone: 'note' },
+      { out: '  "runs_in_flight": 0,' },
+      { out: '  "dataset_items_erased": 1,', tone: 'warn' },
+      { out: '  "aspect_notes_erased": 0,' },
+      { out: '  "datasets": [' },
+      { out: '    "checkout-regressions"' },
+      { out: '  ],' },
+      { out: '  "deletes_pending": false,' },
+      { out: '  "unmatchable_identifiers": 0,' },
+      { out: '  "note": "1 captured dataset cases were emptied in place rather', tone: 'warn' },
+      { out: '           than deleted, so a regression test is not destroyed', tone: 'warn' },
+      { out: '           without anyone being told. They hold no payload any', tone: 'warn' },
+      { out: '           more."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>字段</th><th>它告诉你什么</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>runs_erased</code></td>
+          <td>
+            从运行存储里删掉的持久化运行，子运行也算在内。不计入
+            <code>deleted</code>。守护进程不服务运行时，这个字段不出现
+          </td>
+        </tr>
+        <tr>
+          <td><code>runs_in_flight</code></td>
+          <td>
+            这个人因为还没有结束而被完整留下的持久化运行。<code>note</code>
+            写明要取消的那些运行。守护进程不服务运行时，这个字段不出现
+          </td>
+        </tr>
+        <tr>
+          <td><code>dataset_items_erased</code></td>
+          <td>
+            就地清空的采集用例。它们不计入 <code>deleted</code>，因为那些行还在
+          </td>
+        </tr>
+        <tr>
+          <td><code>aspect_notes_erased</code></td>
+          <td>
+            删掉的方面注释。不计入 <code>deleted</code>，它是上面打印出来的那六个
+            信号计数的总和
+          </td>
+        </tr>
+        <tr>
+          <td><code>datasets</code></td>
+          <td>那些用例待在哪些数据集里，好让你过去看一看</td>
+        </tr>
+        <tr>
+          <td><code>deletes_pending</code></td>
+          <td>
+            当后端是在回复之后才施加这些删除时为真，此时这些计数说的是命中了什么，
+            而不是已经离开磁盘的是什么
+          </td>
+        </tr>
+        <tr>
+          <td><code>unmatchable_identifiers</code></td>
+          <td>
+            这个项目里存下的、其形式是这次请求不可能匹配到的标识符有多少个
+          </td>
+        </tr>
+        <tr>
+          <td><code>note</code></td>
+          <td>
+            上面那些数字为什么可能不是全部答案。当它们就是全部答案时，这个字段
+            不出现
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>采集来的用例是被清空，不是被删除</h3>
+  <p>
+    一个从生产环境采集来的数据集用例，持有 input 的一份逐字副本，所以擦掉运行却把
+    副本留下，会把这个人的话留在数据集里。直接把这个用例删掉则是另一种伤害：有人
+    采下那次运行，是为了不让某个缺陷再回来，而一声不吭地毁掉他的回归测试，不是
+    mcpd 该自己做的决定。
+  </p>
+  <p>
+    所以载荷被覆盖，而那一行留下。这个用例在它原本放着 input 和 metadata 的地方
+    读作 <code>{'{"erased": true}'}</code>，它回指源运行的链接被清空，回复里会写明
+    有多少个用例、在哪些数据集里。这个用例明摆着是空的，而这是一位运维人员可以据此
+    行动的信息。
+  </p>
+  <p>
+    有一种用例完全够不到，原因是租户边界。一个采集进<em>另一个</em>项目所拥有的
+    数据集里的用例，不会被清空，也不会被计数。这次调用只针对一个项目授权，也只触及
+    一个项目，而一次跨过那条边界的擦除，就成了一条得知你读不到的数据集里有什么的
+    途径。请也用一把够得到那个项目的密钥，把这个人从那个项目里擦除。
+  </p>
+
+  <h3>它不做什么</h3>
+  <p>
+    它只触及一个项目。<code>?project=</code> 写明它，你不写时用的是守护进程的默认
+    项目。一把够不到那个项目的密钥会被 403 拒绝，什么也不会被删掉。同一个人在这把
+    密钥打不开的项目里的数据行，既不会被触及也不会被计数，所以一个计数永远不会泄露
+    这位主体在别处也存在。要把一个人从好几个项目里擦除，就是每个项目一次调用，各用
+    一把够得到它的密钥。
+  </p>
+  <p>
+    一个什么也没存下的主体，得到的是一个带着零的 200，不是 404。你要求的状态成立，
+    而一个 404 会回答一个谁也无权提出的问题：这个人在这把密钥能看到的任何地方是否
+    存在。这也是为什么超时之后重试是安全的。第二次调用报出的是第二遍清理那些更小的
+    计数，而不是一个错误。
+  </p>
+  <p>
+    它不是一条把某个人从你自己系统里擦除的途径。mcpd 删除的是 mcpd 存下的东西。
+    你转发到另一个 OTLP 端点的一切，都得在那边也擦除，而 mcpd 不知道它在那边怎么
+    样了。
+  </p>
+
+  <h3>密钥，以及关于它的记录</h3>
+  <p>
+    配置了密钥时，擦除需要一把 admin 密钥；没有设置 admin 密钥时它回退到 read 密钥，
+    这样一个已有的部署仍然保有它原来的触及范围。它会被写进审计日志，带着动作、项目
+    和提出请求的那把密钥的摘要，一次被拒绝的尝试也照样记录。凡是 <code>user_id</code>
+    被哈希的地方，那一行写明的就是摘要：审计日志比它所描述的数据活得更久，所以把
+    原始标识符写进去，会把这个人请你移除的那个名字，留在一张保留期扫不到的表里。
+  </p>
+  <p>
+    一次一个运行的做法仍然在。<code>DELETE /v1/api/traces/{'{trace_id}'}</code>
+    在一个事务里移除单独一次运行和挂在它上面的一切，返回删掉的行数。
+  </p>
+
+  <h2>一次擦除返回的零，才是那个该怀疑的数字</h2>
+  <p>
+    一位运维人员会把一个零转述给一个人，说成“我们没有持有关于你的任何东西”，而这
+    正是这个端点没法证明的那个数字。存下的标识符是用脱敏密钥哈希的，又没有任何东西
+    记录了哪把密钥哈希了哪一行，所以一个零同样可以意味着：在那些行被写下之后，密钥
+    换过了。mcpd 分辨不出这两者。它能做的，是绝不交回一个看着像前一种情况的光秃秃
+    的零。
+  </p>
+  <p>
+    下面是同一位主体，在一把自那次运行被记录以来已经轮换过的脱敏密钥下被擦除。计数
+    全是零，而那一行还在：
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="轮换之后，同一次请求什么也匹配不到"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq "{deleted, unmatchable_identifiers, note}"' },
+      { out: '{' },
+      { out: '  "deleted": 0,', tone: 'warn' },
+      { out: '  "unmatchable_identifiers": 0,' },
+      { out: '  "note": "Nothing matched. Stored identifiers are hashed with', tone: 'warn' },
+      { out: '           the redaction key, so this means no stored identifier', tone: 'warn' },
+      { out: '           hashes to this subject under the key in force now. It', tone: 'warn' },
+      { out: '           does not mean nothing about this person was ever', tone: 'warn' },
+      { out: '           stored: rows written under a different redaction key', tone: 'warn' },
+      { out: '           cannot be matched by this endpoint."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <p>
+    注记能证明什么，取决于这个项目。项目里没有任何东西归到任何人名下时，就没有哪一行
+    是一次密钥更换可能藏起来的，那条注记说的正是这个。否则这个零未被证明：请把那些行
+    当初写下时所用的脱敏密钥恢复回来，再重复这次请求。
+  </p>
+  <p>
+    它选择报出来，而不是拒绝，这是一个有意的取舍。拒绝会让超时之后的重试出问题；
+    它会让“从没见过”的回复和“一小时前擦掉了”的回复不一样，从而把这个端点变成一条
+    打听某个人是否为某个项目所知的途径；它还会挡下每一个脱敏设置曾经变动过的部署里
+    的每一次擦除，包括那些本来就正确地什么都没匹配到的擦除。
+  </p>
+
+  <h3>这次请求不可能匹配到的标识符</h3>
+  <p>
+    一次轮换是看不见的。而标识符究竟<em>是否</em>被哈希这一点的变动是看得见的，
+    <code>unmatchable_identifiers</code> 就是 mcpd 能看见的那部分。一个哈希过的
+    标识符可以由它的 <code>sha256:</code> 前缀认出来，所以存储会数一数：它持有的
+    标识符里，有多少个的形式与这次请求所带的形式相反，是面对哈希请求的明文行，或者
+    反过来。那些行是在另一套脱敏设置下写成的，它们可能属于这位主体，而这次请求
+    没法寻址到它们。
+  </p>
+
+  <p>
+    这个计数在每一次擦除时都会跑，不只在结果为零时跑，下面这份回复就是原因。这个
+    项目先是在脱敏开着时被写入，之后又在脱敏关着时被写入。这次请求命中了较新的那些
+    行并删掉了它们，而较旧的两个标识符是哈希过的，所以这次请求根本不可能寻址到
+    它们。一个到 <code>deleted</code> 为止的计数，读起来会像是一个完整的答案：
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="一次不完整的擦除，正是值得抓住的那种情况"
+    lines={[
+      { cmd: 'curl -sX DELETE "$MCPD/v1/api/subjects/u_8841?project=checkout" | jq "{deleted, unmatchable_identifiers, note}"' },
+      { out: '{' },
+      { out: '  "deleted": 2,' },
+      { out: '  "unmatchable_identifiers": 2,', tone: 'warn' },
+      { out: '  "note": "2 stored identifiers in this project are in a form', tone: 'warn' },
+      { out: '           this request could not match, so rows written under a', tone: 'warn' },
+      { out: '           different redaction setting were not searched and rows', tone: 'warn' },
+      { out: '           about this person may remain. Restore the redaction', tone: 'warn' },
+      { out: '           setting those rows were written under and repeat the', tone: 'warn' },
+      { out: '           request."', tone: 'warn' },
+      { out: '}' },
+    ]}
+  />
+
+  <p>
+    这个计数是对这个项目持有的每一个标识符来数的，不是对这位主体自己的那些行来数的，
+    所以那两个完全可能属于别的什么人。这已经是它能说的全部。它排除掉的，是把一次
+    看着成功的擦除读成一次完整的擦除。
+  </p>
+
+  <h2>三个后端上，这个保证并不一样</h2>
+  <p>
+    SQLite 和 Postgres 在回复你的那个事务里就把数据删掉了。回复到达时那些行已经
+    没了，<code>deletes_pending</code> 是 <code>false</code>。
+  </p>
+  <p>
+    ClickHouse 不是这样。那里的删除是一次异步变更：服务器接下这条语句，在后台施加
+    它，所以回复说的是命中了什么，而不是已经离开磁盘的是什么。那些擦除返回时
+    <code>deletes_pending</code> 是 <code>true</code>，这是 mcpd 在告诉你：两个
+    保证里较弱的那一个才是当前生效的。数据集用例在这个后端上是例外。它们是按自己的
+    键被重写，而不是被变更，所以从回复发出的那一刻起，任何读取拿到的都是那个已清空
+    的用例。一次变更则会让旧的文本在它完成之前一直可读。
+  </p>
+  <p>
+    如果你必须向什么人证明数据在某个时刻之前已经消失，那么这就是要写下来的区别。
+    在 ClickHouse 上，请先确认服务器上那次变更已经完成，再去回答。
+  </p>
+
+  <h2>在端口可达之前</h2>
+  <p>
+    脱敏保护的是一条 trace 里面的那些值。它对谁能读到这条 trace 毫无作用。当 mcpd
+    绑定到一个非回环地址，而摄取或读取 API 是敞开的时，它会在启动时告警，因为此时
+    存下的提示词和补全，任何能连到这个端口的人都读得到。请先设置
+    <code>--ingest-key</code> 和 <code>--read-key</code>，并读一读
+    <a href={linkTo('/deploy')} class="link">Docker 与 Kubernetes</a>。
+  </p>
+
+  <h2>接下来</h2>
+  <ul>
+    <li>
+      从一开始就少留一些：
+      <a href={linkTo('/docs/sampling')} class="link">采样</a>。
+    </li>
+    <li>
+      每一个参数和环境变量：
+      <a href={linkTo('/docs/configuration')} class="link">配置</a>。
+    </li>
+    <li>
+      探针、备份和升级：
+      <a href={linkTo('/docs/operations')} class="link">把它跑起来</a>。
+    </li>
+  </ul>
+</Doc>

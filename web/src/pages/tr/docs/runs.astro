@@ -1,0 +1,234 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import RunCursor from '@/components/RunCursor.astro'
+import { exampleLanguages } from '@/lib/snippets'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const langs = exampleLanguages('workflow')
+const loc = localeOf(Astro.url.pathname)
+const link = (route: string) => urlFor(route, loc)
+---
+
+<Doc
+  title="Çalıştırmalar"
+  description="mcpd'de kalıcı bir çalıştırma: idempotent başlatma, günlük ve onu izleme, olaylar ve beklemeler, iptal, zamanlayıcılar ve sınırlar, bir de çalıştırmanın kendi trace'indeki yeri."
+  lede="Bir çalıştırma; bir satır, bir imleç, denemelerin günlüğü, bir dizi süre sonu ve bir dizi askıya almadır. Bu sayfa, ona ne yapabileceğinizi ve onun size ne söylediğini anlatır."
+  og="docs"
+>
+  <h2>Çalıştırma başlatmak</h2>
+  <p>
+    Bir çalıştırma bir tanım kimliği ve bir girdiyle başlar. Tanımın bir şeması
+    varsa daemon girdiyi ona göre doğrular, saklanan en yüksek sürümü sabitler,
+    çalıştırmayı ve trace'ini oluşturur ve çalıştırmayı saklandığı hâliyle
+    döndürür. Bundan sonrası çalıştırmanın kendi işidir: daemon adımlarını
+    worker'lara sunar, uykularını ve beklemelerini yürütür, olan biteni günlüğe
+    yazar.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" example="workflow" region="run" only={langs} title="başlatma, yanıtlama, izleme" />
+
+  <p>
+    Yeniden denenebilecek her çağrıdan bir <code>idempotency_key</code>
+    gönderin. Çalıştırma tutulduğu sürece proje içinde benzersizdir ve aynı
+    çağrının yeniden denenmesi ikinci bir çalıştırma başlatmak yerine aynı
+    çalıştırmayı döndürür. İki kez tetiklenen bir webhook ya da yeniden başlayan
+    bir iş çalıştırıcısı böylece hiçbir şeye mal olmaz.
+  </p>
+
+  <RunCursor class="not-prose my-8" />
+
+  <h2>Günlük</h2>
+  <p>
+    Bir çalıştırmadaki her değişiklik, sıfırdan başlayan ve boşluk bırakmayan bir
+    sıra numarası taşıyan bir olaydır: çalıştırma başladı, imleç ilerledi, bir
+    adım için lease verildi, adım başladı, bitti ya da başarısız oldu, çalıştırma
+    bekledi ve kaldığı yerden devam etti, çalıştırma sona erdi. Her biri türüne
+    göre biçimlenmiş bir payload taşır. Günlük, çalıştırmanın geçmişidir ve
+    arayüzün çizdiği şeydir.
+  </p>
+  <p>
+    Günlüğü <code>after</code> ile sayfa sayfa okuyun, ya da olaylar endpoint'ini
+    <code>Accept: text/event-stream</code> ile açık tutup her olayı işlendiği anda
+    alın. Durup yeniden başlayan bir istemci gördüğü son sıra numarasını gönderir
+    ve hiçbir şeyi kaçırmaz. Her SDK'nın <code>watch</code> çağrısı bunu sizin
+    için yapar ve çalıştırma bittiğinde biter; <code>wait</code> ise günlüğü
+    sonuna kadar izler ve çıktıyı döndürür; çalıştırma başarılı olmadıysa
+    çalıştırmayı taşıyan, türü belli bir hata döndürür.
+  </p>
+
+  <h2>Olaylar ve beklemeler</h2>
+  <p>
+    Bir <code>wait_event</code> adımı, kendi adını ve işlenmiş anahtarını taşıyan
+    bir olay gelene kadar çalıştırmayı tutar. Olay tek bir kapıdan girer:
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="bir beklemeyi yanıtlama"
+    command={`curl -X POST http://localhost:4317/v1/api/events \\
+  -H 'content-type: application/json' \\
+  -d '{"project":"support","event":"approved","key":"Q-42","payload":{"by":"ops"},"event_id":"hook-1"}'`}
+  />
+
+  <p>
+    Yanıt üç sonuçtan biridir. <code>delivered</code>: bir çalıştırma bekliyordu
+    ve olayı aynı işlem içinde aldı, yani siz alındıyı okuduğunuzda çalıştırma
+    çoktan ilerlemiştir. <code>parked</code>: bekleyen bir çalıştırma yoktu ve
+    olay, sonradan açılıp park edilmiş olayları kabul ettiğini söyleyen bir
+    bekleme için saklanır. <code>duplicate</code>: <code>event_id</code> daha
+    önce görülmüştür ve hiçbir şey yazılmamıştır. İki kez tetiklenebilecek her
+    şeyden kendi kimliğinizi gönderin.
+  </p>
+  <p>
+    Süre sonuna ulaşan bir bekleme, <code>on_timeout</code> ne diyorsa onu yapar:
+    başarısız olur ve sonra <code>on_error</code> karar verir, ya da çıktı
+    olmadan devam eder. Tek bir çalıştırmaya kendi açık beklemesi üzerinden
+    doğrudan göndermek için <code>POST /v1/api/runs/{'{run}'}/signal</code>
+    kullanılır; adres çalıştırmanın kendisi olduğu için aynı gövdeyi anahtarsız
+    alır.
+  </p>
+
+  <h2>Çalıştırmayı iptal etmek</h2>
+  <p>
+    <code>POST /v1/api/runs/{'{run}'}/cancel</code> bir çalıştırmayı ve altındaki
+    her alt çalıştırmayı sona erdirir. Yürümekte olan bir adım hat üzerinde
+    kesilmez: worker bir sonraki heartbeat'inde çalıştırmanın bittiğini öğrenir,
+    bağlamı gövdeye haber verir ve gövdenin bundan sonra gönderdiği her şey
+    <code>run_terminal</code> ile reddedilir. Zaten sona ermiş bir çalıştırmayı
+    iptal etmek hiçbir şeyi değiştirmez ve çalıştırmayı olduğu gibi döndürür.
+  </p>
+
+  <h2>Zamanlayıcılar ve sınırlar</h2>
+  <p>
+    Uykular, bekleme süre sonları, yeniden deneme beklemeleri ve lease bitişleri;
+    hepsi daemon'un tuttuğu zamanlayıcılardır. Daemon'un saatiyle, saniyede bir
+    tetiklenirler; bu yüzden yüz milisaniyelik bir <code>retry_after_ms</code>
+    tam olarak o kadar değil, en az o kadar diye uygulanır. Daemon'un yeniden
+    başlaması hiçbirini kaybettirmez; hepsi birer satırdır ve çalıştırma satırdan
+    devam eder. Hiçbir süre 3650 günden uzun olamaz ve bir worker'dan gelen daha
+    uzun bir <code>retry_after_ms</code> bir 400 ile reddedilir. 2262 yılından
+    sonraki bir <code>sleep_until</code>, hiçbir zaman gelmeyecek bir an olarak
+    tutulur.
+  </p>
+  <p>
+    Bir tanımın <code>max_steps</code>, <code>run_timeout_ms</code> ve
+    <code>max_cost_usd</code> değerleri çalıştırmayı tavanda sona erdirir ve hata
+    olarak tavanın adını verir. Maliyet, adımların bildirdiği kullanımın
+    fiyatlanmış toplamıdır; span'leri fiyatlayan kitabın aynısı kullanılır, yani
+    token'larını bildiren bir ajan adımı, tamamlandığı anda çalıştırmanın
+    bütçesinden düşülür.
+  </p>
+
+  <h2>Çalıştırmanın trace'indeki yeri</h2>
+  <p>
+    Her çalıştırma aynı zamanda bir trace'tir. Daemon çalıştırma için bir kök
+    span, her deneme için de adımın girdisi ve çıktısıyla birer span açar; adım
+    bağlamı üzerinden kendi span'lerini kaydeden bir gövdenin span'leri de
+    bunların altına girer. Böylece bir ajan adımının içindeki model çağrısı o
+    adımın, o adım da o çalıştırmanın altında durur; herhangi bir trace
+    üzerinde çalışan arama, maliyet muhasebesi ve puanlayıcılar bir
+    çalıştırmanın trace'inde de değişmeden çalışır. Bu span'ler, bir SDK'nın
+    span'lerinin geçtiği alım yolunun aynısından yazılır; bu yüzden aynı
+    biçimde örneklenir, maskelenir, fiyatlanır ve iletilir. Token'lar onları
+    harcayan model span'lerinde durur; adım span'i fiyatlanmış toplamı özniteliklerinde
+    taşır, böylece bir trace toplamı her
+    token'ı bir kez sayar. Çalıştırma kendi <code>trace_id</code> değerini taşır
+    ve arayüz ikisini birbirine bağlar.
+  </p>
+  <p>
+    Daemon o span'leri, onları doğuran satır işlendikten sonra kendi saatiyle bir
+    giden kutusu üzerinden yazar. Bir adım tamamlandıktan hemen sonra okunan bir
+    trace o adımın span'ini henüz taşımıyor olabilir; çalıştırmanın kendi
+    ayrıntısı her zaman taşır.
+  </p>
+
+  <h2>Çalıştırmaları geri okumak</h2>
+  <p>
+    <code>GET /v1/api/runs</code> bir projenin çalıştırmalarını, en son
+    güncellenen başta olacak şekilde, duruma ya da tanıma göre filtreleyip
+    listeler. <code>GET /v1/api/runs/{'{run}'}</code> ise çalıştırmanın kendisi ve
+    onunla ilgili kalıcı olan her şeydir: lease sahibi, zamanları, hatası ve
+    kullanımıyla her deneme; hâlâ bekleyen zamanlayıcılar; hâlâ açık olan
+    beklemeler. Arayüzün
+    <a href={`${link('/app')}?screen=workflows`} class="link">İş akışları ekranı</a>
+    bu endpoint'in çizilmiş hâlidir, yanında da günlük canlı akar.
+  </p>
+  <p>
+    İkisi de çalıştırmaya verileni geri döndürür, bu yüzden ikisi de denetim
+    günlüğüne <code>list_runs</code> ve <code>get_run</code> olarak kaydedilir.
+    Çalıştırmanın günlüğü (<code>list_run_events</code>, istek başına bir kez,
+    bir akış da dahil), bir adımın nedenini geriye doğru izleyen çağrı
+    (<code>get_step_cause</code>) ve bir iptal (<code>cancel_run</code>) de
+    kaydedilir. Reddedilen bir okuma, çalıştırmanın sahibi olan projeye karşı
+    kaydedilir. Worker çağrıları kaydedilmez;
+    <a href={link('/docs/workers')} class="link">Worker'lar</a> sayfasına
+    bakın.
+  </p>
+
+  <h2 id="storage">Depolama</h2>
+  <p>
+    Çalıştırmalar, trace deposunun yanında kendi SQLite dosyasında durur:
+    <code>--runs-data</code> başka bir şey söylemedikçe
+    <code>&lt;data&gt;.runs.&lt;ext&gt;</code>. <code>--runs-data off</code>
+    çalıştırma yüzeyini tamamen kapatır, o durumda her çalıştırma endpoint'i 503
+    döndürür. Yedeğini trace deposuyla birlikte alın; <code>mcpd doctor</code>
+    ona kendi grubu olarak not verir.
+  </p>
+  <p>
+    Çalıştırma deposu payload'ları gönderildikleri gibi tutar. Bir
+    çalıştırmanın girdisi, durum verisi, çıktısı ve ilişkilendirmesi, her
+    adımın girdisi, çıktısı ve hatası, her olay payload'ı ve trace deposuna
+    yazılmayı hâlâ bekleyen span payload'ları maskelenmeden saklanır; bir
+    çalıştırmanın ilişkilendirmesindeki <code>user_id</code> da özetlenmeden
+    saklanır. Bu bilerek böyledir: bunlar iş akışının çalışma durumudur,
+    sonraki bir adım onları geri okur ve maskeleyicinin yeniden yazdığı bir
+    değer çalıştırmanın yaptığı şeyi değiştirirdi. Daemon'un trace deposuna
+    yazdığı span'ler, bir SDK'nın gönderdiği bir span ile aynı maskelemeden ve
+    tanımlayıcı özetlemesinden geçer, yani trace deposu maskelenmiş kopyayı
+    tutar. Çalıştırma dosyasını, adımlarınıza verilen her şeyi tutan bir dosya
+    olarak görün; onu buna göre koruyun ve yedeğini buna göre alın.
+  </p>
+  <p>
+    Saklama, çalıştırma deposunu kapsar. Trace deposunu budayan saatlik
+    tarama, aynı proje başına pencereyle, kökü kesim noktasından önce sona
+    ermiş her çalıştırmayı da alt çalıştırmalarıyla ve onlar için saklanan her
+    şeyle birlikte siler: denemeler, olaylar, süre sonları, beklemeler,
+    kuyruktaki span'ler ve o çalıştırmaların tükettiği olaylar. Sona ermemiş
+    bir çalıştırma, ne kadar eski olursa olsun hiçbir zaman silinmez. Tanımlar
+    tutulur.
+  </p>
+  <p>
+    Silme de onu kapsar. <code>DELETE /v1/api/subjects/{'{user_id}'}</code>,
+    projede ilişkilendirmesi o <code>user_id</code> değerini, çalıştırmayı
+    başlatırken verdiğiniz biçimde taşıyan ve sona ermiş her çalıştırmayı,
+    alt çalıştırmalarının tüm ağacıyla ve onlar için saklanan her şeyle
+    birlikte siler ve sayıyı <code>runs_erased</code> olarak bildirir. O
+    kişinin sona ermemiş bir çalıştırması bütün olarak bırakılır,
+    <code>runs_in_flight</code> içinde sayılır ve yanıtın <code>note</code>
+    alanında adlandırılır: onu iptal edin ya da bitmesine izin verin ve silme
+    isteğini yeniden gönderin. Henüz beklemesine ulaşmamış bir çalıştırma için
+    park edilmiş bir olay bir kişiye göre değil, ilişkilendirme anahtarına göre
+    anahtarlanır, bu yüzden silme ona erişmez; süresi dolduğunda, 24 saat
+    sonra silinir. Yanıtın geri kalanı için
+    <a href={link('/docs/privacy')} class="link">Maskeleme ve saklama</a>
+    sayfasına bakın.
+  </p>
+
+  <h2>Sonraki</h2>
+  <ul>
+    <li>
+      Bir tanımın neler söyleyebildiği:
+      <a href={link('/docs/workflows')} class="link">İş akışları</a>.
+    </li>
+    <li>
+      Adımları sunan süreç:
+      <a href={link('/docs/workers')} class="link">Worker'lar</a>.
+    </li>
+    <li>
+      Belirtimden üretilen her çalıştırma endpoint'i:
+      <a href={`${link('/docs/reference/api')}#runs`} class="link">HTTP API, Runs</a>.
+    </li>
+  </ul>
+</Doc>

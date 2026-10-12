@@ -1,0 +1,440 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import Command from '@/components/Command.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+/* 写在这里，而不是从示例程序里读：这些是读者对着自己的守护进程运行的查询，
+   不是 CI 能执行的代码。 */
+const breakdown = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# 上一周的钱花在哪了，按模型分。
+curl -s --get http://localhost:4317/v1/api/analytics/cost \\
+  --data-urlencode 'from=-7d' \\
+  --data-urlencode 'group_by=model'
+
+# 同一周，做成按天的序列，好看出是哪一天变的。
+curl -s --get http://localhost:4317/v1/api/analytics/cost \\
+  --data-urlencode 'from=-7d' \\
+  --data-urlencode 'group_by=model' \\
+  --data-urlencode 'bucket=1d'
+`,
+  },
+  {
+    lang: 'typescript' as const,
+    label: 'TypeScript',
+    shiki: 'typescript',
+    code: `import { Mcpd } from '@mcpd/sdk'
+
+const mcpd = new Mcpd()
+
+const spend = await mcpd.analyticsCost({
+  from: '-7d',
+  to: '-0s',
+  groupBy: 'model',
+  bucket: '1d',
+})
+
+console.log(\`\${spend.currency} \${spend.totalCost.toFixed(4)} over the window\`)
+for (const group of spend.groups) {
+  console.log(group.key, group.totalCost, group.inputTokens, group.outputTokens)
+}`,
+  },
+  {
+    lang: 'python' as const,
+    label: 'Python',
+    shiki: 'python',
+    code: `from mcpd import Mcpd
+
+mcpd = Mcpd()
+
+spend = mcpd.analytics_cost("-7d", "-0s", group_by="model", bucket="1d")
+
+print(f"{spend.currency} {spend.total_cost:.4f} over the window")
+for group in spend.groups:
+    print(group.key, group.total_cost, group.input_tokens, group.output_tokens)`,
+  },
+]
+
+const response = [
+  {
+    lang: 'curl' as const,
+    label: 'CostBreakdown',
+    shiki: 'json',
+    code: `{
+  "from": "2026-08-20T09:00:00Z",
+  "to": "2026-08-27T09:00:00Z",
+  "currency": "USD",
+  "total_cost": 12.418264,
+  "groups": [
+    {
+      "key": "claude-sonnet-4",
+      "count": 1841,
+      "error_count": 12,
+      "total_cost": 9.612055,
+      "input_tokens": 2903118,
+      "output_tokens": 214477,
+      "latency": { "mean": 1840.2, "max": 24193.0 }
+    },
+    {
+      "key": "gpt-4o-mini",
+      "count": 6204,
+      "error_count": 3,
+      "total_cost": 2.806209,
+      "input_tokens": 9114882,
+      "output_tokens": 388310,
+      "latency": { "mean": 612.4, "max": 8801.0 }
+    }
+  ]
+}`,
+  },
+]
+---
+
+<Doc
+  title="成本核算"
+  description="mcpd 怎样把 token 计数变成一个成本数字：在摄取时定价，历史因此改写不了；缓存 token 单独计价；未知模型留作未定价，而不是记成免费。"
+  lede="一个成本数字，只有在你说得出它是从哪来的时候才值得拥有。这一页讲的是从一个 token 计数到屏幕上一个数字之间的每一步。"
+  og="docs"
+>
+  <h2>只在摄取时定一次价</h2>
+  <p>
+    当一个 span 带着模型 id 和 token 计数到达时，mcpd 会在一份价目表里查这个模型，
+    算出这次调用花了多少钱，并把结果存在这个 span 上。读取时不会重算任何东西。
+  </p>
+  <p>
+    这是这一页上那个要紧的决定。价格是会变的。如果成本是在查询时、用那天恰好加载
+    着的那份价目表推出来的，那么下个月的一次降价就会悄悄改写上个月的花费，而你
+    报给某个人的那个数字，等他去核对时就不在那里了。在摄取时定价，把这个数字冻结
+    在这次调用发生时真实生效的费率上。每一份存下的成本还记录了产出它的那份价目表
+    的 id，所以一个数字可以回溯到它背后的费率。
+  </p>
+  <p>
+    一个本身已经带着成本的 span，会照它到达的样子原封不动地留下。如果你的供应商
+    给了你一个真实的数字，而你把它记了下来，mcpd 会保留你的，不会覆盖着定价。
+    <code>is_estimated</code> 标志把两者分开：凡是 mcpd 从价目表推出来的都标记为
+    估算，因为它确实是。
+  </p>
+
+  <h2>费率按每百万 token 计</h2>
+  <p>
+    价目表里的每一个费率都是每百万 token 多少个货币单位，各家供应商也都是这样
+    公布的。一个从定价页上抄下来的费率，可以原样写进价目表，没有一个凌晨三点会
+    除错的除法。一个计费项的算法是
+    <code>tokens × rate ÷ 1,000,000</code>。
+  </p>
+
+  <h2>成本记在步骤上，不记在运行上</h2>
+  <p>
+    每一次模型调用带着自己的数字。一次运行的合计是它那些 span 的和，而每当其中
+    一个 span 到达时，mcpd 都从这些 span 重新算一遍这个和，而不是给一个计数器加
+    数。span 会乱序到达、会被重试、会被就地更新，而一个累加的合计在这三种情况下
+    都会漂移。一个和它下面那些行对不上的头条数字，会毁掉这一页上其他每一个数字的
+    可信度。
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>
+    上面那三次模型调用的定价是 $0.00015、$0.00018 和 $0.00021。表头里那次运行的
+    合计就是它们的和，别的什么也没有：那些工具调用、那次记忆查找和那道护栏没有
+    消耗 token，所以它们不带成本，也不贡献成本。
+  </p>
+
+  <h2>计费项</h2>
+  <p>
+    一次模型调用不是一个 token 数字。供应商会按不同的费率计好几个计费项，而一份
+    价目表为其中每一个都给出一个费率。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>费率</th><th>适用于</th><th>价目表里没有它时</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>input</code></td>
+        <td>普通的输入 token。</td>
+        <td>必填。</td>
+      </tr>
+      <tr>
+        <td><code>output</code></td>
+        <td>普通的补全 token。</td>
+        <td>必填。</td>
+      </tr>
+      <tr>
+        <td><code>cache_read</code></td>
+        <td>从提示词缓存里读出来的 token。</td>
+        <td>按 <code>input</code> 计费。</td>
+      </tr>
+      <tr>
+        <td><code>cache_write</code></td>
+        <td>写进提示词缓存的 token。</td>
+        <td>按 <code>input</code> 计费。</td>
+      </tr>
+      <tr>
+        <td><code>cache_write_5m</code></td>
+        <td>写进五分钟缓存，用于供应商按 TTL 分别定价的场合。</td>
+        <td>退回到 <code>cache_write</code>，再退回到 <code>input</code>。</td>
+      </tr>
+      <tr>
+        <td><code>cache_write_1h</code></td>
+        <td>写进一小时缓存。</td>
+        <td>退回到 <code>cache_write</code>，再退回到 <code>input</code>。</td>
+      </tr>
+      <tr>
+        <td><code>audio_input</code></td>
+        <td>音频输入 token。</td>
+        <td>按 <code>input</code> 计费。</td>
+      </tr>
+      <tr>
+        <td><code>audio_output</code></td>
+        <td>音频输出 token。</td>
+        <td>按 <code>output</code> 计费。</td>
+      </tr>
+      <tr>
+        <td><code>reasoning</code></td>
+        <td>隐藏的推理 token，用于供应商分开计费的场合。</td>
+        <td>
+          没有退路。它们作为输出合计的一部分按 <code>output</code> 计费，几家主要
+          供应商就是这么计的，除非供应商同时上报了一个单独的 <code>text</code>
+          计数。见下文。
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>一个缓存 token 只计一次费</h2>
+  <p>
+    把账单算高的经典办法，是把一个缓存 token 计两次费：一次按缓存费率，另一次
+    作为它本来就在里面的那个上报输入合计的一部分。所以当供应商上报了一份明细时，
+    以那份明细为准。mcpd 按各自的费率给每个计费项定价，只把余下的部分按普通输入
+    费率计费。
+  </p>
+  <p>
+    一次 <code>claude-sonnet-4</code> 调用上报了一百万个输入 token，其中九十万个
+    是从缓存里读的，对着内置的价目表定价是这样：
+  </p>
+  <ul>
+    <li>900,000 次缓存读取，每百万 $0.30，即 $0.27。</li>
+    <li>余下的 100,000 个输入 token，每百万 $3.00，即 $0.30。</li>
+    <li>
+      输入成本 $0.57，而不是单看上报合计会算出来的 $3.00。
+    </li>
+  </ul>
+  <p>
+    当供应商给出一个明确的 <code>text</code> 计数时，就直接把这个计数当作余下部分。
+    当它没有给时，余下部分是上报合计减去每一个计费项字段。
+  </p>
+  <p>
+    这留下了一处值得点名的空档。一个价目表没有费率的计费项，只会作为余下部分的
+    一部分被计费，于是当供应商同时发来了一个 <code>text</code> 计数时，它根本
+    不会被计费。只要你的价目表没给推理 token 自己的费率，它们就落在这里，而声明
+    一个费率就能解决。图像 token 则永远落在这里，因为价目表没有图像费率可给，
+    所以在一个多模态很重的工作负载上，请把这个数字读作偏低，而不是精确。
+  </p>
+
+  <h2>一个未知模型是没有成本，不是成本为零</h2>
+  <p>
+    如果价目表没有这个模型的费率，mcpd 存下这个 span 时根本不带成本字段。它不会
+    存一个零。
+  </p>
+  <p>
+    零是一项主张：这次调用是免费的。缺席是一句承认：我们不知道这次调用花了多少。
+    两者导向不同的决定，而一个把后者报成前者的工具，是在账单上撒谎。同一条规则
+    贯穿读取路径：一次运行的那些 span 合计不出任何东西时，返回的是不带成本数字，
+    而不是成本为零，所以一个空白的成本列意味着<em>未定价</em>，绝不意味着
+    <em>免费</em>。
+  </p>
+  <p>
+    实际后果值得记牢：一个不在价目表里的模型，也不在任何合计里。它的花费不会出现
+    在 <code>/v1/api/analytics/cost</code> 里，它的那些运行会被任何一个为正的
+    <code>min_cost</code> 过滤条件排除掉。一个看着太低的周合计，通常是某个模型 id
+    没能解析出来，而不是这一周清闲。
+  </p>
+
+  <h2>解析一个模型 id</h2>
+  <p>
+    span 上的那个 id 是你的客户端发来的样子，而客户端会给它加装饰。一个网关会加上
+    它的厂商前缀，一个云会加上它的区域前缀，一个供应商会钉上一个发布日期。价目表
+    是按裸模型名做键的，所以查找会依次试四件事，在第一个命中处停下。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>步骤</th><th>例子</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>id 原样，做大小写折叠</td>
+        <td><code>GPT-4o</code> 找到 <code>gpt-4o</code></td>
+      </tr>
+      <tr>
+        <td>最后一个斜杠之后的部分</td>
+        <td><code>openai/gpt-4o</code> 找到 <code>gpt-4o</code></td>
+      </tr>
+      <tr>
+        <td>一个云 id 里点号后面的尾部</td>
+        <td>
+          <code>us.anthropic.claude-sonnet-4</code> 找到
+          <code>claude-sonnet-4</code>
+        </td>
+      </tr>
+      <tr>
+        <td>去掉尾部日期之后的 id，带前缀和不带前缀都试</td>
+        <td>
+          <code>openai/gpt-4o-2024-08-06</code> 找到 <code>gpt-4o</code>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>-YYYY-MM-DD</code> 和 <code>-YYYYMMDD</code> 两种后缀都认得。四步全都
+    失败是一个正常的结果，不是一个错误：它意味着没有成本，如上所述。
+  </p>
+
+  <h2>随附的那份价目表</h2>
+  <p>
+    mcpd 带着一份小小的内置价目表，好让 <code>docker run</code> 在完全没有配置的
+    情况下也产出真实的数字。它叫 <code>builtin</code>，以 USD 计价，它产出的每一份
+    成本都记下这个名字。
+  </p>
+
+  {/* 从 crates/mcpd-core/src/cost.rs 里的 `builtin_book` 誊抄而来。那边的某个
+      费率一动，这里也要动。 */}
+  <table>
+    <thead>
+      <tr>
+        <th>模型</th><th>输入</th><th>输出</th><th>缓存读取</th><th>缓存写入，5 分钟</th><th>缓存写入，1 小时</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><code>claude-opus-4</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
+      <tr><td><code>claude-opus-4-1</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
+      <tr><td><code>claude-opus-4-5</code></td><td>5.00</td><td>25.00</td><td>0.50</td><td>6.25</td><td>10.00</td></tr>
+      <tr><td><code>claude-sonnet-4</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
+      <tr><td><code>claude-sonnet-4-5</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
+      <tr><td><code>claude-haiku-4-5</code></td><td>1.00</td><td>5.00</td><td>0.10</td><td>1.25</td><td>2.00</td></tr>
+      <tr><td><code>claude-3-5-haiku</code></td><td>0.80</td><td>4.00</td><td>0.08</td><td>1.00</td><td>1.60</td></tr>
+      <tr><td><code>gpt-4o</code></td><td>2.50</td><td>10.00</td><td>1.25</td><td>按输入</td><td>按输入</td></tr>
+      <tr><td><code>gpt-4o-mini</code></td><td>0.15</td><td>0.60</td><td>0.075</td><td>按输入</td><td>按输入</td></tr>
+      <tr><td><code>gpt-4.1</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>按输入</td><td>按输入</td></tr>
+      <tr><td><code>gpt-4.1-mini</code></td><td>0.40</td><td>1.60</td><td>0.10</td><td>按输入</td><td>按输入</td></tr>
+      <tr><td><code>o3</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>按输入</td><td>按输入</td></tr>
+      <tr><td><code>o4-mini</code></td><td>1.10</td><td>4.40</td><td>0.275</td><td>按输入</td><td>按输入</td></tr>
+      <tr><td><code>gemini-2.5-pro</code></td><td>1.25</td><td>10.00</td><td>0.31</td><td>按输入</td><td>按输入</td></tr>
+      <tr><td><code>gemini-2.5-flash</code></td><td>0.30</td><td>2.50</td><td>0.075</td><td>按输入</td><td>按输入</td></tr>
+      <tr><td><code>text-embedding-3-small</code></td><td>0.02</td><td>0.00</td><td>按输入</td><td>按输入</td><td>按输入</td></tr>
+      <tr><td><code>text-embedding-3-large</code></td><td>0.13</td><td>0.00</td><td>按输入</td><td>按输入</td><td>按输入</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    单位是每百万 token 多少美元，取自这份价目表上一次对着一份第三方模型目录核对时
+    的状态，价目表把那个日期记作它的 <code>as_of</code>。Anthropic 的条目带着两个
+    缓存写入费率，因为守护进程会从一小时的费率退回到五分钟的那个，而一份漏掉较长
+    那个的价目表会不声不响地少计费。OpenAI 写入它的缓存不收费，所以那里的一次缓存
+    写入按输入费率计。<code>gemini-2.5-flash</code> 还带着一个 1.00 的音频输入
+    费率；其余每一个条目都按它的文本费率给音频定价。没有
+    <code>claude-haiku-4</code>：Anthropic 提供的 id 是
+    <code>claude-haiku-4-5</code>，而一个解析不到任何东西的 id 会被留作未定价，
+    不去猜。
+  </p>
+  <p>
+    这些是公布的标价，不是你的价格。如果你谈下了自己的费率，或者你跑的模型不在这张
+    表里，那么 mcpd 给你看的数字就是一份估算，也应当照估算来读。这份价目表故意做得
+    很短：一份长的会在更多地方过时，也会给人一种超出它应得的准确印象。
+  </p>
+  <p>
+    提供你自己的价目表，目前还没有命令行参数。价目表是服务端状态的一部分，今天替换
+    它的办法是把 mcpd 作为库嵌入，并把一份价目表传给
+    <code>AppState::with_price_book</code>。一份价目表由一个 id、一个 ISO 4217
+    货币和一张从模型 id 到费率的映射构成，它产出的每一个数字都盖上了它的 id，
+    这样两份价目表事后能分辨开。同一个项目里的价格应当共用一种货币；mcpd 把一次
+    运行的那些 span 按算术相加，并不在货币之间换算。
+  </p>
+
+  <h2>把钱读回来</h2>
+  <p>
+    <code>GET /v1/api/analytics/cost</code> 回答一个窗口内钱花到哪去了，不用把
+    任何东西导出到电子表格。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    command="curl -s 'http://localhost:4317/v1/api/analytics/cost?from=-7d&group_by=model'"
+  />
+
+  <table>
+    <thead>
+      <tr><th>参数</th><th>含义</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>from</code>、<code>to</code></td>
+        <td>
+          窗口。RFC 3339 格式，或者相对时间的简写。默认是到现在为止的最近七天。
+        </td>
+      </tr>
+      <tr>
+        <td><code>group_by</code></td>
+        <td>
+          默认是 <code>model</code>。还可以是 <code>provider</code>、
+          <code>entity_name</code>、<code>environment</code>、
+          <code>status</code>、<code>session_id</code>、<code>user_id</code>、
+          <code>service_name</code> 或 <code>name</code>。
+        </td>
+      </tr>
+      <tr>
+        <td><code>bucket</code></td>
+        <td>
+          <code>30s</code>、<code>5m</code>、<code>1h</code> 或 <code>1d</code>。
+          不写它就只要合计；写上它就在合计之外再得到一条时间序列。
+        </td>
+      </tr>
+      <tr>
+        <td><code>project</code></td>
+        <td>读哪个项目。默认是守护进程的默认项目。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <CodeSwitcher class="not-prose my-6" samples={breakdown} title="钱花到哪去了" />
+
+  <p>
+    分组按从大到小返回，最多一百行，而一条分桶的序列最多五千个点。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={response} title="响应" />
+
+  <p>
+    <code>count</code> 上有一处微妙的地方。按 <code>model</code>、
+    <code>provider</code> 或 <code>entity_name</code> 分组读的是那些 span，所以
+    <code>count</code> 是模型调用的次数。按其他任何东西分组读的是运行投影，所以
+    <code>count</code> 是运行的次数。两者都有用；它们不是同一个数字，而拿其中一个
+    去和另一个比，是这里最容易犯的错。
+  </p>
+  <p>
+    这份响应里按分组给出的延迟只带一个均值和一个最大值。分位数来自
+    <code>GET /v1/api/analytics/summary</code>，它在这个窗口上算出它们。
+  </p>
+
+  <h2>接下来去哪</h2>
+  <p>
+    成本是运行列表里的一列，而运行列表正是一次排查真正开始的地方：
+    <a href={linkTo('/docs/searching')} class="link">查找一次运行</a>讲了
+    <code>min_cost</code> 和按花费排序。如果你的数字看着不对，是因为载荷在被定价
+    之前就被丢掉了，那就看
+    <a href={linkTo('/docs/sampling')} class="link">采样</a>，是它决定了什么会被
+    记录下来。这一页上写到的每一个字段，都列在
+    <a href={linkTo('/docs/reference/data-model')} class="link">数据模型</a>里。
+  </p>
+</Doc>

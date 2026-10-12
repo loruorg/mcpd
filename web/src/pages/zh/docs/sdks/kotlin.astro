@@ -1,0 +1,365 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+const install = `dependencies {
+    implementation("dev.mcpd:mcpd-kotlin:0.1.0")
+}`
+
+const scoped = `// The block's value is the value of span, so instrumentation does not force
+// you to restructure the code around it.
+val answer = mcpd.span("retrieve_context", SpanKind.RETRIEVAL) { span ->
+    span.setInput(query)
+    val docs = index.search(query)
+    span.setOutput(docs.map { it.id })
+    span.setAttribute("retrieval.hits", docs.size)
+    docs
+}`
+
+const manual = `val run = mcpd.trace("nightly_reindex", SpanKind.WORKFLOW_RUN, tags = listOf("batch"))
+try {
+    reindex()
+    run.end()
+} catch (e: Exception) {
+    run.setError(e)
+    run.end()
+}`
+
+const nesting = `mcpd.span("support_agent", SpanKind.AGENT_RUN) { run ->
+    // draft is handed nothing. It finds the run through the coroutine context,
+    // however many suspend calls down it is.
+    run.setOutput(draft(question))
+}
+
+suspend fun draft(question: String): String =
+    mcpd.span("draft_answer", SpanKind.MODEL_GENERATION) { generation ->
+        generation.setInput(question)
+        "..."
+    }`
+
+const propagation = `// Outgoing: hand the header to the next service.
+request.header("traceparent", span.traceparent())
+
+// Incoming: continue that trace instead of starting a new one.
+mcpd.span("checkout", traceparent = headers["traceparent"]) { span ->
+    charge(span)
+}`
+
+const payload = `generation.setModel("gpt-4o", provider = "openai")
+generation.setUsage(inputTokens = 1_180, outputTokens = 96)
+
+// setError takes the throwable you are already holding, so the message, the
+// class and the stack all come off it.
+tool.setError(e, retryable = true)
+
+// Or a message directly, which is required either way.
+tool.setError("the shipping service returned 503")`
+
+const surface = `// Keep prompts and completions in the process: the span still carries its
+// timing, status, usage, model, correlation and errors.
+val quiet = Mcpd(McpdConfig(capturePayloads = false))
+quiet.span("draft_answer", input = question, capturePayloads = true) { }  // this one, kept
+
+// A span another tracer already finished, queued as given: never re-parented,
+// re-timed or re-sampled. A malformed id is dropped and counted, never thrown.
+mcpd.record(finishedSpan)
+
+// Prove what was recorded without a server.
+val recorder = RecordingSink()
+val local = Mcpd(McpdConfig(sink = recorder))
+local.span("support_agent") { run -> run.setUsage(inputTokens = 12, outputTokens = 3) }
+local.flush()
+check(recorder.spans.single().usage?.inputTokens == 12L)
+
+// queued, dropped, capacity, exported, failed, rejected.
+val stats = local.stats()`
+
+const shutdown = `// A JVM service: shut down on the way out.
+Runtime.getRuntime().addShutdownHook(Thread { mcpd.close() })
+
+// A short-lived worker: use, and it shuts down at the closing brace.
+Mcpd(McpdConfig(project = "batch")).use { mcpd ->
+    mcpd.span("reindex") { run -> reindex(run) }
+}`
+---
+
+<Doc
+  title="Kotlin"
+  description="面向 Kotlin 的 mcpd SDK：活动的 span 放在协程上下文里，结构化并发和取消都处理得当，接入代码从不抛异常。"
+  lede="以协程为先。活动的 span 存在协程上下文里，取消被记成取消而不是失败，而这里没有任何东西会朝你的智能体抛异常。"
+  og="docs"
+>
+  <h2>安装</h2>
+  <p>
+    使用 Kotlin 2.4 构建，需要 JVM 17 及以上。依赖只有 kotlinx 的 coroutines
+    和 serialization。HTTP 用的是 JDK 自带的客户端，所以对一个已经对
+    HTTP 有主张的服务来说，什么都不会多加。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="build.gradle.kts"
+    samples={[{ lang: 'kotlin', label: 'Gradle', shiki: 'kotlin', code: install }]}
+  />
+
+  <h2>构造客户端</h2>
+  <p>
+    一个进程一个实例。<code>McpdConfig</code> 的每个字段都以一个环境变量作为
+    默认值，也都可以在代码里设置，所以同一份代码不用改一个字，就能在开发环境和
+    生产环境里跑。不带参数的 <code>Mcpd()</code> 对着一个本地的 mcpd 就能用。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="init" title="连接" />
+
+  <p>代码优先于环境变量，环境变量优先于默认值。</p>
+
+  <table>
+    <thead>
+      <tr><th>字段</th><th>环境变量</th><th>默认值</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>apiKey</code></td><td><code>MCPD_API_KEY</code></td><td>无</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>无</td></tr>
+      <tr><td><code>serviceName</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>无</td></tr>
+      <tr><td><code>serviceVersion</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>无</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capturePayloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>logLevel</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      <tr><td><code>batchSize</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flushInterval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2s</code></td></tr>
+      <tr><td><code>maxQueue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10s</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>enabled = false</code> 让每次记录调用都变成空操作，但仍然返回合法的
+    span，所以在测试里可以把 mcpd 关掉，而不用碰被测代码。读取仍然走服务器：
+    一次查询是调用方正等着的东西，给它一个空答案就是在骗人。
+  </p>
+
+  <h2>记录一次运行</h2>
+  <p>
+    <code>span</code> 是地道的那种写法。它会结束这个 span，让它对块里调用的一切
+    都是活动的 span，并把块返回的东西返回出来。抛异常的块会留下一个带着这个异常
+    的 <code>error</code> span，并把异常原样再抛出去。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="带作用域的写法"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: scoped }]}
+  />
+
+  <p>
+    被取消的块不一样，记法也不一样。一个被自己的调用方或者被超时放弃掉的协程，
+    结束时这个 span 是 <code>cancelled</code> 而不是 <code>error</code>，因为
+    一次有意的放弃并不是这个操作的失败，在 trace 列表里也绝不该读成失败。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="trace" title="记录一次运行" />
+
+  <p>块这个形状不合适时，请自己开始和结束这个 span。</p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="不用块"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: manual }]}
+  />
+
+  <h2>上下文</h2>
+  <p>
+    活动的 span 是协程上下文的一个元素，所以它跟着协程走，而不是跟着线程走。
+    往下好几层的一个挂起函数，不用哪个调用方把父级传给它，就能开出挂在正确父级
+    下面的子 span；跑在同一个调度器上的两次运行，也永远看不到对方的 span。用
+    <code>mcpd.currentSpan()</code> 读它，用 <code>mcpd.traceparent()</code>
+    拿它的请求头。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="嵌套"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: nesting }]}
+  />
+
+  <p>
+    跨服务时，上下文走 W3C <code>traceparent</code> 请求头，它把采样决定一起
+    带着走，所以一条 trace 绝不会只记了一半。格式不对的头会开一条新的 trace，
+    而不是让携带它的那个请求失败。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="跨过服务边界"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: propagation }]}
+  />
+
+  <h2>模型、用量与错误</h2>
+  <p>
+    mcpd 在摄取时把 token 数换算成成本，所以 trace 上的那个数字就是你被计费的
+    那个数字。记录一个错误的同时会把这个 span 的状态设成 <code>error</code>，
+    而且一定带着一条消息：“出了点问题”没法拿来做任何事。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="一个 span 带着什么"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: payload }]}
+  />
+
+  <p>
+    其余的是 <code>setInput</code>、<code>setOutput</code>、
+    <code>setMetadata</code>、<code>setAttribute</code>、
+    <code>setAttributes</code>、<code>setTags</code>、
+    <code>setCorrelation</code> 和 <code>addLink</code>，另外还有开一个显式子
+    span 的 <code>child</code>，以及记一个时间点的 <code>event</code>。它们在
+    任何线程上调用都是安全的，而且都不抛异常。属于另一个 tracer 的树的 span，
+    用 <code>externalParentSpanId</code> 指出它来，这个值只带着用于关联，绝不会
+    在 mcpd 自己的树里当作父级用。
+  </p>
+
+  <h2>载荷、sink 与已经结束的 span</h2>
+  <p>
+    <code>capturePayloads = false</code> 把 <code>input</code> 和
+    <code>output</code> 留在进程里：它们在这条记录进入队列之前就被丢掉，所以
+    一次刷出不会带走任何敏感内容，而单个 span 可以为自己覆盖这个设置。导出器
+    把每个批次交给一个 <code>Sink</code>：默认是 HTTP 传输层，也可以是把批次
+    留在内存里供测试用的 <code>RecordingSink</code>，或者每个信号写一行 JSON
+    的 <code>ConsoleSink</code>。抛异常的 sink 算一个失败的批次，每个间隔上报
+    一次，绝不会朝调用方抛出。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="捕获、记录、断言"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: surface }]}
+  />
+
+  <h2>持久化运行</h2>
+  <p>
+    同一个客户端也服务守护进程的持久化运行。<code>Workflow</code> 构建定义，
+    并把那些步骤主体作为挂起 lambda 持有；一个 <code>Worker</code> 注册它，用
+    长轮询要租约，并在一个协程上逐份服务，而 <code>startRun</code>、
+    <code>watchRun</code>、<code>publishEvent</code> 以及其余的，都是客户端上的
+    扩展函数，与运行接口一一对应。步骤主体抛出 <code>RetryableException</code>
+    表示要在这个步骤的预算内重试，并通过 <code>StepContext</code> 把 span 记在
+    自己这个步骤下面。通过这个上下文开出来的每一个 span，结束时都会把自己的
+    用量加到这个步骤上，所以一个会记录自己模型调用的步骤主体，从不用手工去加
+    token；<code>setUsage</code> 会覆盖这些 span 累加出来的结果。一个
+    <code>Worker</code> 在 <code>onError</code> 之外还接受四个可选钩子
+    （<code>onLease</code>、<code>onStepStart</code>、<code>onStepEnd</code>、
+    <code>onConflict</code>），并回答 <code>stats()</code>：领取数、正在跑的
+    步骤主体数、完成数、按类别分的失败数、按原因分的冲突数，以及服务不了的租约。
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} example="workflow" region="workflow" title="一个工作流" />
+  <p>
+    每种构造做什么、租约协议和运行 API，在
+    <a href={linkTo('/docs/workflows')} class="link">工作流</a>、
+    <a href={linkTo('/docs/workers')} class="link">Worker</a> 和
+    <a href={linkTo('/docs/runs')} class="link">运行</a>这几页上。
+  </p>
+
+  <h2>评分与反馈</h2>
+  <p>
+    <code>min</code> 和 <code>max</code> 是必填参数。七分，满分十分是优秀，
+    满分一百分是很差，所以一个没有声明量程的数字没法和任何东西比较。反馈是人的
+    判断，和评分分开存放，因为这两者回答的是不同的问题，绝不能被平均到一起。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="score" title="评分与反馈" />
+
+  <p>
+    日志和指标会挂到活动的那个 span 上，所以图上的一个尖峰能打开引起它的那次
+    运行。
+  </p>
+
+  <h2>刷出与关闭</h2>
+  <p>
+    记录就是往内存里一个有上限的队列追加一条然后返回；一个 worker 协程负责
+    攒批、压缩和发送。<code>flush()</code> 把排着队的东西发出去，并等它发完。
+    <code>shutdown()</code> 停掉 worker，把剩下的发出去，而且调两次也是安全的。
+    最后这次导出是不可取消的，因为关闭通常是在取消的过程中从一个
+    <code>finally</code> 里走到的，而最后那个批次，恰恰是解释这个进程为什么要走
+    的那一个。
+  </p>
+  <p>
+    <code>Mcpd</code> 是 <code>AutoCloseable</code> 的，所以 <code>use</code>
+    和一个关闭钩子都管用。一个两者都不调的 serverless 函数，或者一个短命的
+    worker，会丢掉自己最后那个批次，因为处理函数一返回，运行时就不再调度了。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="关闭"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: shutdown }]}
+  />
+
+  <h2>你拿回来的东西</h2>
+  <p>
+    读取方法与 HTTP API 一一对应，返回由规范生成的类型。它们是唯一会抛异常的
+    一组方法，抛的是 <code>McpdException</code>：一次你正等着结果的查询，不是
+    一个可以吞掉的东西。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="把这次运行读回来"
+    lines={[
+      { cmd: 'gradle run' },
+      { out: '> Task :run' },
+      { out: 'support_agent: 4 spans, ok', tone: 'ok' },
+      { out: '  agent_run support_agent 79ms' },
+      { out: '  model_generation plan_answer 41ms' },
+      { out: '  tool_call lookup_order 16ms' },
+      { out: '  tool_call estimate_delivery 11ms shipping service returned 503 for order 41', tone: 'warn' },
+    ]}
+  />
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="query" title="检索与分析" />
+
+  <h2>你可以依赖的东西</h2>
+  <ul>
+    <li>
+      接入代码从不抛异常。一次失败的导出、一个不可达的服务器，或者一个序列化
+      不了的值，都会通过 <code>java.util.logging</code> 每 30 秒最多上报一次，
+      其余时候被吞掉。可观测性绝不能把它观测的那个东西搞垮。
+    </li>
+    <li>
+      记录不阻塞，所以你的服务的延迟，从不取决于 mcpd 快不快，或者活没活着。
+    </li>
+    <li>
+      内存有上限。队列最多放 <code>maxQueue</code> 个信号；超过之后最旧的会被
+      丢弃并计数，可以从 <code>droppedSignals</code> 和 <code>stats()</code>
+      里读到。一个没有上限的缓冲区，会把一次网络故障变成一次内存耗尽被杀。
+    </li>
+    <li>
+      采样决定只在根上做一次，然后往下继承。
+    </li>
+    <li>
+      一个 span 在开始时导出一次，在结束时再导出一次，所以一次跑到半路崩掉的
+      运行仍然是看得见的。当一个 span 在它的开始记录发出去之前就结束时，这条
+      记录会被就地更新，只发出去一条。
+    </li>
+    <li>
+      超过 1 KiB 的批次会用 gzip 压缩，并带一个能挺过重试的幂等键，所以一个在
+      服务器已经存下之后才超时的请求，不会被重复计数。
+    </li>
+    <li>
+      耗时是用一个单调时钟量出来的，所以一次 NTP 跳变量不出一个负数。
+    </li>
+  </ul>
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">查找一次运行</a>把过滤条件
+    讲全了。<a href={linkTo('/docs/reference/data-model')} class="link">数据模型</a>
+    列出了这些类型带的每一个字段。
+  </p>
+</Doc>

@@ -1,0 +1,243 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import RunCursor from '@/components/RunCursor.astro'
+import { exampleLanguages } from '@/lib/snippets'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const langs = exampleLanguages('workflow')
+const loc = localeOf(Astro.url.pathname)
+const link = (route: string) => urlFor(route, loc)
+---
+
+<Doc
+  title="Esecuzioni"
+  description="Un’esecuzione durevole in mcpd: avviarla in modo idempotente, il diario e come seguirlo, eventi e attese, annullamento, timer e limiti, e dove compare dentro la sua traccia."
+  lede="Un’esecuzione è una riga, un cursore, un diario di tentativi, un insieme di scadenze e un insieme di sospensioni. Questa pagina dice che cosa puoi farle, e che cosa ti risponde."
+  og="docs"
+>
+  <h2>Avviarne una</h2>
+  <p>
+    Un’esecuzione parte da un id di definizione e da un input. Il daemon
+    convalida l’input rispetto allo schema della definizione, quando ce n’è uno,
+    fissa la versione più alta fra quelle archiviate, crea l’esecuzione e la sua
+    traccia, e risponde con l’esecuzione così com’è archiviata. Da lì in
+    poi l’esecuzione va avanti da sola: il daemon offre i suoi passi ai worker,
+    percorre i suoi sleep e le sue attese, e scrive nel diario quello che
+    succede.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" example="workflow" region="run" only={langs} title="avviare, rispondere, seguire" />
+
+  <p>
+    Manda un <code>idempotency_key</code> da qualunque chiamante che possa
+    riprovare. È unico per progetto finché l’esecuzione è tenuta, e una seconda
+    chiamata uguale risponde con la stessa esecuzione invece di avviarne una
+    seconda. Così un webhook che scatta due volte, o un job runner che riparte,
+    non costa niente.
+  </p>
+
+  <RunCursor class="not-prose my-8" />
+
+  <h2>Il diario</h2>
+  <p>
+    Ogni modifica di un’esecuzione è un evento con un numero di sequenza, da
+    zero e senza buchi: l’esecuzione è partita, il cursore si è mosso, un passo
+    è stato dato in lease, è partito, è finito o è fallito, l’esecuzione ha
+    aspettato e ha ripreso, l’esecuzione è finita. Ognuno porta un payload la
+    cui forma dipende dal suo tipo. Il diario è la storia dell’esecuzione, ed è
+    quello che l’interfaccia disegna.
+  </p>
+  <p>
+    Leggilo a pagine a partire da <code>after</code>, oppure tieni aperto
+    l’endpoint degli eventi con <code>Accept: text/event-stream</code> e ricevi
+    ogni evento appena viene confermato. Un client che si ferma e riparte passa
+    l’ultimo numero di sequenza che ha visto e non perde niente. Il
+    <code>watch</code> di ogni SDK fa questo per te e finisce quando finisce
+    l’esecuzione, mentre <code>wait</code> segue il diario fino in fondo e ti
+    restituisce l’output, oppure un fallimento tipizzato che porta con sé
+    l’esecuzione quando non è andata a buon fine.
+  </p>
+
+  <h2>Eventi e attese</h2>
+  <p>
+    Un passo <code>wait_event</code> tiene ferma l’esecuzione finché non arriva
+    un evento con il suo nome e la sua chiave resa dal template. L’evento entra
+    da un solo ingresso:
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="rispondere a un’attesa"
+    command={`curl -X POST http://localhost:4317/v1/api/events \\
+  -H 'content-type: application/json' \\
+  -d '{"project":"support","event":"approved","key":"Q-42","payload":{"by":"ops"},"event_id":"hook-1"}'`}
+  />
+
+  <p>
+    La risposta è uno di tre esiti. <code>delivered</code>: un’esecuzione stava
+    aspettando e ha preso l’evento nella stessa transazione, quindi quando
+    leggi la ricevuta l’esecuzione si è già mossa. <code>parked</code>: nessuna
+    esecuzione stava aspettando, e l’evento resta da parte per un’attesa che si
+    apre più tardi e dichiara di accettare eventi parcheggiati.
+    <code>duplicate</code>: l’<code>event_id</code> era già stato visto e non è
+    stato scritto niente. Manda un id tuo da qualunque cosa possa
+    scattare due volte.
+  </p>
+  <p>
+    Un’attesa che arriva alla sua scadenza fa quello che dice il suo
+    <code>on_timeout</code>: fallisce, e allora decide il suo
+    <code>on_error</code>, oppure prosegue senza output. Per mandare un segnale
+    a una sola esecuzione, attraverso la sua attesa aperta, c’è
+    <code>POST /v1/api/runs/{'{run}'}/signal</code>; prende lo stesso corpo
+    senza chiave, perché l’indirizzo è l’esecuzione stessa.
+  </p>
+
+  <h2>Annullare</h2>
+  <p>
+    <code>POST /v1/api/runs/{'{run}'}/cancel</code> chiude un’esecuzione e ogni
+    esecuzione figlia sotto di essa. Un passo già in corso non viene interrotto
+    a metà: il worker scopre al suo heartbeat successivo che l’esecuzione è
+    finita, il suo contesto lo segnala al corpo, e qualunque cosa il corpo mandi
+    dopo viene rifiutata con <code>run_terminal</code>. Annullare
+    un’esecuzione già finita non cambia niente e risponde con l’esecuzione
+    così com’è.
+  </p>
+
+  <h2>Timer e limiti</h2>
+  <p>
+    Gli sleep, le scadenze delle attese, i backoff dei nuovi tentativi e le
+    scadenze dei lease sono tutti timer che tiene il daemon. Scattano
+    sull’orologio del daemon, una volta al secondo, quindi un
+    <code>retry_after_ms</code> di cento millisecondi è onorato come almeno
+    tanto, non come esattamente tanto. Un riavvio del daemon non ne perde
+    nessuno: sono righe, e l’esecuzione riprende dalla riga. Nessuna durata
+    può superare 3650 giorni, e un <code>retry_after_ms</code> più lungo
+    mandato da un worker viene rifiutato con un 400. Uno
+    <code>sleep_until</code> oltre l’anno 2262 viene tenuto come una scadenza
+    che non arriva mai.
+  </p>
+  <p>
+    I <code>max_steps</code>, <code>run_timeout_ms</code> e
+    <code>max_cost_usd</code> di una definizione chiudono l’esecuzione al tetto,
+    con il tetto stesso nominato come errore. Il costo è la somma dei consumi
+    che i passi riferiscono, valorizzati sullo stesso listino con cui si
+    valorizzano gli span, così un passo di agente che riferisce i suoi token
+    pesa sul budget dell’esecuzione nel momento in cui finisce.
+  </p>
+
+  <h2>L’esecuzione dentro la sua traccia</h2>
+  <p>
+    Ogni esecuzione è anche una traccia. Il daemon apre uno span radice per
+    l’esecuzione e uno span per tentativo, con l’input e l’output del passo, e
+    un corpo che registra span propri attraverso il contesto del passo li
+    mette lì sotto. Così la chiamata al modello dentro un passo di agente sta
+    sotto quel passo, sotto quell’esecuzione, e la ricerca, la contabilità dei
+    costi e gli scorer che lavorano su una traccia qualsiasi lavorano senza
+    cambiamenti sulla traccia di un’esecuzione. Quegli span vengono scritti
+    attraverso lo stesso percorso di ingest che seguono gli span di un SDK,
+    quindi sono campionati, oscurati, valorizzati e inoltrati allo stesso
+    modo. I token stanno sugli span del
+    modello che li ha spesi; lo span del passo porta nei suoi attributi la
+    somma già valorizzata, così il totale di una traccia conta ogni token una
+    volta sola. L’esecuzione porta il suo <code>trace_id</code>, e l’interfaccia
+    lega le due cose.
+  </p>
+  <p>
+    Il daemon scrive quegli span attraverso un outbox, sul proprio orologio,
+    dopo che la riga che li ha prodotti è stata confermata. Una traccia letta un
+    istante dopo che un passo è finito può non portare ancora lo span di quel
+    passo; il dettaglio dell’esecuzione lo porta sempre.
+  </p>
+
+  <h2>Rileggere le esecuzioni</h2>
+  <p>
+    <code>GET /v1/api/runs</code> elenca le esecuzioni di un progetto, a partire
+    da quella aggiornata più di recente, filtrate per stato o per definizione.
+    <code>GET /v1/api/runs/{'{run}'}</code> è l’esecuzione e tutto quello che di
+    lei è durevole: ogni tentativo con il proprietario del suo lease, i tempi,
+    l’errore e il consumo; i timer ancora in sospeso; le attese ancora aperte.
+    La <a href={`${link('/app')}?screen=workflows`} class="link">schermata
+    Workflow</a> dell’interfaccia è questo endpoint disegnato, con il diario
+    vivo accanto.
+  </p>
+  <p>
+    Tutti e due restituiscono quello che è stato dato all’esecuzione, quindi
+    tutti e due vengono registrati nel registro di audit, come
+    <code>list_runs</code> e <code>get_run</code>, e così il diario
+    (<code>list_run_events</code>, una volta per richiesta, anche quando è uno
+    stream), la risalita alla causa (<code>get_step_cause</code>) e un
+    annullamento (<code>cancel_run</code>). Una lettura rifiutata viene
+    registrata sul progetto a cui appartiene l’esecuzione. Le chiamate dei
+    worker non vengono registrate; vedi
+    <a href={link('/docs/workers')} class="link">Worker</a>.
+  </p>
+
+  <h2 id="storage">Storage</h2>
+  <p>
+    Le esecuzioni vivono in un file SQLite proprio, accanto allo storage delle
+    tracce: <code>&lt;data&gt;.runs.&lt;ext&gt;</code>, a meno che
+    <code>--runs-data</code> non dica altro, e <code>--runs-data off</code>
+    spegne del tutto la superficie delle esecuzioni, nel qual caso ogni
+    endpoint delle esecuzioni risponde 503. Fanne il backup insieme
+    allo storage delle tracce; <code>mcpd doctor</code> lo valuta come gruppo a
+    sé.
+  </p>
+  <p>
+    Lo storage delle esecuzioni tiene i payload così come sono stati mandati.
+    L’input, lo stato, l’output e la correlazione di un’esecuzione, l’input,
+    l’output e l’errore di ogni passo, il payload di ogni evento, e i payload
+    degli span che aspettano ancora di essere scritti nello storage delle
+    tracce sono archiviati senza oscuramento, e il <code>user_id</code> nella
+    correlazione di un’esecuzione è archiviato senza hash. È voluto: sono lo
+    stato di lavoro del workflow, un passo successivo li rilegge, e un valore
+    che l’oscuratore avesse riscritto cambierebbe quello che fa l’esecuzione.
+    Gli span che il daemon scrive nello storage delle tracce passano per lo
+    stesso oscuramento e lo stesso hash degli identificatori di uno span
+    mandato da un SDK, quindi lo storage delle tracce tiene la copia oscurata.
+    Considera il file delle esecuzioni come un file che tiene tutto quello che
+    è stato dato ai tuoi passi, e proteggilo e fanne il backup di conseguenza.
+  </p>
+  <p>
+    La conservazione raggiunge lo storage delle esecuzioni. La passata oraria
+    che sfoltisce lo storage delle tracce cancella anche, sulla stessa finestra
+    per progetto, ogni esecuzione la cui radice è finita prima del taglio, con
+    le sue esecuzioni figlie e tutto quello che è archiviato per loro:
+    tentativi, eventi, scadenze, attese, span in coda e gli eventi che quelle
+    esecuzioni hanno consumato. Un’esecuzione che non è finita non viene mai
+    cancellata, per quanto sia vecchia. Le definizioni restano.
+  </p>
+  <p>
+    Anche la cancellazione lo raggiunge.
+    <code>DELETE /v1/api/subjects/{'{user_id}'}</code> cancella ogni
+    esecuzione finita del progetto la cui correlazione porta quel
+    <code>user_id</code>, nella forma con cui hai avviato l’esecuzione, con
+    tutto il suo albero di esecuzioni figlie e tutto quello che è archiviato
+    per loro, e riporta il conteggio come <code>runs_erased</code>.
+    Un’esecuzione di quella persona che non è finita resta intera, contata in
+    <code>runs_in_flight</code> e nominata nella <code>note</code> della
+    risposta: annullala, oppure lasciala finire, e manda di nuovo la
+    cancellazione. Un evento parcheggiato per un’esecuzione che non è ancora
+    arrivata alla sua attesa ha come chiave la sua chiave di correlazione, non
+    una persona, quindi la cancellazione non lo raggiunge; viene cancellato
+    quando scade, dopo 24 ore. Per il resto della risposta, vedi
+    <a href={link('/docs/privacy')} class="link">Oscuramento e conservazione</a>.
+  </p>
+
+  <h2>Poi</h2>
+  <ul>
+    <li>
+      Che cosa può dire una definizione:
+      <a href={link('/docs/workflows')} class="link">Workflow</a>.
+    </li>
+    <li>
+      Il processo che serve i passi:
+      <a href={link('/docs/workers')} class="link">Worker</a>.
+    </li>
+    <li>
+      Ogni endpoint delle esecuzioni, generato dalla specifica:
+      <a href={`${link('/docs/reference/api')}#runs`} class="link">API HTTP, Runs</a>.
+    </li>
+  </ul>
+</Doc>

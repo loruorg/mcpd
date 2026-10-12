@@ -1,0 +1,446 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import Conformance from '@/components/Conformance.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+---
+
+<Doc
+  title="Integrating"
+  description="Three ways to use a running mcpd: the HTTP API on its own, one of the six SDKs, or as an MCP server an agent can call. What each one costs you and what it gives back."
+  lede="A daemon is running somewhere. Here are the three ways anything else reaches it, and how to choose between them."
+  og="docs"
+>
+  <p>
+    mcpd has one door and three ways through it. Everything below talks to the
+    same HTTP surface: the SDKs are a convenience over it, and the MCP server is
+    a client of it.
+  </p>
+
+  <h2>One port, four surfaces</h2>
+  <p>
+    A single process serves all of it on one port, 4317 by default. There is no
+    sidecar, no collector to run beside it and no static-file server for the
+    interface.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Path</th><th>What it is</th><th>Key</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>/v1/traces</code>, <code>/v1/logs</code>, <code>/v1/metrics</code></td>
+        <td>OpenTelemetry ingest. Any OTel SDK, with no mcpd-specific code in your application.</td>
+        <td>Ingest</td>
+      </tr>
+      <tr>
+        <td><code>/v1/ingest</code></td>
+        <td>Native ingest. One batch carries any mix of the six signals and the whole data model, and one request carries a stream of batches.</td>
+        <td>Ingest</td>
+      </tr>
+      <tr>
+        <td><code>/v1/api/…</code></td>
+        <td>The query API. The interface and the SDKs both read through this and nothing else.</td>
+        <td>Read, write, admin, execute or worker, declared per endpoint</td>
+      </tr>
+      <tr>
+        <td><code>/</code></td>
+        <td>The operator interface, compiled into the binary.</td>
+        <td>None for the markup; its data goes through the query API</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Two more paths, <code>/healthz</code> and <code>/readyz</code>, are
+    unauthenticated so a probe can reach them. Start there when you are working
+    out whether an endpoint is reachable at all:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="is it there"
+    lines={[
+      { cmd: 'curl -s "$MCPD/healthz"' },
+      { out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0",…}', tone: 'ok' },
+      { cmd: 'curl -s "$MCPD/readyz"' },
+      { out: 'storage is not reachable: …', tone: 'warn' },
+      { out: '# readyz touches the store, so a 503 here means the daemon is up' },
+      { out: '# and the database behind it is not.' },
+    ]}
+  />
+
+  <h2>The HTTP API, with no SDK</h2>
+  <p>
+    If your language has an HTTP client, it can talk to mcpd. There is nothing
+    to register, no project to create up front and no handshake. Every SDK is a
+    convenience over the requests below, and choosing this route costs you
+    batching, retry and id generation, which you then do yourself.
+  </p>
+
+  <h3>Writing a run</h3>
+  <p>
+    <code>POST /v1/ingest</code> takes one batch. A batch may carry spans, logs,
+    metrics, scores, feedback and aspect notes together, which is the reason the
+    native door exists alongside the OTLP one: the six signals share trace and
+    span ids, so sending them in one request keeps them correlated with no
+    second lookup.
+  </p>
+
+  <p>
+    Three shapes reach that endpoint, and the content type says which. Nothing
+    is worked out from the bytes, so adding a newline inside a string can never
+    change what a body means.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Content type</th><th>Body</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>application/json</code></td>
+          <td>One batch object, which is what every SDK sends</td>
+        </tr>
+        <tr>
+          <td><code>application/json</code></td>
+          <td>An array of batch objects, for a sender with several to hand</td>
+        </tr>
+        <tr>
+          <td><code>application/x-ndjson</code></td>
+          <td>One batch per line, read as the body arrives rather than held whole. <code>application/jsonl</code> means the same thing</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Each element is the batch it is: it is stored in its own transaction when it
+    carries an <code>ingest_key</code>, so a resent stream is recognised line by
+    line rather than as one lump, and elements with no key are stored together.
+    The whole request is refused, with nothing stored, if any line cannot be
+    read or if the request as a whole is over either bound. The reply is one
+    <code>IngestResult</code> covering all of it.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <CodeSwitcher class="not-prose my-6" only={['curl']} region="trace" title="one batch" />
+
+  <p>Four things the request has to get right:</p>
+  <ul>
+    <li>
+      <strong>Ids are OpenTelemetry-shaped.</strong> 32 lowercase hex characters
+      for a trace, 16 for a span, never all zero. Anything else breaks
+      correlation with every other tool you run.
+    </li>
+    <li>
+      <strong><code>ingest_key</code> makes a retry safe.</strong> It is an
+      idempotency key that is stable for a batch, so a resend is recognised and
+      counted as a duplicate rather than written twice.
+    </li>
+    <li>
+      <strong>The key goes in a header.</strong>
+      <code>Authorization: Bearer …</code>, or <code>X-Mcpd-Key</code>. Ingest
+      needs an ingest key, and only when the daemon has any configured.
+    </li>
+    <li>
+      <strong>Batches have bounds.</strong> 32 MiB of body and 10,000 signals by
+      default, both settable with <code>--max-body-bytes</code> and
+      <code>--max-batch-signals</code>. The signal bound counts the whole
+      request, so splitting the same signals over lines does not get past it.
+      Send <code>content-encoding: gzip</code> for anything large.
+    </li>
+  </ul>
+  <p>
+    The response reports what happened per signal:
+    <code>{'{"accepted":2,"rejected":0,"duplicate":0}'}</code>, with an
+    <code>errors</code> array naming the index and the reason for anything
+    refused. The OTLP endpoints answer in OTLP's own shape instead, with a
+    <code>partialSuccess</code> object carrying the rejected count, because that
+    is what an OpenTelemetry sender reads.
+  </p>
+
+  <h3>Reading it back</h3>
+  <CodeSwitcher class="not-prose my-6" only={['curl']} region="query" title="read" />
+
+  <p>
+    Filters compose, paging is by cursor, and <code>project</code> defaults to
+    the daemon's default project when you leave it out. Full-text search over
+    stored payloads is the <code>q</code> parameter, which is what makes
+    "find the run where the model said this" a query rather than a grep.
+  </p>
+  <p>
+    A failure mcpd itself raises comes back as JSON with a stable
+    machine-readable <code>error</code> code, a <code>message</code> written for
+    whoever has to fix it, and a <code>field</code> when one parameter is at
+    fault. Branch on the code, show the message.
+  </p>
+  <p>
+    One class of failure does not have that shape, and a client that assumes it
+    does will fail to parse the reply. A request body that cannot be decoded
+    into the type the endpoint expects is refused by the web framework before
+    any mcpd code runs, so it answers <code>422</code> with
+    <code>content-type: text/plain</code> and a message like
+    <code>missing field `scorer_id`</code>. Body syntax that is not JSON at all
+    answers <code>400</code>, also as text. There is no <code>error</code> code
+    to branch on in either case. This covers every endpoint that takes a typed
+    body:
+    <code>POST /v1/api/scores</code>, <code>/v1/api/feedback</code>,
+    <code>/v1/api/score</code>, <code>/v1/api/datasets</code>, its
+    <code>items</code> and <code>capture</code> routes, and
+    <code>/v1/api/experiments</code>. The ingest doors read the body themselves,
+    so <code>/v1/ingest</code> and the OTLP routes do return the JSON shape.
+    Treat a non-JSON body on a 4xx as a malformed request from your own code,
+    and read it as text.
+  </p>
+
+  <h2>The SDKs</h2>
+  <p>
+    Six languages: <a href="/docs/sdks/typescript" class="link">TypeScript</a>,
+    <a href="/docs/sdks/python" class="link">Python</a>,
+    <a href="/docs/sdks/rust" class="link">Rust</a>,
+    <a href="/docs/sdks/go" class="link">Go</a>,
+    <a href="/docs/sdks/kotlin" class="link">Kotlin</a> and
+    <a href="/docs/sdks/elixir" class="link">Elixir</a>. Each is idiomatic where
+    it can be and identical where it matters. A user who has read the TypeScript
+    quickstart can predict the Kotlin one.
+  </p>
+  <p>What you get over raw HTTP:</p>
+  <ul>
+    <li>Batching and a background worker, so recording a span appends to a queue and returns.</li>
+    <li>Retry with backoff on 429 and the 5xx codes worth retrying, and never on a 4xx that will stay malformed.</li>
+    <li>Id generation, context propagation, and W3C <code>traceparent</code> parsed on the way in and emitted on the way out, so a trace survives a service boundary.</li>
+    <li>Types generated from the same specification as the daemon's, so a field cannot mean one thing in the SDK and another in the store.</li>
+  </ul>
+  <p>
+    Three promises hold in every language, and they are the reason an SDK is
+    safe to put in a hot path. Instrumentation never throws: an unreachable
+    daemon is logged at most once an interval and swallowed. It never blocks:
+    network work happens on the worker, so your agent's latency does not depend
+    on mcpd being up. And its queue is bounded: when it fills, the oldest spans
+    are dropped and a counter goes up, because an unbounded buffer turns a
+    network outage into an out-of-memory kill.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="init" title="connect" />
+
+  <p>
+    A client built with no arguments works against a local daemon. Everything is
+    settable in code or by environment variable, with code winning, and the
+    variable names are the same in every language so a value copied between two
+    services keeps working when they are written in different ones:
+    <code>MCPD_ENDPOINT</code>, <code>MCPD_API_KEY</code>,
+    <code>MCPD_PROJECT</code>, <code>MCPD_ENVIRONMENT</code>,
+    <code>MCPD_SERVICE_NAME</code>, <code>MCPD_SERVICE_VERSION</code>,
+    <code>MCPD_SAMPLE</code> and <code>MCPD_ENABLED</code>. Setting
+    <code>MCPD_ENABLED=false</code> turns every call into a no-op that still
+    returns valid objects, so a test suite can switch mcpd off without touching
+    any code.
+  </p>
+
+  <h3>They are interchangeable, and that is tested</h3>
+  <p>
+    Unit tests prove each SDK does what its own authors meant. They prove
+    nothing about whether the six agree. So the conformance suite writes one
+    canonical run through each language against one live daemon, plus a seventh
+    channel that sends the same run with nothing but <code>curl</code>, and
+    asserts that what comes back is structurally identical:
+  </p>
+
+  <Conformance class="not-prose my-8" />
+
+  <p>
+    If you are choosing a language for a new service, this is the answer to
+    "will the traces look the same as the ones we already have".
+  </p>
+
+  <h3>If your language is not one of the six</h3>
+  <p>
+    Point an OpenTelemetry SDK at <code>/v1/traces</code> and send no new code.
+    mcpd is an OTLP receiver, and it maps both the OpenTelemetry
+    <code>gen_ai.*</code> convention and the OpenInference
+    <code>llm.*</code> one, so instrumentation you already have lands correctly.
+    See <a href="/docs/opentelemetry" class="link">OpenTelemetry</a>.
+  </p>
+
+  <h2>From an AI agent, over MCP</h2>
+  <p>
+    The third route is for an agent rather than a service: instead of your code
+    reading traces, a coding or support agent reads them on your behalf and
+    answers a question about them. "Why did the last run fail", "show me the
+    runs a scorer marked down this week", "what did this session cost". mcpd
+    exposes that through the Model Context Protocol.
+  </p>
+
+  <h3>The three tools</h3>
+  <p>
+    Three, not thirty. They are the three moves of one investigation: which run,
+    what happened inside it, and whether it is one run or all of them.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Tool</th><th>What it answers</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>find_runs</code></td>
+        <td>
+          Which run. One line each: id, age, status, duration, cost, steps.
+          Filter by status, model, user, session or free text; sort by duration
+          to get the slowest. Defaults to the last 24 hours.
+        </td>
+      </tr>
+      <tr>
+        <td><code>get_run</code></td>
+        <td>
+          What happened. The waterfall, the step that failed and why, the prompts
+          and completions, the logs, the scores. Payloads are capped so one run
+          cannot fill a context window.
+        </td>
+      </tr>
+      <tr>
+        <td><code>run_stats</code></td>
+        <td>
+          One run or all of them. Cost, failure rate, latency and tokens over a
+          window, grouped by model, name, status, environment or user. A 40%
+          failure rate means the run you are reading is not the problem.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Results come back as text rather than JSON, which is a deliberate choice
+    about whose context this spends. Forty span objects is mostly punctuation;
+    the same run drawn as a waterfall is a few hundred tokens and the agent can
+    see the shape of it.
+  </p>
+
+  <h3>The shape of it</h3>
+  <p>
+    The MCP server is a subcommand of the same binary rather than a second
+    service. It runs as <code>mcpd mcp</code>, speaks JSON-RPC over standard
+    input and output, and holds no data of its own. There is no port to open, no
+    process to keep alive and nothing to deploy: the agent host starts it as a
+    child process when a conversation needs it and stops it afterwards.
+  </p>
+  <p>
+    What it does hold is a connection to a daemon. Every tool call becomes a
+    request to the same query API described above, with the same read key and
+    the same project scoping, so an agent cannot reach a project the key it was
+    given does not reach. The blast radius of handing an agent this server is
+    exactly the blast radius of handing it that key, which is the property to
+    check before you configure one.
+  </p>
+  <p>
+    The tool set is deliberately small. A large surface makes a model choose
+    badly, and most questions about an agent's behaviour reduce to listing runs,
+    opening one, and asking a numeric question over a window. A client discovers
+    the current set with the protocol's own <code>tools/list</code> call rather
+    than from a list written down here that could fall behind.
+  </p>
+
+  <h3>Configuring a client</h3>
+  <p>
+    An MCP host launches a server from a command, some arguments and an
+    environment. The exact file and the exact key are the host's, not mcpd's, so
+    check its documentation; the three values it needs from you are the same
+    everywhere.
+  </p>
+  <table>
+    <thead>
+      <tr><th>What the host needs</th><th>Value</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Command</td><td>The <code>mcpd</code> binary, on a path the host can run.</td></tr>
+      <tr>
+        <td>Arguments</td>
+        <td>
+          The <code>mcp</code> subcommand. It takes <code>--endpoint</code>, the
+          daemon to query, and <code>--api-key</code>, a read key for it, for a
+          host that passes arguments more readily than an environment.
+        </td>
+      </tr>
+      <tr>
+        <td>Environment</td>
+        <td>
+          The same two values as <code>MCPD_ENDPOINT</code> and
+          <code>MCPD_API_KEY</code>. The endpoint defaults to
+          <code>http://127.0.0.1:4317</code>, and the key can be left out when
+          the daemon has no keys set.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <Command
+    class="not-prose my-6"
+    label="what the host runs"
+    command="MCPD_ENDPOINT=https://mcpd.internal MCPD_API_KEY=$READ mcpd mcp"
+    primaryLabel="As environment"
+    secondary={[
+      { label: 'As flags', command: 'mcpd mcp --endpoint https://mcpd.internal --api-key $READ' },
+      { label: 'From Docker', command: 'docker run -i --rm -e MCPD_ENDPOINT -e MCPD_API_KEY ghcr.io/mcpd/mcpd mcp' },
+    ]}
+  />
+
+  <p>Three things to hold on to when you issue that key.</p>
+  <ul>
+    <li>
+      Give the agent a <code>read</code> key, not an <code>ingest</code> key.
+      The scopes exist so that a credential for writing spans is not also a
+      credential for every stored prompt.
+    </li>
+    <li>
+      Scope it to a project. A key configured at the top level reaches every
+      project on the daemon.
+    </li>
+    <li>
+      Know that a read key also deletes traces until you configure an
+      <code>admin</code> list, because the admin scope falls back to the read
+      list when it is unset. An agent holding a read key on a daemon that has
+      never been given an admin list can delete a run.
+    </li>
+  </ul>
+  <p>All three are on <a href="/docs/security" class="link">Security</a>.</p>
+
+  <h2>Which one to use</h2>
+  <table>
+    <thead>
+      <tr><th>Route</th><th>Use it when</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>HTTP</td>
+        <td>Your language has no SDK, you are sending from a shell or a job, or you want no dependency at all.</td>
+      </tr>
+      <tr>
+        <td>An SDK</td>
+        <td>You are instrumenting an application, where batching, retry and never throwing are worth more than the dependency.</td>
+      </tr>
+      <tr>
+        <td>OpenTelemetry</td>
+        <td>You already emit OTel and would rather change a URL than add a library.</td>
+      </tr>
+      <tr>
+        <td>MCP</td>
+        <td>A person is asking an agent questions about stored runs, rather than code reading them on a schedule.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    They mix. A fleet that emits through the TypeScript SDK, a nightly job that
+    posts scores with <code>curl</code>, and an agent reading it all back over
+    MCP is one deployment, not three.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>What is stored and who can read it: <a href="/docs/security" class="link">Security</a>.</li>
+    <li>Pointing an existing OTel setup at mcpd: <a href="/docs/opentelemetry" class="link">OpenTelemetry</a>.</li>
+    <li>Every endpoint, generated from the specification: <a href="/docs/reference/api" class="link">HTTP API</a>.</li>
+    <li>The queries worth knowing: <a href="/docs/searching" class="link">Finding a run</a>.</li>
+  </ul>
+</Doc>

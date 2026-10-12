@@ -1,0 +1,348 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+const scoped = `# Sync and async are the same object. Both end the span on the way out and
+# record the exception if the block raised.
+with mcpd.trace("nightly_summariser") as run:
+    with mcpd.span("fetch", kind=SpanKind.TOOL_CALL) as step:
+        step.set_output({"documents": 42})
+
+async with mcpd.trace("agent") as run:
+    async with mcpd.span("generate", kind=SpanKind.MODEL_GENERATION) as generation:
+        generation.set_output(await model.complete(prompt))
+    await mcpd.aflush()`
+
+const nesting = `def draft(question: str) -> str:
+    # Nothing was passed in. The span still lands under the run, because the
+    # active span is a contextvars.ContextVar and this call is inside the block.
+    with mcpd.span("draft", kind=SpanKind.MODEL_GENERATION) as generation:
+        generation.set_input(question)
+        return "..."
+
+
+with mcpd.trace("support_agent") as run:
+    run.set_output(draft("where is my order?"))`
+
+const propagation = `# Outbound: hand the active span to the next service.
+requests.post(url, headers={"traceparent": mcpd.traceparent()}, json=payload)
+
+# Inbound: continue that trace rather than starting a new one.
+with mcpd.trace("handler", traceparent=request.headers.get("traceparent")) as run:
+    ...`
+
+const payload = `generation.set_model("gpt-4o-mini", provider="openai")
+generation.set_usage(input_tokens=812, output_tokens=96, cache_read=128)
+
+# A failure you caught and decided about yourself.
+generation.set_error("the provider timed out", kind="TimeoutError", retryable=True)
+
+# A point in time inside the span, with no duration of its own.
+generation.event("first_token")`
+
+const sinks = `from mcpd import Mcpd, RecordingSink
+
+sink = RecordingSink()
+mcpd = Mcpd(sink=sink)
+with mcpd.trace("answer") as run:
+    run.set_usage(input_tokens=12)
+mcpd.flush()
+assert sink.spans[0].usage.input_tokens == 12
+print(mcpd.stats())  # queued, dropped, capacity, exported, failed, rejected`
+
+const serverless = `def handler(event, context):
+    with mcpd.trace("answer") as run:
+        run.set_input(event["body"])
+        answer = agent(event["body"])
+        run.set_output(answer)
+
+    # The batch is still in memory here. The runtime freezes this process the
+    # moment the handler returns, and the worker thread never runs again.
+    mcpd.flush()
+    return {"statusCode": 200, "body": answer}`
+---
+
+<Doc
+  title="Python"
+  description="面向 Python 的 mcpd SDK：同步与异步的上下文管理器、基于 contextvars 的传播、没有任何必需依赖，以及从不抛异常的接入代码。"
+  lede="给同步代码和异步代码用的上下文管理器，一个基于 contextvars 的活动 span，以及完全没有必需依赖。"
+  og="docs"
+>
+  <h2>安装</h2>
+  <p>
+    Python 3.9 及以上。它有意不带任何必需依赖：导出器用的是标准库里的
+    <code>urllib</code> 和 <code>gzip</code>，所以装上 mcpd 不会往锁文件里加
+    任何东西，也不可能和你的智能体已经依赖的东西冲突。
+  </p>
+
+  <Command
+    command="pip install mcpd"
+    primaryLabel="只用标准库"
+    secondary={[{ label: '带 httpx 附加项', command: 'pip install "mcpd[httpx]"' }]}
+  />
+
+  <p>
+    <code>httpx</code> 附加项只多一样东西，连接复用，别的什么都不加。不装它，
+    SDK 的行为完全一样。
+  </p>
+
+  <h2>构造客户端</h2>
+  <p>
+    一个进程一个客户端。每个参数也都会读一个环境变量，所以同一份代码不用改一个
+    字，就能在开发环境和生产环境里跑。不带参数的 <code>Mcpd()</code> 连的是
+    <code>http://localhost:4317</code> 上的守护进程。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="init" title="连接" />
+
+  <p>代码优先于环境变量，环境变量优先于默认值。</p>
+
+  <table>
+    <thead>
+      <tr><th>参数</th><th>环境变量</th><th>默认值</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>api_key</code></td><td><code>MCPD_API_KEY</code></td><td>无</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>无</td></tr>
+      <tr><td><code>service_name</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>无</td></tr>
+      <tr><td><code>service_version</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>无</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capture_payloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>log_level</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      <tr><td><code>batch_size</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flush_interval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2.0</code> 秒</td></tr>
+      <tr><td><code>max_queue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10.0</code> 秒</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>enabled=False</code> 让每一次记录调用都变成空操作，但仍然返回合法的
+    对象，所以你可以在测试里把 mcpd 关掉，而不用改被测代码。
+    <code>capture_payloads=False</code> 把提示词和补全留在进程里：span 照样
+    记录，带着它的时间、状态、用量、模型、关联信息和错误，而 <code>input</code>
+    和 <code>output</code> 在进入队列之前就被丢掉。单个 span 可以在自己的启动
+    字段里用 <code>capture_payloads=True</code> 说自己不一样，反过来也可以。
+  </p>
+
+  <h2>记录一次运行</h2>
+  <p>
+    <code>mcpd.trace(name)</code> 开一次运行，<code>mcpd.span(name)</code> 在
+    当前活动的那个东西下面开一个步骤。两者都是上下文管理器：代码块出去时结束
+    这个 span，块里抛了异常就把异常记下来，然后原样放它过去。你自己的错误处理
+    不会因为被观测而改变。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="trace" title="记录一次运行" />
+
+  <p>
+    不用 <code>with</code> 块时，请自己调 <code>run.end()</code>。不管哪种写法，
+    span 在开始时就已经导出过一次，所以一个永远没结束的 span，看起来就是一个
+    永远没结束的 span，而它通常正是你在找的那一个。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="同步与异步"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: scoped }]}
+  />
+
+  <h2>上下文</h2>
+  <p>
+    活动的 span 是一个 <code>contextvars.ContextVar</code>。它会跟着一次
+    <code>await</code> 进到任务里，也不会在线程之间泄漏，所以往下三层的一个
+    辅助函数，不需要任何调用方把参数一路传下去，就能开出挂在正确父级下面的
+    子 span。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="嵌套"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: nesting }]}
+  />
+
+  <p>出来的就是这棵树，时间和载荷都挂在上面。</p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>
+    跨服务时，上下文走 W3C <code>traceparent</code> 请求头。格式不对的头会开
+    一条新的 trace，而不是让携带它的那个请求失败。进来的头说不采样，就照它办，
+    因为一条有的服务留下、有的服务扔掉的 trace，算不上一条 trace。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="跨过服务边界"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: propagation }]}
+  />
+
+  <h2>模型、用量与错误</h2>
+  <p>
+    mcpd 在摄取时就是按 token 数定价的，所以 trace 上的成本就是你被计费的那个
+    成本。请上报供应商告诉你的数字。<code>set_error</code> 接受一个字符串或者
+    一个异常，同时把 <code>status</code> 设成 <code>error</code>，并且一定会填上
+    一条消息：“出了点问题”没法拿来做任何事。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="一个 span 带着什么"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: payload }]}
+  />
+
+  <p>
+    其余的设置方法是 <code>set_input</code>、<code>set_output</code>、
+    <code>set_metadata</code>、<code>set_attributes</code>、
+    <code>set_tags</code>、<code>set_entity</code>、<code>set_cost</code>、
+    <code>set_status</code> 和 <code>add_link</code>。它们都返回这个 span，
+    其中任何一个也都可以在 span 开始时作为关键字参数传进去。
+    <code>external_parent_span_id=</code> 指的是一个来自非 mcpd 的 tracing
+    系统的父级，只带着用于关联，绝不用来决定父子关系。
+  </p>
+
+  <h2>载荷、sink 与已经结束的 span</h2>
+  <p>
+    sink 就是一个批次被排空之后去的地方，默认是 HTTP 传输层。
+    <code>RecordingSink</code> 把每个批次留在内存里，于是一个测试不需要服务器
+    就能断言接入代码记下了什么；<code>ConsoleSink</code> 则把每个信号打印成
+    一行 JSON 到标准错误。抛异常的 sink 算一个失败的批次，会被计数、被上报，
+    绝不会变成你代码里的异常。<code>stats()</code> 回答的是这个客户端自构造
+    以来做了些什么。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="断言记下了什么"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: sinks }]}
+  />
+
+  <p>
+    <code>mcpd.record(span)</code> 把一个已经结束的 <code>SpanRecord</code>
+    排进队列，id、父级和时间都按你手上的样子来：也就是另一套 tracing 系统的
+    适配器或者一次批量导入手上有的那些东西。它绝不会被重新指定父级、重新计时
+    或者重新采样，而一条格式不对的记录会被丢弃，并计入
+    <code>stats().rejected</code>，绝不抛出。
+  </p>
+
+  <h2>持久化运行</h2>
+  <p>
+    同一个客户端也服务守护进程的持久化运行。<code>workflow()</code> 构建定义
+    并持有那些步骤主体，可以写成调用，也可以写成装饰器；一个 <code>Worker</code>
+    注册它，在一个线程池上用长轮询要租约并逐份服务，而 <code>mcpd.runs</code>、
+    <code>mcpd.events</code> 和 <code>mcpd.definitions</code> 与运行接口一一
+    对应。步骤主体抛出带 <code>class_="retryable"</code> 的
+    <code>StepFailure</code>，表示要在这个步骤的预算内重试，并通过
+    <code>StepContext</code> 把 span 记在自己这个步骤下面。这些 span 花掉的，
+    就是这个步骤的用量：每个 span 结束时把 token 加进去，看到的最后一个模型
+    胜出，所以守护进程是按 trace 显示出来的东西给这个步骤定价的；
+    <code>ctx.set_usage</code> 可以逐个字段覆盖它。<code>Worker</code> 在
+    <code>on_error</code> 之外还接受四个钩子（<code>on_lease</code>、
+    <code>on_step_start</code>、<code>on_step_end</code>、
+    <code>on_conflict</code>），而 <code>worker.stats()</code> 统计领到的租约、
+    正在跑的步骤主体、完成数、按类别分的失败数、按原因分的冲突数，以及服务不了
+    的租约。
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['python']} example="workflow" region="workflow" title="一个工作流" />
+  <p>
+    每种构造做什么、租约协议和运行 API，在
+    <a href={linkTo('/docs/workflows')} class="link">工作流</a>、
+    <a href={linkTo('/docs/workers')} class="link">Worker</a> 和
+    <a href={linkTo('/docs/runs')} class="link">运行</a>这几页上。
+  </p>
+
+  <h2>评分与反馈</h2>
+  <p>
+    <code>min</code> 和 <code>max</code> 只能按关键字传，而且没有默认值。一个
+    没有声明量程的裸数字没法和任何东西比较，所以量程在调用处就被强制要求，而
+    不是留到之后去猜。反馈是人的判断，和评分分开存放：这两者回答的是不同的
+    问题，绝不能被平均到一起。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="score" title="评分与反馈" />
+
+  <p>
+    不指定 trace 时，两者都会挂到当前活动 span 所在的那条 trace 上。日志和指标
+    也一样，所以图上的一个尖峰能打开引起它的那次运行。
+  </p>
+
+  <h2>刷出与关闭</h2>
+  <p>
+    记录就是往内存里的一个队列追加一条然后返回；HTTP 由一个守护线程来做。
+    <code>flush()</code> 把等着的东西发出去，如果在它的超时之内没做完就返回
+    <code>False</code>。<code>shutdown()</code> 先刷出，再停掉 worker 并释放
+    传输层。两者都是幂等的。在一个事件循环里请调 <code>aflush()</code> 和
+    <code>ashutdown()</code>，它们做的是同样的事，但不阻塞这个循环。
+  </p>
+  <p>
+    在一个 serverless 函数里，这件事比在别处都更要紧。你的处理函数一返回，运行时
+    就把进程冻住，worker 线程再也不会跑，于是还排在队列里的那个批次就丢了。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="一个 serverless 处理函数"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: serverless }]}
+  />
+
+  <p>
+    客户端还会注册一个 <code>atexit</code> 钩子，所以一个忘了关闭的普通脚本，
+    最后那个批次仍然发得出去。这个钩子在 <code>os._exit()</code> 上，或者在一个
+    致命信号上，都不会跑，所以它是一张安全网，不是替代品。
+  </p>
+
+  <h2>你可以依赖的东西</h2>
+  <ul>
+    <li>
+      接入代码从不抛异常。每一次记录调用都有保护；一次失败最多每个间隔记一条
+      日志，然后被吞掉。可观测性绝不能把它观测的那个东西搞垮。读取调用是例外，
+      它们确实会抛，因为一次你正等着结果的查询是另一回事。
+    </li>
+    <li>
+      记录不阻塞。你的智能体的延迟，从不取决于 mcpd 快不快，或者活没活着。
+    </li>
+    <li>
+      内存有上限。最多 <code>max_queue</code> 个信号，默认 8192 个。队列满时
+      最旧的会被丢弃，<code>mcpd.dropped</code> 记下它们的数量，并且每个间隔
+      记一条警告。一个没有上限的缓冲区，会把一次网络故障变成一次内存耗尽被杀。
+    </li>
+    <li>
+      采样决定只在根上做一次，依据是 trace id，然后由每个子级继承。进来的
+      <code>traceparent</code> 永远胜出。
+    </li>
+    <li>
+      一个 span 在开始时就导出，在结束时更新，所以一次跑到半路崩掉的运行仍然是
+      看得见的。
+    </li>
+    <li>
+      时间戳取自 <code>time.time_ns()</code>，在传输时是带九位数字的 UTC。用
+      本地时间会让一条分布式 trace 没法读。
+    </li>
+  </ul>
+
+  <h2>把它读回来</h2>
+  <p>
+    读取方法对应 HTTP API，返回由规范生成的类型。它们是同步的，失败时抛出
+    <code>McpdError</code>。<code>from_</code> 和 <code>to</code> 接受一个
+    <code>datetime</code>，也接受 <code>-15m</code>、<code>-1h</code> 或
+    <code>-7d</code> 这样的简写。在异步代码里，请用
+    <code>asyncio.to_thread</code> 把它们放到循环外面去跑。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="query" title="检索与分析" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">查找一次运行</a>把过滤条件
+    讲全了。<a href={linkTo('/docs/reference/data-model')} class="link">数据模型</a>
+    列出了这些类型带的每一个字段。
+  </p>
+</Doc>

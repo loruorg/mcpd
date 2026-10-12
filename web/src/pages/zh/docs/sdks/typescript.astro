@@ -1,0 +1,389 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+const nesting = `// Anything the callback starts nests under it. No handle is passed down.
+await mcpd.withSpan('support_agent', async (run) => {
+  const order = await mcpd.withSpan(
+    'lookup_order',
+    async (tool) => {
+      tool.setInput({ orderId: 'A-1042' })
+      mcpd.log('info', 'this line belongs to lookup_order')
+      return { status: 'in transit' }
+    },
+    { kind: 'tool_call' },
+  )
+  run.setOutput(order)
+})`
+
+const explicitParent = `// Correct on every runtime, including ones with no AsyncLocalStorage.
+const run = mcpd.trace('support_agent')
+const step = run.child('call_model', { kind: 'model_generation' })
+step.end()
+
+await run.withChild('call_tool', async (tool) => {
+  tool.setOutput({ ok: true })
+})
+run.end()
+
+// Which mechanism is in use, at runtime.
+mcpd.stats().context // 'async-local-storage' | 'fallback'`
+
+const propagation = `// Outbound: put the active span on the request.
+await fetch(url, {
+  headers: { traceparent: span.traceparent() },
+})
+
+// Inbound: continue that trace instead of starting a new one.
+const run = mcpd.trace('handle_request', {
+  traceparent: request.headers.get('traceparent'),
+})`
+
+const payload = `generation.setModel('claude-sonnet-4', 'anthropic')
+generation.setUsage({
+  inputTokens: 812,
+  outputTokens: 37,
+  inputDetails: { cacheRead: 640 },
+})
+
+// A failure you caught and handled yourself.
+generation.setError('the provider timed out', {
+  kind: 'TimeoutError',
+  retryable: true,
+})
+
+// A point in time inside the span, with no duration of its own.
+generation.event('first_token', { kind: 'model_chunk' })`
+
+const recording = `import { Mcpd, RecordingSink } from '@mcpd/sdk'
+
+const sink = new RecordingSink()
+const mcpd = new Mcpd({ sink })
+
+await answerQuestion(mcpd)
+await mcpd.flush()
+
+expect(sink.spans.map((s) => s.name)).toEqual(['answer_question', 'model_call'])
+expect(sink.scores[0]?.scorerId).toBe('answer_relevance')`
+
+const finished = `// Ids, parent and times the caller already holds. Queued as given.
+mcpd.record({
+  traceId: otel.traceId,
+  spanId: otel.spanId,
+  parentSpanId: otel.parentSpanId,
+  name: 'GET /orders',
+  kind: 'http_request',
+  status: 'ok',
+  startTime: otel.startTime,
+  endTime: otel.endTime,
+  isRoot: false,
+  isEvent: false,
+  correlation: { project: 'support' },
+  receivedAt: otel.endTime,
+})
+
+// A parent from a tracing system that is not mcpd, for correlation only.
+const run = mcpd.trace('handle_request', { externalParentSpanId: otel.spanId })`
+
+const serverless = `export default async function handler(request: Request): Promise<Response> {
+  const answer = await mcpd.withSpan('answer', async (run) => {
+    run.setInput(await request.text())
+    return 'ok'
+  })
+
+  // The batch is still in memory here. Send it before the response goes out.
+  await mcpd.flush()
+  return new Response(answer)
+}`
+---
+
+<Doc
+  title="TypeScript"
+  description="面向 TypeScript 与 JavaScript 的 mcpd SDK：Node、Deno、Bun、浏览器和边缘运行时。没有运行时依赖，用 AsyncLocalStorage 承载上下文，接入代码从不抛异常。"
+  lede="一个没有依赖的包。它记录 span、日志、指标、评分和反馈，而且从不从一次接入调用里抛出异常。"
+  og="docs"
+>
+  <h2>安装</h2>
+  <p>
+    Node 20 及以上、Deno、Bun、浏览器和边缘运行时。以 ESM 为主，另外带一份给
+    <code>require</code> 用的 CommonJS 构建。只有两处是 Node 专有的，
+    <code>async_hooks</code> 和 <code>zlib</code>，它们在运行时才加载，在没有
+    它们的地方跳过。
+  </p>
+
+  <Command command="npm install @mcpd/sdk" />
+
+  <h2>构造客户端</h2>
+  <p>
+    一个进程一个客户端。每个选项也都会读一个环境变量，所以同一份代码不用改一个
+    字，就能在开发环境和生产环境里跑。完全不带参数时，它连的是
+    <code>http://localhost:4317</code> 上的守护进程。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="init" title="连接" />
+
+  <p>代码优先于环境变量，环境变量优先于默认值。</p>
+
+  <table>
+    <thead>
+      <tr><th>选项</th><th>环境变量</th><th>默认值</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>apiKey</code></td><td><code>MCPD_API_KEY</code></td><td>无</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>无</td></tr>
+      <tr><td><code>serviceName</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>无</td></tr>
+      <tr><td><code>serviceVersion</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>无</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capturePayloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>logLevel</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      <tr><td><code>batchSize</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flushIntervalMs</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2000</code></td></tr>
+      <tr><td><code>maxQueue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeoutMs</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10000</code></td></tr>
+      <tr><td><code>sink</code></td><td></td><td>HTTP 传输层</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>enabled: false</code> 什么都不记录，也什么都不发送，而每次调用仍然返回
+    合法的对象，列表读取则返回空的一页。一个测试套件不用碰任何一行接入代码，就能
+    把 mcpd 关掉。
+  </p>
+  <p>
+    <code>capturePayloads: false</code> 把提示词和补全留在进程里。span 照样记录，
+    带着它的时间、状态、用量、模型、关联信息和错误；<code>input</code> 和
+    <code>output</code> 在进入队列之前就被丢掉，所以一次刷出不可能带走任何敏感
+    内容。单个 span 可以在自己的启动选项里用 <code>capturePayloads</code> 覆盖
+    这个设置，两个方向都可以。
+  </p>
+
+  <h2>记录一次运行</h2>
+  <p>
+    <code>withSpan</code> 是带作用域的那种写法。它开一个 span，让这个 span 对
+    回调启动的一切保持活动，并在回调落定时结束它。回调抛出异常时，这个 span 会
+    被标记为 <code>error</code>，带上抛出的那条消息，异常本身则原样再抛出去，
+    所以你自己的错误处理不会因为被观测而改变。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="trace" title="记录一次运行" />
+
+  <h2>上下文</h2>
+  <p>
+    在 Node 和 Bun 上，当前活动的 span 存在一个 <code>AsyncLocalStorage</code>
+    里。在一个 <code>withSpan</code> 回调里启动的任何东西，都不需要拿到引用就会
+    嵌套在它下面；在同一个事件循环上交错运行的两次运行，也永远看不到对方的 span。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="嵌套"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: nesting }]}
+  />
+
+  <p>
+    浏览器和大多数边缘运行时没有 <code>AsyncLocalStorage</code>。在那里，SDK 改成
+    只保存一个值。它嵌套是对的，在一次运行内部也挺得过一次 <code>await</code>，
+    但它分不出两次并发的运行，结果会是一次运行的工具调用出现在另一次运行的树里。
+    在这些运行时上并发跑智能体时，请显式地把父级传下去。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="显式指定父级"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: explicitParent }]}
+  />
+
+  <p>
+    跨服务时，上下文走 W3C <code>traceparent</code> 请求头。一条 trace 能挺过一次
+    网络跳转，靠的全部就是它。格式不对的头会被忽略，并开一条新的根 trace，因为
+    一个谁都读不出来的头，不构成让携带它的那个请求失败的理由。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="跨过服务边界"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: propagation }]}
+  />
+
+  <h2>模型、用量与错误</h2>
+  <p>
+    mcpd 在摄取时就是按 token 数定价的，所以 trace 上的成本就是你被计费的那个
+    成本。请上报供应商告诉你的数字，而不是自己去数 token。错误一定带一条消息，
+    而设置错误的同时会把这个 span 的状态设成 <code>error</code>，所以这两者不
+    可能对不上。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="一个 span 带着什么"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: payload }]}
+  />
+
+  <h2>持久化运行</h2>
+  <p>
+    同一个客户端也服务守护进程的持久化运行。<code>workflow()</code> 构建定义并
+    持有那些步骤主体；一个 <code>Worker</code> 注册它，用长轮询要租约并逐份服务，
+    而 <code>mcpd.runs</code>、<code>mcpd.events</code> 和
+    <code>mcpd.definitions</code> 与运行接口一一对应。步骤主体抛出
+    <code>RetryableError</code> 表示要在这个步骤的预算内重试，并通过
+    <code>StepContext</code> 把 span 记在自己这个步骤下面。这样记下的 span，
+    以及嵌套在它下面的每一个 span，结束时都会把自己的用量加到这个步骤上，所以
+    守护进程按 trace 显示出来的东西定价，步骤主体从不用手工去加 token；
+    <code>ctx.setUsage</code> 是一次显式的覆盖。<code>onError</code> 旁边还有
+    四个钩子：<code>onLease</code>、<code>onStepStart</code>、
+    <code>onStepEnd</code> 和 <code>onConflict</code>，而
+    <code>worker.stats()</code> 统计领取数、完成数、按类别分的失败数，以及按原因
+    分的冲突数。
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} example="workflow" region="workflow" title="一个工作流" />
+  <p>
+    每种构造做什么、租约协议和运行 API，在
+    <a href={linkTo('/docs/workflows')} class="link">工作流</a>、
+    <a href={linkTo('/docs/workers')} class="link">Worker</a> 和
+    <a href={linkTo('/docs/runs')} class="link">运行</a>这几页上。
+  </p>
+
+  <h2>评分与反馈</h2>
+  <p>
+    <code>min</code> 和 <code>max</code> 是类型强制要求的。一个没有声明量程的
+    0.7 分没法和任何东西比较，而等到有人在看图的时候，再问它当初是什么意思已经
+    太晚了。反馈是人的判断，和评分分开存放，因为这两者回答的是不同的问题，绝不
+    能被平均到一起。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="score" title="评分与反馈" />
+
+  <p>
+    不指定 trace 时，两者都会挂到当前活动 span 所在的那条 trace 上，所以你自己
+    产品里的一个赞成或反对按钮，只要拿着你留下的那个 trace id 就能调
+    <code>feedback</code>。
+  </p>
+
+  <h2>五种信号，一套 id</h2>
+  <p>
+    span、日志、指标、评分和反馈走的是同一个队列，带着同样的 trace id 和 span
+    id。正是这一点，让图上的一个尖峰能打开引起它的那次运行。
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>刷出与关闭</h2>
+  <p>
+    记录就是往队列里追加一条。在后台 worker 把它发出去之前，没有任何东西离开过
+    这个进程，而它每两秒发一次，或者在一个批次装满时发。<code>flush()</code> 和
+    <code>shutdown()</code> 都可以 await，也都是幂等的，<code>shutdown()</code>
+    还会把那个 worker 停掉。
+  </p>
+  <p>
+    在一个 serverless 函数里，这件事不是可选的。你一返回响应，运行时就把进程
+    冻住，后台 worker 再也不会跑，于是最后一个批次就丢了。请在响应发出去之前
+    await 一次刷出。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="一个 serverless 处理函数"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: serverless }]}
+  />
+
+  <p>
+    在 Node 上，客户端还会在 <code>beforeExit</code> 时刷出一次，所以一个忘了调
+    <code>shutdown()</code> 的脚本，最后那个批次仍然发得出去。这个钩子在显式的
+    <code>process.exit()</code> 上，或者在一个致命信号上，都不会触发，所以它是
+    一张安全网，不是替代品。
+  </p>
+
+  <h2>断言你记下了什么</h2>
+  <p>
+    <code>RecordingSink</code> 用内存替掉网络，于是一个测试可以把被测代码产生的
+    span、日志、指标、评分和反馈读回来，不需要服务器，也不需要端口。
+    <code>ConsoleSink</code> 则每个信号打印一行 JSON，而任何带
+    <code>export(batch, ingestKey)</code> 方法的对象都是一个 sink。抛异常的
+    sink 算一个失败的批次加一条诊断，绝不会变成你代码里的异常。
+    <code>mcpd.stats()</code> 会回答 <code>queued</code>、<code>dropped</code>、
+    <code>capacity</code>、<code>exported</code>、<code>failed</code> 和
+    <code>rejected</code>。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="一个不需要服务器的测试"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: recording }]}
+  />
+
+  <h2>记录一个已经结束的 span</h2>
+  <p>
+    <code>mcpd.record(span)</code> 把一个 span 排进队列，它的 id、父级和时间都是
+    你已经拿在手上的：也就是另一套 tracing 系统的适配器、一次批量导入或者一次
+    重放手上有的那些东西。它按给的样子排队，绝不会被重新指定父级、重新计时或者
+    重新采样，其中留空的关联信息则从客户端补上。id 不是 OpenTelemetry 那个形状、
+    名字为空，或者缺少开始时间的记录会被丢弃，并计入
+    <code>stats().rejected</code>。在任何一个 span 上，
+    <code>externalParentSpanId</code> 携带的都是一个来自非 mcpd 的 tracing 系统
+    的父级，只用于关联。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="一个来自别处的 span"
+    samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: finished }]}
+  />
+
+  <h2>你可以依赖的东西</h2>
+  <ul>
+    <li>
+      接入代码从不抛异常。一次失败的导出、一个不可达的守护进程，或者一个序列化
+      不了的载荷，都会通过 <code>onError</code> 每个间隔最多上报一次，然后就放过
+      它。可观测性绝不能把它观测的那个东西搞垮。
+    </li>
+    <li>
+      记录不阻塞。它往队列里追加一条就返回；网络工作发生在一个后台 worker 上，
+      所以你的智能体的延迟，从不取决于 mcpd 快不快，或者活没活着。
+    </li>
+    <li>
+      内存有上限。队列最多放 <code>maxQueue</code> 个信号。队列满时最旧的会被
+      丢弃，同时计入 <code>mcpd.stats()</code>，因为一个没有上限的缓冲区，会把
+      一次网络故障变成一次内存耗尽被杀。
+    </li>
+    <li>
+      采样决定只在根上做一次，然后往下继承。一条只记了一半的 trace，读起来像是
+      你系统里的一个 bug。
+    </li>
+    <li>
+      还没结束的 span 一样会发出去。一个 span 在开始时排一次队，在结束时再排一
+      次，所以一次跑到半路崩掉的运行也是看得见的。如果开始那条记录还没发走，
+      结束那条会替换掉它，所以一个很快的 span 只花一条记录，而不是两条。
+    </li>
+    <li>
+      你的载荷绝不会被改写。键会在 <code>camelCase</code> 和守护进程的
+      <code>snake_case</code> 之间转换，而这个转换到 <code>input</code>、
+      <code>output</code>、<code>attributes</code>、<code>metadata</code>、
+      <code>fields</code> 和 <code>labels</code> 为止。你的提示词到达时，和你
+      写下的一模一样。
+    </li>
+  </ul>
+
+  <h2>把它读回来</h2>
+  <p>
+    读也是同一个客户端。每个方法对应一个 HTTP 端点，返回由规范生成的类型。读取
+    失败时会抛出一个 <code>McpdError</code>：一次你等着结果、却答不上来的查询是
+    个消息，这和一个导不出去的 span 不一样。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="query" title="检索与分析" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">查找一次运行</a>把过滤条件
+    讲全了。<a href={linkTo('/docs/reference/data-model')} class="link">数据模型</a>
+    列出了这些类型带的每一个字段。
+  </p>
+</Doc>

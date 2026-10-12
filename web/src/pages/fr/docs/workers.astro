@@ -1,0 +1,220 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import LeaseProtocol from '@/components/LeaseProtocol.astro'
+import { exampleLanguages } from '@/lib/snippets'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const langs = exampleLanguages('workflow')
+const loc = localeOf(Astro.url.pathname)
+const link = (route: string) => urlFor(route, loc)
+---
+
+<Doc
+  title="Workers"
+  description="Comment un worker sert les étapes d’une exécution durable : enregistrement, baux, heartbeats, complete et fail, les quatre motifs de 409, at_most_once, montée en charge et portée de clé."
+  lede="Un worker est votre propre processus, qui sert des corps d’étape au daemon. Cette page est le protocole qu’il parle, et la raison d’être de chaque appel."
+  og="docs"
+>
+  <h2>Ce qu’est un worker</h2>
+  <p>
+    Un worker détient les corps des étapes réclamables et demande du travail au
+    daemon. Il tourne là où tourne votre code, avec vos imports, votre pool de
+    connexions et vos secrets, et le daemon n’en voit jamais rien. Le daemon lui
+    remet un bail avec l’entrée évaluée et les étapes précédentes ; le worker
+    exécute le corps et rend compte du déroulement. Toute la relation tient là.
+  </p>
+  <p>
+    Chaque SDK en fournit un. Il enregistre les workflows qu’il détient, réclame
+    des baux en long polling, envoie des heartbeats pendant qu’un corps tourne,
+    et répond à chaque refus selon son motif. L’exemple ci-dessous est le même
+    programme que celui de la page
+    <a href={link('/docs/workflows')} class="link">Workflows</a> ; en voici la
+    partie qui le sert.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" example="workflow" region="worker" only={langs} title="servir les corps" />
+
+  <h2>Le protocole</h2>
+  <p>
+    Cinq appels, et un worker qui les parle peut s’écrire directement sur
+    l’API HTTP, sans SDK. Le worker de chaque SDK est un client de ces cinq
+    appels, et rien de plus.
+  </p>
+
+  <LeaseProtocol class="not-prose my-8" />
+
+  <table>
+    <thead>
+      <tr><th>Appel</th><th>Ce qu’il fait</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>POST /v1/api/workers/register</code></td>
+        <td>Annonce le worker et stocke les définitions qu’il détient. La réponse porte <code>lease_ttl_ms</code> et <code>heartbeat_ms</code>, les deux nombres sur lesquels repose le reste du protocole.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/claim</code></td>
+        <td>Propose jusqu’à <code>max</code> étapes exécutables, en gardant la requête ouverte jusqu’à <code>wait_ms</code> quand il n’y en a aucune. Le daemon garde une réclamation ouverte au plus pendant les quatre cinquièmes de son délai de requête, soit 24 secondes avec la valeur par défaut, et répond aussitôt quand il cesse de la garder. Une réclamation peut donc revenir vide avant <code>wait_ms</code> : réclamez de nouveau. Une réclamation peut se limiter à une seule exécution, ce qui permet à un script de mener sa propre exécution jusqu’au bout.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/{'{lease}'}/started</code></td>
+        <td>Déclare que le corps tourne. Avant le corps, toujours : c’est ce qui distingue, pour le daemon, une étape proposée d’une étape en cours.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/{'{lease}'}/heartbeat</code></td>
+        <td>Prolonge le bail. La seule preuve dont dispose le daemon qu’un worker est vivant.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/{'{lease}'}/complete</code>, <code>/fail</code></td>
+        <td>Termine l’étape : la sortie, un patch de l’état de l’exécution et la consommation que le daemon tarife ; ou une erreur avec la classe qui décide si elle est réessayée.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Les baux</h2>
+  <p>
+    Un bail est une tentative, tenue par un worker, pour une durée bornée. Il
+    porte l’entrée évaluée, les étapes précédentes indexées par identifiant,
+    l’état et la corrélation de l’exécution, une clé stable d’une tentative à
+    l’autre de cette étape, et les identifiants de trace et de span du span
+    d’étape que le daemon a ouvert. Un corps qui enregistre ses propres spans
+    par le contexte d’étape les place sous ce span, si bien que l’appel de
+    modèle à l’intérieur d’une étape atterrit à la bonne profondeur dans la
+    trace de l’exécution.
+  </p>
+  <p>
+    Un bail dont le worker cesse d’envoyer les heartbeats expire. Le daemon
+    marque la tentative comme orpheline puis, passée une fenêtre de reprise, la
+    remet en file sous <code>at_least_once</code> ou la fait échouer sous
+    <code>at_most_once</code>. Un worker qui revient d’une pause et poste sur
+    un bail repris n’est pas ignoré : on le lui dit.
+  </p>
+
+  <h2>Les quatre refus</h2>
+  <p>
+    Un appel de worker que le daemon ne peut pas accepter est refusé avec un 409
+    portant l’un des quatre motifs. La liste est fermée, et le worker de chaque
+    SDK traite chaque motif par son nom, car un worker qui les réunit dans une
+    seule branche abandonne des étapes qu’il a déjà terminées ou signale un
+    échec pour une réussite.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Motif</th><th>Sens</th><th>Ce que fait le worker</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>already_applied</code></td>
+        <td>Le complete ou le fail antérieur de ce bail est bien arrivé et sa réponse s’est perdue.</td>
+        <td>Le traite comme une réussite et ne poste rien de plus.</td>
+      </tr>
+      <tr>
+        <td><code>fenced</code></td>
+        <td>Une tentative postérieure existe, ou un autre bail a mis fin à celui-ci.</td>
+        <td>Abandonne le travail et ne poste plus rien pour ce bail. Un heartbeat refusé en <code>fenced</code> annule aussi le corps en cours, par son contexte.</td>
+      </tr>
+      <tr>
+        <td><code>run_terminal</code></td>
+        <td>L’exécution est terminée, par réussite, échec, dépassement de délai ou annulation.</td>
+        <td>S’arrête, et cesse de réclamer pour cette exécution.</td>
+      </tr>
+      <tr>
+        <td><code>not_started</code></td>
+        <td>Un complete ou un fail est arrivé pour une tentative <code>at_most_once</code> dont le <code>started</code> n’est jamais arrivé.</td>
+        <td>Le signale haut et fort comme un bug du worker. Les workers des SDK ne peuvent pas le produire ; un worker écrit à la main, si.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Le corps</h2>
+  <p>
+    Un corps reçoit un contexte, son entrée évaluée et les étapes précédentes.
+    Le contexte est l’endroit où il déclare ce que le daemon doit garder : un
+    patch de l’état de l’exécution, fusionné au <code>complete</code> avec
+    remplacement des clés de premier niveau ; les tokens qu’il a dépensés, que
+    le daemon tarife avec la même grille que les spans ; et un signal
+    d’annulation qui part quand le bail est perdu ou quand l’exécution se
+    termine, pour qu’un corps qui le transmet à ses propres entrées-sorties
+    s’arrête au bon moment. Les tokens s’additionnent d’eux-mêmes : un span que
+    le corps enregistre par le contexte, et tout span sous lui, ajoute sa
+    consommation à celle de l’étape en se terminant, si bien qu’un corps qui
+    enregistre ses appels de modèle comme des spans n’a jamais de somme à faire
+    à la main, et <code>set_usage</code> est la surcharge explicite pour celui
+    qui n’en enregistre aucun.
+  </p>
+  <p>
+    Un corps se termine en rendant sa sortie ou en levant une erreur. Levez
+    l’erreur réessayable du SDK pour être réessayé dans le budget de l’étape ;
+    levez un échec d’étape typé pour nommer toute autre classe ; le reste est
+    fatal. Le message est envoyé au daemon et affiché dans le journal. La pile
+    d’appels, non.
+  </p>
+  <p>
+    Un bail portant sur une définition, une version ou une étape que le worker
+    ne détient pas échoue en <code>unservable</code> et le corps ne tourne
+    jamais. La tentative retourne dans la file pour un worker qui, lui, la
+    détient, sans dépenser le budget de nouvelles tentatives, et c’est ce qui
+    permet à deux versions d’un worker de tourner côte à côte pendant un
+    déploiement.
+  </p>
+
+  <h2>Monter en charge</h2>
+  <p>
+    Faites tourner autant de workers que vous voulez sur un même daemon.
+    Chacun réclame jusqu’à sa propre limite de concurrence, le daemon remet
+    chaque tentative à exactement l’un d’eux, et le fencing fait qu’un bail que
+    deux workers détiendraient malgré tout ne laisse qu’un gagnant.
+    L’identifiant d’un worker est consigné sur chaque tentative qu’il a prise,
+    donc le journal dit quel processus a exécuté une étape. Donnez un nom à
+    chaque processus, ou laissez le SDK en dériver un depuis l’hôte.
+  </p>
+  <p>
+    Une réclamation est un long poll : une flotte au repos coûte au daemon une
+    requête ouverte par worker et aucun trafic. Pendant qu’elle attend, une
+    réclamation cherche du travail quand une exécution démarre, qu’une étape se
+    termine, qu’une échéance se déclenche ou qu’un événement reprend une
+    attente, et au plus deux fois par seconde le reste du temps. Une flotte
+    chargée est bornée par la concurrence des workers eux-mêmes, et un corps
+    qui prend une heure coûte un heartbeat toutes les dix secondes, et rien
+    d’autre.
+  </p>
+
+  <h2>Les clés</h2>
+  <p>
+    Les appels de worker demandent la portée <code>worker</code> ; démarrer,
+    signaler et annuler des exécutions demandent <code>execute</code>. Les deux
+    retombent sur les clés d’écriture quand elles ne sont pas définies, et une
+    clé admin porte les deux. Un worker qui ne fait que servir des étapes n’a
+    besoin d’aucune clé capable de démarrer une exécution, et un webhook qui ne
+    fait que publier des événements n’a besoin d’aucune clé capable d’en
+    réclamer une. Voir
+    <a href={link('/docs/configuration')} class="link">Configuration</a> pour
+    les indicateurs.
+  </p>
+  <p>
+    Les appels de worker ne sont pas enregistrés dans le journal d’audit, bien
+    qu’un bail porte l’entrée de l’étape et les sorties des étapes précédentes.
+    Ils forment une boucle de machine qui réclame de nombreuses fois par minute,
+    et une ligne par réclamation noierait les lectures faites par une personne.
+    Relire une exécution par les endpoints d’exécution est enregistré ; voir
+    <a href={link('/docs/security')} class="link">Sécurité</a>.
+  </p>
+
+  <h2>Ensuite</h2>
+  <ul>
+    <li>
+      Démarrer et suivre une exécution, et répondre à une attente :
+      <a href={link('/docs/runs')} class="link">Exécutions</a>.
+    </li>
+    <li>
+      La définition que le worker sert :
+      <a href={link('/docs/workflows')} class="link">Workflows</a>.
+    </li>
+    <li>
+      Tous les endpoints du protocole des workers, générés depuis la
+      spécification :
+      <a href={`${link('/docs/reference/api')}#workers`} class="link">API HTTP, Workers</a>.
+    </li>
+  </ul>
+</Doc>

@@ -1,0 +1,159 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="転送"
+  description="保存したすべてのスパンを別の OTLP エンドポイントへ複製し、mcpd をデータが閉じ込められる場所ではなく、テレメトリーのパイプラインの一区間にします。ローカルへの保存が常に先です。"
+  lede="mcpd は OTLP を両方向に話します。ここに届いたものが、ここに閉じ込められることはありません。"
+  og="docs"
+>
+  <h2>11 個のエクスポーターではなく、出口は 1 つのプロトコル</h2>
+  <p>
+    mcpd は OTLP を受け取り、OTLP を送出できます。この 1 つの性質が、ベンダー
+    ごとのエクスポーターの集まりがすることの大半を肩代わりします。Langfuse、
+    Datadog、Honeycomb、Grafana をはじめ、名前を挙げる価値のある送信先はどれも
+    HTTP 上の OTLP を受け付けます。したがって転送は 11 個ではなく 1 つの実装で
+    済み、あるベンダーの SDK のリリースに遅れることもありません。
+  </p>
+  <p>
+    これは、mcpd の採用が取り消せるということでもあります。これまで使っていた
+    ものに向けて転送し、2 週間ほど両方を動かし、取り消せない移行に賭けるので
+    はなく、目の前のデータを見て決めてください。
+  </p>
+
+  <h2>有効にする</h2>
+
+  <Command
+    class="not-prose my-6"
+    title="ローカルに保存し、先へ複製する"
+    command="mcpd serve --forward-endpoint https://otlp.example.com"
+  />
+
+  <p>
+    パスは自動で付け足されるので、<code>/v1/traces</code> ではなくベースの URL
+    を渡してください。資格情報が必要な送信先には、ヘッダーを足します。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="認証ヘッダー付きで"
+    command={`mcpd serve \\
+  --forward-endpoint https://otlp.example.com \\
+  --forward-header 'Authorization: Bearer $TOKEN'`}
+  />
+
+  <p>
+    同じ設定は、設定ファイルの <code>forward</code> の下にもあります。そこでは
+    <code>batch_size</code> と <code>enabled</code> も使えます。フラグはファイル
+    より優先されるので、共有の ConfigMap を編集せずに、1 つのインスタンスだけ
+    別の宛先へ向けられます。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "forward": {
+    "endpoint": "https://otlp.example.com",
+    "headers": [["Authorization", "Bearer sk-..."]],
+    "batch_size": 256,
+    "enabled": true
+  }
+}`}</code></pre>
+
+  {/* The diagram belongs here, not at the top. It draws the intake ending at
+      Store, and this section is about what happens after Store, so the two read
+      as one sequence rather than as a picture that stops where the subject
+      begins. */}
+  <PipelineDiagram class="not-prose my-8" />
+
+  <h2>ローカルへの保存が先に起きます</h2>
+  <p>
+    スパンは、何かが転送されるより先に mcpd 自身のストアへ書かれ、転送はその
+    後、独立したタスクで走ります。ここから 2 つの帰結が出てきます。どちらも意図
+    したものです。
+  </p>
+  <p>
+    遅い送信先が、そのスパンを生んだリクエストに自分のレイテンシを足すことは
+    ありません。あなたのエージェントが、他人のコレクターを待つことはありません。
+  </p>
+  <p>
+    落ちている送信先が、取り込みの拒否に化けることもありません。mcpd は動き
+    続け、転送は独立したタスクで再試行されます。もう一方のやり方、つまり
+    他社の障害であなたのテレメトリーがまったく残らなくなるやり方こそ、この設計
+    が避けるためにある失敗です。
+  </p>
+  <p>
+    各バッチには 3 回の試行があります。429、5xx、または接続の失敗は 250 ms 後に
+    再試行され、待ち時間は試行のたびに倍になります。秒で指定された
+    <code>Retry-After</code> は、30 秒を上限としてこの待ち時間の代わりに使われ
+    ます。それ以外の 4xx は最初の応答で確定します。そのバッチは、その送信先に
+    とって不正な形のままだからです。デーモンが停止する途中なら、残りの試行を
+    すぐに行います。最終的に拒否されたバッチや、最後の試行の後も未配送の
+    バッチはログに記録され、そのスパンは
+    <code>mcpd_forward_dropped_spans_total</code> に加算されます。これで、
+    コピーのどれだけが欠けているかがわかります。
+  </p>
+  <p>
+    接続を受け付けたまま決して応答しない送信先も、デーモンのメモリを奪うことはできません。
+    送信先を同時に待てるのは、取り込みリクエスト 64 件分のコピーまでです。それだけ待っている間は、
+    新しいコピーはその場で破棄されて <code>mcpd_forward_dropped_spans_total</code> に数えられ、
+    ローカルへの書き込みには影響しません。
+  </p>
+  <p>
+    永続的な送信キューはありません。バッチは再試行の間メモリ上で待ち、転送
+    キューが満杯のときは新しいバッチが捨てられ、そのスパンは同じメトリクスに
+    数えられます。永続的なキューは別の製品であり、黙ったまま何時間も遅れる
+    キューは、目に見える欠落より悪いものです。配送の保証が必要なら、mcpd と
+    送信先の間に本物のコレクターを置き、それが作られた目的の仕事をさせて
+    ください。
+  </p>
+
+  <h2>秘匿化は、出ていくものにも適用されます</h2>
+  <p>
+    転送は取り込みパイプラインの後で起きます。そのパイプラインは、何かが書かれる
+    前にその場で秘匿化します。mcpd が隠すよう指示されたものは、次の区間にも
+    届きません。ストレージは守るのに出口は守らないルールは、プライバシーの制御
+    とは呼べません。
+  </p>
+
+  <h2>何が転送されるか</h2>
+  <p>
+    スパンです。ログ、メトリクス、スコア、フィードバック、観点ノートは
+    mcpd に残ります。人が転送する先はトレーシングのバックエンドであり、それ以外は
+    捨てるか、属性に押し込んで壊してしまうからです。
+  </p>
+  <p>
+    スパンはサービスごとにまとめられて <code>resourceSpans</code> になります。
+    受け取り側が期待する形です。スパンごとに 1 つのリソースを置く形も規格上は
+    正しいのですが、下流のすべてにまとめ直させることになります。
+  </p>
+
+  <h2>mcpd から mcpd への転送</h2>
+  <p>
+    両端が同じプロトコルを話すので、ローカルの mcpd から共有の mcpd へ転送でき
+    ます。開発者は自分のマシンに、ペイロードを丸ごと持つ速いストアを持ち、チーム
+    のインスタンスは同じ実行を受け取って、到着時に自分の保持期間と自分の秘匿化
+    ルールを適用します。
+  </p>
+
+  <h2>次に</h2>
+  <ul>
+    <li>
+      既存の OpenTelemetry の構成を mcpd に向ける：
+      <a href={linkTo('/docs/opentelemetry')} class="link">OpenTelemetry</a>。
+    </li>
+    <li>
+      スパンが保存され、送られる前に取り除かれるもの：
+      <a href={linkTo('/docs/privacy')} class="link">秘匿化と保持期間</a>。
+    </li>
+    <li>
+      すべてのフラグとファイル設定：
+      <a href={linkTo('/docs/configuration')} class="link">設定</a>。
+    </li>
+  </ul>
+</Doc>

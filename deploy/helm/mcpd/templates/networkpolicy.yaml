@@ -1,0 +1,80 @@
+{{/*
+  The review question this answers: "only these namespaces may reach ingest."
+
+  Read this before you rely on it, because the honest answer is narrower than
+  the question. mcpd serves OTLP ingest, the query API, the operator interface
+  and /metrics on ONE port. A NetworkPolicy selects pods and ports, not paths,
+  so this gates the whole daemon or nothing. Anything you allow in for ingest
+  can also reach /v1/api and read stored prompts and completions. What holds
+  those apart is the read key, not this file, and separating them at the
+  network layer would need a second listener that mcpd does not have.
+
+  What it does buy is still worth having: in a cluster with no policy at all,
+  every pod in every namespace can open a connection to mcpd. After this, only
+  the sources below can.
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $ingress := .Values.networkPolicy.ingress }}
+{{- if not (or $ingress.namespaceSelectors $ingress.podSelectors $ingress.ipBlocks $ingress.extraFrom) }}
+{{- fail "networkPolicy.enabled is true but no ingress source is set, so the policy would refuse every connection to mcpd, including from the agents you are collecting. Set at least one of networkPolicy.ingress.namespaceSelectors, networkPolicy.ingress.podSelectors, networkPolicy.ingress.ipBlocks or networkPolicy.ingress.extraFrom." }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mcpd.fullname" . }}
+  labels:
+    {{- include "mcpd.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mcpd.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    {{- if .Values.networkPolicy.egress.enabled }}
+    - Egress
+    {{- end }}
+  ingress:
+    - from:
+        {{- range $ingress.namespaceSelectors }}
+        - namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- range $ingress.podSelectors }}
+        - podSelector:
+            {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- range $ingress.ipBlocks }}
+        - ipBlock:
+            {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with $ingress.extraFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        # The container port, not service.port. A NetworkPolicy is enforced at
+        # the pod, so a Service listening on a different number in front of it
+        # makes no difference here. Read from config.listen by the same helper
+        # as `containerPort` in deployment.yaml, so the two cannot disagree.
+        - protocol: TCP
+          port: {{ include "mcpd.port" . }}
+  {{- if .Values.networkPolicy.egress.enabled }}
+  egress:
+    {{- if .Values.networkPolicy.egress.allowDns }}
+    # Every destination mcpd dials is configured as a hostname, so without this
+    # rule nothing else in this list works. The failure is quiet: an alert
+    # webhook that cannot resolve is a warning in the log, not a refused start.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.egress.dnsNamespace }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- end }}
+    {{- with .Values.networkPolicy.egress.rules }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+{{- end }}

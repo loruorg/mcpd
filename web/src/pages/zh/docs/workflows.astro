@@ -1,0 +1,233 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import RunCursor from '@/components/RunCursor.astro'
+import { exampleLanguages } from '@/lib/snippets'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const langs = exampleLanguages('workflow')
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="工作流"
+  description="mcpd 里的持久化工作流：守护进程按着走的那份定义、九种构造、模板与守卫、重试与副作用，以及用六种语言写出它的那个构建器。"
+  lede="工作流是守护进程持有的数据，加上守护进程永远看不到的步骤主体。这一页讲的是数据：一份定义能说什么，以及每种构造让守护进程做什么。"
+  og="docs"
+>
+  <h2>分工</h2>
+  <p>
+    一次持久化运行有两个主人。步骤与步骤之间，运行归守护进程：游标、事件流水、
+    重试预算、定时器和等待。步骤里面的一切归你的进程：你调用的模型、你发出的
+    提示词、你运行的工具、你持有的凭据。这些东西一样都不会交给守护进程，它也
+    从来不代你去跑一个模型。
+  </p>
+  <p>
+    所以一个工作流从同一个文件里分成两部分出来。图作为一份定义送到守护进程，
+    那是一份守护进程按着走的文档。步骤主体留在你的进程里，用你写它时用的那种语言，
+    等一个 <a href={linkTo('/docs/workers')} class="link">worker</a> 来服务它。
+    没有任何东西需要部署到守护进程上，而且一个步骤主体可以改，定义完全不用动。
+  </p>
+
+  <RunCursor class="not-prose my-8" />
+
+  <h2>写一个工作流</h2>
+  <p>
+    构建器同时产出这两部分。<code>document()</code> 就是那份定义，而每一次
+    <code>step</code> 或 <code>agent</code> 调用都会把自己的步骤主体留下来给
+    worker。每个 SDK 都有同一个构建器和同样的九种构造，所以一个工作流用一种
+    语言写出来，换一种语言读起来是一样的；不管是哪一种写的，守护进程存下来的
+    都是同一份文档。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" example="workflow" region="workflow" only={langs} title="一个客服工作流" />
+
+  <p>
+    那个例子里有三件事，是每一个工作流的形状。步骤的输入是一份模板，守护进程
+    为每一次尝试渲染它，所以 <code>draft</code> 读得到 <code>classify</code>
+    答了什么，而两个步骤主体谁也不知道对方的存在。守卫决定一个节点到底跑不跑：
+    问题原样发出去，缺陷则等一个人来看。最后一个步骤是带重试策略的
+    <code>at_most_once</code>，这正是一个副作用需要的组合：守护进程会重试一次
+    瞬时失败，而且在没有被明确告知的情况下，绝不会把一个步骤主体跑两次。
+  </p>
+
+  <h2>那些构造</h2>
+  <p>
+    一共九种，每个 SDK 九种都有。其中两种是可领取的，也就是由 worker 来服务；
+    其余的都是守护进程自己的。
+  </p>
+  <table>
+    <thead>
+      <tr><th>构造</th><th>谁来跑</th><th>它做什么</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>task</code></td>
+        <td>worker</td>
+        <td>可领取的活。worker 运行它在这个 id 下注册的那段代码。</td>
+      </tr>
+      <tr>
+        <td><code>agent</code></td>
+        <td>worker</td>
+        <td>在网络上是同一回事，但记录成一个智能体回合：你自己的循环，不管里面调用了多少次模型，都算作一个持久化步骤。trace 和界面能把它和普通的 task 区分开。</td>
+      </tr>
+      <tr>
+        <td><code>sleep</code></td>
+        <td>守护进程</td>
+        <td>延迟这么多毫秒。这期间没有任何进程活着。</td>
+      </tr>
+      <tr>
+        <td><code>sleep_until</code></td>
+        <td>守护进程</td>
+        <td>延迟到某个由模板渲染出来的时刻，比如输入里带着的一个账单日期。</td>
+      </tr>
+      <tr>
+        <td><code>wait_event</code></td>
+        <td>守护进程</td>
+        <td>暂停，直到一个名字和键都对得上的事件到来，或者直到截止时间过去。键是每次运行各自渲染的，所以一次等待只对得上一个订单，不会对上别的。</td>
+      </tr>
+      <tr>
+        <td><code>parallel</code></td>
+        <td>两者都有</td>
+        <td>带名字的分支，每个分支是一个可领取的步骤；在其中任何一个被派出去之前，全部已经落盘。最后一个分支结束时，运行才往下走。</td>
+      </tr>
+      <tr>
+        <td><code>foreach</code></td>
+        <td>两者都有</td>
+        <td>对某条路径上的数组，每个元素一个可领取的步骤，受 <code>max_items</code> 限制；你指明的话，也受同时运行几个的限制。输出按元素顺序作为一个数组返回。</td>
+      </tr>
+      <tr>
+        <td><code>loop</code></td>
+        <td>两者都有</td>
+        <td>在一个可领取的步骤上做有上限的循环。<code>until</code> 在每一轮之后求值，可以让它提前结束。</td>
+      </tr>
+      <tr>
+        <td><code>subworkflow</code></td>
+        <td>守护进程</td>
+        <td>另一份定义的一次子运行，有自己的事件流水。它的输出就是这个步骤的输出，取消父运行也会取消它。</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    一个分支、一个 foreach 的主体和一个 loop 的主体，各自都是一个可领取的步骤。
+    需要好几个步骤的主体应该做成子工作流，这样每一份事件流水都是平的：一次运行
+    是一个列表，永远不是一棵由列表组成的树。
+  </p>
+
+  <h2>模板与守卫</h2>
+  <p>
+    模板就是 JSON，只是它的字符串里带着 <code>${'${path}'}</code> 这样的引用。
+    守护进程在创建一次尝试时渲染它，取的是那一刻这次运行手上的东西：
+    <code>input</code>，这次运行的输入；<code>steps.&lt;id&gt;</code>，某个更早
+    的步骤答了什么，下面有 <code>.output</code>、<code>.status</code> 和
+    <code>.error</code>；<code>run</code>，这次运行自己的 id 和关联信息；以及在
+    foreach 或 loop 内部的 <code>item</code>、<code>index</code> 和
+    <code>iter.index</code>。如果一个引用就是整个字符串，它会保住自己的类型，
+    所以 <code>"${'${steps.classify.output}'}"</code> 交给下一个步骤的是一个
+    对象，而不是一个写成字符串的对象。
+  </p>
+  <p>
+    守卫是在同样这些路径上的谓词：<code>eq</code>、<code>ne</code>、
+    <code>lt</code>、<code>lte</code>、<code>gt</code>、<code>gte</code>、
+    <code>in</code>、<code>exists</code> 和 <code>matches</code>，可以用
+    <code>all</code>、<code>any</code> 和 <code>not</code> 组合起来。一个为假的
+    守卫会把这个节点写成 <code>skipped</code>，运行接着往下走。一条不存在的
+    路径会让每一个比较都为假，而不是抛出错误，因为一次因为少一个字段就死掉的
+    运行，是没有人能把它跑完的运行。
+  </p>
+  <p>
+    文档存下来的时候，守护进程会校验它。守卫指向了一条谁也产生不出来的路径，
+    模板读了一个在后面才声明的步骤，foreach 遍历的东西不是一条路径，id 不匹配
+    <code>^[a-z][a-z0-9_]*$</code>：每一种都会以 400 被拒绝，并指出是哪个
+    字段。未知字段同样会被拒绝，所以一个拼错的守卫是一个错误，而不是一次跳过了
+    自己守卫的运行。
+  </p>
+  <p>
+    每一个时长都有下限，也有上限。<code>run_timeout_ms</code>、
+    <code>step_timeout_ms</code>、重试的 <code>initial_ms</code> 和
+    <code>max_ms</code>、睡眠的 <code>ms</code>，以及等待的
+    <code>timeout_ms</code>，每一个最多是 <code>315360000000</code>，也就是
+    3650 天；更长的会以 400 被拒绝，并指出是哪个字段、上限是多少，以及你发来的
+    值。比这更远的截止时间，放不进守护进程存它所用的那个时钟。
+  </p>
+
+  <h2>重试、副作用与失败</h2>
+  <p>
+    失败的步骤主体会用一个类别告诉守护进程它是怎么失败的。<code>retryable</code>
+    表示值得再试一次，只要这个节点的 <code>retry</code> 预算还有，守护进程就会
+    按这个节点的退避再试一次，并且至少等够步骤主体要求的
+    <code>retry_after_ms</code>，而它和其他每一个时长一样，受同一个 3650 天
+    上限的约束。<code>fatal</code> 和
+    <code>invalid_input</code> 不重试。<code>unservable</code> 表示这个 worker
+    并不持有这份定义或这个步骤，于是这次尝试回到队列里等另一个 worker，而且不
+    消耗预算。抛出其他任何东西的步骤主体，都算 <code>fatal</code>。
+  </p>
+  <p>
+    <code>max_attempts</code> 把每一次尝试都算上，包括第一次，所以默认值 1
+    意味着不重试。预算用完之后由 <code>on_error</code> 决定：默认的
+    <code>fail_run</code> 结束这次运行，并把这个步骤的消息当作运行的错误；
+    <code>continue</code> 把这个步骤标记为失败然后往下走，这样后面的守卫可以读
+    <code>steps.&lt;id&gt;.status</code> 并绕开它。
+  </p>
+  <p>
+    <code>effect</code> 说明一个步骤主体被重复执行会付出什么代价。在默认的
+    <code>at_least_once</code> 下，一份丢失的租约会让这次尝试重新入队，步骤主体
+    可能再跑一次。在 <code>at_most_once</code> 下，worker 必须在步骤主体之前发出
+    <code>started</code>，而一次已经 started、租约又丢了的尝试会判为失败，不会
+    再跑一次。给那个发邮件或者扣款的步骤用它，并把租约的
+    <code>idempotency_key</code> 交给那个步骤主体，让它转交给第三方：这个键在
+    同一个步骤的多次重试之间是稳定的，所以一次因为响应丢失而发生的重试，在
+    对面也能被认出来。
+  </p>
+
+  <h2>版本</h2>
+  <p>
+    一份定义一旦存下来就是不可变的。再提交一次同样的内容，你拿回的是同一个
+    版本；在一个已经存在的版本号下提交不同的内容，守护进程会以 409 拒绝，因为
+    否则一次锁定了那个版本的运行会在脚下被换掉。不写版本号，守护进程就分配下
+    一个数字，worker 启动时就是这么做的。一次运行会锁定它启动时的那个版本，
+    再也不重新解析，所以一次存入版本 3 的发布，会让版本 2 上的那些运行按它们
+    当初写的样子跑完。
+  </p>
+
+  <h2>上限</h2>
+  <p>
+    一份定义可以声明 <code>max_steps</code>、<code>run_timeout_ms</code> 和
+    <code>max_cost_usd</code>。守护进程把每一次尝试算在第一个上，把运行的时长
+    算在第二个上，把各个步骤上报并定过价的用量算在第三个上；触到上限时，它把
+    运行结束为 <code>timed_out</code> 或 <code>failed</code>，并把这个上限写成
+    错误。一个收敛不了的循环，和一个花钱停不下来的智能体步骤，在守护进程看来
+    是同一个问题，同一个设置把两者都拦住。
+  </p>
+
+  <h2>守护进程保留什么</h2>
+  <p>
+    一次运行的输入、它的状态、它的输出，以及每个步骤的输入和输出，都按发来时的
+    原样保存在运行存储里。它们不经脱敏：它们是工作流自己的工作状态，后面的步骤
+    会把它们读回去，而一个被脱敏器改写过的值会改变这次运行的行为。一次运行写进
+    trace 存储的 span，和其他任何 span 一样会被脱敏。保留期和擦除也作用于运行
+    存储，针对的是已经结束的运行。
+    <a href={linkTo('/docs/runs#storage')} class="link">运行</a>那一页确切地写明
+    了每一种会删除什么。
+  </p>
+
+  <h2>接下来</h2>
+  <ul>
+    <li>
+      服务那些步骤主体，以及 worker 讲的那套协议：
+      <a href={linkTo('/docs/workers')} class="link">Worker</a>。
+    </li>
+    <li>
+      启动一次运行，观察它、给它发信号、把它取消：
+      <a href={linkTo('/docs/runs')} class="link">运行</a>。
+    </li>
+    <li>
+      文档本身，逐个字段：
+      <a href="https://github.com/mcpd/mcpd/blob/main/spec/definition.schema.json" class="link">definition.schema.json</a>，
+      以及
+      <a href="https://github.com/mcpd/mcpd/blob/main/internal/run-contract-v1.md" class="link">run-contract-v1.md</a>
+      里那份有约束力的契约。
+    </li>
+  </ul>
+</Doc>

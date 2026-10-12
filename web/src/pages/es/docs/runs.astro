@@ -1,0 +1,235 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import RunCursor from '@/components/RunCursor.astro'
+import { exampleLanguages } from '@/lib/snippets'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const langs = exampleLanguages('workflow')
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Ejecuciones"
+  description="Una ejecución duradera en mcpd: arrancarla de forma idempotente, el diario y cómo seguirlo, eventos y esperas, cancelación, temporizadores y límites, y dónde aparece dentro de su traza."
+  lede="Una ejecución es una fila, un cursor, un diario de intentos, un conjunto de plazos y un conjunto de suspensiones. Esta página es lo que puedes hacerle, y lo que ella te cuenta a cambio."
+  og="docs"
+>
+  <h2>Arrancar una</h2>
+  <p>
+    Una ejecución arranca con el id de una definición y una entrada. El daemon
+    valida la entrada contra el esquema de la definición cuando lo tiene, fija
+    la versión almacenada más alta, acuña la ejecución y su traza, y responde
+    con la ejecución tal como quedó almacenada. A partir de ahí la ejecución
+    avanza sola: el daemon ofrece sus pasos a los workers, recorre sus pausas y
+    sus esperas, y escribe en el diario lo que va ocurriendo.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" example="workflow" region="run" only={langs} title="arrancar, respuesta, seguir" />
+
+  <p>
+    Envía un <code>idempotency_key</code> desde cualquier llamador que se pueda
+    reintentar. Es único por proyecto mientras la ejecución se conserva, y un
+    reintento de la misma llamada responde con la misma ejecución en vez de
+    arrancar una segunda. Así, un webhook que se dispara dos veces, o un
+    lanzador de trabajos que se reinicia, no cuesta nada.
+  </p>
+
+  <RunCursor class="not-prose my-8" />
+
+  <h2>El diario</h2>
+  <p>
+    Cada cambio en una ejecución es un evento con un número de secuencia, desde
+    cero y sin huecos: la ejecución arrancó, el cursor avanzó, un paso recibió
+    un lease, empezó, terminó o falló, la ejecución esperó y se reanudó, la
+    ejecución acabó. Cada uno lleva un payload con la forma de su tipo. El
+    diario es la historia de la ejecución, y es lo que dibuja la interfaz.
+  </p>
+  <p>
+    Léelo por páginas a partir de <code>after</code>, o mantén abierto el
+    endpoint de eventos con <code>Accept: text/event-stream</code> y recibe
+    cada evento en cuanto se confirma. Un cliente que se para y vuelve a
+    arrancar pasa el último número de secuencia que vio y no se pierde nada. El
+    <code>watch</code> de cada SDK hace esto por ti y termina cuando termina la
+    ejecución, y <code>wait</code> sigue el diario hasta el final y devuelve la
+    salida, o un fallo tipado que lleva dentro la ejecución cuando no salió
+    bien.
+  </p>
+
+  <h2>Eventos y esperas</h2>
+  <p>
+    Un paso <code>wait_event</code> retiene la ejecución hasta que llega un
+    evento con su nombre y su clave renderizada. El evento entra por una sola
+    puerta:
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="responder a una espera"
+    command={`curl -X POST http://localhost:4317/v1/api/events \\
+  -H 'content-type: application/json' \\
+  -d '{"project":"support","event":"approved","key":"Q-42","payload":{"by":"ops"},"event_id":"hook-1"}'`}
+  />
+
+  <p>
+    La respuesta es uno de tres resultados. <code>delivered</code>: había una
+    ejecución esperando y tomó el evento en la misma transacción, así que
+    cuando lees el acuse la ejecución ya ha avanzado. <code>parked</code>: no
+    había ninguna ejecución esperando, y el evento se guarda para una espera
+    que se abra más tarde y declare que acepta eventos aparcados.
+    <code>duplicate</code>: el <code>event_id</code> ya se había visto y no se
+    escribió nada. Envía tu propio id desde cualquier cosa que pueda dispararse
+    dos veces.
+  </p>
+  <p>
+    Una espera que llega a su plazo hace lo que diga su <code>on_timeout</code>:
+    falla, y entonces decide su <code>on_error</code>, o continúa sin salida.
+    Para enviar a una ejecución directamente, por su propia espera abierta,
+    está <code>POST /v1/api/runs/{'{run}'}/signal</code>; acepta el mismo cuerpo
+    sin clave, porque la dirección es la ejecución.
+  </p>
+
+  <h2>Cancelar</h2>
+  <p>
+    <code>POST /v1/api/runs/{'{run}'}/cancel</code> termina una ejecución y toda
+    ejecución hija que cuelgue de ella. Un paso en vuelo no se interrumpe sobre
+    el cable: el worker se entera en su siguiente heartbeat de que la ejecución
+    terminó, su contexto avisa al cuerpo, y lo que el cuerpo publique después
+    se rechaza con <code>run_terminal</code>. Cancelar una ejecución que ya
+    había terminado no cambia nada y responde con la ejecución tal como está.
+  </p>
+
+  <h2>Temporizadores y límites</h2>
+  <p>
+    Las pausas, los plazos de las esperas, los backoffs de reintento y los
+    vencimientos de los leases son todos temporizadores que guarda el daemon.
+    Se disparan con el reloj del daemon, una vez por segundo, así que un
+    <code>retry_after_ms</code> de cien milisegundos se respeta como al menos
+    eso, no como exactamente eso. Un reinicio del daemon no pierde ninguno; son
+    filas, y la ejecución se reanuda desde la fila. Ninguna duración puede
+    pasar de 3650 días, y un <code>retry_after_ms</code> más largo que envíe un
+    worker se rechaza con un 400. Un <code>sleep_until</code> posterior al año
+    2262 se guarda como un plazo que no vence nunca.
+  </p>
+  <p>
+    El <code>max_steps</code>, el <code>run_timeout_ms</code> y el
+    <code>max_cost_usd</code> de una definición terminan la ejecución en el
+    tope, con el tope nombrado como el error. El costo es la suma de lo que
+    valió el consumo que informaron los pasos, con el mismo libro de precios
+    que tarifa los spans, así que un paso de agente que informa de sus tokens
+    se carga contra el presupuesto de la ejecución en cuanto termina.
+  </p>
+
+  <h2>La ejecución dentro de su traza</h2>
+  <p>
+    Cada ejecución es además una traza. El daemon abre un span raíz para la
+    ejecución y un span por intento, con la entrada y la salida del paso, y un
+    cuerpo que registra sus propios spans a través del contexto del paso los
+    cuelga por debajo. Así, la llamada al modelo dentro de un paso de agente
+    queda bajo ese paso y bajo esa ejecución, y la búsqueda, la contabilidad de
+    costos y los evaluadores que trabajan sobre cualquier traza trabajan igual
+    sobre la traza de una ejecución. Esos spans se escriben por la misma ruta
+    de ingesta que siguen los spans de un SDK, así que se muestrean, se
+    ocultan, se tarifan y se reenvían de la misma forma. Los tokens viven en
+    los spans de modelo que los gastaron; el span del paso lleva en sus
+    atributos la suma ya tarifada, así que el total de una traza cuenta cada
+    token una sola vez. La ejecución lleva su <code>trace_id</code>, y la
+    interfaz enlaza las dos.
+  </p>
+  <p>
+    El daemon escribe esos spans a través de un outbox y con su propio reloj,
+    después de confirmar la fila que los originó. Una traza leída justo después
+    de que termine un paso puede que todavía no lleve el span de ese paso; el
+    detalle de la propia ejecución siempre lo lleva.
+  </p>
+
+  <h2>Volver a leer las ejecuciones</h2>
+  <p>
+    <code>GET /v1/api/runs</code> lista las ejecuciones de un proyecto, las
+    actualizadas más recientemente primero, filtradas por estado o por
+    definición. <code>GET /v1/api/runs/{'{run}'}</code>
+    es la ejecución y todo lo duradero que hay en ella: cada intento con el
+    dueño de su lease, sus tiempos, su error y su consumo; los temporizadores
+    aún pendientes; las esperas aún abiertas. La
+    <a href="/app?screen=workflows" class="link">pantalla Workflows</a>
+    de la interfaz es este endpoint dibujado, con el diario en vivo al lado.
+  </p>
+  <p>
+    Los dos devuelven lo que recibió la ejecución, así que los dos quedan
+    anotados en el registro de auditoría, como <code>list_runs</code> y
+    <code>get_run</code>, y también el diario (<code>list_run_events</code>,
+    una vez por solicitud, también cuando es un stream), el recorrido de causas
+    (<code>get_step_cause</code>) y una cancelación (<code>cancel_run</code>).
+    Una lectura rechazada se anota contra el proyecto dueño de la ejecución.
+    Las llamadas de worker no se anotan; consulta
+    <a href={urlFor('/docs/workers', locale)} class="link">Workers</a>.
+  </p>
+
+  <h2 id="storage">Almacenamiento</h2>
+  <p>
+    Las ejecuciones viven en su propio archivo SQLite, al lado del almacén de
+    trazas, en <code>&lt;data&gt;.runs.&lt;ext&gt;</code> salvo que
+    <code>--runs-data</code> diga otra cosa, y <code>--runs-data off</code>
+    apaga por completo la superficie de ejecuciones, en cuyo caso todos sus
+    endpoints responden 503. Haz su copia de seguridad junto con la del almacén
+    de trazas; <code>mcpd doctor</code> lo califica como un grupo aparte.
+  </p>
+  <p>
+    El almacén de ejecuciones guarda los payloads tal como se enviaron. La
+    entrada, el estado, la salida y la correlación de una ejecución, la
+    entrada, la salida y el error de cada paso, el payload de cada evento y los
+    payloads de los spans que todavía esperan a escribirse en el almacén de
+    trazas se guardan sin ocultar, y el <code>user_id</code> de la correlación
+    de una ejecución se guarda sin hash. Es deliberado: son el estado de
+    trabajo del workflow, un paso posterior los vuelve a leer, y un valor que
+    el ocultador hubiera reescrito cambiaría lo que hace la ejecución. Los
+    spans que el daemon escribe en el almacén de trazas pasan por la misma
+    ocultación y el mismo hash de identificadores que un span que envía un SDK,
+    así que el almacén de trazas guarda la copia ocultada. Trata el archivo de
+    ejecuciones como un archivo que guarda todo lo que recibieron tus pasos, y
+    protégelo y haz su copia de seguridad en consecuencia.
+  </p>
+  <p>
+    La retención llega al almacén de ejecuciones. La pasada horaria que recorta
+    el almacén de trazas borra además, con la misma ventana por proyecto, toda
+    ejecución cuya raíz terminó antes del corte, con sus ejecuciones hijas y
+    todo lo guardado para ellas: intentos, eventos, plazos, esperas, spans en
+    cola y los eventos que esas ejecuciones consumieron. Una ejecución que no
+    ha terminado no se borra nunca, por vieja que sea. Las definiciones se
+    conservan.
+  </p>
+  <p>
+    La supresión también llega a él.
+    <code>DELETE /v1/api/subjects/{'{user_id}'}</code> borra toda ejecución
+    terminada del proyecto cuya correlación lleve ese <code>user_id</code>, tal
+    como lo pasaste al arrancar la ejecución, con todo su árbol de ejecuciones
+    hijas y todo lo guardado para ellas, e informa del recuento como
+    <code>runs_erased</code>. Una ejecución de esa persona que no ha terminado
+    se deja entera, se cuenta en <code>runs_in_flight</code> y se nombra en el
+    <code>note</code> de la respuesta: cancélala, o deja que termine, y envía
+    la supresión otra vez. Un evento aparcado para una ejecución que todavía no
+    ha llegado a su espera va asociado a su clave de correlación y no a una
+    persona, así que la supresión no llega a él; se borra cuando caduca, a las
+    24 horas. Consulta
+    <a href={urlFor('/docs/privacy', locale)} class="link">Ocultación y retención</a>
+    para el resto de la respuesta.
+  </p>
+
+  <h2>A continuación</h2>
+  <ul>
+    <li>
+      Qué puede decir una definición:
+      <a href={urlFor('/docs/workflows', locale)} class="link">Workflows</a>.
+    </li>
+    <li>
+      El proceso que sirve los pasos:
+      <a href={urlFor('/docs/workers', locale)} class="link">Workers</a>.
+    </li>
+    <li>
+      Todos los endpoints de ejecuciones, generados a partir de la
+      especificación:
+      <a href={`${urlFor('/docs/reference/api', locale)}#runs`} class="link">API HTTP, Runs</a>.
+    </li>
+  </ul>
+</Doc>

@@ -1,0 +1,533 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* Os links internos continuam escritos como rotas em inglês e são localizados
+   aqui. Uma rota cuja página em português ainda não existe leva para a página
+   em inglês, em vez de para um URL em português sem nada atrás. */
+const code = localeOf(Astro.url.pathname)
+const url = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+
+const exporterEnv = `# The base URL. Your exporter appends /v1/traces itself.
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+
+# Optional. Send gzip if your payloads are large.
+export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
+
+# Only when mcpd runs with --ingest-key.
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer YOUR_INGEST_KEY"`
+
+const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
+  -H 'content-type: application/json' \\
+  -d '{
+  "resourceSpans": [{
+    "resource": { "attributes": [
+      { "key": "service.name", "value": { "stringValue": "checkout-agent" } }
+    ]},
+    "scopeSpans": [{
+      "spans": [{
+        "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "spanId": "00f067aa0ba902b7",
+        "name": "chat gpt-4o",
+        "startTimeUnixNano": "1700000000000000000",
+        "endTimeUnixNano": "1700000001500000000",
+        "status": { "code": 1 },
+        "attributes": [
+          { "key": "gen_ai.system", "value": { "stringValue": "openai" } },
+          { "key": "gen_ai.request.model", "value": { "stringValue": "gpt-4o" } },
+          { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+          { "key": "gen_ai.usage.input_tokens", "value": { "intValue": "1200" } },
+          { "key": "gen_ai.usage.output_tokens", "value": { "intValue": "350" } }
+        ]
+      }]
+    }]
+  }]
+}'
+
+# {"partialSuccess":{"rejectedSpans":0,"errorMessage":""}}`
+---
+
+<Doc
+  title="OpenTelemetry"
+  description="O mcpd aceita OTLP/JSON em /v1/traces, /v1/logs e /v1/metrics, e lê tanto as convenções semânticas gen_ai.* do OpenTelemetry quanto as llm.* do OpenInference. Nenhum código específico do mcpd."
+  lede="Se o seu agente já emite OpenTelemetry, o mcpd é uma troca de endpoint. Esta página é o caminho OTLP inteiro: os três endpoints, a codificação, e cada atributo que o mcpd lê."
+  og="docs"
+>
+  <h2>Os três endpoints</h2>
+  <p>
+    O mcpd serve os endpoints OTLP sobre HTTP na mesma porta da sua API de
+    consulta e da sua interface. Não há coletor para rodar na frente dele,
+    nem um segundo contêiner, nem uma porta de recepção separada.
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Endpoint</th>
+          <th>Aceita</th>
+          <th>Responde com</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>POST /v1/traces</code></td>
+          <td><code>ExportTraceServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedSpans</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/logs</code></td>
+          <td><code>ExportLogsServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedLogRecords</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/metrics</code></td>
+          <td><code>ExportMetricsServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedDataPoints</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Toda exportação bem-sucedida responde com o próprio formato
+    <code>partialSuccess</code> do OTLP, carregando uma contagem. É assim que um
+    coletor avisa a quem enviou que descartou alguma coisa, e os exportadores
+    leem esse campo. Devolver um corpo vazio deixaria quem enviou reportar um
+    sucesso que ele não teve.
+  </p>
+
+  <h2>Aponte um exportador para ele</h2>
+  <p>
+    Duas variáveis fazem o trabalho. Defina as duas no ambiente do processo que
+    roda o seu agente, e nada mais muda.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="exportador"
+    samples={[{ lang: 'curl', label: 'Ambiente', shiki: 'bash', code: exporterEnv }]}
+  />
+
+  <p>
+    Vale saber de dois detalhes antes de você depurar um silêncio. Primeiro,
+    <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> é um URL base e o exportador
+    acrescenta o caminho do sinal a ele. Defina
+    <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code> se quiser dar o URL
+    completo, caminho incluído. Segundo, a porta 4317 é por convenção a porta
+    gRPC no OpenTelemetry, e a 4318 é a de HTTP. O mcpd serve HTTP na 4317
+    porque serve tudo numa porta só, então um exportador deixado na porta
+    padrão manda para a 4318 e você não vê nada chegar. Nomeie a porta de forma
+    explícita.
+  </p>
+
+  <h2>As duas codificações, para traces</h2>
+  <p>
+    <code>/v1/traces</code> lê o cabeçalho <code>content-type</code> e aceita
+    qualquer uma das duas codificações: OTLP/protobuf quando ele contém
+    <code>protobuf</code>, e OTLP/JSON caso contrário. Protobuf é o padrão do
+    OpenTelemetry, então um SDK sem modificação nenhuma apontado para o mcpd
+    manda traces que chegam sem configuração alguma.
+  </p>
+  <p>
+    <code>/v1/logs</code> e <code>/v1/metrics</code> aceitam só JSON. Um corpo
+    em protobuf ali é recusado como <code>body is not valid JSON</code>. Se
+    você manda os três sinais, defina o protocolo uma vez, globalmente:
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="json para todo sinal"
+    command="export OTEL_EXPORTER_OTLP_PROTOCOL=http/json"
+  />
+
+  <p>
+    Quando nenhum <code>content-type</code> é mandado, o mcpd assume
+    <code>application/json</code>.
+  </p>
+
+  <h2>Compressão e tamanho</h2>
+  <p>
+    O corpo de uma requisição pode chegar com <code>content-encoding: gzip</code>,
+    com <code>identity</code>, ou sem cabeçalho de codificação. Qualquer outra
+    coisa é recusada pelo nome: <code>content-encoding "br" is not supported;
+    use gzip or send the body uncompressed</code>. As respostas são comprimidas
+    por negociação de conteúdo, então um trace grande lido de volta por uma
+    conexão lenta também vem comprimido.
+  </p>
+  <p>
+    Dois limites valem para uma requisição. O limite de corpo é 32 MiB e é
+    medido sobre o que chega, então gzip compra espaço para você. O limite de
+    lote é 10.000 sinais, contados depois da decodificação em toda porta de
+    ingestão: spans em <code>/v1/traces</code>, registros em
+    <code>/v1/logs</code>, pontos de dados em <code>/v1/metrics</code> e tudo
+    que vem na requisição em <code>/v1/ingest</code>. Um lote maior é recusado
+    com <code>413 payload_too_large</code> nomeando os dois números. Os dois
+    limites são ajustáveis: <code>--max-body-bytes</code> e
+    <code>--max-batch-signals</code>, descritos em
+    <a href={url('/docs/configuration')} class="link">Configuração</a>.
+  </p>
+
+  <h2>O que acontece entre chegar e ficar guardado</h2>
+  <p>
+    Um span OTLP e um span nativo seguem o mesmo caminho. É esse o sentido de o
+    pipeline ser compartilhado: a ordem abaixo não pode divergir entre as duas
+    portas.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    Precificar na ingestão é o motivo de um span OTLP receber um número de custo
+    para começo de conversa. O mcpd o precifica com a tabela de preços com que
+    este servidor está rodando, no instante em que ele chega, então mudar as
+    suas tarifas depois não pode reescrever em silêncio o que o mês passado
+    custou. Veja <a href={url('/docs/cost')} class="link">Apuração de custos</a>.
+  </p>
+
+  <h2>As duas convenções semânticas</h2>
+  <p>
+    Há dois conjuntos concorrentes de nomes de atributo em uso para spans de IA:
+    o <code>gen_ai.*</code> do próprio OpenTelemetry e o <code>llm.*</code> do
+    OpenInference, com <code>openinference.span.kind</code>. O mcpd lê os dois,
+    e por cima deles os seus próprios nomes <code>mcpd.*</code>. Você não
+    renomeia nada.
+  </p>
+  <p>
+    Cada linha abaixo é lida em ordem, e a primeira que casar vence. Um atributo
+    que nenhuma linha nomeia continua guardado: o mapa de atributos inteiro,
+    achatado, fica no span, então nada do que você manda se perde por não ter
+    sido mapeado.
+  </p>
+
+  <h3>Modelo, conteúdo e uso</h3>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Campo do mcpd</th>
+          <th>Lido de, nesta ordem</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>model</code></td>
+          <td><code>gen_ai.request.model</code>, <code>gen_ai.response.model</code>, <code>llm.model_name</code>, <code>mcpd.model</code></td>
+        </tr>
+        <tr>
+          <td><code>provider</code></td>
+          <td><code>gen_ai.system</code>, <code>llm.provider</code>, <code>mcpd.provider</code></td>
+        </tr>
+        <tr>
+          <td><code>input</code></td>
+          <td><code>input.value</code>, <code>gen_ai.prompt</code>, <code>mcpd.input</code></td>
+        </tr>
+        <tr>
+          <td><code>output</code></td>
+          <td><code>output.value</code>, <code>gen_ai.completion</code>, <code>mcpd.output</code></td>
+        </tr>
+        <tr>
+          <td><code>entity_name</code></td>
+          <td><code>gen_ai.agent.name</code>, <code>mcpd.entity.name</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.input_tokens</code></td>
+          <td><code>gen_ai.usage.input_tokens</code>, <code>gen_ai.usage.prompt_tokens</code>, <code>llm.token_count.prompt</code>, <code>mcpd.usage.input_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.output_tokens</code></td>
+          <td><code>gen_ai.usage.output_tokens</code>, <code>gen_ai.usage.completion_tokens</code>, <code>llm.token_count.completion</code>, <code>mcpd.usage.output_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.total_tokens</code></td>
+          <td><code>llm.token_count.total</code>, <code>gen_ai.usage.total_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.cache_read</code></td>
+          <td><code>gen_ai.usage.cache_read_input_tokens</code>, <code>llm.token_count.prompt_details.cache_read</code>, <code>mcpd.usage.cache_read_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.cache_write</code></td>
+          <td><code>gen_ai.usage.cache_creation_input_tokens</code>, <code>llm.token_count.prompt_details.cache_write</code>, <code>mcpd.usage.cache_write_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.audio</code></td>
+          <td><code>llm.token_count.prompt_details.audio</code></td>
+        </tr>
+        <tr>
+          <td><code>output_details.reasoning</code></td>
+          <td><code>llm.token_count.completion_details.reasoning</code>, <code>gen_ai.usage.reasoning_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>output_details.audio</code></td>
+          <td><code>llm.token_count.completion_details.audio</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Um span sem nenhuma das três contagens de token não carrega objeto de uso
+    nenhum, em vez de carregar um cheio de zeros. Zero tokens de entrada e
+    tokens de entrada desconhecidos são fatos diferentes, e um relatório de
+    custo construído sobre o primeiro quando queria dizer o segundo está errado
+    de um jeito que ninguém percebe.
+  </p>
+
+  <h3>Correlação</h3>
+  <p>
+    Os campos de correlação são o que deixa você pedir as execuções de um
+    usuário, ou as de uma sessão. Os atributos do span são lidos primeiro,
+    depois os atributos do recurso.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Campo do mcpd</th>
+          <th>Lido de, nesta ordem</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>project</code></td>
+          <td><code>mcpd.project</code> no span, depois no recurso, depois o <code>--project</code> do daemon</td>
+        </tr>
+        <tr>
+          <td><code>environment</code></td>
+          <td><code>mcpd.environment</code>, <code>deployment.environment.name</code> do recurso, <code>deployment.environment</code> do recurso</td>
+        </tr>
+        <tr>
+          <td><code>service_name</code></td>
+          <td><code>service.name</code> do recurso</td>
+        </tr>
+        <tr>
+          <td><code>service_version</code></td>
+          <td><code>service.version</code> do recurso</td>
+        </tr>
+        <tr>
+          <td><code>session_id</code></td>
+          <td><code>gen_ai.conversation.id</code>, <code>session.id</code>, <code>mcpd.session_id</code></td>
+        </tr>
+        <tr>
+          <td><code>thread_id</code></td>
+          <td><code>mcpd.thread_id</code>, <code>thread.id</code></td>
+        </tr>
+        <tr>
+          <td><code>user_id</code></td>
+          <td><code>user.id</code>, <code>enduser.id</code>, <code>mcpd.user_id</code></td>
+        </tr>
+        <tr>
+          <td><code>request_id</code></td>
+          <td><code>mcpd.request_id</code>, <code>http.request.id</code></td>
+        </tr>
+        <tr>
+          <td><code>release</code></td>
+          <td><code>mcpd.release</code>, <code>service.version</code> do recurso</td>
+        </tr>
+        <tr>
+          <td><code>run_id</code>, <code>resource_id</code>, <code>experiment_id</code></td>
+          <td><code>mcpd.run_id</code>, <code>mcpd.resource_id</code>, <code>mcpd.experiment_id</code></td>
+        </tr>
+        <tr>
+          <td><code>tags</code></td>
+          <td><code>mcpd.tags</code>, como um array de strings</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Status e erros</h3>
+  <p>
+    O código de status <code>1</code> do OTLP vira <code>ok</code> e o
+    <code>2</code> vira <code>error</code>. Um status não definido com hora de
+    término é registrado como <code>ok</code>, porque um span que terminou sem
+    reclamar terminou bem. Um status não definido sem hora de término continua
+    <code>unset</code>: o span ainda está rodando, e o mcpd o guarda assim em
+    vez de inventar um desfecho.
+  </p>
+  <p>
+    Num span com erro, a mensagem vem de <code>status.message</code>, depois de
+    <code>exception.message</code>, e faltando as duas vem a string literal
+    <code>unspecified error</code>. O tipo do erro vem de
+    <code>exception.type</code> e a pilha de <code>exception.stacktrace</code>.
+    Um span com erro sempre carrega uma mensagem, porque "algo falhou" sem texto
+    nenhum não é algo sobre o que você possa agir.
+  </p>
+
+  <h3>Tipo de span</h3>
+  <p>
+    O tipo determina como um span é desenhado na cascata. O mcpd o deduz em
+    ordem de especificidade, e recorre a <code>generic</code>, que é sempre
+    seguro. Rotular um span errado é pior do que recusar-se a rotulá-lo.
+  </p>
+  <ol>
+    <li><code>mcpd.span.kind</code>, quando nomeia um tipo que o mcpd conhece.</li>
+    <li><code>openinference.span.kind</code>.</li>
+    <li><code>gen_ai.operation.name</code>.</li>
+    <li>A presença de um atributo que só um tipo de span carrega.</li>
+  </ol>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Valor do atributo</th>
+          <th>Tipo no mcpd</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>openinference.span.kind=LLM</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>openinference.span.kind=CHAIN</code></td><td><code>workflow_run</code></td></tr>
+        <tr><td><code>openinference.span.kind=TOOL</code></td><td><code>tool_call</code></td></tr>
+        <tr><td><code>openinference.span.kind=AGENT</code></td><td><code>agent_run</code></td></tr>
+        <tr><td><code>openinference.span.kind=RETRIEVER</code></td><td><code>retrieval</code></td></tr>
+        <tr><td><code>openinference.span.kind=EMBEDDING</code></td><td><code>rag_embedding</code></td></tr>
+        <tr><td><code>openinference.span.kind=RERANKER</code></td><td><code>rag_action</code></td></tr>
+        <tr><td><code>openinference.span.kind=GUARDRAIL</code></td><td><code>guardrail</code></td></tr>
+        <tr><td><code>openinference.span.kind=EVALUATOR</code></td><td><code>scorer_run</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=chat</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=text_completion</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=generate_content</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=embeddings</code></td><td><code>rag_embedding</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=execute_tool</code></td><td><code>tool_call</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=invoke_agent</code></td><td><code>agent_run</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=create_agent</code></td><td><code>agent_run</code></td></tr>
+        <tr><td>qualquer um de <code>gen_ai.system</code>, <code>llm.model_name</code>, <code>llm.provider</code> presente</td><td><code>model_generation</code></td></tr>
+        <tr><td><code>mcp.tool.name</code> presente</td><td><code>mcp_tool_call</code></td></tr>
+        <tr><td><code>http.request.method</code> ou <code>http.method</code> presente</td><td><code>http_request</code></td></tr>
+        <tr><td>qualquer outra coisa</td><td><code>generic</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Um tipo de span que o mcpd não reconhece em
+    <code>openinference.span.kind</code> ou em
+    <code>gen_ai.operation.name</code> cai para <code>generic</code> em vez de
+    ser rejeitado. A lista completa de tipos está no
+    <a href={url('/docs/reference/data-model')} class="link">modelo de dados</a>.
+  </p>
+
+  <h2>Logs e métricas</h2>
+  <p>
+    Os registros de log são mapeados pelo número de severidade, do jeito que a
+    especificação manda: 1 a 4 é trace, 5 a 8 debug, 9 a 12 info, 13 a 16 warn,
+    17 a 20 error, e qualquer coisa acima disso é fatal. Sem número de
+    severidade, um registro é tratado como info. A mensagem vem de
+    <code>body.stringValue</code>, o nome do logger vem do nome do escopo, e
+    <code>traceId</code> e <code>spanId</code> são preservados quando são
+    válidos, que é o que põe uma linha de log ao lado do span que a emitiu.
+  </p>
+  <p>
+    Nas métricas, somas viram contadores e gauges continuam gauges. Os
+    histogramas são registrados pela sua soma e pela sua contagem, com os
+    limites dos baldes preservados: o mcpd não finge que consegue re-derivar um
+    quantil exato de um histograma já agregado. Os exemplars são preservados, e
+    é isso que deixa um pico num gráfico abrir a execução que o causou. A
+    maioria das ferramentas os descarta.
+  </p>
+
+  <h2>Ids, e o traceparent do W3C</h2>
+  <p>
+    O mcpd usa exatamente os formatos de identificador do OpenTelemetry: um id
+    de trace tem 128 bits, escritos como 32 caracteres hexadecimais minúsculos,
+    e um id de span tem 64 bits, escritos como 16. Manter o formato de fio
+    idêntico é o que elimina a camada de tradução. O id todo de zeros é
+    reservado para significar "nenhum trace" e é recusado onde quer que
+    apareça, inclusive nos ids que o próprio mcpd gera.
+  </p>
+  <p>
+    O OTLP/JSON especifica hexadecimal para os campos de id, mas vários SDKs
+    emitem base64. O mcpd aceita os dois e guarda em hexadecimal. Um span cujos
+    ids estejam faltando, tenham o tamanho errado ou sejam todos zeros é
+    pulado, e o resto do lote continua sendo escrito, porque um coletor que
+    rejeita dez mil spans bons por causa de um ruim é um coletor que as
+    pessoas desligam.
+  </p>
+  <p>
+    Os carimbos de tempo são nanossegundos desde a época Unix. Eles passam de
+    2<sup>53</sup>, então o OTLP/JSON os manda como strings, e o mcpd os
+    interpreta como strings. Lê-los como ponto flutuante perde precisão, o que
+    aparece como spans que parecem começar com microssegundos de diferença sem
+    que isso seja verdade. Um <code>endTimeUnixNano</code> igual a
+    <code>0</code> ou ausente quer dizer que o span não terminou.
+  </p>
+  <p>
+    Um cabeçalho <code>traceparent</code> é
+    <code>version-traceid-parentid-flags</code>. O mcpd o interpreta com as
+    regras que a especificação define: a versão <code>ff</code> é recusada, a
+    versão <code>00</code> precisa ter exatamente quatro campos, versões
+    posteriores podem carregar mais, os ids precisam ser válidos, e o bit 0 do
+    byte de flags é a flag de amostragem. Um cabeçalho malformado nunca é
+    motivo para recusar uma requisição. Em vez disso, o mcpd começa um trace
+    novo.
+  </p>
+  <p>
+    Onde isso importa: os SDKs do mcpd leem um <code>traceparent</code> que
+    chega e emitem um nas chamadas que saem, então um trace sobrevive à
+    fronteira entre serviços. Os endpoints OTLP tiram os seus ids do conteúdo
+    da requisição, porque o seu exportador já os colocou nos spans. Se um trace
+    começa num serviço que você não instrumenta com o mcpd, repasse o
+    <code>traceparent</code> dele e as duas metades caem sob um id de trace só.
+  </p>
+
+  <h2>Uma requisição, por inteiro</h2>
+  <p>
+    Nada do que está acima precisa de um SDK. Esta é uma exportação completa e
+    válida que você pode colar num terminal:
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="OTLP/JSON cru"
+    samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: rawPost }]}
+  />
+
+  <h2>O que o OTLP não consegue carregar</h2>
+  <p>
+    O OTLP tem um formato para spans, logs e métricas. Não tem nenhum para uma
+    nota de máquina, para o polegar para baixo de uma pessoa ou para uma
+    nota de aspecto, e nenhum vocabulário para o detalhe de tokens sobre o
+    qual um provedor moderno cobra. Há dois jeitos de mandar isso:
+  </p>
+  <ul>
+    <li>
+      <code>POST /v1/ingest</code>, o endpoint de lote nativo do mcpd, que
+      carrega o modelo de dados inteiro numa requisição só.
+    </li>
+    <li>
+      <code>POST /v1/api/scores</code> e <code>POST /v1/api/feedback</code>,
+      que se prendem a um trace que você já mandou por OTLP.
+    </li>
+  </ul>
+  <p>
+    Misturar os dois é normal e esperado. Exporte os spans com o SDK do
+    OpenTelemetry que você já roda, e poste as notas a partir do seu job de
+    avaliação. Eles se juntam pelo id do trace. Veja
+    <a href={url('/docs/evaluation')} class="link">Notas e feedback</a> e a
+    <a href={url('/docs/reference/api')} class="link">API HTTP</a>.
+  </p>
+
+  <h2>Antes de expor a porta</h2>
+  <p>
+    Sem nenhum <code>--ingest-key</code> definido, qualquer um que alcance a
+    4317 pode escrever nela, e sem <code>--read-key</code>, pode ler todo prompt
+    guardado. O mcpd registra um aviso na inicialização quando se liga a um
+    endereço que não é de loopback com um dos dois em aberto. Defina os dois com
+    a <a href={url('/docs/configuration')} class="link">configuração</a>, e
+    depois mande a chave como <code>Authorization: Bearer</code>, que é o que o
+    <code>OTEL_EXPORTER_OTLP_HEADERS</code> acima faz.
+  </p>
+
+  <Command
+    class="my-6"
+    label="rodar com chaves"
+    command="mcpd --ingest-key $INGEST_KEY --read-key $READ_KEY"
+  />
+</Doc>

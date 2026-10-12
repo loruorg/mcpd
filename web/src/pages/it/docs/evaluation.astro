@@ -1,0 +1,306 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* I link interni restano scritti come route inglesi e vengono localizzati qui.
+   Una route la cui pagina italiana non è ancora scritta porta alla pagina
+   inglese, invece che a un URL italiano senza niente dietro. */
+const code = localeOf(Astro.url.pathname)
+const url = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+---
+
+<Doc
+  title="Punteggi e feedback"
+  description="Come mcpd registra la valutazione automatica e il giudizio umano, perché stanno separati, e la query che trova le esecuzioni che uno scorer ha messo sotto la soglia."
+  lede="Un punteggio è quello che ha pensato una macchina. Un feedback è quello che ha pensato una persona. mcpd li tiene come due segnali e non fa mai la media dell’uno nell’altro."
+  og="docs"
+>
+  <h2>Due segnali, non un numero solo</h2>
+  <p>
+    Un <strong>punteggio</strong> è una valutazione automatica: un modello
+    giudice, un’espressione regolare, uno unit test, qualunque cosa sappia
+    produrre un numero su un’esecuzione. Un record di <strong>feedback</strong>
+    è il giudizio di una persona: un pollice giù nel tuo prodotto, il voto di un
+    revisore, una risposta corretta.
+  </p>
+  <p>
+    Tutti e due si attaccano a un <code>trace_id</code> o a uno
+    <code>span_id</code>, tutti e due arrivano come segnali a pieno titolo, e
+    tutti e due sono archiviati in una tabella propria. Non vengono mai
+    combinati. Un giudice che dà 0.9 di pertinenza e un cliente che preme
+    pollice giù dicono tutti e due il vero, e il disaccordo fra i due è la cosa
+    più utile che c’è sull’esecuzione. Una media cancellerebbe esattamente
+    quello, e ti lascerebbe un numero su cui nessuno può agire.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>Un punteggio dichiara la sua scala</h2>
+  <p>
+    <code>min</code> e <code>max</code> fanno parte del punteggio. Senza di loro
+    un valore non è interpretabile: 0.86 può essere un buon risultato su una
+    scala da 0 a 1, uno scarso su una scala da 0 a 5, oppure una distanza in cui
+    più basso è meglio. Sei mesi dopo, con due scorer nello stesso progetto,
+    nessuno sa più dire quale delle tre. La specifica li porta a 0 e 1 per
+    impostazione predefinita, e ogni SDK li richiede sul posto della chiamata,
+    così un valore predefinito non viene mai accettato per sbaglio.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Campo</th><th>A che cosa serve</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>scorer_id</code></td>
+        <td>Quale scorer lo ha prodotto, per esempio <code>answer_relevance</code>. Obbligatorio.</td>
+      </tr>
+      <tr>
+        <td><code>scorer_version</code></td>
+        <td>Un punteggio si confronta solo con un altro punteggio della stessa versione. Cambia il prompt di un giudice e hai un nuovo scorer, non il seguito di quello vecchio.</td>
+      </tr>
+      <tr>
+        <td><code>value</code></td>
+        <td>Il numero.</td>
+      </tr>
+      <tr>
+        <td><code>min</code>, <code>max</code></td>
+        <td>La scala dichiarata su cui sta il numero.</td>
+      </tr>
+      <tr>
+        <td><code>label</code></td>
+        <td>Un risultato categoriale, quando lo scorer ne produce uno accanto al numero.</td>
+      </tr>
+      <tr>
+        <td><code>reason</code></td>
+        <td>Il perché. Per un modello giudice è la sua spiegazione, ed è quello che rende un punteggio discutibile invece che magico.</td>
+      </tr>
+      <tr>
+        <td><code>source</code></td>
+        <td>Live, offline, esperimento o manuale.</td>
+      </tr>
+      <tr>
+        <td><code>score_trace_id</code></td>
+        <td>La traccia dell’esecuzione che ha prodotto il punteggio, così un punteggio sospetto si apre e si legge come qualunque altra esecuzione.</td>
+      </tr>
+      <tr>
+        <td><code>cost</code></td>
+        <td>Quanto è costato produrre il punteggio.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Registrarne uno</h2>
+  <p>
+    L’helper dell’SDK accoda un punteggio nello stesso modo in cui accoda uno
+    span, quindi la chiamata non blocca e non può sollevare eccezioni. Senza un
+    <code>traceId</code> si attacca alla traccia dello span attivo.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="score" title="punteggio e feedback" />
+
+  <p>
+    Su HTTP è <code>POST /v1/api/scores</code>, che prende uno
+    <code>Score</code> come corpo. Un punteggio deve nominare il
+    <code>trace_id</code> o lo <code>span_id</code> di cui parla; un punteggio
+    attaccato a niente viene rifiutato con 400 invece di essere archiviato dove
+    non lo troverà mai nessuno. Manda <code>score_id</code> come stringa vuota e
+    il server ne genera uno.
+  </p>
+
+  <h2>Da dove viene un punteggio</h2>
+  <p>
+    <code>source</code> è separato da <code>scorer_id</code> perché lo stesso
+    scorer gira in più di un contesto, e i contesti non sono confrontabili.
+    Ridare un punteggio al traffico della settimana scorsa con il giudice di
+    oggi non è la prova che la qualità sia migliorata.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Origine</th><th>Che cosa vuol dire</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>live</code></td><td>Prodotto online, mentre l’esecuzione tracciata avveniva.</td></tr>
+      <tr><td><code>offline</code></td><td>Prodotto dopo, dando un punteggio a tracce già archiviate.</td></tr>
+      <tr><td><code>experiment</code></td><td>Prodotto da un esperimento eseguito su un dataset.</td></tr>
+      <tr><td><code>manual</code></td><td>Inserito da una persona, tramite l’API o l’interfaccia.</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Un punteggio scritto attraverso un SDK vale <code>live</code> se non dici
+    altro. Per gli altri tre lo imposti tu.
+  </p>
+
+  <h2>Dare un punteggio costa, quindi viene registrato</h2>
+  <p>
+    Una valutazione giudicata di solito è un’altra chiamata al modello. Dare un
+    punteggio a ogni esecuzione di produzione con un giudice grande può costare
+    più di quanto sia costato servire il traffico, ed è una fattura che le
+    persone scoprono tardi. Uno <code>Score</code> porta quindi un
+    <code>cost</code> nella stessa forma in cui lo porta uno span, con una
+    valuta, una divisione fra input e output, e il listino che ha prodotto la
+    cifra. Impostalo quando scrivi il punteggio tramite l’API HTTP o un batch di
+    ingest nativo.
+  </p>
+  <p>
+    <code>score_trace_id</code> è l’altra metà della stessa idea. Traccia
+    l’esecuzione che produce il punteggio e l’id finisce sul punteggio, così un
+    giudice che ha cominciato a bocciare tutto si può aprire, leggere e mostrare
+    rotto.
+  </p>
+
+  <h2>Il giudizio delle persone</h2>
+  <p>
+    Il feedback si scrive dal tuo prodotto. Chiamalo dal controllo che la
+    persona ha davvero premuto e il giudizio atterra esattamente sulla traccia
+    che ha prodotto la risposta a cui stava reagendo. <code>kind</code> decide
+    la forma di <code>value</code>.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Tipo</th><th><code>value</code></th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>thumbs</code></td><td><code>up</code> oppure <code>down</code>.</td></tr>
+      <tr><td><code>rating</code></td><td>Un numero, su una scala che dichiara chi lo produce.</td></tr>
+      <tr><td><code>correction</code></td><td>La risposta giusta, come testo.</td></tr>
+      <tr><td><code>tag</code></td><td>Un’etichetta scelta da un insieme.</td></tr>
+      <tr><td><code>comment</code></td><td>Prosa libera, senza nessun punteggio attaccato.</td></tr>
+    </tbody>
+  </table>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="un pollice giù dal tuo prodotto"
+    samples={[
+      {
+        lang: 'typescript',
+        label: 'TypeScript',
+        shiki: 'typescript',
+        code: `// Nessun traceId: si attacca alla traccia dello span attivo.
+mcpd.feedback({
+  kind: 'thumbs',
+  value: 'down',
+  comment: 'Named the wrong depot.',
+  authorKind: 'end_user',
+})`,
+      },
+      {
+        lang: 'curl',
+        label: 'cURL',
+        shiki: 'bash',
+        code: `curl -s -X POST "$MCPD/v1/api/feedback" \\
+  -H 'content-type: application/json' \\
+  -d "{
+    \\"feedback_id\\": \\"\\",
+    \\"trace_id\\": \\"$TRACE\\",
+    \\"kind\\": \\"thumbs\\",
+    \\"value\\": \\"down\\",
+    \\"comment\\": \\"Named the wrong depot.\\",
+    \\"author_kind\\": \\"end_user\\",
+    \\"timestamp\\": \\"$NOW\\",
+    \\"correlation\\": { \\"project\\": \\"default\\" }
+  }"`,
+      },
+    ]}
+  />
+
+  <p>
+    L’oscuramento cerca corrispondenze sui nomi delle chiavi, e passa sopra i
+    <code>metadata</code> che attacchi a un giudizio. <code>author_id</code>
+    viene archiviato come lo mandi, quindi manda uno pseudonimo invece di un
+    indirizzo email. Vedi
+    <a href={url('/docs/privacy')} class="link">Oscuramento e conservazione</a>.
+  </p>
+
+  <h2>La query che trova le risposte sbagliate</h2>
+  <p>
+    È a questo che servono i punteggi. <code>has_score</code> nomina uno scorer
+    e <code>score_below</code> fissa l’asticella, e l’elenco delle tracce
+    restituisce le esecuzioni che quello scorer ha messo sotto. Il confronto è
+    stretto, quindi <code>score_below=0.5</code> esclude un’esecuzione che ha
+    preso esattamente 0.5.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="query" title="trovare le esecuzioni con un punteggio basso" />
+
+  <p>
+    <code>score_below</code> vuol dire qualcosa solo con <code>has_score</code>
+    accanto: un’asticella senza nessuno scorer nominato è un’asticella su
+    niente. Sono tutti e due parametri di <code>GET /v1/api/traces</code>,
+    quindi si combinano con ogni altro filtro che c’è lì. Le risposte sbagliate
+    di un solo modello, in produzione, nell’ultimo giorno, sono una richiesta
+    sola.
+  </p>
+
+  <h2>Rileggerli</h2>
+  <p>
+    <code>GET /v1/api/scores</code> elenca le valutazioni automatiche, filtrate
+    per <code>scorer_id</code>, <code>source</code>, <code>trace_id</code>,
+    <code>experiment_id</code>, <code>min_value</code>, <code>max_value</code>
+    e una finestra temporale, con paginazione a cursore. <code>source</code>
+    prende <code>live</code>, <code>offline</code>, <code>experiment</code> o
+    <code>manual</code>, ed è così che rileggi i punteggi del giudice senza
+    quelli che ha digitato una persona.
+    <code>GET /v1/api/feedback</code> prende un <code>trace_id</code> e
+    restituisce i giudizi su quell’esecuzione. Elencare il feedback di un
+    progetto senza nominare un’esecuzione non è implementato in questa build, e
+    l’endpoint lo dice: senza <code>trace_id</code> rifiuta con un 400 che
+    nomina il parametro. Prima rispondeva con un elenco vuoto, che si legge come
+    se nessuno avesse giudicato niente.
+  </p>
+  <p>
+    L’elenco dei punteggi non prende nessun <code>order</code>: è dal più
+    recente, e il suo cursore confronta in un verso solo. Gli elenchi delle
+    esecuzioni e degli span invece uno lo prendono, quindi qui viene rifiutato
+    per nome invece che accettato e buttato via. Lo stesso vale per i filtri
+    <code>kind</code>, <code>from</code>, <code>to</code> e
+    <code>cursor</code> che diversi client SDK ti lasciano impostare su una
+    query di feedback. Nessuno dei quattro è mai stato applicato, e adesso tutti
+    e quattro vengono rifiutati.
+  </p>
+  <p>
+    Per leggere un’esecuzione e tutto quello che le è attaccato in una volta
+    sola, chiedi gli extra per nome:
+    <code>GET /v1/api/traces/{'{trace_id}'}?include=scores,feedback</code>,
+    oppure <code>include=all</code> per avere anche i log.
+  </p>
+
+  <h2>Che cosa porta l’elenco delle tracce, e che cosa no</h2>
+  <p>
+    Ogni traccia archiviata tiene due aggregati, così l’elenco non ha bisogno di
+    nessuna join. Uno è il valore medio <em>per scorer</em>: una media dentro
+    <code>answer_relevance</code>, e una media separata dentro
+    <code>groundedness</code>. L’altro è un conteggio del feedback
+    <em>per tipo</em>: tre pollici, una correzione. Conteggi, non una media,
+    perché la media di un pollice su e di una correzione non è una quantità.
+  </p>
+  <p>
+    Non c’è nessun punteggio complessivo di qualità, e non ci sarà. Una cifra
+    sola che mette insieme un modello giudice, un’espressione regolare e il
+    pollice giù di un cliente sarebbe un numero senza unità e senza nessun modo
+    di discuterci. mcpd ti mostra le parti e ti lascia decidere.
+  </p>
+
+  <h2>Poi</h2>
+  <ul>
+    <li>
+      Tutto il resto su cui puoi filtrare:
+      <a href={url('/docs/searching')} class="link">Trovare un’esecuzione</a>.
+    </li>
+    <li>
+      Di che cosa è fatta una cifra di costo:
+      <a href={url('/docs/cost')} class="link">Contabilità dei costi</a>.
+    </li>
+    <li>
+      Che cosa succede all’id di un autore prima di essere archiviato:
+      <a href={url('/docs/privacy')} class="link">Oscuramento e conservazione</a>.
+    </li>
+  </ul>
+</Doc>

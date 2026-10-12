@@ -1,0 +1,627 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Sécurité"
+  description="Ce qu’un mcpd déployé stocke, ce qui quitte la machine et sous quel réglage, les clés, les portées et le cloisonnement par projet, les limites du masquage, et les contrôles que mcpd n’a pas."
+  lede="Une page pour répondre à une revue de sécurité. Ce qui est conservé, ce qui est envoyé ailleurs, qui peut le lire, et les contrôles que mcpd n’a pas."
+  og="docs"
+>
+  <p>
+    Tout ce qui suit vient du code source du daemon et de
+    <code>spec/mcpd.spec.json</code>, le fichier dont l’API est générée. Là où
+    un contrôle n’existe pas, cette page le dit, plutôt que de vous laisser
+    découvrir le manque dans un questionnaire.
+  </p>
+
+  <h2>Ce que mcpd stocke</h2>
+  <p>
+    mcpd stocke le texte des conversations de votre agent. C’est sa raison
+    d’être, et une revue doit partir de là. Un span de type
+    <code>model_generation</code> porte <code>input</code> et
+    <code>output</code> : le prompt exact envoyé au modèle et le texte exact
+    qui est revenu. Pour la plupart des utilisateurs, ce sont les données les
+    plus sensibles qu’ils détiennent.
+  </p>
+  <p>Sur les six signaux, les champs libres stockés sont les suivants :</p>
+  <table>
+    <thead>
+      <tr><th>Signal</th><th>Ce qu’il contient</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Spans</td>
+        <td><code>input</code>, <code>output</code>, <code>attributes</code>, <code>metadata</code>, et le message d’erreur</td>
+      </tr>
+      <tr><td>Logs</td><td>le message, et les <code>fields</code> structurés</td></tr>
+      <tr><td>Métriques</td><td><code>labels</code></td></tr>
+      <tr><td>Scores</td><td><code>reason</code>, et <code>metadata</code></td></tr>
+      <tr><td>Feedback</td><td>le <code>comment</code> en texte libre, et <code>metadata</code></td></tr>
+      <tr><td>Notes d’aspect</td><td>la phrase, dans <code>text</code></td></tr>
+    </tbody>
+  </table>
+  <p>
+    À côté du payload, chaque signal porte des champs de corrélation qui
+    relient une exécution au reste de votre système : projet, environnement, nom
+    et version du service, session, thread, utilisateur, ressource, exécution,
+    requête, expérience et release. <code>user_id</code> est haché à l’entrée,
+    sauf si vous désactivez le masquage. Les autres sont stockés tels qu’ils ont
+    été envoyés : traitez chacun d’eux comme un champ par lequel une
+    personne peut être identifiée si vous y mettez une identité.
+  </p>
+  <p>
+    Le nombre de tokens et un montant de coût sont calculés à l’ingestion et
+    stockés avec l’exécution. Rien de ce qui concerne l’appel au modèle n’est
+    récupéré auprès d’un fournisseur.
+  </p>
+
+  <h3>Où c’est écrit</h3>
+  <p>
+    Un seul backend, choisi au démarrage. Par défaut, c’est un fichier SQLite
+    embarqué à <code>./mcpd.db</code>, défini par <code>--data</code>. L’index
+    plein texte vit dans le même fichier : le stockage est donc un fichier à
+    sauvegarder et un fichier à protéger. <code>--postgres-url</code> ou
+    <code>--clickhouse-url</code> place plutôt les données dans une base que
+    vous exploitez vous-même.
+  </p>
+  <p>
+    Les exécutions durables, quand elles sont actives, vivent dans un second
+    fichier SQLite à côté du premier, quel que soit le stockage des traces. Ce
+    fichier garde l’entrée, l’état, la sortie et la corrélation de chaque
+    exécution, et l’entrée, la sortie et l’erreur de chaque étape, exactement
+    tels qu’ils ont été envoyés : sans masquage, avec <code>user_id</code> non
+    haché, parce qu’une étape ultérieure les relit et qu’une valeur réécrite
+    changerait ce que fait l’exécution. Les spans qu’une exécution écrit dans le
+    stockage des traces sont masqués comme tous les autres. Protégez le fichier
+    des exécutions comme vous protégez le stockage des traces, ou davantage. La
+    conservation et l’effacement par sujet l’atteignent tous deux, pour les
+    exécutions terminées ; voir
+    <a href={`${urlFor('/docs/runs', code)}#storage`} class="link">Exécutions</a>.
+  </p>
+  <p>
+    mcpd ne chiffre pas ce qu’il écrit. Le chiffrement au repos est l’affaire du
+    volume avec le stockage embarqué, et celle de la base avec les deux autres.
+  </p>
+
+  <h2>Ce qui quitte la machine</h2>
+  <p>
+    Avec une configuration par défaut, rien. Le daemon émet des requêtes
+    sortantes à exactement quatre endroits, et chacun d’eux reste inactif tant
+    que vous ne l’avez pas configuré. Il n’y a pas de vérification de mise à
+    jour, pas de rapport d’usage et aucune télémétrie.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Destination</th><th>Ce qui est envoyé</th><th>Inactif sauf si</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Backend de stockage</td>
+        <td>Tout ce que mcpd stocke, par votre propre connexion.</td>
+        <td>Vous définissez <code>--postgres-url</code> ou <code>--clickhouse-url</code>. Le stockage par défaut est un fichier local et n’a besoin d’aucun réseau.</td>
+      </tr>
+      <tr>
+        <td>Transfert</td>
+        <td>
+          Chaque span stocké, réémis en OTLP JSON vers
+          <code>&#123;endpoint&#125;/v1/traces</code>. Cela inclut le
+          payload : <code>input</code> et <code>output</code> partent dans les
+          attributs <code>input.value</code> et <code>output.value</code>,
+          chacun plafonné à 32 KiB. Les valeurs déjà masquées le restent, et un
+          <code>user_id</code> haché est transféré sous forme de hachage.
+        </td>
+        <td>Vous définissez <code>--forward-endpoint</code>, ou un bloc <code>forward</code> dans le fichier de configuration.</td>
+      </tr>
+      <tr>
+        <td>Webhooks de moniteur et d’objectif</td>
+        <td>
+          Un corps JSON fixe : l’identifiant et le nom du moniteur ou de
+          l’objectif, le projet, la condition, ce qu’elle surveille, le seuil,
+          la mesure, le nombre d’échantillons, un détail d’une ligne et un
+          horodatage. Aucun texte de prompt ou de complétion ne s’y trouve.
+        </td>
+        <td>Un moniteur ou un objectif du fichier de configuration nomme un <code>webhook</code>.</td>
+      </tr>
+      <tr>
+        <td>Modèle juge</td>
+        <td>
+          Le critère, plus la question de l’exécution et sa réponse, chacune
+          tronquée à 4 000 caractères, envoyés en POST vers
+          <code>&#123;endpoint&#125;/chat/completions</code>. C’est le seul
+          chemin qui envoie du texte de prompt et de complétion stocké à un
+          fournisseur de modèles.
+        </td>
+        <td>Un bloc <code>judge</code> du fichier de configuration nomme un endpoint, un modèle et au moins un critère, et un appelant demande ce scorer par son nom.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    L’interface que le binaire sert à <code>/</code> est compilée dans le
+    binaire. Ses polices, ses styles et ses scripts viennent de la même origine,
+    et elle n’émet aucune requête vers un tiers.
+  </p>
+
+  <h2>Clés et portées</h2>
+  <p>
+    L’authentification se fait par clés d’API. Il n’y a pas de compte, pas de
+    session et pas de connexion. Une clé est présentée sous la forme
+    <code>Authorization: Bearer …</code> ou dans l’en-tête
+    <code>X-Mcpd-Key</code>, et les deux valeurs sont hachées en SHA-256 avant
+    d’être comparées : ni la longueur de la clé configurée ni la position du
+    premier caractère erroné ne sont observables par le temps de réponse.
+  </p>
+  <p>Il y a six portées, de la plus étroite à la plus large :</p>
+  <table>
+    <thead>
+      <tr><th>Portée</th><th>Ce qu’elle permet</th><th>Pourquoi elle est une portée à part</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ingest</code></td>
+        <td>Écrire des signaux. Ne rien lire.</td>
+        <td>Cette clé vit dans chaque conteneur qui émet un span, y compris ceux qui exécutent du code tiers. Elle ne doit pas ouvrir en plus tous les prompts stockés.</td>
+      </tr>
+      <tr>
+        <td><code>read</code></td>
+        <td>Lire les signaux stockés.</td>
+        <td>C’est en lecture que se trouvent les prompts.</td>
+      </tr>
+      <tr>
+        <td><code>write</code></td>
+        <td>Modifier les données stockées : scores, retours, datasets, expériences et acquittements.</td>
+        <td>Plusieurs de ces handlers lisent un payload au passage. Capturer une exécution de production dans un dataset lit l’<code>input</code> et l’<code>output</code> de cette exécution, ce qui est plus qu’émettre un span.</td>
+      </tr>
+      <tr>
+        <td><code>execute</code></td>
+        <td>Démarrer, annuler et signaler des exécutions, et leur publier des événements.</td>
+        <td>Démarrer une exécution dépense de l’argent et agit sur vos systèmes. Une clé qui peut enregistrer un score ne doit pas pouvoir aussi lancer du travail.</td>
+      </tr>
+      <tr>
+        <td><code>worker</code></td>
+        <td>Réclamer des étapes et rendre compte de ce qui leur est arrivé.</td>
+        <td>C’est la clé du processus qui exécute le corps des étapes. Une réclamation renvoie l’<code>input</code> de l’étape et l’<code>output</code> de chaque étape précédente, donc elle lit des payloads, et elle ne doit pas pouvoir aussi démarrer des exécutions ni modifier des données stockées.</td>
+      </tr>
+      <tr>
+        <td><code>admin</code></td>
+        <td>Détruire des données, et lire le journal d’audit.</td>
+        <td>Supprimer n’est pas lire.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    La portée exigée par un endpoint est déclarée endpoint par endpoint dans la
+    spécification et publiée dans la référence
+    <a href={urlFor('/docs/reference/api', code)} class="link">API HTTP</a>
+    générée : il y a donc une seule réponse à « de quoi cet endpoint a-t-il
+    besoin ? » plutôt qu’une réponse par document.
+  </p>
+
+  <h3>Le repli, et ce qu’il implique pour une clé que vous avez déjà</h3>
+  <p>
+    Une liste <code>write</code> non définie se replie sur la liste
+    <code>ingest</code>, et une liste <code>admin</code> non définie se replie
+    sur la liste <code>read</code>. Des listes <code>execute</code> et
+    <code>worker</code> non définies se replient sur la liste
+    <code>write</code>, donc sur la liste <code>ingest</code> quand celle-ci
+    n’est pas définie non plus. C’est ce qui empêche une mise à jour de
+    révoquer l’accès sur tous les déploiements configurés avant l’existence des
+    portées plus étroites. Une clé admin est aussi acceptée pour
+    <code>execute</code> et <code>worker</code>, pour qu’un opérateur puisse
+    piloter une exécution à la main. Ensemble, ces règles veulent dire que sur
+    un daemon qui ne détient qu’une clé d’ingestion et une clé de lecture :
+  </p>
+  <ul>
+    <li>la clé d’ingestion attache aussi des scores et des retours, démarre des exécutions et réclame des étapes, et</li>
+    <li>la clé de lecture supprime aussi des traces et, par le repli admin, démarre des exécutions et réclame des étapes.</li>
+  </ul>
+  <p>
+    Une clé de lecture est donc une clé de suppression tant que vous n’avez pas
+    défini <code>--admin-key</code>, et les deux clés atteignent la surface des
+    exécutions tant que vous n’avez pas défini <code>--execute-key</code>,
+    <code>--worker-key</code> et <code>--admin-key</code>. C’est sur cette base
+    qu’il faut distribuer les clés. Rien ne se restreint tout seul. Chaque
+    portée a son option, <code>--ingest-key</code>, <code>--read-key</code>,
+    <code>--write-key</code>, <code>--admin-key</code>,
+    <code>--execute-key</code> et <code>--worker-key</code>, et chacune prend
+    une liste ; toutes peuvent aussi être définies par projet dans le
+    fichier de configuration.
+  </p>
+
+  <h3>Sans clé, toutes les portées sont ouvertes</h3>
+  <p>
+    Ce défaut est délibéré : un premier essai sur un portable ne doit pas exiger
+    d’identifiant. C’est aussi ce qu’il y a de plus dangereux sur une instance
+    exposée, donc quand le daemon écoute sur une adresse autre que la boucle
+    locale, il journalise au démarrage un avertissement par surface ouverte à
+    un appelant qui ne devrait pas l’atteindre. Chaque avertissement nomme la
+    surface et les options qui la ferment. Lancez <code>mcpd config</code>
+    avant d’exposer un port : la commande affiche la configuration à
+    laquelle une invocation se résout, puis se termine. Elle porte une ligne
+    par portée, et elle nomme la liste sur laquelle une portée s’est
+    repliée :
+    <code>admin auth      key required (read keys)</code> vous dit que les clés
+    de lecture peuvent encore supprimer.
+    <a href={urlFor('/deploy', code)} class="link">Docker et Kubernetes</a>
+    montre la sortie.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="fermé avant d’être joignable"
+    command={'mcpd --ingest-key "$INGEST" --read-key "$READ"'}
+    primaryLabel="Options"
+    secondary={[
+      { label: 'Les six portées', command: 'mcpd --ingest-key "$I" --read-key "$R" --write-key "$W" --execute-key "$E" --worker-key "$K" --admin-key "$A"' },
+      { label: 'En environnement', command: 'MCPD_INGEST_KEYS=… MCPD_READ_KEYS=… mcpd' },
+      { label: 'Vérifier d’abord', command: 'mcpd config' },
+    ]}
+  />
+
+  <h3>Un projet est une frontière de cloisonnement</h3>
+  <p>
+    Une clé configurée au niveau supérieur donne accès à tous les projets. Une
+    clé inscrite à la place sous un projet nommé dans le bloc
+    <code>projects</code> du fichier de configuration donne accès à ce projet et
+    à aucun autre, et chaque projet tient sa propre liste par portée. Une même
+    clé peut apparaître sous plusieurs projets : c’est ainsi qu’une équipe
+    plateforme détient une clé couvrant ce qu’elle exploite sans détenir le
+    serveur entier.
+  </p>
+  <p>Sur le chemin d’écriture, la vérification se fait par signal, pas par requête :</p>
+  <ul>
+    <li>
+      Un lot peut nommer plusieurs projets. Les signaux qui nomment un projet
+      que la clé n’atteint pas sont écartés et signalés comme rejetés dans la
+      réponse, avec le motif : une flotte pointée sur le mauvais projet se
+      découvre donc dans la réponse qu’elle lit déjà. Le reste du lot est
+      stocké.
+    </li>
+  </ul>
+  <p>
+    Sur le chemin de lecture, chaque endpoint qui nomme un projet le compare aux
+    droits de la clé : traces, spans, logs, métriques, scores, retours,
+    analytics, datasets, expériences et journal d’audit. Les éléments d’un
+    dataset sont adressés par l’identifiant du dataset, et le daemon cherche
+    quel projet possède ce dataset puis y compare la clé : une clé qui ne peut
+    pas ouvrir le projet ne peut pas lire les cas qui en ont été capturés. Un
+    identifiant qui n’existe pas est refusé de la même façon qu’un identifiant
+    que la clé n’a pas le droit d’atteindre, donc l’endpoint ne peut pas servir
+    à tester quels identifiants existent. Trois endpoints ne prennent aucun projet et sont joignables par toute clé
+    qui détient la portée de lecture, quels que soient les projets auxquels
+    elle est limitée : la liste des projets, le catalogue des scorers et
+    l’ensemble des capacités du stockage
+    (<code>GET /v1/api/capabilities</code>). La liste des projets est filtrée
+    par l’autorisation de la clé, donc une clé limitée à un projet ne voit que
+    les projets qu’elle atteint. Sur une instance partagée, les noms de projet
+    sont souvent des noms d’équipes ou de clients. L’état des moniteurs et
+    l’état des objectifs y figuraient, jusqu’à ce qu’ils soient filtrés par
+    l’autorisation de projet de la clé, ce qu’ils auraient toujours dû
+    être : un moniteur nomme le projet qu’il surveille et porte le webhook
+    vers lequel il poste.
+    L’API ne nomme que l’hôte de ce webhook, car l’URL d’un webhook est souvent sa propre clé d’accès.
+  </p>
+
+  <h3>Un refus dit lequel des deux problèmes se pose</h3>
+  <p>
+    Une clé absente ou inconnue donne un 401, et une clé reconnue que cet
+    endpoint ou ce projet n’admet pas donne un 403. La distinction est
+    opérationnelle : un 401 vous envoie chercher une faute de frappe dans un
+    identifiant, un 403 vous dit que l’identifiant est bon et que les droits ne
+    le sont pas.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="quatre refus"
+    lines={[
+      { cmd: 'curl -sw "%{http_code} " "$MCPD/v1/api/traces?project=acme"' },
+      { out: '401  this endpoint needs an API key; send it as `Authorization: Bearer <key>`', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $TYPO"' },
+      { out: '401  that key is not one this daemon knows', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $INGEST"' },
+      { out: '403  that key is not valid for reading', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $BILLING_READ"' },
+      { out: '403  that key does not reach the project "acme"', tone: 'warn' },
+    ]}
+  />
+
+  <p>
+    Ce dernier message est le même que le projet existe ou non. Confirmer quels
+    noms de projets sont réels est une petite fuite, et sur un daemon partagé
+    ces noms sont ceux de vos clients.
+  </p>
+
+  <h3>Le journal d’audit</h3>
+  <p>
+    Restituer un payload stocké hors de mcpd est enregistré, et chaque
+    suppression l’est aussi : la question « qui a lu cette exécution ? » a donc
+    une réponse. Une ligne porte le moment, la clé, l’action, le projet, la
+    trace ou le dataset nommé, et le fait que la requête ait été servie ou
+    refusée. <code>GET /v1/api/audit</code> la relit, de la plus récente à la
+    plus ancienne, et exige la portée <code>admin</code>.
+  </p>
+  <p>
+    Dix-huit actions sont enregistrées : <code>get_trace</code>,
+    <code>list_spans</code>, <code>list_logs</code>,
+    <code>list_feedback</code>, <code>list_dataset_items</code>,
+    <code>capture_into_dataset</code>,
+    <code>read_trace_aspect_notes</code>, <code>get_theme</code>, <code>get_theme_flow</code>, <code>list_theme_history</code>, <code>list_theme_examples</code>,
+    <code>delete_trace</code>, <code>erase_subject</code>, et cinq sur les
+    exécutions durables : <code>list_runs</code>, <code>get_run</code>,
+    <code>list_run_events</code>, <code>get_step_cause</code> et
+    <code>cancel_run</code>. La frontière est le payload, pas la requête.
+    Lister des traces renvoie une projection de noms, de durées, de nombres de
+    tokens et de coûts, sans aucun prompt ni aucune complétion : ce n’est donc
+    pas enregistré. Ouvrir l’une de ces traces l’est, parce que c’est là qu’est
+    le texte. Lister des exécutions durables est enregistré, parce que chaque
+    exécution de la liste porte son entrée, sa sortie et son état tels qu’ils
+    ont été envoyés. Une lecture refusée d’une exécution est enregistrée sous le
+    projet qui possède l’exécution.
+  </p>
+  <p>
+    Les appels de worker ne sont pas enregistrés : réclamer une étape, déclarer
+    qu’elle a démarré, le heartbeat, le complete et le fail. Un bail porte bien
+    l’entrée de l’étape et les sorties des étapes qui la précèdent, mais la
+    boucle du worker réclame de nombreuses fois par minute, et une ligne par
+    réclamation noierait les lectures faites par une personne. Traitez la clé
+    <code>worker</code> comme une clé qui lit chaque payload des exécutions
+    qu’elle sert. Démarrer une exécution n’est pas enregistré non plus ; un
+    nouvel envoi d’une clé d’idempotence encore retenue reçoit en réponse
+    l’exécution que cette clé a démarrée, donc traitez la clé
+    <code>execute</code> comme une clé qui peut lire les exécutions qu’elle
+    démarre.
+  </p>
+  <p>Cinq propriétés qu’un auditeur doit connaître :</p>
+  <ul>
+    <li>
+      <strong>La clé n’est jamais écrite.</strong> Le principal est une
+      empreinte SHA-256 tronquée de la clé, qui distingue une clé d’une autre
+      sans stocker de vérificateur. Une requête sans clé sur un daemon ouvert
+      est enregistrée comme <code>anonymous</code>.
+    </li>
+    <li>
+      <strong>La personne vient de votre ingress, ou de nulle part.</strong>
+      mcpd n’a pas de comptes utilisateurs : seule, une ligne attribue une
+      action à une clé et non à un humain. Le champ <code>subject</code> porte
+      une identité quand <code>--trusted-identity-header</code> et
+      <code>--trusted-proxy-cidr</code> sont tous deux définis, et il est vide
+      sinon, ce qui est le cas par défaut. mcpd n’établit jamais cette identité
+      lui-même : il enregistre ce qu’une adresse que vous avez nommée a affirmé.
+    </li>
+    <li>
+      <strong>Un refus est enregistré aussi.</strong> La ligne est écrite avant
+      que le 403 ne soit renvoyé, parce qu’une tentative refusée sur le projet
+      d’une autre équipe est exactement la ligne pour laquelle un journal
+      d’audit existe. Lire le journal n’est pas enregistré : il grossirait sans
+      qu’aucun payload ne soit lu, et la ligne ne dirait rien que le
+      détenteur de la clé d’administration ne sache déjà.
+    </li>
+    <li>
+      <strong>Il enregistre quelle clé, et en option qui.</strong> La clé est
+      stockée sous forme d’empreinte tronquée, jamais la clé elle-même, donc
+      le journal n’est pas un endroit où s’accumulent des identifiants. Cela
+      répond à « une clé d’administration a supprimé ceci » et non à « quelle
+      personne l’a fait », parce que mcpd n’a pas de fournisseur d’identité. Si vous voulez la seconde réponse, donnez-lui l’en-tête que
+      votre ingress pose déjà et les adresses autorisées à le poser :
+      <code>--trusted-identity-header x-forwarded-user</code> avec
+      <code>--trusted-proxy-cidr 10.42.0.0/16</code>. Les deux moitiés sont
+      obligatoires. Un en-tête est une chaîne que peut envoyer quiconque atteint
+      le port, donc mcpd ne le lit que depuis une adresse que vous avez nommée ;
+      une requête venue d’ailleurs est servie normalement et sa ligne ne porte
+      aucun sujet, ce qui est la réponse honnête plutôt qu’une supposition. Sans
+      aucune des deux options, aucun sujet n’est jamais enregistré, et c’est le
+      comportement par défaut.
+    </li>
+    <li>
+      <strong>La conservation ne l’élague pas.</strong> La passe de conservation
+      retire les spans, les logs, les métriques, les traces, les scores, les
+      retours, les notes d’aspect et les exécutions durables terminées. Elle
+      laisse le journal d’audit : un journal qui expirerait en même temps que
+      les données qu’il décrit ne pourrait pas dire qui a lu les données
+      supprimées.
+    </li>
+    <li>
+      <strong>Il ne fait jamais échouer la requête qu’il décrit.</strong> Une
+      ligne qui ne peut pas être écrite est journalisée et comptée dans
+      <code>mcpd_audit_write_failures_total</code> sur <code>/metrics</code>, et
+      la lecture aboutit quand même. Un journal d’audit capable de faire tomber
+      le chemin de lecture est un risque pire que celui qu’il évite : surveillez
+      ce compteur plutôt que de compter sur l’échec des requêtes.
+    </li>
+  </ul>
+
+  <h3>Ce qu’aucune clé ne couvre</h3>
+  <ul>
+    <li>
+      <strong>L’interface.</strong> Le balisage servi à <code>/</code> l’est à
+      quiconque atteint le port. Les données derrière ne le sont pas : chaque
+      requête qu’elle émet passe par l’API de consultation et rencontre les
+      mêmes clés. Il n’y a pas d’écran de connexion dans le daemon.
+    </li>
+    <li>
+      <strong>Les sondes et <code>/metrics</code>.</strong> Sans
+      authentification, délibérément, parce qu’un kubelet et un collecteur ne
+      peuvent pas porter de clé. Ils rapportent l’état, la version, la durée de
+      fonctionnement, le nom du backend de stockage et des compteurs, jamais des
+      payloads.
+    </li>
+    <li>
+      <strong>L’origine.</strong> L’API de consultation et les sondes répondent
+      avec <code>Access-Control-Allow-Origin: *</code>, donc une page de
+      navigateur, quelle que soit son origine, peut les appeler. mcpd n’utilise
+      ni cookie ni identifiant ambiant, si bien qu’une telle page doit quand
+      même détenir une clé : une politique d’origine permissive ne lui en
+      fournit pas.
+    </li>
+  </ul>
+
+  <h2>Ce que le masquage fait, et ce qu’il ne peut pas faire</h2>
+  <p>
+    Le masquage est actif par défaut et s’exécute avant l’écriture, en troisième
+    étape du pipeline d’ingestion. Une valeur qu’une règle reconnaît
+    n’atteint jamais la base de données, ce qui est une garantie différente de
+    celle d’une valeur supprimée après coup, et c’est cette différence qu’un
+    auditeur interroge. Ce qu’il ne peut pas faire, c’est garder les octets
+    hors du réseau : ils l’ont déjà traversé quand la règle s’exécute. Pour
+    cela, les SDK portent <code>MCPD_CAPTURE_PAYLOADS=false</code>, qui retire
+    <code>input</code> et <code>output</code> avant qu’un span ne soit mis en
+    file, et laisse tout le reste dessus.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    Une règle est un ensemble de sous-chaînes en minuscules et un mode. Une clé
+    correspond quand son nom, mis en minuscules, contient l’une d’elles. Les
+    valeurs reconnues sont remplacées, tronquées, hachées par une empreinte à
+    clé, ou supprimées. Quand une clé reconnue porte un objet, tout ce qui se
+    trouve dessous est masqué aussi, quel que soit le nom des clés filles, et
+    un secret envoyé comme nombre JSON est traité comme un secret
+    envoyé comme chaîne. La table complète des règles est sur
+    <a href={urlFor('/docs/privacy', code)} class="link">Masquage et conservation</a>.
+  </p>
+  <p>
+    Voici maintenant la limite, celle qu’une revue demandera et qu’aucune
+    configuration ne supprime. <strong>Les règles reconnaissent des noms de
+    champs, pas la forme d’une valeur.</strong> Une clé d’API qu’un utilisateur
+    a collée au milieu d’une phrase, et qui arrive sous un champ nommé
+    <code>content</code> ou <code>question</code>, n’est reconnue par rien dans
+    le pipeline. Le nom du champ est innocent, donc la valeur est stockée en
+    entier.
+  </p>
+  <p>Le masquage arrête donc une chose précise :</p>
+  <ul>
+    <li>Il arrête la capture structurée des secrets et des identifiants, là où un secret arrive dans un champ nommé d’après ce qu’il est.</li>
+    <li>Il n’analyse pas le texte libre, et ce n’est pas un classificateur de contenu.</li>
+    <li>Il ne détecte pas un secret à sa forme ni à son entropie.</li>
+    <li>Il ne touche ni au nom d’un span ni au message d’un enregistrement de log. Ce sont des identifiants qui servent au regroupement plutôt que des payloads, et les réécrire casserait ce regroupement. Ne construisez pas un nom de span à partir de l’adresse e-mail d’un client.</li>
+    <li>Il ne touche pas au stockage des exécutions. Les payloads d’une exécution durable sont ses données de travail et sont gardés tels qu’ils ont été envoyés ; seuls les spans qu’une exécution écrit dans le stockage des traces sont masqués.</li>
+  </ul>
+  <p>
+    Un contrôle travaille bien sur la forme, et c’est une détection après coup
+    plutôt qu’une prévention : le scorer intégré
+    <code>no_leaked_secret</code> pénalise une exécution dont la
+    <em>réponse</em> porte un jeton qui ressemble à un secret, par préfixe connu
+    ou par une longue suite alphanumérique à casse mixte. Il note une exécution
+    déjà stockée. Il ne supprime rien, il ne lit pas le prompt, et il ne
+    s’exécute que si vous le demandez. Voyez-le comme un moyen d’apprendre que
+    cela s’est produit, pas comme une deuxième ligne de masquage.
+  </p>
+  <p>
+    Deux bornes s’appliquent qu’une règle ait reconnu quelque chose ou non.
+    Toute chaîne de plus de 128 KiB est tronquée sur une frontière de caractère,
+    avec un marqueur, et le parcours s’arrête à une profondeur de 32. Les deux
+    existent pour qu’un seul document emballé ne décide pas de la taille de
+    votre base ni ne sature un CPU.
+  </p>
+  <p>
+    <code>--no-redact</code> désactive tout le pipeline, ce qui n’a de sens que
+    si quelque chose en amont masque déjà. Là où le masquage hache un
+    identifiant, définissez <code>--redact-key</code> : la clé intégrée est une
+    constante dans du code publié, et les identifiants viennent de petits
+    espaces, donc une empreinte sans clé se retrouve en devinant les candidats.
+  </p>
+
+  <h2>Rétention et effacement</h2>
+  <p>
+    <code>--retention-days</code> supprime les signaux plus vieux que ce nombre
+    de jours. Omettez l’option et rien n’est jamais supprimé, ce qui est le bon
+    défaut : un outil qui jetterait sans bruit les traces du mois dernier se
+    ferait découvrir au pire moment.
+  </p>
+  <p>
+    La passe s’exécute sur un minuteur horaire dans le daemon, jamais dans la
+    requête d’un utilisateur. Elle couvre chaque projet nommé dans le bloc
+    <code>projects</code>, chacun avec son propre <code>retention_days</code>
+    lorsqu’il en définit un et avec la valeur globale sinon, plus le projet par
+    défaut. Un projet sans fenêtre nulle part n’est pas élagué du tout.
+  </p>
+  <p>
+    Pour une demande concernant une personne,
+    <code>DELETE /v1/api/subjects/{'{user_id}'}?project=…</code> retire toutes
+    les exécutions enregistrées au nom de cette personne dans le projet, avec
+    les spans, les logs, les métriques, les scores et les retours qui y sont
+    attachés, et répond par un compte par signal. L’identifiant est haché avec
+    la même clé avant d’être comparé, donc la demande fonctionne sur des
+    identifiants hachés sans que vous ayez à en hacher un vous-même, et la
+    réponse indique combien d’identifiants stockés étaient sous une forme que la
+    demande n’a pas pu reconnaître. Pour retirer une exécution plutôt qu’une
+    personne, <code>DELETE /v1/api/traces/{'{trace_id}'}</code> la retire avec
+    tout ce qui y est attaché, en une seule transaction. Les deux exigent la
+    portée <code>admin</code> et les deux sont enregistrées dans le journal
+    d’audit.
+    <a href={urlFor('/docs/privacy', code)} class="link">Masquage et conservation</a>
+    détaille la demande d’effacement et ce qu’elle peut ou ne peut pas promettre.
+  </p>
+
+  <h2>Ce que mcpd ne fait pas</h2>
+  <p>
+    Rien de ce qui suit n’existe dans cette version. Ces manques sont listés
+    parce qu’une revue qui les découvre plus tard est un plus mauvais résultat
+    qu’une revue qui les lit ici.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Absent de mcpd</th><th>Que faire à la place</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>La terminaison TLS.</strong> mcpd parle du HTTP en clair. Les prompts et les complétions traversent ce lien en entier.</td>
+        <td>Terminez le TLS sur votre ingress ou dans votre mesh, et gardez le port du daemon hors de tout réseau non fiable.</td>
+      </tr>
+      <tr>
+        <td><strong>Le SSO.</strong> Aucune intégration avec un fournisseur d’identité, pas d’OIDC, pas de SAML, pas d’écran de connexion.</td>
+        <td>Placez l’interface derrière le proxy d’identité que vous exploitez déjà. L’identité d’une personne est celle que ce proxy établit.</td>
+      </tr>
+      <tr>
+        <td><strong>SCIM.</strong> Aucun provisionnement d’utilisateurs ni de groupes, parce que mcpd n’a pas la notion de compte utilisateur.</td>
+        <td>Provisionnez au niveau du proxy. Dans mcpd, l’unité est une clé, ajoutée à une liste ou retirée d’une liste.</td>
+      </tr>
+      <tr>
+        <td><strong>Des rôles au-delà des six portées.</strong> L’autorisation est une portée et une liste de projets. Il n’y a pas de rôle par endpoint et pas de groupe.</td>
+        <td>Séparez par clé et par projet. Si une distinction compte, faites-en un projet.</td>
+      </tr>
+      <tr>
+        <td><strong>Établir qui est une personne.</strong> Le journal d’audit peut enregistrer un sujet, mais mcpd ne détermine jamais qui appelle. Il enregistre ce que votre ingress a affirmé, et seulement depuis une adresse que vous avez nommée.</td>
+        <td>Définissez <code>--trusted-identity-header</code> et <code>--trusted-proxy-cidr</code> pour que l’en-tête que votre proxy pose déjà atteigne la ligne d’audit. Sans eux, une ligne attribue une action à une clé, et émettre une clé par équipe resserre l’empreinte.</td>
+      </tr>
+      <tr>
+        <td><strong>Le cycle de vie des clés.</strong> Les clés sont des listes lues au démarrage. Il n’y a pas d’expiration, pas de calendrier de rotation et pas de quota par clé. Le plafond qui existe est par projet : <code>--quota-per-minute</code> borne le nombre de signaux qu’un projet peut stocker en une minute, quelle que soit la clé qui les a envoyés.</td>
+        <td>Configurez plusieurs clés, une par équipe ou par flotte, pour que révoquer l’une soit une modification et un redémarrage plutôt qu’un redéploiement de tout ce qui émet un span. Faites d’une flotte son propre projet si elle a besoin de son propre plafond.</td>
+      </tr>
+      <tr>
+        <td><strong>Le chiffrement au repos.</strong> mcpd écrit des fichiers en clair ou des lignes en clair.</td>
+        <td>Chiffrez le volume, ou utilisez une base qui le fait.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Signaler quelque chose</h2>
+  <p>
+    Les vulnérabilités présumées vont à <strong>hi@mcpd.sh</strong> avec
+    « Security » en objet, pas dans une issue publique. Le fichier
+    <code>SECURITY.md</code> du dépôt indique le périmètre et ce que contient un
+    bon rapport. Une instance sans authentification que quelqu’un a choisi
+    d’exposer est un comportement par défaut documenté, pas une vulnérabilité.
+    Tout ce qui passe outre une clé qui <em>était</em> configurée, outre une
+    règle de masquage configurée, ou par-dessus une frontière de projet en est
+    une.
+  </p>
+
+  <h2>La suite</h2>
+  <ul>
+    <li>La table des règles, les quatre modes et le hachage à clé : <a href={urlFor('/docs/privacy', code)} class="link">Masquage et conservation</a>.</li>
+    <li>Ce qu’il faut régler avant qu’un port soit joignable : <a href={urlFor('/deploy', code)} class="link">Docker et Kubernetes</a>.</li>
+    <li>Toutes les options et variables d’environnement : <a href={urlFor('/docs/configuration', code)} class="link">Configuration</a>.</li>
+    <li>Joindre une instance déployée depuis du code ou depuis un agent : <a href={urlFor('/docs/integrating', code)} class="link">Intégrer</a>.</li>
+  </ul>
+</Doc>

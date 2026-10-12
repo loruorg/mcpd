@@ -1,0 +1,60 @@
+# Who may reach mcpd. A template, not part of the manifests beside it.
+#
+# The extension is .example on purpose. `kubectl apply -f deploy/k8s/` applies
+# every manifest in this directory, and a NetworkPolicy that names a namespace
+# you do not have cuts mcpd off from everything with no error to read. Edit the
+# selectors below, save it as networkpolicy.yaml, and apply that file by name.
+#
+# Read this before you rely on it, because the honest answer is narrower than
+# the question usually asked. "Only these namespaces may reach ingest" is not
+# something a NetworkPolicy can say here. mcpd serves OTLP ingest, the query
+# API, the operator interface and /metrics on ONE port, and a policy selects
+# pods and ports, never paths. So this gates the whole daemon: whatever you let
+# in to write traces can also call /v1/api and read stored prompts and
+# completions. The read key is what holds those two apart, not this file.
+#
+# What it does buy is still worth having. With no policy in the namespace, every
+# pod in the cluster can open a connection to mcpd. With this, only the sources
+# named below can.
+#
+# One trap before you apply it: some CNI plugins enforce policy on traffic
+# arriving from the node, and the kubelet's liveness and readiness probes arrive
+# that way. On those clusters, add the node CIDR under ipBlock or the pod never
+# becomes ready and the rollout stalls.
+#
+# There is no egress rule here, so egress stays unrestricted. Adding one without
+# meaning to breaks four things quietly, because mcpd logs a warning and carries
+# on: alert webhooks, forwarding to another OTLP endpoint, the judge's model
+# endpoint, and an external Postgres or ClickHouse.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcpd
+  labels:
+    app.kubernetes.io/name: mcpd
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mcpd
+  # Ingress only. Naming Egress here with no egress rule below would deny every
+  # outbound connection, including DNS.
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # A whole namespace. Kubernetes sets kubernetes.io/metadata.name on
+        # every namespace itself, so this needs no labelling first.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: REPLACE_WITH_YOUR_AGENT_NAMESPACE
+        # Pods in mcpd's own namespace. A podSelector with no namespaceSelector
+        # beside it never reaches across a namespace boundary.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: REPLACE_WITH_YOUR_AGENT_FLEET
+      ports:
+        # The container port, not a Service port. A policy is enforced at the
+        # pod, so a Service in front of it makes no difference here. This has to
+        # match containerPort in deployment.yaml.
+        - protocol: TCP
+          port: 4317

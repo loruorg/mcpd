@@ -1,0 +1,315 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Pruebas de regresión"
+  description="Convierte una ejecución de producción que salió mal en un caso de prueba permanente, pasa los evaluadores integrados sobre ejecuciones guardadas y compara dos versiones con sus tamaños de muestra."
+  lede="La ejecución que se rompió el martes pasa a ser el caso que toda versión posterior tiene que aprobar."
+  og="docs"
+>
+  <h2>El ciclo que esto existe para cerrar</h2>
+  <p>
+    Un agente falla en una pregunta real. Alguien lo reproduce a mano, cambia un
+    prompt, y parece que mejora. Tres semanas después vuelve a fallar en la
+    misma pregunta, porque nadie guardó nada.
+  </p>
+  <p>
+    Un dataset sí lo guarda. Captura la ejecución fallida y deja de ser
+    una anécdota: pasa a ser un caso con una entrada, una respuesta esperada
+    cuando la tienes, y un puntero a la traza de la que salió. Toda versión
+    posterior se ejecuta contra él.
+  </p>
+
+  <h2>Capturar una ejecución</h2>
+  <p>
+    Busca la ejecución en la interfaz o mediante la API, y luego entrega su
+    id de traza al dataset.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="capturar una ejecución fallida como caso"
+    command={`curl -X POST localhost:4317/v1/api/datasets/$DATASET/capture \\
+  -H 'content-type: application/json' \\
+  -d '{"trace_ids": ["b3d9e71a4c0f428eb6a5d2317f90c684"]}'`}
+  />
+
+  <p>
+    El caso capturado conserva <code>source_trace_id</code>, así que meses
+    después puedes abrir la ejecución que lo motivó y leer lo que ocurrió de
+    verdad en vez de deducirlo de la entrada.
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <h2>La respuesta de la propia ejecución no es la respuesta esperada</h2>
+  <p>
+    <code>use_output_as_expected</code> está desactivado por defecto, y ese valor
+    por defecto es lo importante. Las ejecuciones que vale la pena capturar
+    suelen ser las que salieron mal, y guardar una respuesta equivocada como
+    referencia consagraría el fallo: a partir de ahí, cada versión posterior se
+    mediría por su capacidad de reproducirlo.
+  </p>
+  <p>
+    Actívalo cuando captures ejecuciones que salieron bien, para fijar un
+    comportamiento que ya te gusta. Déjalo desactivado, y escribe tú la
+    respuesta esperada, cuando captures un fallo.
+  </p>
+
+  <h2>Los evaluadores integrados</h2>
+  <p>
+    mcpd trae trece evaluadores deterministas: código corriente que lee una
+    ejecución guardada y devuelve un número. No cuestan nada, nunca llaman a un
+    modelo, y dan la misma respuesta dos veces, que es la propiedad que necesita
+    una prueba de regresión y que un modelo juez no tiene.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Evaluador</th><th>Pasa cuando</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>answered</code></td><td>La ejecución produjo una respuesta no vacía.</td></tr>
+      <tr><td><code>no_errors</code></td><td>Ningún span de la ejecución falló.</td></tr>
+      <tr><td><code>exact_match</code></td><td>La respuesta es igual a la esperada.</td></tr>
+      <tr><td><code>contains</code></td><td>La respuesta contiene una cadena obligatoria.</td></tr>
+      <tr><td><code>json_valid</code></td><td>La respuesta se analiza como JSON.</td></tr>
+      <tr><td><code>latency_budget</code></td><td>La ejecución terminó dentro de un presupuesto en milisegundos.</td></tr>
+      <tr><td><code>cost_budget</code></td><td>La ejecución no costó más de una cantidad fijada.</td></tr>
+      <tr><td><code>no_tool_loop</code></td><td>Ninguna herramienta se llamó dos veces con la misma entrada.</td></tr>
+      <tr><td><code>tool_efficiency</code></td><td>La ejecución se mantuvo dentro de un presupuesto de llamadas a herramientas.</td></tr>
+      <tr><td><code>not_a_refusal</code></td><td>La respuesta no es una negativa ni una disculpa.</td></tr>
+      <tr><td><code>no_leaked_secret</code></td><td>No aparece ninguna clave, token ni credencial en la respuesta.</td></tr>
+      <tr><td><code>span_present</code></td><td>La ejecución registró un span del tipo o el nombre exigido.</td></tr>
+      <tr><td><code>tool_succeeded</code></td><td>La herramienta exigida se ejecutó y al menos una llamada terminó bien.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>GET /v1/api/scorers</code> devuelve esa misma lista con una marca
+    <code>needs_config</code>. Un evaluador que necesita una respuesta esperada y
+    no la recibe se abstiene en lugar de adivinar, y esa abstención se informa.
+  </p>
+
+  <h2>Cuando quien califica es un modelo</h2>
+  <p>
+    Hay preguntas que ningún código determinista responde. Si una respuesta
+    atendió de verdad a la pregunta, si un resumen conservó el sentido, si el
+    tono era el correcto: eso necesita un lector, y un modelo es el lector
+    barato.
+  </p>
+  <p>
+    La puntuación con juez está apagada hasta que la configuras, y un evaluador
+    con juez no se ejecuta nunca si no lo nombras. Los dos valores por defecto
+    existen por la misma razón: calificar gasta dinero en cada ejecución que lee,
+    y una función que hace eso en silencio es una función de la que te enteras
+    por una factura.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "judge": {
+    "endpoint": "http://localhost:11434/v1",
+    "model": "qwen2.5:14b",
+    "api_key": "",
+    "timeout_seconds": 30,
+    "criteria": {
+      "answer_relevance": "Does the answer address the question that was asked?",
+      "no_hedging": "Does the answer commit, rather than hedge?"
+    }
+  }
+}`}</code></pre>
+
+  <p>
+    La solicitud tiene la forma de chat-completions de OpenAI, y eso no es una
+    preferencia por un proveedor: Ollama, vLLM, llama.cpp, LM Studio, OpenRouter
+    y los proveedores alojados la aceptan todos, así que la misma configuración
+    llega a un modelo en tu portátil y a una pasarela en producción. Deja
+    <code>api_key</code> vacío para un modelo local que no la pida. La
+    temperatura es cero, porque un juez que responde distinto cada vez no se
+    puede comparar consigo mismo, que es lo único para lo que sirven las
+    puntuaciones.
+  </p>
+  <p>
+    Los criterios se configuran en vez de pasarse en cada solicitud. El
+    identificador de un evaluador queda guardado en cada puntuación que produce y
+    es aquello por lo que agrupa una comparación posterior, así que dejar que
+    cada llamada inventara a la vez el identificador y la pregunta construiría
+    una columna en la que nadie puede confiar.
+  </p>
+  <p>
+    Los criterios configurados no aparecen en <code>GET /v1/api/scorers</code>.
+    Ese endpoint lista los trece evaluadores integrados y nada más, así que un
+    cliente que arme su menú de evaluadores a partir de ahí no ofrecerá tus
+    criterios. El único sitio donde el daemon te los nombra de vuelta es el error
+    que recibes por un identificador de evaluador desconocido, que lista juntos
+    los integrados y los criterios configurados.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="ejecutar un evaluador con juez sobre la ejecución más reciente"
+    command={`curl -X POST localhost:4317/v1/api/score \\
+  -H 'content-type: application/json' \\
+  -d '{"limit": 1, "scorers": ["answer_relevance"]}'`}
+  />
+
+  <p>
+    <code>timeout_seconds</code> es cuánto puede tardar una llamada de
+    evaluación, desde que conecta hasta el último byte de la respuesta: 30 por
+    defecto, de 1 a 300. Si una llamada se pasa de ese tiempo, el evaluador se
+    abstiene y nombra la clave, y mcpd lee como mucho 1 MiB de una respuesta.
+  </p>
+  <p>
+    Cada evaluador con juez es una llamada al modelo por ejecución, y la
+    solicitud tiene que terminar dentro de
+    <code>--request-timeout-seconds</code>. Así que una solicitud evalúa como
+    mucho las ejecuciones que caben en ese plazo si cada llamada tarda todo su
+    <code>timeout_seconds</code>. Con los valores por defecto, 30 y 30, y un
+    evaluador con juez, eso es una ejecución. Una solicitud que pide más, en
+    <code>trace_ids</code> o en <code>limit</code>, se rechaza con un 400 que
+    nombra el tope, antes de llamar a ningún modelo. Si omites
+    <code>limit</code>, la solicitud evalúa tantas ejecuciones recientes como quepan. Sube
+    <code>--request-timeout-seconds</code> para evaluar más en una solicitud.
+    Cada puntuación con juez se guarda en cuanto el modelo responde, así que una
+    solicitud cortada a medias conserva las que terminó.
+  </p>
+
+  <h3>Se abstiene en lugar de adivinar</h3>
+  <p>
+    Un juez que devuelve un número que no dedujo es peor que ningún juez, porque
+    parece evidencia. Por eso cada uno de estos casos se informa en
+    <code>skipped</code> con su motivo, y ninguno produce una puntuación.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Qué pasó</th><th>Qué hace mcpd</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>La ejecución no registró ninguna respuesta</td>
+        <td>Se abstiene. Una ejecución sin respuesta no ha puntuado mal en relevancia: no se ha medido.</td>
+      </tr>
+      <tr>
+        <td>El modelo respondió en prosa</td>
+        <td>Se abstiene, y cita la respuesta. Un JSON envuelto en un bloque de código o en una frase sí se lee.</td>
+      </tr>
+      <tr>
+        <td>El modelo respondió fuera de la escala</td>
+        <td>Se abstiene. Un siete en una escala de uno no es un nueve décimos, y recortarlo sería inventar un número.</td>
+      </tr>
+      <tr>
+        <td>No se pudo contactar con el modelo</td>
+        <td>Se abstiene, con el estado y el cuerpo. Un límite de tasa es un motivo, no un cero.</td>
+      </tr>
+      <tr>
+        <td>La respuesta pasaba de 1 MiB</td>
+        <td>Se abstiene sin leer el resto. Un veredicto ocupa unos cientos de bytes, así que una respuesta de ese tamaño no lo es.</td>
+      </tr>
+      <tr>
+        <td>El plazo de la solicitud no dejó tiempo para la llamada</td>
+        <td>Se niega sin llamar al modelo. La pasada responde con las puntuaciones que terminó, dentro del plazo, en vez de con un 503.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Toda puntuación con juez guarda el modelo como su
+    <code>scorer_version</code>. Dos puntuaciones de dos jueces distintos no son
+    comparables, y ese campo es lo que lo dice en el registro.
+  </p>
+
+  <h2>Puntuar ocurre a posteriori</h2>
+  <p>
+    <code>POST /v1/api/score</code> pasa los evaluadores sobre ejecuciones que ya
+    están guardadas. Nada se evalúa en línea. Una evaluación en la ruta de la
+    solicitud suma su latencia a aquello que juzga, y una evaluación que lanza un
+    error nunca debería tumbar la solicitud de un usuario.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="puntuar las últimas cien ejecuciones"
+    command={`curl -X POST localhost:4317/v1/api/score \\
+  -H 'content-type: application/json' \\
+  -d '{"project": "support-desk", "limit": 100, "config": {"max_ms": 4000}}'`}
+  />
+
+  <p>
+    La respuesta trae las puntuaciones que escribió y, por separado, cada
+    evaluador que se abstuvo con el motivo por el que lo hizo. Un evaluador que
+    no pudo responder es más interesante que uno que devolvió un número, así que
+    mcpd nunca se lo traga. El techo de ingesta del proyecto también llega hasta
+    esta puerta: una puntuación calculada por la pasada que llevaría al proyecto
+    por encima de <code>--quota-per-minute</code> no se guarda, y aparece en
+    <code>skipped</code> diciéndolo, en vez de escribirse pasando del techo o
+    tirarse en silencio.
+  </p>
+  <p>
+    Envía <code>"dry_run": true</code> para ver qué produciría una pasada sin
+    guardar nada.
+  </p>
+  <p>
+    Qué ejecuciones lee una pasada lo deciden <code>trace_ids</code>,
+    <code>from</code> y <code>limit</code>. Nombra las ejecuciones en
+    <code>trace_ids</code> para puntuar exactamente esas. Déjalo vacío y la
+    pasada toma las <code>limit</code> ejecuciones más recientes del proyecto, de
+    más nueva a más antigua, y <code>from</code> acota esa página: una pasada
+    enviada con <code>from</code> lee solo las ejecuciones que empezaron en ese
+    momento o después, que es como puntuas todo lo ocurrido desde un despliegue
+    sin listar identificadores.
+  </p>
+
+  <h2>Comparar dos versiones</h2>
+  <p>
+    Registra un experimento por cada versión que quieras comparar, etiqueta sus
+    puntuaciones con el identificador de ese experimento, y pídele a mcpd la
+    diferencia.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="¿ayudó el prompt nuevo?"
+    command="curl 'localhost:4317/v1/api/experiments/compare?baseline=v3&candidate=v4'"
+  />
+
+  <p>
+    La respuesta es una diferencia por evaluador con el tamaño de muestra de cada
+    lado, y una marca <code>decidable</code>. Por debajo de veinte observaciones
+    mcpd dice que la comparación no se puede decidir, en vez de informar de un
+    movimiento.
+  </p>
+  <p>
+    Es una regla deliberadamente tosca, no una prueba de significación. El fallo
+    que evita es el habitual: una media que se movió sobre cuatro ejecuciones,
+    impresa sin su recuento, leída como un resultado y llevada a producción.
+    Imprimir los recuentos junto a la diferencia es lo que impide confundir el
+    ruido con un hallazgo.
+  </p>
+
+  <h2>Dónde se ejecuta esto</h2>
+  <p>
+    Todo esto es la API HTTP, así que el ciclo pertenece a CI: captura los fallos
+    según ocurren, puntúa las ejecuciones que produce tu suite de pruebas,
+    registra la compilación como un experimento, y haz fallar el trabajo cuando
+    <code>regressed</code> vuelva como verdadero en una comparación decidible.
+  </p>
+
+  <h2>A continuación</h2>
+  <ul>
+    <li>
+      Las dos señales junto a las que vive una puntuación:
+      <a href={urlFor('/docs/evaluation', code)} class="link">Puntuaciones y feedback</a>.
+    </li>
+    <li>
+      Vigilar la media de un evaluador en producción:
+      <a href={urlFor('/docs/alerting', code)} class="link">Monitores y alertas</a>.
+    </li>
+    <li>
+      Todos los endpoints y campos:
+      <a href={urlFor('/docs/reference/api', code)} class="link">API HTTP</a>.
+    </li>
+  </ul>
+</Doc>

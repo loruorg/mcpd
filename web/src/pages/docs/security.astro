@@ -1,0 +1,608 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+---
+
+<Doc
+  title="Security"
+  description="What a deployed mcpd stores, what leaves the machine and under which setting, how keys, scopes and project tenancy work, the limits of redaction, and the controls mcpd does not have."
+  lede="One page to answer a review. What is kept, what is sent anywhere else, who can read it, and the controls mcpd does not have."
+  og="docs"
+>
+  <p>
+    Everything below is drawn from the daemon's own source and from
+    <code>spec/mcpd.spec.json</code>, which is what the API is generated from.
+    Where a control does not exist, this page says so rather than leaving the
+    gap for you to find in a questionnaire.
+  </p>
+
+  <h2>What mcpd stores</h2>
+  <p>
+    mcpd stores the text of your agent's conversations. That is the point of it,
+    and a review should start from it. A span of kind
+    <code>model_generation</code> carries <code>input</code> and
+    <code>output</code>: the exact prompt sent to the model and the exact text
+    that came back. For most users that is the most sensitive data they hold.
+  </p>
+  <p>Across the six signals, the stored free-form fields are:</p>
+  <table>
+    <thead>
+      <tr><th>Signal</th><th>Content it holds</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Spans</td>
+        <td><code>input</code>, <code>output</code>, <code>attributes</code>, <code>metadata</code>, and the error message</td>
+      </tr>
+      <tr><td>Logs</td><td>the message, and the structured <code>fields</code></td></tr>
+      <tr><td>Metrics</td><td><code>labels</code></td></tr>
+      <tr><td>Scores</td><td><code>reason</code>, and <code>metadata</code></td></tr>
+      <tr><td>Feedback</td><td>the free-text <code>comment</code>, and <code>metadata</code></td></tr>
+      <tr><td>Aspect notes</td><td>the sentence in <code>text</code></td></tr>
+    </tbody>
+  </table>
+  <p>
+    Alongside the payload, every signal carries correlation fields that tie a run
+    to the rest of your system: project, environment, service name and version,
+    session, thread, user, resource, run, request, experiment and release.
+    <code>user_id</code> is hashed on the way in unless you turn redaction off.
+    The others are stored as sent, so treat any of them as a field a person
+    could be identified by if you put an identity in one.
+  </p>
+  <p>
+    Token counts and a cost figure are computed at ingest and stored with the
+    run. Nothing about the model call is fetched from a provider.
+  </p>
+
+  <h3>Where it is written</h3>
+  <p>
+    One backend, chosen at start-up. The default is an embedded SQLite file at
+    <code>./mcpd.db</code>, set with <code>--data</code>. The full-text index
+    lives in the same file, so the store is one file to back up and one file to
+    protect. <code>--postgres-url</code> or <code>--clickhouse-url</code> puts
+    the data in a database you run instead.
+  </p>
+  <p>
+    Durable runs, when they are on, live in a second SQLite file beside the
+    first, whatever the trace store is. It keeps every run's input, state,
+    output and correlation, and every step's input, output and error, exactly
+    as they were sent: not redacted, with <code>user_id</code> unhashed,
+    because a later step reads them back and a rewritten value would change
+    what the run does. The spans a run writes into the trace store are
+    redacted like any other. Protect the run file as you protect the trace
+    store, or more so. Retention and erasure by subject both reach it, for
+    runs that have ended; see <a href="/docs/runs#storage" class="link">Runs</a>.
+  </p>
+  <p>
+    mcpd does not encrypt what it writes. Encryption at rest is the volume's job
+    on the embedded store and the database's job on the other two.
+  </p>
+
+  <h2>What leaves the machine</h2>
+  <p>
+    With a default configuration, nothing. The daemon makes outbound requests in
+    exactly four places, and every one of them is off until you configure it.
+    There is no update check, no usage reporting and no telemetry of any kind.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Destination</th><th>What is sent</th><th>Off unless</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Storage backend</td>
+        <td>Everything mcpd stores, over your own connection.</td>
+        <td>You set <code>--postgres-url</code> or <code>--clickhouse-url</code>. The default store is a local file and needs no network at all.</td>
+      </tr>
+      <tr>
+        <td>Forwarding</td>
+        <td>
+          Every stored span, re-emitted as OTLP JSON to
+          <code>&#123;endpoint&#125;/v1/traces</code>. This includes the payload:
+          <code>input</code> and <code>output</code> go out as the
+          <code>input.value</code> and <code>output.value</code> attributes,
+          each capped at 32 KiB. Values already redacted stay redacted, and a
+          hashed <code>user_id</code> is forwarded as the hash.
+        </td>
+        <td>You set <code>--forward-endpoint</code>, or a <code>forward</code> block in the config file.</td>
+      </tr>
+      <tr>
+        <td>Monitor and objective webhooks</td>
+        <td>
+          A fixed JSON body: the monitor or objective id and name, the project,
+          the condition, what it watches, the threshold, the reading, the sample
+          count, a one-line detail and a timestamp. No prompt or completion text
+          is in it.
+        </td>
+        <td>A monitor or objective in the config file names a <code>webhook</code>.</td>
+      </tr>
+      <tr>
+        <td>Judge model</td>
+        <td>
+          The criterion, plus the run's question and its answer, each truncated
+          at 4,000 characters, POSTed to
+          <code>&#123;endpoint&#125;/chat/completions</code>. This is the one path
+          that sends stored prompt and completion text to a model provider.
+        </td>
+        <td>A <code>judge</code> block in the config file names an endpoint, a model and at least one criterion, and a caller asks for that scorer by name.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    The interface the binary serves at <code>/</code> is compiled into it. Its
+    fonts, styles and scripts come from the same origin, and it makes no
+    third-party requests.
+  </p>
+
+  <h2>Keys and scopes</h2>
+  <p>
+    Authentication is API keys. By default there is no account, no session and
+    no login; <code>--signup</code> adds them, as described below. A
+    key is presented as <code>Authorization: Bearer …</code> or in the
+    <code>X-Mcpd-Key</code> header, and both sides are hashed with SHA-256
+    before they are compared, so neither the length of the configured key nor
+    the position of the first wrong character is observable from timing.
+  </p>
+  <p>There are six scopes, in order of the reach they grant:</p>
+  <table>
+    <thead>
+      <tr><th>Scope</th><th>What it permits</th><th>Why it is its own scope</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ingest</code></td>
+        <td>Write signals. Read nothing.</td>
+        <td>This key lives in every container that emits a span, including the ones running third-party code. It must not also open every stored prompt.</td>
+      </tr>
+      <tr>
+        <td><code>read</code></td>
+        <td>Read stored signals.</td>
+        <td>Reading is where the prompts are.</td>
+      </tr>
+      <tr>
+        <td><code>write</code></td>
+        <td>Change stored data: scores, feedback, datasets, experiments and acknowledgements.</td>
+        <td>Several of those handlers read a payload on the way through. Capturing a production run into a dataset reads that run's input and output, which is more than emitting a span.</td>
+      </tr>
+      <tr>
+        <td><code>execute</code></td>
+        <td>Start, cancel and signal runs, and publish events to them.</td>
+        <td>Starting a run spends money and reaches into your systems. A key that may record a score should not also be able to launch work.</td>
+      </tr>
+      <tr>
+        <td><code>worker</code></td>
+        <td>Claim steps and report what happened to them.</td>
+        <td>This is the key inside the process that runs step bodies. A claim hands back the step's input and every earlier step's output, so it reads payloads, and it should not also be able to start runs or change stored data.</td>
+      </tr>
+      <tr>
+        <td><code>admin</code></td>
+        <td>Destroy data, and read the audit log.</td>
+        <td>Deleting is not reading.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Which scope an endpoint takes is declared per endpoint in the specification
+    and published in the generated
+    <a href="/docs/reference/api" class="link">HTTP API</a> reference, so there
+    is one answer to "what does this endpoint need" rather than one per document.
+  </p>
+
+  <h3>Accounts, with --signup</h3>
+  <p>
+    With <code>--signup</code>, anyone may create an account with an email and a
+    password. Each account owns one project with a random name. Logging in gives
+    a session token that holds every scope on that project, and the account can
+    mint API keys for it, one scope each. Neither reaches any other project. A
+    signal an account key sends is stored in the account's project, whatever
+    project it names, and an idempotency key is kept per project, so one
+    account cannot make another's batch look like a replay. Only a session can
+    list, mint or revoke keys, so a key that leaks cannot make more.
+  </p>
+  <p>
+    Passwords are hashed with argon2id. Tokens and keys are random 32-byte
+    values, shown once, and stored only as SHA-256 digests. A wrong password
+    and an unknown email get the same answer. Sign-up and log-in are limited
+    per client address, and failed log-ins per email. Sessions last 30 days.
+    There is no email verification and no password reset in this build.
+  </p>
+  <p>
+    The mode also turns off the rule that a scope with no keys is open: a
+    request with no credential is refused everywhere except the probes,
+    sign-up and log-in. Configured keys are tried first and keep the reach
+    they have. See <a href="/docs/configuration#signup" class="link">Open sign-up</a>
+    for the flags.
+  </p>
+
+  <h3>The fallback, and what it means for a key you already have</h3>
+  <p>
+    An unset <code>write</code> list falls back to the <code>ingest</code> list,
+    and an unset <code>admin</code> list falls back to the <code>read</code>
+    list. Unset <code>execute</code> and <code>worker</code> lists fall back to
+    the <code>write</code> list, and so to the <code>ingest</code> list when
+    that is unset too. That is what stops an upgrade from revoking access on
+    every deployment configured before the narrower scopes existed. An admin key
+    is also accepted for <code>execute</code> and <code>worker</code>, so an
+    operator can drive a run by hand. Together, these mean that on a daemon
+    holding only an ingest key and a read key:
+  </p>
+  <ul>
+    <li>the ingest key also attaches scores and feedback, starts runs and claims steps, and</li>
+    <li>the read key also deletes traces and, through the admin fallback, starts runs and claims steps.</li>
+  </ul>
+  <p>
+    So a read key is a delete key until you set <code>--admin-key</code>, and
+    both keys reach the run surface until you set <code>--execute-key</code>,
+    <code>--worker-key</code> and <code>--admin-key</code>. Hand keys out on
+    that basis. Nothing narrows on its own. Each scope has a flag,
+    <code>--ingest-key</code>, <code>--read-key</code>,
+    <code>--write-key</code>, <code>--admin-key</code>,
+    <code>--execute-key</code> and <code>--worker-key</code>, and each takes a
+    list; every one of them can also be set per project in the config file.
+  </p>
+
+  <h3>With no keys, every scope is open</h3>
+  <p>
+    That default is deliberate: a first run on a laptop must not need a
+    credential. It is also the single most dangerous thing about an exposed
+    instance, so when the daemon binds a non-loopback address, it logs a
+    warning at start-up for each surface open to a caller that should not reach
+    it. Each warning names the surface and the flags that close it. Run
+    <code>mcpd config</code> before you expose a port: it prints the
+    configuration an invocation resolves to, then exits. It carries a line per
+    scope, and it names the list a scope has fallen back to, so
+    <code>admin auth      key required (read keys)</code> tells you the read
+    keys can still delete.
+    <a href="/deploy" class="link">Docker and Kubernetes</a> shows the output.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="closed before it is reachable"
+    command={'mcpd --ingest-key "$INGEST" --read-key "$READ"'}
+    primaryLabel="Flags"
+    secondary={[
+      { label: 'All six scopes', command: 'mcpd --ingest-key "$I" --read-key "$R" --write-key "$W" --execute-key "$E" --worker-key "$K" --admin-key "$A"' },
+      { label: 'As environment', command: 'MCPD_INGEST_KEYS=… MCPD_READ_KEYS=… mcpd' },
+      { label: 'Check first', command: 'mcpd config' },
+    ]}
+  />
+
+  <h3>A project is a tenancy boundary</h3>
+  <p>
+    A key configured at the top level grants every project. A key listed instead
+    under a named project in the <code>projects</code> block of the config file
+    grants that project and no other, and each project holds its own list per
+    scope. One key may appear under several projects, which is how a platform
+    team holds a key spanning what it operates without holding the whole server.
+  </p>
+  <p>On the write path the check is per signal, not per request:</p>
+  <ul>
+    <li>
+      A batch may name several projects. Signals naming a project the key does
+      not reach are dropped and reported in the response as rejected, with the
+      reason, so a fleet pointed at the wrong project is discoverable from the
+      response it already reads. The rest of the batch is stored.
+    </li>
+  </ul>
+  <p>
+    On the read path, every endpoint that names a project checks it against the
+    key's grant: traces, spans, logs, metrics, scores, feedback, analytics,
+    datasets, experiments and the audit log. The items inside a dataset are
+    addressed by the dataset's id, and the daemon looks up which project owns
+    that dataset and checks the key against it, so a key that cannot open the
+    project cannot read the cases captured from it. An id that does not exist
+    is refused the same way as one the key may not reach, so the endpoint
+    cannot be used to test which ids exist. Three endpoints take no project and are reachable by any key holding the
+    read scope, whatever projects it is scoped to: the project list, the scorer
+    catalogue and the storage capability set
+    (<code>GET /v1/api/capabilities</code>). The project list is filtered by
+    the key's grant, so a project-scoped key sees only the projects it reaches.
+    On a shared instance, project names are often team or customer names. The
+    monitor state and the objective state were on that list until they were
+    filtered by the key's project grant, which they should always have been: a
+    monitor names the project it watches and carries the webhook it posts to.
+    The API names only the host of that webhook, because a webhook URL is often its own credential.
+  </p>
+
+  <h3>A refusal says which of the two problems it is</h3>
+  <p>
+    A missing or unrecognised key is 401, and a recognised key that this
+    endpoint or this project does not admit is 403. The split is operational: a
+    401 sends you to look for a typo in a credential, a 403 tells you the
+    credential is right and the grant is wrong.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="four refusals"
+    lines={[
+      { cmd: 'curl -sw "%{http_code} " "$MCPD/v1/api/traces?project=acme"' },
+      { out: '401  this endpoint needs an API key; send it as `Authorization: Bearer <key>`', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $TYPO"' },
+      { out: '401  that key is not one this daemon knows', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $INGEST"' },
+      { out: '403  that key is not valid for reading', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $BILLING_READ"' },
+      { out: '403  that key does not reach the project "acme"', tone: 'warn' },
+    ]}
+  />
+
+  <p>
+    That last message is the same whether the project exists or not. Confirming
+    which project names are real is a small leak, and on a shared daemon those
+    names are the names of your customers.
+  </p>
+
+  <h3>The audit log</h3>
+  <p>
+    Handing a stored payload back out of mcpd is recorded, and so is every
+    deletion, so the question "who read this run" has an answer. A row carries
+    when, which key, what action, which project, which trace or dataset it
+    named, and whether the request was served or refused.
+    <code>GET /v1/api/audit</code> reads it back, newest first, and takes the
+    <code>admin</code> scope.
+  </p>
+  <p>
+    Eighteen actions are recorded: <code>get_trace</code>, <code>list_spans</code>,
+    <code>list_logs</code>, <code>list_feedback</code>,
+    <code>list_dataset_items</code>, <code>capture_into_dataset</code>,
+    <code>read_trace_aspect_notes</code>, <code>get_theme</code>,
+    <code>get_theme_flow</code>, <code>list_theme_history</code>,
+    <code>list_theme_examples</code>,
+    <code>delete_trace</code>, <code>erase_subject</code>, and five on durable
+    runs: <code>list_runs</code>, <code>get_run</code>,
+    <code>list_run_events</code>, <code>get_step_cause</code> and
+    <code>cancel_run</code>. The boundary is the payload, not the request.
+    Listing traces returns a projection of names, timings, token counts and
+    cost with no prompt or completion in it, so it is not recorded; opening one
+    of those traces is, because that is where the text is. Listing durable runs
+    is recorded, because every run in the list carries its input, output and
+    state as they were sent. A refused read of a run is recorded under the
+    project that owns the run.
+  </p>
+  <p>
+    The worker calls are not recorded: claiming a step, declaring it started,
+    the heartbeat, complete and fail. A lease does carry the step's input and
+    the outputs of the steps before it, but the worker loop claims many times a
+    minute, and a row per claim would bury the reads a person made. Treat the
+    <code>worker</code> key as one that reads every payload of the runs it
+    serves. Starting a run is not recorded either; a repost of a held
+    idempotency key answers with the run that key started, so treat the
+    <code>execute</code> key as one that can read the runs it starts.
+  </p>
+  <p>Five properties a reviewer should know:</p>
+  <ul>
+    <li>
+      <strong>The key is never written down.</strong> The principal is a
+      truncated SHA-256 digest of the key, which distinguishes one key from
+      another without storing a verifier for it. A request with no key on an
+      open daemon is recorded as <code>anonymous</code>.
+    </li>
+    <li>
+      <strong>The person comes from your ingress, or not at all.</strong> mcpd
+      has no user accounts, so on its own a row attributes an action to a key
+      and not to a human. The <code>subject</code> field carries an identity
+      when <code>--trusted-identity-header</code> and
+      <code>--trusted-proxy-cidr</code> are both set, and is empty otherwise,
+      which is the default. mcpd never establishes that identity itself; it
+      records what an address you named asserted.
+    </li>
+    <li>
+      <strong>A refusal is recorded too.</strong> The row goes down before the
+      403 is returned, because a refused attempt on another team's project is
+      exactly the row an audit log exists for. Reading the log is not itself
+      recorded: it would grow without a payload ever being read, and the row
+      would say nothing the holder of the admin key does not already know.
+    </li>
+    <li>
+      <strong>It records which key, and optionally who.</strong> The key is
+      stored as a truncated digest, never the key itself, so the log is not a
+      place credentials accumulate. That answers "an admin key deleted this"
+      and not "which person did", because mcpd has no identity provider. If you want the second answer, give it the header
+      your ingress already sets and the addresses allowed to set it:
+      <code>--trusted-identity-header x-forwarded-user</code> with
+      <code>--trusted-proxy-cidr 10.42.0.0/16</code>. Both halves are required.
+      A header is a string anyone who can reach the port may send, so mcpd
+      reads it only from an address you named; a request from anywhere else is
+      served normally and its row carries no subject, which is the honest
+      answer rather than a guess. With neither flag set, no subject is ever
+      recorded, and that is the default.
+    </li>
+    <li>
+      <strong>Retention does not trim it.</strong> The retention pass removes
+      spans, logs, metrics, traces, scores, feedback, aspect notes and ended
+      durable runs. It leaves
+      the audit log, because a log that expired alongside the data it describes
+      could not say who read the deleted data.
+    </li>
+    <li>
+      <strong>It never fails the request it describes.</strong> A row that
+      cannot be written is logged and counted as
+      <code>mcpd_audit_write_failures_total</code> on <code>/metrics</code>, and
+      the read still returns. An audit log that can take down the read path is a
+      worse liability than the one it prevents, so watch that counter rather
+      than relying on requests failing.
+    </li>
+  </ul>
+
+  <h3>What no key covers</h3>
+  <ul>
+    <li>
+      <strong>The interface.</strong> The markup at <code>/</code> is served to
+      anyone who can reach the port. The data behind it is not: every request it
+      makes goes through the query API and meets the same keys. There is no
+      login screen in the daemon unless <code>--signup</code> is on.
+    </li>
+    <li>
+      <strong>The probes and <code>/metrics</code>.</strong> Unauthenticated on
+      purpose, because a kubelet and a scraper cannot carry a key. They report
+      status, version, uptime, the storage backend's name and counters, never
+      payloads.
+    </li>
+    <li>
+      <strong>Origin.</strong> The query API and the probes answer with
+      <code>Access-Control-Allow-Origin: *</code>, so a browser page on any
+      origin may call them. mcpd uses no cookies and no ambient credentials, so
+      such a page still has to hold a key: a permissive origin policy does not
+      hand it one.
+    </li>
+  </ul>
+
+  <h2>What redaction does, and what it cannot do</h2>
+  <p>
+    Redaction is on by default and runs before the write, as stage three of the
+    intake pipeline. A value a rule matches never reaches the database, which is
+    a different guarantee from a value deleted afterwards, and the difference is
+    the one an auditor asks about. What it cannot do is keep the bytes off the
+    network: they have crossed it by the time the rule runs. For that, the
+    SDKs carry <code>MCPD_CAPTURE_PAYLOADS=false</code>, which drops
+    <code>input</code> and <code>output</code> before a span is queued and
+    leaves everything else on it.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    A rule is a set of lowercase substrings and a mode. A key matches when its
+    name, lowercased, contains one of them. Matched values are masked, partially
+    masked, hashed with a keyed digest, or dropped. When a matched key holds an
+    object, everything under it is redacted too, whatever the child keys are
+    called, and a secret sent as a JSON number is treated the same as one sent
+    as a string. The full rule table is on
+    <a href="/docs/privacy" class="link">Redaction and retention</a>.
+  </p>
+  <p>
+    Now the limit, which a review will ask about and which no amount of
+    configuration removes. <strong>Rules match field names, not the shape of a
+    value.</strong> An API key that a user pasted into the middle of a sentence,
+    and that arrives under a field called <code>content</code> or
+    <code>question</code>, is not matched by anything in the pipeline. The field
+    name is innocent, so the value is stored in full.
+  </p>
+  <p>Redaction therefore stops one specific thing:</p>
+  <ul>
+    <li>It stops the structured capture of credentials and identifiers, where a credential arrives in a field named after what it is.</li>
+    <li>It does not scan free text, and it is not a content classifier.</li>
+    <li>It does not detect a secret by its shape or by entropy.</li>
+    <li>It does not touch a span's name or a log record's message. Those are identifiers used for grouping rather than payloads, and rewriting them would break the grouping. Do not build a span name out of a customer's email address.</li>
+    <li>It does not touch the run store. A durable run's payloads are its working state and are kept as sent; only the spans a run writes into the trace store are redacted.</li>
+  </ul>
+  <p>
+    One control does work on shape, and it is detection after the fact rather
+    than prevention: the built-in <code>no_leaked_secret</code> scorer marks
+    down a run whose <em>answer</em> carries a token that looks like a
+    credential, by known prefix or by a long mixed-case alphanumeric run. It
+    scores a run that is already stored. It removes nothing, it does not read
+    the prompt, and it runs only when you ask for it. Treat it as a way to find
+    out that this has happened, not as a second line of redaction.
+  </p>
+  <p>
+    Two bounds apply whether or not a rule matched. Any single string longer
+    than 128 KiB is truncated on a character boundary with a marker, and walking
+    stops at a depth of 32. Both exist so one runaway document cannot decide the
+    size of your database or pin a CPU.
+  </p>
+  <p>
+    <code>--no-redact</code> turns the whole pipeline off, which is sensible
+    only when something upstream already redacts. Where redaction hashes an
+    identifier, set <code>--redact-key</code>: the built-in key is a constant in
+    published source, and identifiers come from small spaces, so an unkeyed
+    digest can be recovered by guessing candidates.
+  </p>
+
+  <h2>Retention and erasure</h2>
+  <p>
+    <code>--retention-days</code> deletes signals older than that many days.
+    Omit it and nothing is ever deleted, which is the right default: a tool that
+    quietly discarded last month's traces would be discovered at the worst
+    moment.
+  </p>
+  <p>
+    The pass runs on an hourly timer inside the daemon, never inside a user's
+    request. It covers every project named in the <code>projects</code> block,
+    each with its own <code>retention_days</code> where it sets one and the
+    global figure where it does not, plus the default project. A project with no
+    window anywhere is not trimmed at all.
+  </p>
+  <p>
+    For a request about one person,
+    <code>DELETE /v1/api/subjects/{'{user_id}'}?project=…</code> removes every
+    run recorded against that person in the project, with the spans, logs,
+    metrics, scores and feedback attached to them, and answers with a count per
+    signal. The identifier is hashed with the same key before it is matched, so
+    the request works against hashed identifiers without you hashing anything
+    yourself, and the response says how many stored identifiers were in a form
+    the request could not match. To remove one run rather than one person,
+    <code>DELETE /v1/api/traces/{'{trace_id}'}</code> removes it and everything
+    attached to it in one transaction. Both take the <code>admin</code> scope
+    and both are recorded in the audit log.
+    <a href="/docs/privacy" class="link">Redaction and retention</a> walks
+    through the erasure request and what it can and cannot promise.
+  </p>
+
+  <h2>What mcpd does not do</h2>
+  <p>
+    None of the following exists in this build. They are listed because a review
+    that discovers them later is a worse outcome than a review that reads them
+    here.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Not in mcpd</th><th>What to do instead</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>TLS termination.</strong> mcpd speaks plain HTTP. Prompts and completions cross that link in full.</td>
+        <td>Terminate TLS at your ingress or in your mesh, and keep the daemon's port off any untrusted network.</td>
+      </tr>
+      <tr>
+        <td><strong>SSO.</strong> No identity provider integration, no OIDC, no SAML, no login screen.</td>
+        <td>Put the interface behind the identity proxy you already run. A person's identity is whatever that proxy establishes.</td>
+      </tr>
+      <tr>
+        <td><strong>SCIM.</strong> No user or group provisioning. The accounts <code>--signup</code> creates own one project each and have no groups.</td>
+        <td>Provision at the proxy. Inside mcpd the unit is a key, added to or removed from a list.</td>
+      </tr>
+      <tr>
+        <td><strong>Roles beyond the six scopes.</strong> Authorisation is a scope and a project list. There is no per-endpoint role and no group.</td>
+        <td>Separate by key and by project. If a distinction matters, make it a project.</td>
+      </tr>
+      <tr>
+        <td><strong>Establishing who a person is.</strong> The audit log can record a subject, but mcpd never works out who the caller is. It records what your ingress asserted, and only from an address you named.</td>
+        <td>Set <code>--trusted-identity-header</code> and <code>--trusted-proxy-cidr</code> so the header your proxy already sets reaches the audit row. Without them a row attributes an action to a key, and issuing one key per team narrows the digest.</td>
+      </tr>
+      <tr>
+        <td><strong>Key lifecycle.</strong> Keys are lists read at start-up. There is no expiry, no rotation schedule and no per-key quota. The ceiling that exists is per project: <code>--quota-per-minute</code> bounds how many signals a project may store in a minute, whichever key sent them.</td>
+        <td>Configure several keys, one per team or fleet, so revoking one is an edit and a restart rather than a redeployment of everything that emits a span. Make a fleet its own project if it needs its own ceiling.</td>
+      </tr>
+      <tr>
+        <td><strong>Encryption at rest.</strong> mcpd writes plain files or plain rows.</td>
+        <td>Encrypt the volume, or use a database that does it.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Reporting something</h2>
+  <p>
+    Suspected vulnerabilities go to <strong>hi@mcpd.sh</strong> with "Security"
+    in the subject, not to a public issue. The repository's
+    <code>SECURITY.md</code> states the scope and what a good report contains.
+    An unauthenticated instance that somebody chose to expose is a documented
+    default rather than a finding. Anything that gets past a key that
+    <em>was</em> configured, past a configured redaction rule, or across a
+    project boundary is one.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>The rule table, the four modes and the keyed hash: <a href="/docs/privacy" class="link">Redaction and retention</a>.</li>
+    <li>What to set before a port is reachable: <a href="/deploy" class="link">Docker and Kubernetes</a>.</li>
+    <li>Every flag and environment variable: <a href="/docs/configuration" class="link">Configuration</a>.</li>
+    <li>Reaching a deployed instance from code or from an agent: <a href="/docs/integrating" class="link">Integrating</a>.</li>
+  </ul>
+</Doc>

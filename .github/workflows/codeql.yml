@@ -1,0 +1,115 @@
+# Semantic security analysis of the code that runs in a browser, and of the
+# SDKs that run inside other people's agents.
+#
+# Why this exists: clippy and the type checkers find local mistakes. They do
+# not follow a value from an HTTP response, through three files, into
+# `innerHTML`. CodeQL does, and the daemon ships a web application and serves a
+# public HTTP API, so that is the class of bug worth paying for. The Go, Python
+# and Kotlin SDKs are in the matrix for the other half of the same argument: an
+# SDK runs in a process that is not this project's, and a flaw there is a flaw
+# in somebody else's production.
+#
+# Why Rust is not in the matrix: the Rust crates are covered twice already, by
+# `cargo clippy --workspace --all-targets -- -D warnings` in ci.yml, which runs
+# on every pull request, and by the advisory and dependency scans in audit.yml.
+# A third analyser over the same crates would add minutes to every pull request
+# and report what those two report.
+#
+# The `actions` language analyses the workflow files in this directory,
+# including this one.
+#
+# Build modes. JavaScript, TypeScript, Python and workflow files are read
+# directly; so is Go, which CodeQL can extract without a build. Kotlin is not:
+# CodeQL's documentation says that with `build-mode: none` any Kotlin in the
+# repository is skipped with a warning, because Kotlin extraction hooks the
+# compiler. So java-kotlin runs in `manual` mode and the job compiles the SDK
+# with Gradle, with the daemon off, which is the only way that compilation is
+# seen by the tracer.
+name: codeql
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Weekly. A file you did not touch can become a finding when the query pack
+    # is updated, and nothing else in this repository would surface that.
+    - cron: '19 4 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Nothing is granted by default. Each job asks for what it needs.
+permissions: {}
+
+jobs:
+  analyse:
+    name: analyse ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Uploading the SARIF result to the code scanning dashboard.
+      security-events: write
+      # CodeQL reads workflow run metadata to attribute results to a run.
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: javascript-typescript
+            build-mode: none
+          - language: actions
+            build-mode: none
+          - language: go
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: java-kotlin
+            build-mode: manual
+    steps:
+      - name: check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: initialise CodeQL
+        uses: github/codeql-action/init@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
+        with:
+          languages: ${{ matrix.language }}
+          # `none` reads the sources directly, with no dependency install
+          # first: node_modules is excluded from analysis anyway, and
+          # installing it would only widen what a pull request can execute
+          # here. `manual` is Kotlin alone, for the reason at the top.
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+
+      # The Kotlin SDK, compiled after `init` so the tracer sees it. The
+      # example under examples/kotlin is not compiled here. It would build:
+      # it takes the SDK from source through includeBuild, and ci.yml builds
+      # it that way. It is left out because it is one caller of the SDK, not
+      # code that runs in anyone's process, and the analysis is of the SDK.
+      # No Gradle wrapper is tracked, hence the version chosen here. It is the
+      # one ci.yml uses: 9.7.0, the newest Gradle the Kotlin 2.4.20 plugin in
+      # sdks/kotlin/build.gradle.kts lists as fully supported.
+      - name: JDK and Gradle for the Kotlin SDK
+        if: matrix.build-mode == 'manual'
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - if: matrix.build-mode == 'manual'
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          gradle-version: '9.7.0'
+      - name: compile the Kotlin SDK
+        if: matrix.build-mode == 'manual'
+        working-directory: sdks/kotlin
+        run: gradle compileKotlin --no-daemon
+
+      - name: analyse
+        uses: github/codeql-action/analyze@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
+        with:
+          category: /language:${{ matrix.language }}

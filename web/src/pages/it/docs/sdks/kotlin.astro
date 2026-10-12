@@ -1,0 +1,411 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* I link interni restano scritti come route inglesi e vengono localizzati qui.
+   Una route la cui pagina italiana non è ancora scritta porta alla pagina
+   inglese, invece che a un URL italiano senza niente dietro. */
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+
+const install = `dependencies {
+    implementation("dev.mcpd:mcpd-kotlin:0.1.0")
+}`
+
+const scoped = `// Il valore del blocco è il valore di span, così la strumentazione non ti
+// costringe a riscrivere il codice per farle posto.
+val answer = mcpd.span("retrieve_context", SpanKind.RETRIEVAL) { span ->
+    span.setInput(query)
+    val docs = index.search(query)
+    span.setOutput(docs.map { it.id })
+    span.setAttribute("retrieval.hits", docs.size)
+    docs
+}`
+
+const manual = `val run = mcpd.trace("nightly_reindex", SpanKind.WORKFLOW_RUN, tags = listOf("batch"))
+try {
+    reindex()
+    run.end()
+} catch (e: Exception) {
+    run.setError(e)
+    run.end()
+}`
+
+const nesting = `mcpd.span("support_agent", SpanKind.AGENT_RUN) { run ->
+    // A draft non si passa niente. Trova l'esecuzione nel contesto della
+    // coroutine, per quante chiamate suspend ci siano di mezzo.
+    run.setOutput(draft(question))
+}
+
+suspend fun draft(question: String): String =
+    mcpd.span("draft_answer", SpanKind.MODEL_GENERATION) { generation ->
+        generation.setInput(question)
+        "..."
+    }`
+
+const propagation = `// In uscita: passa l'header al servizio successivo.
+request.header("traceparent", span.traceparent())
+
+// In entrata: continua quella traccia invece di aprirne una nuova.
+mcpd.span("checkout", traceparent = headers["traceparent"]) { span ->
+    charge(span)
+}`
+
+const payload = `generation.setModel("gpt-4o", provider = "openai")
+generation.setUsage(inputTokens = 1_180, outputTokens = 96)
+
+// setError prende il throwable che hai già in mano, così il messaggio, la
+// classe e lo stack vengono tutti da lì.
+tool.setError(e, retryable = true)
+
+// Oppure un messaggio diretto, che in ogni caso è obbligatorio.
+tool.setError("the shipping service returned 503")`
+
+const surface = `// Tieni i prompt e le completion dentro il processo: lo span porta comunque
+// i suoi tempi, lo stato, il consumo, il modello, la correlazione e gli errori.
+val quiet = Mcpd(McpdConfig(capturePayloads = false))
+quiet.span("draft_answer", input = question, capturePayloads = true) { }  // questo invece si tiene
+
+// Uno span già concluso da un altro tracer, messo in coda com'è: senza mai
+// cambiargli il padre, i tempi o il campionamento. Un id malformato viene
+// scartato e contato, mai sollevato.
+mcpd.record(finishedSpan)
+
+// Verifica che cosa è stato registrato, senza un server.
+val recorder = RecordingSink()
+val local = Mcpd(McpdConfig(sink = recorder))
+local.span("support_agent") { run -> run.setUsage(inputTokens = 12, outputTokens = 3) }
+local.flush()
+check(recorder.spans.single().usage?.inputTokens == 12L)
+
+// queued, dropped, capacity, exported, failed, rejected.
+val stats = local.stats()`
+
+const shutdown = `// Un servizio JVM: arrestalo all'uscita.
+Runtime.getRuntime().addShutdownHook(Thread { mcpd.close() })
+
+// Un worker di breve durata: use, e si arresta alla parentesi che chiude.
+Mcpd(McpdConfig(project = "batch")).use { mcpd ->
+    mcpd.span("reindex") { run -> reindex(run) }
+}`
+---
+
+<Doc
+  title="Kotlin"
+  description="L’SDK mcpd per Kotlin: lo span attivo nel contesto della coroutine, la concorrenza strutturata e la cancellazione trattate come si deve, e una strumentazione che non solleva mai eccezioni."
+  lede="Prima di tutto le coroutine. Lo span attivo vive nel contesto della coroutine, la cancellazione viene registrata come cancellazione e non come guasto, e niente qui solleva un’eccezione contro il tuo agente."
+  og="docs"
+>
+  <h2>Installazione</h2>
+  <p>
+    Compilato con Kotlin 2.4, per JVM 17 o successiva. Le uniche dipendenze
+    sono kotlinx coroutines e serialization. L’HTTP lo fa il client della
+    JDK, così non si aggiunge niente a un servizio che ha già un’idea sua
+    sull’HTTP.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="build.gradle.kts"
+    samples={[{ lang: 'kotlin', label: 'Gradle', shiki: 'kotlin', code: install }]}
+  />
+
+  <h2>Costruire il client</h2>
+  <p>
+    Un’istanza per processo. Ogni campo di <code>McpdConfig</code> legge una
+    variabile d’ambiente come proprio valore predefinito e si può impostare nel
+    codice, così lo stesso codice gira in sviluppo e in produzione senza una
+    modifica. <code>Mcpd()</code> senza argomenti funziona contro un mcpd locale.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="init" title="connettersi" />
+
+  <p>
+    Il codice vince sull’ambiente, e l’ambiente vince sull’impostazione
+    predefinita.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Campo</th><th>Ambiente</th><th>Predefinito</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>apiKey</code></td><td><code>MCPD_API_KEY</code></td><td>nessuna</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>nessuno</td></tr>
+      <tr><td><code>serviceName</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>nessuno</td></tr>
+      <tr><td><code>serviceVersion</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>nessuna</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capturePayloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>logLevel</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      <tr><td><code>batchSize</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flushInterval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2s</code></td></tr>
+      <tr><td><code>maxQueue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10s</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>enabled = false</code> rende ogni chiamata di registrazione
+    un’operazione a vuoto che restituisce comunque span validi, così mcpd si può
+    spegnere nei test senza toccare il codice sotto test. Le letture vanno
+    comunque al server: una query è una cosa che chi chiama sta aspettando, e una
+    risposta vuota sarebbe una bugia.
+  </p>
+
+  <h2>Registrare un’esecuzione</h2>
+  <p>
+    <code>span</code> è la forma idiomatica. Chiude lo span, lo rende lo span
+    attivo per tutto quello che il blocco chiama, e restituisce quello che il
+    blocco ha restituito. Un blocco che solleva un’eccezione lascia uno span
+    <code>error</code> che porta l’eccezione con sé, e la rilancia identica.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="la forma con ambito"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: scoped }]}
+  />
+
+  <p>
+    Un blocco cancellato è un’altra cosa, e viene registrato in un altro modo.
+    Una coroutine abbandonata da chi l’ha chiamata o da un timeout chiude lo span
+    come <code>cancelled</code> anziché come <code>error</code>, perché un
+    abbandono voluto non è un guasto dell’operazione e non deve leggersi come
+    tale nell’elenco delle tracce.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="trace" title="registrare un’esecuzione" />
+
+  <p>
+    Quando un blocco non ha la forma giusta, apri e chiudi lo span per conto tuo.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="senza un blocco"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: manual }]}
+  />
+
+  <h2>Contesto</h2>
+  <p>
+    Lo span attivo è un elemento del contesto della coroutine, quindi segue la
+    coroutine e non il thread. Una funzione suspend parecchi livelli più in basso
+    apre un figlio del padre giusto senza che nessun chiamante gliene passi uno,
+    e due esecuzioni sullo stesso dispatcher non vedono mai gli span dell’altra.
+    Lo leggi con <code>mcpd.currentSpan()</code>, e ne prendi l’header con
+    <code>mcpd.traceparent()</code>.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="annidamento"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: nesting }]}
+  />
+
+  <p>
+    Fra due servizi il contesto viaggia in un header <code>traceparent</code>
+    W3C, che porta con sé la decisione di campionamento, così una traccia non è
+    mai registrata a metà. Un header malformato fa partire una traccia nuova
+    anziché far fallire la richiesta che lo portava.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="attraverso il confine fra due servizi"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: propagation }]}
+  />
+
+  <h2>Modello, consumo ed errori</h2>
+  <p>
+    I conteggi dei token sono quelli che mcpd trasforma in costo all’ingest,
+    quindi la cifra che vedi sulla traccia è la cifra che ti è stata
+    fatturata. Registrare un errore porta nello stesso gesto lo stato dello span a
+    <code>error</code>, e un messaggio c’è sempre: «qualcosa è fallito» non dice
+    a nessuno che cosa fare.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="che cosa porta uno span"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: payload }]}
+  />
+
+  <p>
+    Gli altri sono <code>setInput</code>, <code>setOutput</code>,
+    <code>setMetadata</code>, <code>setAttribute</code>,
+    <code>setAttributes</code>, <code>setTags</code>,
+    <code>setCorrelation</code> e <code>addLink</code>, più <code>child</code>
+    per un figlio esplicito ed <code>event</code> per un punto nel tempo. Si
+    possono chiamare tutti senza rischi da qualunque thread e nessuno di loro
+    solleva eccezioni. Uno span che appartiene all’albero di un altro tracer lo
+    nomina con <code>externalParentSpanId</code>, portato per la correlazione e
+    mai usato come padre dentro l’albero di mcpd.
+  </p>
+
+  <h2>Payload, sink e span già conclusi</h2>
+  <p>
+    <code>capturePayloads = false</code> tiene <code>input</code> e
+    <code>output</code> dentro il processo: vengono scartati prima che il record
+    arrivi alla coda, così niente di sensibile esce con un flush, e un singolo
+    span lo può sovrascrivere per sé. L’exporter consegna ogni batch a un
+    <code>Sink</code>: il trasporto HTTP come impostazione predefinita, un
+    <code>RecordingSink</code> che tiene i batch in memoria per un test, o un
+    <code>ConsoleSink</code> che scrive una riga JSON per segnale. Un sink che
+    solleva un’eccezione è un batch fallito, riferito una volta per intervallo e
+    mai sollevato verso chi ha chiamato.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="catturare, registrare, verificare"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: surface }]}
+  />
+
+  <h2>Esecuzioni durevoli</h2>
+  <p>
+    Lo stesso client serve le esecuzioni durevoli del daemon.
+    <code>Workflow</code> costruisce la definizione e conserva i corpi dei passi
+    come lambda sospendibili; un <code>Worker</code> la registra, fa long polling
+    per ottenere i lease e serve ognuno di essi su una coroutine, e
+    <code>startRun</code>, <code>watchRun</code>, <code>publishEvent</code> e gli
+    altri sono extension sul client che rispecchiano uno a uno la superficie
+    delle esecuzioni. Un corpo solleva <code>RetryableException</code> per essere
+    ritentato entro il budget del suo passo, e registra span sotto il proprio passo
+    attraverso lo <code>StepContext</code>. Ogni span aperto attraverso il
+    contesto somma il proprio consumo a quello del passo man mano che finisce,
+    così un corpo che registra le proprie chiamate al modello non somma mai i
+    token a mano; <code>setUsage</code> sovrascrive quello che gli span hanno
+    sommato. Un <code>Worker</code> prende quattro hook facoltativi accanto a
+    <code>onError</code> (<code>onLease</code>, <code>onStepStart</code>,
+    <code>onStepEnd</code>, <code>onConflict</code>) e risponde a
+    <code>stats()</code>: le prese in carico, i corpi in volo, i completamenti, i
+    fallimenti per classe, i conflitti per motivo e i lease che non si sono
+    potuti servire.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} example="workflow" region="workflow" title="un workflow" />
+  <p>
+    Che cosa fa ogni costrutto, il protocollo dei lease e l’API delle esecuzioni
+    stanno su
+    <a href={linkTo('/docs/workflows')} class="link">Workflow</a>,
+    <a href={linkTo('/docs/workers')} class="link">Worker</a> ed
+    <a href={linkTo('/docs/runs')} class="link">Esecuzioni</a>.
+  </p>
+
+  <h2>Punteggi e feedback</h2>
+  <p>
+    <code>min</code> e <code>max</code> sono parametri obbligatori. Sette è
+    ottimo su dieci e scarso su cento, quindi un numero senza una scala
+    dichiarata non si può confrontare con niente. Il feedback è il giudizio di
+    una persona e resta separato da un punteggio, perché i due rispondono a
+    domande diverse e non vanno mai mediati insieme.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="score" title="punteggio e feedback" />
+
+  <p>
+    I log e le metriche si attaccano allo span attivo, così un picco su un
+    grafico apre l’esecuzione che lo ha causato.
+  </p>
+
+  <h2>Flush e arresto</h2>
+  <p>
+    Registrare aggiunge a una coda in memoria con un tetto e ritorna; una
+    coroutine worker raggruppa in batch, comprime e manda. <code>flush()</code>
+    manda quello che è in coda e aspetta. <code>shutdown()</code> ferma il
+    worker, manda quello che resta, e si può chiamare due volte senza rischi.
+    L’export finale gira senza potere essere cancellato, perché all’arresto si
+    arriva di solito da un <code>finally</code> durante una cancellazione, e
+    l’ultimo batch è quello che spiega perché il processo se ne sta andando.
+  </p>
+  <p>
+    <code>Mcpd</code> è <code>AutoCloseable</code>, quindi funzionano sia
+    <code>use</code> sia uno shutdown hook. Una funzione serverless o un worker
+    di breve durata che non chiama né l’uno né l’altro perde il suo ultimo
+    batch, perché il runtime smette di schedulare nel momento in cui l’handler
+    ritorna.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="arrestare il client"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: shutdown }]}
+  />
+
+  <h2>Che cosa ti torna indietro</h2>
+  <p>
+    I metodi di lettura rispecchiano uno a uno l’API HTTP e restituiscono i tipi
+    generati. Sono gli unici metodi che sollevano eccezioni, e sollevano
+    <code>McpdException</code>: una query che stai aspettando non è una cosa da
+    inghiottire.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="rileggere l’esecuzione"
+    lines={[
+      { cmd: 'gradle run' },
+      { out: '> Task :run' },
+      { out: 'support_agent: 4 spans, ok', tone: 'ok' },
+      { out: '  agent_run support_agent 79ms' },
+      { out: '  model_generation plan_answer 41ms' },
+      { out: '  tool_call lookup_order 16ms' },
+      { out: '  tool_call estimate_delivery 11ms shipping service returned 503 for order 41', tone: 'warn' },
+    ]}
+  />
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="query" title="cercare e analizzare" />
+
+  <h2>Su che cosa puoi contare</h2>
+  <ul>
+    <li>
+      La strumentazione non solleva mai eccezioni. Un export fallito, un server
+      irraggiungibile o un valore che non si lascia serializzare vengono riferiti
+      al massimo una volta ogni 30 secondi attraverso
+      <code>java.util.logging</code> e per il resto inghiottiti. L’osservabilità
+      non deve mai far cadere la cosa che osserva.
+    </li>
+    <li>
+      Registrare non blocca, quindi la latenza del tuo servizio non dipende mai
+      da quanto mcpd sia veloce, né dal fatto che sia attivo.
+    </li>
+    <li>
+      La memoria è limitata. La coda tiene <code>maxQueue</code> segnali; oltre
+      quel punto i più vecchi vengono scartati e contati, e si leggono in
+      <code>droppedSignals</code> e in <code>stats()</code>. Un buffer senza
+      limite trasforma un’interruzione di rete in un processo ucciso per memoria
+      esaurita.
+    </li>
+    <li>
+      La decisione di campionamento si prende una volta sola, alla radice, e si
+      eredita.
+    </li>
+    <li>
+      Uno span viene esportato quando parte e di nuovo quando finisce, così
+      un’esecuzione andata in crash per strada resta visibile. Quando uno span
+      finisce prima che il suo record di inizio sia stato mandato, il record
+      viene aggiornato sul posto e ne parte uno solo.
+    </li>
+    <li>
+      I batch vengono compressi con gzip sopra 1 KiB e portano una chiave di
+      idempotenza che sopravvive a un nuovo tentativo, così una richiesta andata
+      in timeout dopo che il server l’aveva archiviata non può contare due volte.
+    </li>
+    <li>
+      Le durate si misurano su un orologio monotono, così uno scatto NTP non ne
+      può produrre una negativa.
+    </li>
+  </ul>
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">Trovare un’esecuzione</a>
+    copre i filtri per intero.
+    <a href={linkTo('/docs/reference/data-model')} class="link">Il modello dei dati</a>
+    elenca ogni campo che questi tipi portano.
+  </p>
+</Doc>

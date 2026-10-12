@@ -1,0 +1,731 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+
+const probeYaml = `livenessProbe:
+  httpGet: { path: /healthz, port: 4317 }
+  periodSeconds: 10
+readinessProbe:
+  httpGet: { path: /readyz, port: 4317 }
+  periodSeconds: 5
+
+# SIGTERM is handled, so give in-flight ingest time to finish.
+terminationGracePeriodSeconds: 30`
+
+const scrape = `scrape_configs:
+  - job_name: mcpd
+    static_configs:
+      - targets: ['mcpd:4317']`
+---
+
+<Doc
+  title="Running it"
+  description="Operating mcpd in production: liveness and readiness probes, the Prometheus metrics it exports, graceful shutdown, backing up the SQLite file, upgrades, and where a single instance stops."
+  lede="mcpd is one process holding one file. That makes most of operating it short, and it makes the few things that matter worth knowing exactly."
+  og="docs"
+>
+  <h2>What is on the port</h2>
+  <p>
+    One address serves everything: OTLP ingest at <code>/v1/traces</code>,
+    <code>/v1/logs</code> and <code>/v1/metrics</code>, native ingest at
+    <code>/v1/ingest</code>, the query API under <code>/v1/api</code>, the
+    operator interface at <code>/</code>, and the three operational endpoints
+    below. There is no sidecar and no reverse proxy to configure, which is most
+    of why the deployment fits on one line.
+  </p>
+  <p>
+    The interface is compiled into the binary, so there is no static file server
+    and no second volume mount. Ingest carries the large body limit and no CORS.
+    The query API carries CORS, so an interface served from another origin can
+    read it.
+  </p>
+
+  <h2>/healthz and /readyz are not the same question</h2>
+  <p>
+    They are separate because they answer to different consequences, and wiring
+    both to the same handler is a common way to build a restart loop.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Endpoint</th>
+          <th>Touches storage</th>
+          <th>Answers</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>GET /healthz</code></td>
+          <td>No</td>
+          <td>Always <code>200</code> while the process is serving</td>
+        </tr>
+        <tr>
+          <td><code>GET /readyz</code></td>
+          <td>Yes, one read of each store</td>
+          <td><code>200</code> when the signal store and the run store answer, <code>503</code> when either does not</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    <code>/healthz</code> is liveness. It deliberately never touches storage: a
+    slow or locked database must not get the process killed and restarted,
+    because restarting it does not fix a disk and the restart loop costs you the
+    in-flight batches as well.
+  </p>
+  <p>
+    <code>/readyz</code> is readiness. It runs one trivial query against a
+    reader connection, so an instance that cannot serve stops being sent
+    traffic. When storage is unreachable it answers <code>503</code> with a
+    <code>status</code> of <code>degraded</code> and a <code>detail</code>
+    naming the failure, rather than a bare status code you then have to
+    investigate blind.
+  </p>
+  <p>
+    Both bodies carry the same fields: <code>status</code>,
+    <code>version</code>, <code>spec_version</code>,
+    <code>uptime_seconds</code>, <code>storage</code>, and
+    <code>detail</code> when something is wrong. <code>spec_version</code> is
+    the data-model version this build implements, which is how a client can
+    refuse to talk to a server it does not understand.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="probing a healthy instance"
+    lines={[
+      { cmd: 'curl -s localhost:4317/healthz' },
+      { out: '{"status":"ok","version":"0.1.0","spec_version":"1.0.0",' },
+      { out: ' "uptime_seconds":86400,"storage":"sqlite"}', tone: 'ok' },
+      { cmd: 'curl -s -o /dev/null -w "%{http_code}\\n" localhost:4317/readyz' },
+      { out: '200', tone: 'ok' },
+      { cmd: 'curl -s localhost:4317/metrics | head -4' },
+      { out: '# HELP mcpd_signals_accepted_total Signals written to storage.' },
+      { out: '# TYPE mcpd_signals_accepted_total counter' },
+      { out: 'mcpd_signals_accepted_total 184203' },
+      { out: '# HELP mcpd_signals_rejected_total Signals refused, with a reason returned to the sender.' },
+    ]}
+  />
+
+  <p>
+    Neither probe requires a key, and neither does <code>/metrics</code>. If
+    that is not acceptable in your network, restrict them at your ingress.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="kubernetes"
+    samples={[{ lang: 'curl', label: 'Pod spec', shiki: 'yaml', code: probeYaml }]}
+  />
+
+  <h2>Metrics</h2>
+  <p>
+    mcpd exports its own counters at <code>/metrics</code> in Prometheus text
+    exposition format. They are not behind a feature flag: an observability tool
+    that cannot be observed is a liability.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th>Type</th>
+          <th>Meaning</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>mcpd_signals_accepted_total</code></td>
+          <td>counter</td>
+          <td>Signals written to storage</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_signals_rejected_total</code></td>
+          <td>counter</td>
+          <td>Signals refused, with a reason returned to the sender</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_batches_duplicate_total</code></td>
+          <td>counter</td>
+          <td>Batches recognised as a replay and skipped</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_traces_sampled_out_total</code></td>
+          <td>counter</td>
+          <td>Traces the sampling policy discarded</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_signals_over_quota_total</code></td>
+          <td>counter</td>
+          <td>Signals refused for exceeding a project's per-minute ceiling</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_signals_unbounded_total</code></td>
+          <td>counter</td>
+          <td>
+            Signals that reached the ceiling step for a project no ceiling
+            covers
+          </td>
+        </tr>
+        <tr>
+          <td><code>mcpd_ingest_requests_total</code></td>
+          <td>counter</td>
+          <td>Ingest requests handled</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_query_requests_total</code></td>
+          <td>counter</td>
+          <td>Query requests handled</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_request_errors_total</code></td>
+          <td>counter</td>
+          <td>Requests that failed with a server error</td>
+        </tr>
+        <tr>
+          <td><code>mcpd_audit_write_failures_total</code></td>
+          <td>counter</td>
+          <td>
+            Audit rows that could not be written; the request they describe
+            still succeeded
+          </td>
+        </tr>
+        <tr>
+          <td><code>mcpd_uptime_seconds</code></td>
+          <td>gauge</td>
+          <td>Seconds since this process started</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Every counter is process-lifetime and resets to zero on restart, so alert on
+    a rate rather than a level. The two worth watching are
+    <code>mcpd_signals_rejected_total</code>, which means senders are being told
+    no and probably are not reading the reply, and
+    <code>mcpd_request_errors_total</code>, which is mcpd's own fault by
+    definition: a 4xx is the caller's and is never counted there.
+  </p>
+  <p>
+    A rising <code>mcpd_traces_sampled_out_total</code> is not a fault. It is
+    the number that explains a gap in the interface when somebody asks why their
+    run is missing.
+  </p>
+  <p>
+    <code>mcpd_signals_over_quota_total</code> is the same shape of number for
+    the other reason a signal does not land: a project hit its per-minute
+    ceiling. Those refusals are also counted in
+    <code>mcpd_signals_rejected_total</code>, so watch this one to tell a fleet
+    that is being limited apart from a fleet that is sending malformed data. See
+    <a href="/docs/configuration" class="link">Configuration</a> for what the
+    ceiling covers.
+  </p>
+  <p>
+    <code>mcpd_signals_unbounded_total</code> is the opposite number: signals
+    that were kept because no ceiling covered the project they named. Ceilings
+    written only under <code>projects</code> bound the projects they name, so a
+    sender that names anything else walks past them. Those signals are counted
+    rather than refused, because refusing a project nobody wrote down would drop
+    the data of a deployment that upgraded without changing its configuration.
+    Non-zero means set a top-level <code>--quota-per-minute</code> beside the
+    per-project ones.
+  </p>
+  <p>
+    The ceiling covers every door a row can come in through: the four ingest
+    endpoints, the single-record score and feedback endpoints, and
+    <code>POST /v1/api/score</code>, whose scores are computed and then charged
+    against the same counter before they are stored. What does not fit under
+    the ceiling there is reported per score in the response's
+    <code>skipped</code> list rather than written past it.
+  </p>
+  <p>
+    <code>mcpd_audit_write_failures_total</code> counts audit rows that could
+    not be written. The request each row described still succeeded and still
+    returned its data, which is the point: an audit write never fails the read
+    it describes. Non-zero therefore means reads of stored payloads happened
+    that the audit log cannot account for, so treat it as an integrity signal
+    rather than an availability one.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="prometheus"
+    samples={[{ lang: 'curl', label: 'prometheus.yml', shiki: 'yaml', code: scrape }]}
+  />
+
+  <h2>Shutdown</h2>
+  <p>
+    mcpd handles <code>SIGTERM</code> and <code>SIGINT</code>. On either, it
+    stops accepting new connections and lets in-flight requests finish before
+    the process exits.
+  </p>
+  <p>
+    Handling <code>SIGTERM</code> specifically is what makes this work under an
+    orchestrator. Kubernetes sends <code>SIGTERM</code> and waits out the grace
+    period before <code>SIGKILL</code>; a container that only listens for
+    <code>SIGINT</code> is killed rather than stopped, and whatever batch was
+    mid-transaction is lost.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="a clean stop"
+    lines={[
+      { out: 'mcpd 0.1.0 listening on http://0.0.0.0:4317' },
+      { out: '  storage     sqlite at /data/mcpd.db' },
+      { out: 'retention removed 12480 rows older than 30 days', tone: 'note' },
+      { out: 'received termination signal', tone: 'warn' },
+      { out: 'shutting down', tone: 'ok' },
+    ]}
+  />
+
+  <p>
+    What mcpd cannot save on the way out is anything still sitting in a sender's
+    queue. The SDKs hold spans in memory and export them on a worker, so a
+    process that exits without calling <code>shutdown()</code> loses whatever
+    had not gone yet. That is the agent's shutdown to get right, not the
+    daemon's.
+  </p>
+
+  <h2>Backups</h2>
+  <p>
+    The whole store is one SQLite file at <code>--data</code>. It runs in WAL
+    mode, so on disk you will find <code>mcpd.db</code> alongside
+    <code>mcpd.db-wal</code> and <code>mcpd.db-shm</code>. Copying the
+    <code>.db</code> on its own while the process is running gives you a file
+    that is missing everything still in the write-ahead log.
+  </p>
+  <p>
+    Take the backup through SQLite, which reads a consistent snapshot while
+    mcpd keeps writing:
+  </p>
+
+  <Command
+    class="my-6"
+    label="hot backup"
+    command={`sqlite3 /data/mcpd.db ".backup '/backup/mcpd-$(date +%F).db'"`}
+  />
+
+  <p>
+    Stopping the process first and copying all three files is equally valid and
+    needs no <code>sqlite3</code> binary in the image. There is no
+    <code>mcpd backup</code> subcommand in this build, and no scheduled backup:
+    this is your snapshot tooling's job, and pretending otherwise would put a
+    half-built one in the critical path.
+  </p>
+  <p>
+    Retention deletes rows but does not shrink the file. SQLite keeps the freed
+    pages and reuses them, so disk usage plateaus rather than falling after a
+    large delete. Run <code>VACUUM</code> against a stopped instance if you
+    actually need the space back.
+  </p>
+
+  <h3>Restore</h3>
+  <p>
+    Putting a backup back is four steps, and the order matters because of the
+    write-ahead log.
+  </p>
+  <ol>
+    <li>
+      Stop the daemon. A restore under a running process is a second writer on
+      the same file.
+    </li>
+    <li>Copy the backup over the file at <code>--data</code>.</li>
+    <li>
+      Delete the <code>-wal</code> and <code>-shm</code> files beside it. They
+      belong to the database you replaced, and left in place they would be
+      replayed into the one you restored.
+    </li>
+    <li>
+      Start the daemon, and confirm it is reading the restored file:
+      <code>/readyz</code> answers 200, and a trace list against the project
+      returns the runs the backup held.
+    </li>
+  </ol>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="restore, run against a demo store"
+    lines={[
+      { cmd: 'kill $(cat mcpd.pid) && cp /backup/mcpd-2026-09-01.db /data/mcpd.db' },
+      { cmd: 'rm -f /data/mcpd.db-wal /data/mcpd.db-shm' },
+      { cmd: 'mcpd --data /data/mcpd.db &' },
+      { cmd: 'curl -s -o /dev/null -w "%{http_code}\\n" localhost:4317/readyz' },
+      { out: '200', tone: 'ok' },
+      { cmd: 'curl -s "localhost:4317/v1/api/traces?project=default&limit=500" | jq ".traces | length"' },
+      { out: '2', tone: 'ok' },
+    ]}
+  />
+
+  <h2>Upgrades</h2>
+  <p>
+    Replace the binary or the image tag and start it again. The schema is
+    applied at startup, every time, and is written so that running it against an
+    up-to-date file changes nothing. The applied version is recorded in a
+    <code>schema_version</code> table inside the same file, and this build is at
+    version 2.
+  </p>
+  <p>
+    Two things to keep in mind. Roll forward, not back: an older binary is not
+    promised to read a newer file, so take the backup first. And check
+    <code>spec_version</code> from <code>/healthz</code> after the upgrade if
+    you pin SDK versions, because that is the number a client compares against.
+  </p>
+
+  <h2>Where one instance stops</h2>
+  <p>
+    Being honest about this is more useful than a number we have not measured.
+    We publish no throughput figures, because none exist that we could stand
+    behind.
+  </p>
+  <ul>
+    <li>
+      <strong>One writer.</strong> The SQLite store keeps a single write
+      connection behind a mutex and four read connections. WAL mode means a
+      dashboard query never blocks ingest, which is the failure that would
+      matter, but all writes are serialised through that one connection.
+    </li>
+    <li>
+      <strong>One instance per file.</strong> Two mcpd processes pointed at the
+      same file is not a supported deployment. Run it as a single replica with
+      a volume, not as a horizontally scaled service.
+    </li>
+    <li>
+      <strong>Both limits above are the embedded store's.</strong> They stop
+      applying on ClickHouse, which is compiled in and covered below.
+    </li>
+    <li>
+      <strong>Payloads are large.</strong> Prompts and completions are
+      kilobytes, not bytes, and they are what makes mcpd worth running. Storage
+      grows with text volume far faster than with span count, so measure with
+      your own payloads rather than with a span-per-second figure.
+    </li>
+    <li>
+      <strong>Retention covers the projects you wrote down.</strong> The hourly
+      pass deletes from every project in the <code>projects</code> block, each
+      on its own <code>retention_days</code> where it sets one and on the global
+      figure where it does not, plus the project named by
+      <code>--project</code>. A project a sender invented that appears in
+      neither place has no window and is never trimmed, which is worth knowing
+      before you rely on retention as a privacy control.
+    </li>
+  </ul>
+  <p>
+    When volume outgrows the instance, the levers in order of how much they cost
+    you are: <code>--retention-days</code>, which bounds the file;
+    <code>--sample</code>, which bounds the inflow and is deterministic so a
+    kept trace is kept whole; and moving to ClickHouse, which removes the single
+    writer and the single replica together. See
+    <a href="/docs/sampling" class="link">Sampling</a> and
+    <a href="/docs/privacy" class="link">Redaction and retention</a>.
+  </p>
+
+  <h2>Postgres, when you already run one</h2>
+  <p>
+    Point mcpd at a Postgres connection string and it stores there instead of
+    the embedded file. The schema is created on start.
+  </p>
+
+  <Command
+    class="my-6"
+    title="store into Postgres"
+    command="mcpd serve --postgres-url postgres://mcpd:$PGPASSWORD@db:5432/mcpd"
+  />
+
+  <p>
+    This removes the same two limits ClickHouse does. Writes no longer pass
+    through a single connection, so mcpd runs as several replicas behind one
+    service, and it does so on a database most teams already operate, back up
+    and monitor.
+  </p>
+  <p>
+    Migration takes a Postgres advisory lock and is skipped entirely when the
+    schema is already current. Several replicas starting at once is therefore
+    safe, and a rolling deploy does not take an exclusive lock on tables that
+    other replicas are writing to.
+  </p>
+  <p>
+    Full-text search uses a generated <code>tsvector</code> column with a GIN
+    index, in the <code>simple</code> configuration: it lower-cases and splits
+    on word boundaries but does not stem, so searching a prompt for the literal
+    token you typed does what you expect.
+  </p>
+  <p>
+    Choose ClickHouse over Postgres when retention is measured in billions of
+    spans. Below that, the database you already run is the better answer.
+  </p>
+
+  <h2>ClickHouse, when the file is no longer the right shape</h2>
+  <p>
+    Point mcpd at a ClickHouse HTTP endpoint and it stores there instead of the
+    embedded file. The schema is created on start, so there is nothing to apply
+    by hand.
+  </p>
+
+  <Command
+    class="my-6"
+    title="store into ClickHouse"
+    command={`mcpd serve \\
+  --clickhouse-url http://clickhouse:8123 \\
+  --clickhouse-database mcpd \\
+  --clickhouse-user default --clickhouse-password $CH_PASSWORD`}
+  />
+
+  <p>
+    Both constraints above lift at once. Writes no longer pass through a single
+    connection, so mcpd runs as several replicas behind one service, and spans
+    land in a <code>MergeTree</code> built for the shape this data actually has:
+    far more writing than reading, and queries that scan a time range.
+  </p>
+  <p>
+    Choose it when retention is measured in months of production traffic rather
+    than in a laptop's disk. On anything smaller the embedded file is faster to
+    run, faster to back up, and one fewer thing to operate. Keep the file until
+    it hurts.
+  </p>
+  <p>
+    Traces are a <code>ReplacingMergeTree</code>, because a trace projection is
+    recomputed as its spans arrive and the last write is the correct one. Spans
+    arriving out of order, retried, or updated in place therefore converge on
+    the right answer rather than accumulating duplicates.
+  </p>
+  <p>
+    One guarantee is weaker here than on the other two backends, and it is the
+    one you may have to certify. Deletion on ClickHouse is an asynchronous
+    mutation, so an erasure request is accepted and applied afterwards. SQLite
+    and Postgres delete inside the transaction that answered. The reply says
+    which of the two happened, in <code>deletes_pending</code>. See
+    <a href="/docs/privacy" class="link">Redaction and retention</a>.
+  </p>
+
+  <h2>Checking a deployment</h2>
+  <p>
+    <code>mcpd doctor</code> reads the configuration and the store and reports
+    what is wrong, naming the flag that fixes each thing. It exists because the
+    failures that actually bite are quiet ones: nothing crashes, and you find
+    out weeks later.
+  </p>
+
+  <Command
+    class="my-6"
+    title="check a deployment without contacting anything but the store"
+    command="mcpd doctor --data /data/mcpd.db --offline"
+    primaryLabel="Offline"
+    secondary={[
+      { label: 'Without writing', command: 'mcpd doctor --data /data/mcpd.db --offline --read-only' },
+      { label: 'A longer window', command: 'mcpd doctor --data /data/mcpd.db --window-days 30' },
+    ]}
+  />
+
+  <p>
+    Three flags are the command's own. <code>--offline</code> contacts nothing
+    but the store, so the forward endpoint is reported as skipped rather than
+    checked. <code>--read-only</code> writes nothing, so the storage check
+    proves the store can be read and not that it can be written, and says so.
+    <code>--window-days</code> is how many days of history the activity, clock
+    and price-book checks read, seven unless you say otherwise, between 1 and
+    36525. Everything else it takes is the daemon's own configuration, so it
+    grades the invocation you would start.
+  </p>
+  <p>
+    Twelve groups are graded, in this order, and the report ends with a count of
+    each level:
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Group</th><th>What it grades</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>storage</code></td>
+          <td>The store answers a ping, and a probe span survives a write, a read and a delete</td>
+        </tr>
+        <tr>
+          <td><code>runs</code></td>
+          <td>The run store answers, how many definition versions and running runs it holds, and whether the run surface needs a key on an address other people can reach. Read only: the doctor never claims a step or fires a deadline</td>
+        </tr>
+        <tr>
+          <td><code>keys</code></td>
+          <td>Every scope, with its inheritance made explicit, so the case where no admin key is set and every read key therefore also deletes is on the page rather than in the documentation</td>
+        </tr>
+        <tr>
+          <td><code>identity</code></td>
+          <td>The audit subject header, and whether the range permitted to set it is narrow enough to believe</td>
+        </tr>
+        <tr>
+          <td><code>projects</code></td>
+          <td>Configured projects against projects that hold runs. One that has never received a span is almost always a typo in a name</td>
+        </tr>
+        <tr>
+          <td><code>retention</code></td>
+          <td>How far back each project's data goes, and whether anything will ever delete it</td>
+        </tr>
+        <tr>
+          <td><code>limits</code></td>
+          <td>The per-project ingest ceilings and the sampling fractions</td>
+        </tr>
+        <tr>
+          <td><code>forwarding</code></td>
+          <td>The forward endpoint, by POSTing an OTLP batch with no spans in it</td>
+        </tr>
+        <tr>
+          <td><code>judge</code></td>
+          <td>The judge block, as configuration only</td>
+        </tr>
+        <tr>
+          <td><code>monitors</code></td>
+          <td>Monitors and objectives, and the signals they read</td>
+        </tr>
+        <tr>
+          <td><code>clock</code></td>
+          <td>Runs from both ends of each project's history against this machine's clock, because a sender whose clock runs behind sorts underneath every honest run and would never appear on a page of the newest ones</td>
+        </tr>
+        <tr>
+          <td><code>pricing</code></td>
+          <td>Recent model spans against the price book, so a model nothing can price is named</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    <code>identity</code> and <code>limits</code> are the two most recently
+    added, and both were ungraded for the same reason: nothing about them
+    crashes. An audit log with no subject records what was done and never who
+    did it. A sampling fraction outside 0.0 to 1.0 is refused for
+    <code>--sample</code> and was never checked in a project block, so a project
+    could carry one and the daemon would run it. A ceiling set per project with
+    no top-level ceiling beside it leaves every project nobody wrote down with
+    no ceiling at all, and the sender chooses the project name.
+  </p>
+
+  <h3>Skipped is not ok</h3>
+  <p>
+    A check that was not run says <strong>skipped</strong>, never ok. That
+    distinction is the point of the command: a subsystem missing from the
+    configuration you pointed it at is not a subsystem in good health, and
+    reporting the two the same way would make doctor most confident exactly when
+    it had been handed the wrong file. The summary line counts the skipped
+    checks separately and says so in words, so a run that verified two of its
+    fourteen findings cannot read as a clean bill of health.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="how a run against a fresh deployment ends"
+    lines={[
+      { cmd: 'mcpd doctor --data /data/mcpd.db | tail -4' },
+      { out: '2 ok, 9 skipped, 2 warnings, 1 fault', tone: 'warn' },
+      { out: 'A skipped check proved nothing: it was not run, or there was nothing there' },
+      { out: 'to run it against. Only the 2 ok were verified.' },
+      { out: 'A fault is something broken or open. Exiting 2.', tone: 'warn' },
+    ]}
+  />
+
+  <h3>A busy store is not a broken one</h3>
+  <p>
+    The storage probe is the only check that needs the write lock. Everything
+    below it reads, and readers do not queue behind a writer. A probe write that
+    loses the race for that lock is reported as <strong>skipped</strong>: it is
+    attempted three times, and if all three wait for the lock and give up, the
+    report says the write was not checked and why.
+  </p>
+  <p>
+    This matters because the embedded store takes one writer, and a deployment
+    under real ingest holds that lock almost continuously. Reporting contention
+    as a fault made the command fail a deploy precisely when the deployment was
+    healthy and busy. The failures the probe exists to catch each name
+    themselves and none of them says "locked": a read-only mount, a full disk
+    and a role without <code>INSERT</code> are still faults, and so is a corrupt
+    lock, which says "locking protocol" and is real damage.
+  </p>
+
+  <h3>The exit code</h3>
+  <p>
+    It exits non-zero on a fault, so it can gate a deploy. A warning is not a
+    fault: it exits zero and expects a person to read it. One configuration is a
+    fault rather than a warning, and it is worth knowing before you wire this
+    into a pipeline: an open read scope on a non-loopback address, which hands
+    every stored prompt to anyone who can reach the port. An open ingest scope
+    on the same address stays a warning, because junk rows are what retention
+    removes and disclosure cannot be taken back. A trusted identity range that
+    contains the whole internet is graded the same way, for the same reason: any
+    address could then set the header and be recorded as whoever it names.
+  </p>
+
+  <h3>What runs without the command</h3>
+  <p>
+    You have to know <code>mcpd doctor</code> exists to run it, and none of the
+    mistakes it finds announces itself, so the deployment carrying one is
+    usually the deployment nobody pointed it at. The groups that read only the
+    configuration therefore run on every start: <code>keys</code>,
+    <code>identity</code>, <code>limits</code> and <code>judge</code>. They need
+    no store round trip and no network, so a start pays microseconds for them.
+    The other eight stay in the command, because each reads the store or
+    contacts the forward endpoint, and a start must wait on neither.
+  </p>
+  <p>
+    A fault found at startup stops the daemon; a warning is logged and it
+    carries on. What separates them is whether the configuration asks for
+    something that cannot work: a key entry that is empty or has whitespace at
+    an end, a trusted range holding the whole internet, a project
+    <code>sample</code> outside 0.0 to 1.0, or a judge that can never answer.
+    Each of those is a feature you turned on that silently does nothing, which
+    is worse than one that fails, because nobody goes looking for it. A short
+    key, a key two projects share, a ceiling smaller than one batch: those work,
+    and may be what you meant, so they are logged and never fatal.
+  </p>
+  <p>
+    The openness mcpd ships with is the exception. An open ingest or read scope
+    on a non-loopback address is a fault to <code>mcpd doctor</code>, which
+    gates a deploy, and a warning at startup, which does not. Refusing there
+    would mean a first run that never starts.
+  </p>
+  <p>
+    <code>mcpd config</code> and <code>mcpd doctor</code> themselves run against
+    a configuration a start would refuse. They are the two commands that exist
+    to explain a bad one, so neither can be the command that will not run.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="a judge that could never have produced a score"
+    lines={[
+      { cmd: 'mcpd --config-file /etc/mcpd/config.json' },
+      { out: 'Error: the configuration cannot do what it says, so mcpd will', tone: 'warn' },
+      { out: 'not start:', tone: 'warn' },
+      { out: '  judge: the judge at https://api.example.com/v1 has no criteria,', tone: 'warn' },
+      { out: '  so every judged scorer declines with `is not a configured', tone: 'warn' },
+      { out: '  criterion` and no judged score is ever produced. Add entries', tone: 'warn' },
+      { out: '  under `judge.criteria` in --config-file.', tone: 'warn' },
+      { out: 'Fix the lines above, or run `mcpd doctor` for the whole report.', tone: 'warn' },
+    ]}
+  />
+
+  <h2>The settings to check before it is reachable</h2>
+  <p>
+    When it binds a non-loopback address, mcpd logs a warning at startup for
+    each surface open to a caller that should not reach it, and each warning
+    names the flags to set. It warns rather than refusing to start, because
+    refusing would break the path from nothing to a first trace. It is still a
+    warning about a real hole: an open read API hands every stored prompt to
+    anyone who can reach the port.
+  </p>
+
+  <Command
+    class="my-6"
+    command="mcpd --data /data/mcpd.db --ingest-key $INGEST_KEY --read-key $READ_KEY --execute-key $EXECUTE_KEY --worker-key $WORKER_KEY --admin-key $ADMIN_KEY --retention-days 30"
+  />
+
+  <p>
+    Without the last three keys, the ingest key and the read key also reach the
+    run surface, and the read key also deletes. Full detail on every key, and on
+    everything else you can set, is in
+    <a href="/docs/configuration" class="link">Configuration</a>.
+  </p>
+</Doc>

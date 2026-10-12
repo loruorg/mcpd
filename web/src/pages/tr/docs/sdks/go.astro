@@ -1,0 +1,348 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (href: string) => urlFor(href, code)
+
+const scoped = `ctx, span := m.Start(ctx, "retrieve_docs", mcpd.WithSpanKind(mcpd.SpanKindRetrieval))
+defer span.End()
+
+// Buradan aşağıda bu ctx'i alan her şey span'in altına düşer ve End
+// idempotenttir, yani bir defer ile açık bir çağrı süre konusunda
+// çelişemez.`
+
+const nesting = `func handle(ctx context.Context, m *mcpd.Client, q string) string {
+    ctx, run := m.Start(ctx, "support_agent", mcpd.WithSpanKind(mcpd.SpanKindAgentRun))
+    defer run.End()
+
+    // draft'a span değil ctx geçilir. Düzeneğin tamamı budur.
+    return draft(ctx, m, q)
+}
+
+func draft(ctx context.Context, m *mcpd.Client, q string) string {
+    _, span := m.Start(ctx, "draft_answer", mcpd.WithSpanKind(mcpd.SpanKindModelGeneration))
+    defer span.End()
+    return "..."
+}`
+
+const propagation = `// Giden: etkin trace bağlamını isteğin üzerine yazın.
+req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+mcpd.Inject(ctx, req.Header)
+
+// Gelen: onu geri okuyup aynı trace'i sürdürün.
+func handler(w http.ResponseWriter, r *http.Request) {
+    ctx, span := m.Start(mcpd.Extract(r.Context(), r.Header), "handle_request")
+    defer span.End()
+}`
+
+const payload = `span.SetModel("gpt-4o-mini", "openai")
+span.SetTokens(812, 96)
+
+// Ya da tam döküm, böylece önbellekten gelen bir prompt öyle fiyatlandırılır.
+span.SetUsage(mcpd.TokenUsage{
+    InputTokens:  ptr(uint64(812)),
+    OutputTokens: ptr(uint64(96)),
+    InputDetails: &mcpd.InputTokenDetails{CacheRead: ptr(uint64(640))},
+})
+
+// RecordError bir error alır, yani kaydedilen hata her zaman bir mesaj taşır.
+span.RecordError(err,
+    mcpd.ErrorKind("SMTPTemporaryFailure"),
+    mcpd.ErrorRetryable(true),
+    mcpd.ErrorStack(mcpd.Stack()),
+)`
+
+const serverless = `func Handler(ctx context.Context, event Event) (Response, error) {
+    ctx, run := m.Start(ctx, "answer")
+    answer := agent(ctx, event.Body)
+    run.SetOutput(answer)
+    run.End()
+
+    // Yığın burada hâlâ bellekte. Runtime, handler döner dönmez bu süreci
+    // dondurur ve worker goroutine'i bir daha çalışmaz.
+    if err := m.Flush(ctx); err != nil {
+        log.Printf("mcpd flush: %v", err)
+    }
+    return Response{Body: answer}, nil
+}`
+---
+
+<Doc
+  title="Go"
+  description="Go için mcpd SDK'sı: baştan sona context.Context, yalnızca standart kütüphane ve hata döndürmeyen, nil bir istemcide bile güvenle çağrılabilen ölçümleme."
+  lede="Etkin span'i, her Go kütüphanesinin yaptığı gibi context.Context taşır. Üçüncü taraf bağımlılığı yok, başarısız olabilecek bir kayıt çağrısı da yok."
+  og="docs"
+>
+  <h2>Kurulum</h2>
+  <p>
+    Go 1.21 veya üstü. Üçüncü taraf bağımlılığı yok: taşıyıcı, standart
+    kütüphanedeki <code>net/http</code> ve <code>compress/gzip</code>. Yani mcpd
+    eklemek modül grafiğinize başka hiçbir şey eklemez.
+  </p>
+
+  <Command command="go get github.com/mcpd/mcpd/sdks/go" />
+
+  <h2>İstemciyi oluşturma</h2>
+  <p>
+    Süreç başına bir istemci. Her ayarın bir seçeneği ve bir ortam değişkeni
+    vardır, böylece aynı kod tek bir düzenleme olmadan hem geliştirmede hem
+    üretimde çalışır. Hiç seçenek verilmeyen <code>mcpd.New()</code>, yerel bir
+    daemon ile çalışır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="init" title="bağlanma" />
+
+  <p>Kod ortam değişkenine, ortam değişkeni de varsayılana üstün gelir.</p>
+
+  <table>
+    <thead>
+      <tr><th>Seçenek</th><th>Ortam değişkeni</th><th>Varsayılan</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>WithEndpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>WithAPIKey</code></td><td><code>MCPD_API_KEY</code></td><td>yok</td></tr>
+      <tr><td><code>WithProject</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>WithEnvironment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>yok</td></tr>
+      <tr><td><code>WithService</code></td><td><code>MCPD_SERVICE_NAME</code>, <code>MCPD_SERVICE_VERSION</code></td><td>yok</td></tr>
+      <tr><td><code>WithSampleRate</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>WithBatchSize</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>WithFlushInterval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2s</code></td></tr>
+      <tr><td><code>WithMaxQueue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>WithTimeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10s</code></td></tr>
+      <tr><td><code>WithEnabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>WithCapturePayloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>WithLogLevel</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>WithEnabled(false)</code> kaydı, yine de geçerli span'ler ve kimlikler
+    döndüren boş bir işleme çevirir; böylece bir test, çağrı yerlerini
+    değiştirmeden mcpd'yi kapatabilir. Okuma metotları çalışmayı sürdürür, çünkü
+    ölçümlemeyi kapatmak bir sorguyu sessizce boş bir yanıta çevirmemelidir.
+  </p>
+
+  <p>
+    <code>WithCapturePayloads(false)</code> prompt'ları ve tamamlamaları sürecin
+    içinde tutar: span'ler yine zamanlamasını, durumunu, token kullanımını,
+    modelini, ilişkilendirmesini ve hatalarını taşır, <code>input</code> ile
+    <code>output</code> ise kuyruğa varmadan atılır. Tek bir span,
+    <code>WithSpanCapturePayloads</code> ile kendisi için tersini söyleyebilir;
+    iki yönde de.
+  </p>
+
+  <p>
+    <code>WithSink</code>, yığınların gittiği yeri değiştirir.
+    <code>RecordingSink</code> onları bellekte tutar, böylece bir test
+    ölçümlemenin ne kaydettiğini sunucu olmadan doğrular;
+    <code>ConsoleSink</code> ise sinyal başına tek bir JSON satırı yazar.
+    Başarısız olan bir sink <code>Stats()</code> içinde sayılır ve sinyalleri
+    kaydeden koda hiç ulaşmaz. <code>Record</code>, çoktan bitmiş bir span'i
+    kimlikleri ve zamanlarıyla birlikte verildiği gibi kuyruğa alır; bozuk olan
+    reddedilir ve sayılır, asla hata olarak döndürülmez.
+    <code>WithExternalParent</code> ise başka bir izleme sisteminden gelen üstü
+    yalnızca ilişkilendirme için taşır.
+  </p>
+
+  <h2>Bir çalıştırmayı kaydetme</h2>
+  <p>
+    <code>Start</code> yeni bir context ve bir span döndürür,
+    <code>defer span.End()</code> de onu kapatır. Go'da kapsamlı biçim bu
+    ikilidir: defer hem erken bir dönüşte hem de bir panik hâlinde çalışır, yani
+    aklınıza gelmeyen bir akış yolu bir span'i açık bırakamaz.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="kapsamlı biçim"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: scoped }]}
+  />
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="trace" title="bir çalıştırmayı kaydetme" />
+
+  <h2>Bağlam</h2>
+  <p>
+    <code>Start</code>, context'te hangi span varsa onun altına bir alt span
+    açar; hiçbiri yoksa bir kök açar. <code>Trace</code> her zaman bir kök
+    başlatır, <code>span.Child(ctx, name)</code> ise span'i bir context içinde
+    taşımadığınızda belirli bir span'in altına alt span başlatır. Burada ikinci
+    bir taşıma düzeneği icat edilmez: üst span, zaten geçirmekte olduğunuz
+    <code>ctx</code> içindedir.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="iç içe geçme"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: nesting }]}
+  />
+
+  <p>
+    Servis sınırının ötesinde <code>Inject</code>, giden başlıklara bir W3C
+    <code>traceparent</code> yazar; <code>Extract</code> ise gelen başlıklardaki
+    değeri okuyup bir context'e koyar. İçinde böyle bir değer olmayan başlıklar
+    olduğu gibi döndürülür, yani okunamayan bir başlık, onu taşıyan isteği
+    başarısız kılmak yerine yeni bir trace başlatır. Yukarı akıştaki örnekleme
+    kararı kalıtılır, böylece bir trace'in iki yarısı birbiriyle uyuşur.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="servis sınırının ötesinde"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: propagation }]}
+  />
+
+  <h2>Model, kullanım ve hatalar</h2>
+  <p>
+    mcpd alım sırasında token sayılarını fiyatlandırır, dolayısıyla trace'te
+    gördüğünüz maliyet size faturalanan maliyettir. <code>RecordError</code> bir
+    dizge değil bir <code>error</code> alır; kaydedilen bir başarısızlığın
+    üzerinde bir mesaj olmasını garanti eden şey budur. <code>End</code> de
+    durumu <code>ok</code> yerine <code>error</code> olarak kaydeder.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="bir span neler taşır"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: payload }]}
+  />
+
+  <p>
+    Span'in geri kalan metotları şunlardır: <code>SetInput</code>,
+    <code>SetOutput</code>, <code>SetMetadata</code>,
+    <code>SetAttributes</code>, <code>SetTags</code>, <code>SetStatus</code>,
+    <code>SetSession</code>, <code>SetThread</code>, <code>SetUser</code>,
+    <code>Event</code> ve <code>EndWithStatus</code>. Aynı alanlar, span
+    başlarken <code>With...</code> seçenekleriyle de verilebilir.
+  </p>
+
+  <h2>Kalıcı çalıştırmalar</h2>
+  <p>
+    Daemon'ın kalıcı çalıştırmalarını da aynı istemci karşılar.
+    <code>NewWorkflow</code> tanımı kurar ve adım gövdelerini saklar; bir
+    <code>Worker</code> bu tanımı kaydeder, lease'ler için uzun yoklama yapar ve
+    her birini bir goroutine üzerinde karşılar; <code>StartRun</code>,
+    <code>WatchRun</code>, <code>PublishEvent</code> ve diğerleri çalıştırma
+    yüzeyini bire bir yansıtır. Bir gövde, adımın bütçesi içinde yeniden
+    denenmek için <code>mcpd.Retryable(err, wait)</code> döndürür; handler'ın
+    <code>ctx</code> değerinden başlatılan bir span de çalıştırmanın trace'inde
+    kendi adımının altına düşer. Böyle bir span'in harcadığı, adımın
+    kullanımıdır: span'ler bittikçe sayılar toplanır, en son görülen model
+    geçerli olur ve <code>SetUsage</code> kendi verdiği alanları geçersiz kılar.
+    Worker içeriden <code>WorkerOnLease</code>,
+    <code>WorkerOnStepStart</code>, <code>WorkerOnStepEnd</code>,
+    <code>WorkerOnConflict</code> ve <code>worker.Stats()</code> ile
+    izlenebilir.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['go']} example="workflow" region="workflow" title="bir iş akışı" />
+  <p>
+    Her yapının ne yaptığı, lease protokolü ve çalıştırma API'si şu sayfalarda:
+    <a href={linkTo('/docs/workflows')} class="link">İş akışları</a>,
+    <a href={linkTo('/docs/workers')} class="link">Worker'lar</a> ve
+    <a href={linkTo('/docs/runs')} class="link">Çalıştırmalar</a>.
+  </p>
+
+  <h2>Puanlar ve geri bildirim</h2>
+  <p>
+    <code>Score</code>, <code>min</code> ve <code>max</code> değerlerini sıradan
+    konumsal argümanlar olarak alır, yani ölçek atlanamaz. Çıplak bir 0.86,
+    hangi aralıkta durduğunu bilmeden hiçbir şey ifade etmez. Geri bildirim bir
+    insanın yargısıdır ve puandan ayrı durur; çünkü ikisi farklı sorulara yanıt
+    verir ve asla birlikte ortalanmamalıdır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="score" title="puan ve geri bildirim" />
+
+  <p>
+    Neyin değerlendirildiğini adlandırmak için <code>mcpd.TraceTarget(id)</code>
+    ya da <code>mcpd.SpanTarget(id, spanID)</code> verin; context'te hangi span
+    varsa onu kullanmak için ise boş bir <code>mcpd.Target&#123;&#125;</code>
+    verin.
+  </p>
+
+  <h2>Beş sinyalin hepsi, tek bir kimlik kümesi</h2>
+  <p>
+    <code>Log</code>, <code>Metric</code>, <code>Score</code> ve
+    <code>Feedback</code> metotlarının hepsi context alır, yani beş sinyalin
+    hepsi aynı trace ve span id'lerini taşır. Bir grafikteki sıçramadan onu
+    doğuran çalıştırmayı açabilmenizi sağlayan şey budur.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>Flush ve kapatma</h2>
+  <p>
+    <code>Start</code> ve <code>End</code> bellekteki bir kuyruğa ekleyip döner;
+    yığınlamayı ve göndermeyi arka plandaki bir goroutine yapar.
+    <code>Flush(ctx)</code> kuyrukta bekleyeni hiçbir şeyi durdurmadan gönderir.
+    <code>Shutdown(ctx)</code> flush eder, worker'ı durdurur ve
+    idempotenttir; <code>New</code> çağrısının yanına bir
+    <code>defer m.Shutdown(ctx)</code> koymak bu yüzden doğru alışkanlıktır.
+  </p>
+  <p>
+    Serverless bir fonksiyonda runtime, handler döner dönmez süreci dondurur ve
+    worker goroutine'i bir daha çalışmaz, yani hâlâ kuyrukta bekleyen bir
+    yığın kaybolur. Dönmeden önce flush edin.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="serverless bir handler"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: serverless }]}
+  />
+
+  <h2>Güvenebilecekleriniz</h2>
+  <ul>
+    <li>
+      Bir şey kaydeden hiçbir metot hata döndürmez ve panik etmez; nil bir
+      istemcide bile. Başarısız bir dışa aktarım, flush aralığı başına en çok bir
+      kez loglanır ve atılır. Gözlemlenebilirlik, gözlediği şeyi asla
+      devirmemelidir.
+    </li>
+    <li>
+      Kayıt bloklamaz, yani ajanınızın gecikmesi mcpd'nin hızlı ya da ayakta
+      olmasına hiç bağlı değildir.
+    </li>
+    <li>
+      Bellek sınırlıdır. Kuyruk <code>WithMaxQueue</code> kadar sinyal tutar;
+      bunun ötesinde en eskiler atılır ve sayılır. Bu sayı, dışa aktarılanlar,
+      vazgeçilenler ve <code>Record</code> tarafından reddedilenlerle birlikte
+      <code>Stats()</code> içinde görünür. Sınırsız bir tampon, bir ağ
+      kesintisini bellek yetersizliğinden ölüme çevirir.
+    </li>
+    <li>
+      Örnekleme kararı bir kez, kökte, trace id'sinin özeti alınarak verilir ve
+      her alt span'e kalıtılır. Böylece bir filodaki her süreç aynı trace
+      hakkında aynı kararı verir.
+    </li>
+    <li>
+      Bitmemiş bir span de dışa aktarılır. Uzun süren span'ler başladıklarında
+      çıkar ve bittiklerinde güncellenir, yani yolun ortasında çöken bir
+      çalıştırma görünür olur. Bir sonraki flush'tan önce biten bir span ise bir
+      kez, bitmiş hâliyle gönderilir.
+    </li>
+    <li>
+      Kodlanamayan bir değer, çağrınızı başarısız kılmak yerine atılır ve
+      loglanır; çünkü bir payload'daki serileştirme hatası, ajanınızda bir
+      başarısızlık olarak yüzeye çıkmamalıdır.
+    </li>
+  </ul>
+
+  <h2>Geri okuma</h2>
+  <p>
+    Okuma metotları HTTP API'yi yansıtır ve üretilmiş tipleri döndürür. Hata
+    döndüren tek metotlar bunlardır, çünkü çağıran taraf bir yanıt bekliyordur.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="query" title="arama ve analiz" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">Çalıştırma bulma</a>
+    filtreleri eksiksiz anlatır.
+    <a href={linkTo('/docs/reference/data-model')} class="link">Veri modeli</a>
+    bu tiplerin taşıdığı her alanı listeler.
+  </p>
+</Doc>

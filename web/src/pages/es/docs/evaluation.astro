@@ -1,0 +1,297 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Puntuaciones y feedback"
+  description="Cómo mcpd registra la evaluación automática y el juicio humano, por qué se guardan por separado, y la consulta que encuentra las ejecuciones que un evaluador puntuó por debajo."
+  lede="Una puntuación es lo que pensó una máquina. El feedback es lo que pensó una persona. mcpd las guarda como dos señales distintas y nunca promedia una con la otra."
+  og="docs"
+>
+  <h2>Dos señales, no un número</h2>
+  <p>
+    Una <strong>puntuación</strong> es una evaluación automática: un modelo
+    juez, una expresión regular, una prueba unitaria, cualquier cosa capaz de
+    producir un número sobre una ejecución. Un registro de
+    <strong>feedback</strong> es el juicio de una persona: un pulgar abajo en tu
+    producto, la valoración de un revisor, una respuesta corregida.
+  </p>
+  <p>
+    Ambos se enganchan a un <code>trace_id</code> o a un <code>span_id</code>,
+    ambos llegan como señales por derecho propio y cada uno se guarda en su
+    propia tabla. Nunca se combinan. Un juez que puntúa 0.9 en relevancia y un
+    cliente que pulsa el pulgar abajo son dos afirmaciones ciertas, y el
+    desacuerdo entre ellas es lo más útil que hay en esa ejecución. Un promedio
+    borraría justo eso y te dejaría con un número sobre el que nadie puede
+    actuar.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>Una puntuación declara su escala</h2>
+  <p>
+    <code>min</code> y <code>max</code> forman parte de la puntuación. Sin
+    ellos el valor no se puede interpretar: 0.86 puede ser un buen resultado en
+    una escala de 0 a 1, uno malo en una escala de 0 a 5, o una distancia donde
+    menos es mejor. Seis meses después, con dos evaluadores en el mismo
+    proyecto, nadie sabe cuál era. La especificación les da 0 y 1 por defecto, y
+    todos los SDK los exigen en el punto de llamada para que ese valor por
+    defecto nunca se acepte por descuido.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Campo</th><th>Para qué sirve</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>scorer_id</code></td>
+        <td>Qué evaluador la produjo, por ejemplo <code>answer_relevance</code>. Obligatorio.</td>
+      </tr>
+      <tr>
+        <td><code>scorer_version</code></td>
+        <td>Una puntuación solo se compara con otra de la misma versión. Si cambias el prompt de un juez tienes un evaluador nuevo, no la continuación del anterior.</td>
+      </tr>
+      <tr>
+        <td><code>value</code></td>
+        <td>El número.</td>
+      </tr>
+      <tr>
+        <td><code>min</code>, <code>max</code></td>
+        <td>La escala declarada sobre la que se sitúa el número.</td>
+      </tr>
+      <tr>
+        <td><code>label</code></td>
+        <td>Un resultado categórico, cuando el evaluador produce uno junto al número.</td>
+      </tr>
+      <tr>
+        <td><code>reason</code></td>
+        <td>El porqué. En un modelo juez es su explicación, y es lo que convierte una puntuación en algo discutible en lugar de en magia.</td>
+      </tr>
+      <tr>
+        <td><code>source</code></td>
+        <td>En vivo, fuera de línea, de experimento o manual.</td>
+      </tr>
+      <tr>
+        <td><code>score_trace_id</code></td>
+        <td>La traza de la propia ejecución de puntuación, para poder abrir y leer una puntuación sospechosa como cualquier otra ejecución.</td>
+      </tr>
+      <tr>
+        <td><code>cost</code></td>
+        <td>Lo que costó producir la puntuación.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Cómo registrar una</h2>
+  <p>
+    El ayudante del SDK encola una puntuación igual que encola un span, así que
+    la llamada no bloquea y no puede lanzar una excepción. Si no le pasas
+    <code>traceId</code>, se engancha a la traza del span activo.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="score" title="puntuación y feedback" />
+
+  <p>
+    Por HTTP eso es <code>POST /v1/api/scores</code>, con un <code>Score</code>
+    como cuerpo. Una puntuación tiene que nombrar el <code>trace_id</code> o el
+    <code>span_id</code> del que habla; una puntuación enganchada a nada se
+    rechaza con un 400 en vez de guardarse donde nunca se podrá encontrar. Envía
+    <code>score_id</code> como cadena vacía y el servidor genera uno.
+  </p>
+
+  <h2>De dónde viene una puntuación</h2>
+  <p>
+    <code>source</code> es distinto de <code>scorer_id</code> porque el mismo
+    evaluador se ejecuta en más de un contexto, y los contextos no son
+    comparables. Volver a puntuar el tráfico de la semana pasada con el juez de
+    hoy no es prueba de que la calidad haya mejorado.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Origen</th><th>Significado</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>live</code></td><td>Producida en línea, mientras ocurría la ejecución trazada.</td></tr>
+      <tr><td><code>offline</code></td><td>Producida después, puntuando trazas ya guardadas.</td></tr>
+      <tr><td><code>experiment</code></td><td>Producida por un experimento ejecutado contra un dataset.</td></tr>
+      <tr><td><code>manual</code></td><td>Introducida por una persona, mediante la API o la interfaz.</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Una puntuación escrita a través de un SDK toma <code>live</code> por
+    defecto. Para los otros tres valores, ponlo tú.
+  </p>
+
+  <h2>Puntuar cuesta dinero, así que queda registrado</h2>
+  <p>
+    Una evaluación con juez suele ser otra llamada a un modelo. Puntuar cada
+    ejecución de producción con un juez grande puede costar más de lo que costó
+    servir el tráfico, y esa es una factura que la gente descubre tarde. Por eso
+    un <code>Score</code> lleva un <code>cost</code> con la misma forma que el de
+    un span: una moneda, el reparto entre entrada y salida, y el libro de
+    precios que produjo la cifra. Ponlo cuando escribas la puntuación por la API
+    HTTP o en un lote de ingesta nativo.
+  </p>
+  <p>
+    <code>score_trace_id</code> es la otra mitad de la misma idea. Traza la
+    propia ejecución de puntuación y su identificador queda en la puntuación,
+    así que un juez que empezó a bajarlo todo se puede abrir, leer y demostrar
+    que está roto.
+  </p>
+
+  <h2>Feedback humano</h2>
+  <p>
+    El feedback se escribe desde tu propio producto. Llámalo desde el control que
+    la persona pulsó de verdad y el juicio aterriza en la traza exacta que
+    produjo la respuesta a la que estaba reaccionando. <code>kind</code> decide
+    la forma de <code>value</code>.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Tipo</th><th><code>value</code></th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>thumbs</code></td><td><code>up</code> o <code>down</code>.</td></tr>
+      <tr><td><code>rating</code></td><td>Un número, en una escala que declara quien lo produce.</td></tr>
+      <tr><td><code>correction</code></td><td>La respuesta correcta, como texto.</td></tr>
+      <tr><td><code>tag</code></td><td>Una etiqueta elegida de un conjunto.</td></tr>
+      <tr><td><code>comment</code></td><td>Texto libre, sin puntuación asociada.</td></tr>
+    </tbody>
+  </table>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="un pulgar abajo desde tu producto"
+    samples={[
+      {
+        lang: 'typescript',
+        label: 'TypeScript',
+        shiki: 'typescript',
+        code: `// No traceId: it attaches to the active span's trace.
+mcpd.feedback({
+  kind: 'thumbs',
+  value: 'down',
+  comment: 'Named the wrong depot.',
+  authorKind: 'end_user',
+})`,
+      },
+      {
+        lang: 'curl',
+        label: 'cURL',
+        shiki: 'bash',
+        code: `curl -s -X POST "$MCPD/v1/api/feedback" \\
+  -H 'content-type: application/json' \\
+  -d "{
+    \\"feedback_id\\": \\"\\",
+    \\"trace_id\\": \\"$TRACE\\",
+    \\"kind\\": \\"thumbs\\",
+    \\"value\\": \\"down\\",
+    \\"comment\\": \\"Named the wrong depot.\\",
+    \\"author_kind\\": \\"end_user\\",
+    \\"timestamp\\": \\"$NOW\\",
+    \\"correlation\\": { \\"project\\": \\"default\\" }
+  }"`,
+      },
+    ]}
+  />
+
+  <p>
+    La ocultación actúa sobre los nombres de las claves, y se aplica a los
+    <code>metadata</code> que adjuntas a un juicio. <code>author_id</code> se
+    guarda tal como lo envías, así que envía un identificador seudónimo en lugar
+    de una dirección de correo. Consulta
+    <a href={urlFor('/docs/privacy', code)} class="link">Ocultación y retención</a>.
+  </p>
+
+  <h2>La consulta que encuentra respuestas malas</h2>
+  <p>
+    Para esto sirven las puntuaciones. <code>has_score</code> nombra un evaluador
+    y <code>score_below</code> pone el listón, y la lista de trazas devuelve las
+    ejecuciones que ese evaluador dejó por debajo. La comparación es estricta,
+    así que <code>score_below=0.5</code> excluye una ejecución que puntuó
+    exactamente 0.5.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="query" title="encuentra las ejecuciones con mala puntuación" />
+
+  <p>
+    <code>score_below</code> solo significa algo con <code>has_score</code> al
+    lado: un listón sin evaluador nombrado es un listón sobre nada. Los dos son
+    parámetros de <code>GET /v1/api/traces</code>, así que se combinan con
+    cualquier otro filtro de ahí. Las respuestas malas de un modelo, en
+    producción, en el último día, son una sola solicitud.
+  </p>
+
+  <h2>Cómo volver a leerlas</h2>
+  <p>
+    <code>GET /v1/api/scores</code> lista las evaluaciones automáticas,
+    filtradas por <code>scorer_id</code>, <code>source</code>,
+    <code>trace_id</code>, <code>experiment_id</code>, <code>min_value</code>,
+    <code>max_value</code> y una ventana de tiempo, con paginación por cursor.
+    <code>source</code> acepta <code>live</code>, <code>offline</code>,
+    <code>experiment</code> o <code>manual</code>, que es como lees las
+    puntuaciones del propio juez sin las que escribió una persona.
+    <code>GET /v1/api/feedback</code> toma un <code>trace_id</code> y devuelve
+    los juicios sobre esa ejecución. Listar el feedback de un proyecto sin
+    nombrar una ejecución no está implementado en esta versión, y el endpoint lo
+    dice: sin <code>trace_id</code> rechaza con un 400 que nombra el parámetro.
+    Antes respondía una lista vacía, que se lee como si nadie hubiera juzgado
+    nada.
+  </p>
+  <p>
+    La lista de puntuaciones no acepta <code>order</code>: va de más reciente a
+    más antigua, y su cursor solo compara en un sentido. Las listas de
+    ejecuciones y de spans sí lo aceptan, así que aquí se rechaza por su nombre
+    en vez de aceptarse y descartarse. Lo mismo vale para los filtros
+    <code>kind</code>, <code>from</code>, <code>to</code> y <code>cursor</code>
+    que varios clientes de SDK te dejan poner en una consulta de feedback.
+    Ninguno se aplicó nunca, y los cuatro ahora se rechazan.
+  </p>
+  <p>
+    Para leer de una vez una ejecución y todo lo que cuelga de ella, pide los
+    extras por su nombre:
+    <code>GET /v1/api/traces/{'{trace_id}'}?include=scores,feedback</code>, o
+    <code>include=all</code> para incluir también los logs.
+  </p>
+
+  <h2>Qué lleva la lista de trazas, y qué no</h2>
+  <p>
+    Cada traza guardada conserva dos agregados para que la lista no necesite
+    ningún join. Uno es el valor medio <em>por evaluador</em>: una media dentro
+    de <code>answer_relevance</code>, y otra media aparte dentro de
+    <code>groundedness</code>. El otro es un recuento de feedback <em>por
+    tipo</em>: tres pulgares, una corrección. Recuentos, no una media, porque la
+    media de un pulgar arriba y una corrección no es ninguna cantidad.
+  </p>
+  <p>
+    No hay una puntuación global de calidad, y no la habrá. Una sola cifra que
+    combinara un modelo juez, una expresión regular y el pulgar abajo de un
+    cliente sería un número sin unidad y sin manera de rebatirlo. mcpd te enseña
+    las piezas y te deja decidir a ti.
+  </p>
+
+  <h2>A continuación</h2>
+  <ul>
+    <li>
+      Todo lo demás por lo que puedes filtrar:
+      <a href={urlFor('/docs/searching', code)} class="link">Encontrar una ejecución</a>.
+    </li>
+    <li>
+      De qué está hecha una cifra de costo:
+      <a href={urlFor('/docs/cost', code)} class="link">Contabilidad de costos</a>.
+    </li>
+    <li>
+      Qué le pasa al identificador de un autor antes de guardarse:
+      <a href={urlFor('/docs/privacy', code)} class="link">Ocultación y retención</a>.
+    </li>
+  </ul>
+</Doc>

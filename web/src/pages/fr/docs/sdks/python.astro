@@ -1,0 +1,389 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (href: string) => urlFor(href, code)
+
+const scoped = `# Le synchrone et l’asynchrone sont le même objet. Les deux terminent le span
+# en sortant et enregistrent l’exception si le bloc en a levé une.
+with mcpd.trace("nightly_summariser") as run:
+    with mcpd.span("fetch", kind=SpanKind.TOOL_CALL) as step:
+        step.set_output({"documents": 42})
+
+async with mcpd.trace("agent") as run:
+    async with mcpd.span("generate", kind=SpanKind.MODEL_GENERATION) as generation:
+        generation.set_output(await model.complete(prompt))
+    await mcpd.aflush()`
+
+const nesting = `def draft(question: str) -> str:
+    # Rien n’a été passé en argument. Le span se place quand même sous
+    # l’exécution, car le span actif est un contextvars.ContextVar et cet
+    # appel est à l’intérieur du bloc.
+    with mcpd.span("draft", kind=SpanKind.MODEL_GENERATION) as generation:
+        generation.set_input(question)
+        return "..."
+
+
+with mcpd.trace("support_agent") as run:
+    run.set_output(draft("where is my order?"))`
+
+const propagation = `# En sortie, passez le span actif au service suivant.
+requests.post(url, headers={"traceparent": mcpd.traceparent()}, json=payload)
+
+# En entrée, continuez cette trace plutôt que d’en démarrer une nouvelle.
+with mcpd.trace("handler", traceparent=request.headers.get("traceparent")) as run:
+    ...`
+
+const payload = `generation.set_model("gpt-4o-mini", provider="openai")
+generation.set_usage(input_tokens=812, output_tokens=96, cache_read=128)
+
+# Un échec que vous avez intercepté et sur lequel vous avez tranché vous-même.
+generation.set_error("the provider timed out", kind="TimeoutError", retryable=True)
+
+# Un instant à l’intérieur du span, sans durée propre.
+generation.event("first_token")`
+
+const sinks = `from mcpd import Mcpd, RecordingSink
+
+sink = RecordingSink()
+mcpd = Mcpd(sink=sink)
+with mcpd.trace("answer") as run:
+    run.set_usage(input_tokens=12)
+mcpd.flush()
+assert sink.spans[0].usage.input_tokens == 12
+print(mcpd.stats())  # queued, dropped, capacity, exported, failed, rejected`
+
+const serverless = `def handler(event, context):
+    with mcpd.trace("answer") as run:
+        run.set_input(event["body"])
+        answer = agent(event["body"])
+        run.set_output(answer)
+
+    # Le lot est encore en mémoire ici. Le runtime gèle ce processus dès que le
+    # handler rend la main, et le thread worker ne tourne plus jamais.
+    mcpd.flush()
+    return {"statusCode": 200, "body": answer}`
+---
+
+<Doc
+  title="Python"
+  description="Le SDK mcpd pour Python : gestionnaires de contexte synchrones et asynchrones, propagation par contextvars, aucune dépendance obligatoire, une instrumentation qui ne lève jamais d’exception."
+  lede="Des gestionnaires de contexte pour le code synchrone comme asynchrone, un span actif fondé sur contextvars, et aucune dépendance obligatoire."
+  og="docs"
+>
+  <h2>Installation</h2>
+  <p>
+    Python 3.9 ou plus récent. Il n’y a aucune dépendance obligatoire, et c’est
+    délibéré : l’exporter tourne sur <code>urllib</code> et <code>gzip</code>
+    de la bibliothèque standard, si bien qu’installer mcpd n’ajoute rien à un
+    fichier de verrouillage et ne peut entrer en conflit avec ce dont votre
+    agent dépend déjà.
+  </p>
+
+  <Command
+    command="pip install mcpd"
+    primaryLabel="Bibliothèque standard seule"
+    secondary={[{ label: 'Avec l’extra httpx', command: 'pip install "mcpd[httpx]"' }]}
+  />
+
+  <p>
+    L’extra <code>httpx</code> ajoute la réutilisation des connexions et rien
+    d’autre. Le SDK se comporte à l’identique sans lui.
+  </p>
+
+  <h2>Construire le client</h2>
+  <p>
+    Un client par processus. Chaque argument lit aussi une variable
+    d’environnement, si bien que le même code tourne en développement et en
+    production sans la moindre modification. <code>Mcpd()</code> sans argument
+    s’adresse à un daemon sur <code>http://localhost:4317</code>.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="init" title="se connecter" />
+
+  <p>
+    Le code l’emporte sur l’environnement, et l’environnement l’emporte sur la
+    valeur par défaut.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Argument</th><th>Environnement</th><th>Par défaut</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>api_key</code></td><td><code>MCPD_API_KEY</code></td><td>aucune</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>aucun</td></tr>
+      <tr><td><code>service_name</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>aucun</td></tr>
+      <tr><td><code>service_version</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>aucune</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capture_payloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>log_level</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      <tr><td><code>batch_size</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flush_interval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2.0</code> secondes</td></tr>
+      <tr><td><code>max_queue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10.0</code> secondes</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>enabled=False</code> fait de chaque appel d’enregistrement une
+    opération sans effet qui renvoie quand même des objets valides : vous pouvez
+    donc désactiver mcpd dans les tests sans modifier le code testé.
+    <code>capture_payloads=False</code> garde les prompts et les complétions
+    dans le processus : les spans sont toujours enregistrés avec leurs temps,
+    leur statut, leur consommation, leur modèle, leur corrélation et leurs
+    erreurs, et <code>input</code> et <code>output</code> sont écartés avant
+    d’atteindre la file d’attente. Un span peut décider autrement pour lui-même
+    avec <code>capture_payloads=True</code> dans ses champs de départ, et
+    réciproquement.
+  </p>
+
+  <h2>Enregistrer une exécution</h2>
+  <p>
+    <code>mcpd.trace(name)</code> démarre une exécution et
+    <code>mcpd.span(name)</code> démarre une étape sous ce qui est actif à ce
+    moment-là. Les deux sont des gestionnaires de contexte : le bloc termine le
+    span en sortant et enregistre l’exception s’il en a levé une, puis laisse
+    passer cette exception telle quelle. Votre propre gestion des erreurs n’est
+    pas altérée par le fait d’être observée.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="trace" title="enregistrer une exécution" />
+
+  <p>
+    Sans bloc <code>with</code>, appelez <code>run.end()</code> vous-même. Le
+    span est exporté dès qu’il démarre dans les deux cas : un span qui ne se
+    termine jamais est donc visible comme un span qui ne s’est jamais terminé,
+    et c’est en général celui que vous cherchez.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="synchrone et asynchrone"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: scoped }]}
+  />
+
+  <h2>Contexte</h2>
+  <p>
+    Le span actif est un <code>contextvars.ContextVar</code>. Il suit un
+    <code>await</code> jusque dans une tâche et ne fuit pas entre threads : une
+    fonction utilitaire trois cadres plus bas ouvre donc un enfant du bon parent
+    sans qu’aucun appelant ait à lui faire passer un argument.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="imbrication"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: nesting }]}
+  />
+
+  <p>Ce qui en ressort est l’arbre, avec les temps et les payloads attachés.</p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>
+    Entre services, le contexte voyage dans un en-tête W3C
+    <code>traceparent</code>. Un en-tête mal formé démarre une nouvelle trace
+    plutôt que de faire échouer la requête qui le transportait. Une décision
+    entrante de ne pas échantillonner est respectée, car une trace que certains
+    services gardent et que d’autres jettent n’est pas une trace.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="d’un service à l’autre"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: propagation }]}
+  />
+
+  <h2>Modèle, consommation et erreurs</h2>
+  <p>
+    mcpd tarife les décomptes de tokens à l’ingestion : le coût porté par la
+    trace est donc celui qui vous a été facturé. Reportez ce que le fournisseur
+    vous a indiqué. <code>set_error</code> accepte une chaîne ou une exception,
+    place <code>status</code> sur <code>error</code> du même geste, et renseigne
+    toujours un message : « quelque chose a échoué » ne dit pas quoi faire.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="ce que porte un span"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: payload }]}
+  />
+
+  <p>
+    Les autres setters sont <code>set_input</code>, <code>set_output</code>,
+    <code>set_metadata</code>, <code>set_attributes</code>,
+    <code>set_tags</code>, <code>set_entity</code>, <code>set_cost</code>,
+    <code>set_status</code> et <code>add_link</code>. Tous renvoient le span, et
+    chacun peut aussi être passé en argument nommé au démarrage du span.
+    <code>external_parent_span_id=</code> nomme un parent venu d’un système de
+    tracing autre que mcpd, porté pour la corrélation et jamais utilisé pour la
+    filiation.
+  </p>
+
+  <h2>Payloads, sinks et spans terminés</h2>
+  <p>
+    Un sink est l’endroit où part un lot vidé. Le transport HTTP est le sink par
+    défaut. Un <code>RecordingSink</code> garde chaque lot en mémoire : un test
+    vérifie ainsi ce que l’instrumentation a enregistré sans serveur. Un
+    <code>ConsoleSink</code> imprime une ligne JSON par signal sur stderr. Un
+    sink qui lève une exception donne un lot en échec, compté et signalé, jamais
+    une exception dans votre code. <code>stats()</code> répond ce que le client
+    a fait depuis sa construction.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="vérifier ce qui a été enregistré"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: sinks }]}
+  />
+
+  <p>
+    <code>mcpd.record(span)</code> met en file un <code>SpanRecord</code> déjà
+    terminé, avec les identifiants, le parent et les temps tels que vous les
+    détenez : ce dont dispose un adaptateur pour un autre système de tracing ou
+    un import par lots. Il n’est jamais re-parenté, re-daté ni ré-échantillonné,
+    et un enregistrement mal formé est écarté et compté dans
+    <code>stats().rejected</code>, jamais levé.
+  </p>
+
+  <h2>Exécutions durables</h2>
+  <p>
+    Le même client dessert les exécutions durables du daemon.
+    <code>workflow()</code> construit la définition et retient le corps des
+    étapes, sous forme d’appels ou de décorateurs ; un <code>Worker</code>
+    l’enregistre, attend des leases en long polling sur un pool de threads et
+    sert chacun d’eux, et <code>mcpd.runs</code>, <code>mcpd.events</code> et
+    <code>mcpd.definitions</code> reprennent un pour un la surface des
+    exécutions. Un corps d’étape lève <code>StepFailure</code> avec
+    <code>class_="retryable"</code> pour être réessayé dans le budget de
+    l’étape, et enregistre des spans sous son étape via le
+    <code>StepContext</code>. Ce que dépensent ces spans est la consommation de
+    l’étape : les tokens sont additionnés à la fin de chaque span et le dernier
+    modèle vu l’emporte, si bien que le daemon tarife l’étape d’après ce que
+    montre la trace ; <code>ctx.set_usage</code> la remplace champ par champ.
+    <code>Worker</code> accepte quatre hooks à côté de <code>on_error</code>
+    (<code>on_lease</code>, <code>on_step_start</code>,
+    <code>on_step_end</code>, <code>on_conflict</code>), et
+    <code>worker.stats()</code> compte les leases prises, les corps en cours,
+    les achèvements, les échecs par classe, les conflits par motif et les leases
+    non servables.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['python']} example="workflow" region="workflow" title="un workflow" />
+  <p>
+    Ce que fait chaque construction, le protocole de lease et l’API des
+    exécutions sont décrits dans
+    <a href={linkTo('/docs/workflows')} class="link">Workflows</a>,
+    <a href={linkTo('/docs/workers')} class="link">Workers</a> et
+    <a href={linkTo('/docs/runs')} class="link">Exécutions</a>.
+  </p>
+
+  <h2>Scores et feedback</h2>
+  <p>
+    <code>min</code> et <code>max</code> se passent uniquement par mot-clé et
+    n’ont pas de valeur par défaut. Un nombre nu, sur une échelle non déclarée,
+    ne peut être comparé à rien : l’échelle est donc exigée à l’appel plutôt que
+    devinée plus tard. Le feedback est le jugement d’une personne et reste
+    distinct d’un score : les deux répondent à des questions différentes et ne
+    doivent jamais être moyennés ensemble.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="score" title="score et feedback" />
+
+  <p>
+    Les deux se rattachent à la trace du span actif quand vous n’en nommez
+    aucune. Les logs et les métriques font de même, si bien qu’un pic sur un
+    graphique ouvre l’exécution qui l’a causé.
+  </p>
+
+  <h2>Flush et arrêt</h2>
+  <p>
+    Enregistrer ajoute à une file d’attente en mémoire et rend la main ; un
+    thread daemon se charge du HTTP. <code>flush()</code> envoie ce qui attend
+    et renvoie <code>False</code> s’il n’y est pas parvenu dans son délai.
+    <code>shutdown()</code> vide la file, arrête le worker et libère le
+    transport. Les deux sont idempotents. À l’intérieur d’une boucle
+    d’événements, appelez <code>aflush()</code> et <code>ashutdown()</code>, qui
+    font le même travail sans bloquer la boucle.
+  </p>
+  <p>
+    Dans une fonction serverless, cela compte plus que partout ailleurs. Le
+    runtime gèle le processus dès que votre handler rend la main, et le thread
+    worker ne tourne plus jamais : un lot encore en file est donc perdu.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="un handler serverless"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: serverless }]}
+  />
+
+  <p>
+    Un client enregistre aussi un hook <code>atexit</code>, si bien qu’un script
+    ordinaire qui oublie de s’arrêter proprement obtient quand même son dernier
+    lot. Ce hook ne s’exécute pas sur <code>os._exit()</code> ni sur un signal
+    fatal : c’est un filet de sécurité, pas un remplacement.
+  </p>
+
+  <h2>Ce sur quoi vous pouvez compter</h2>
+  <ul>
+    <li>
+      L’instrumentation ne lève jamais d’exception. Chaque appel
+      d’enregistrement est protégé ; un échec est journalisé au plus une fois
+      par intervalle puis avalé. L’observabilité ne doit jamais faire tomber ce
+      qu’elle observe. Les appels de lecture font exception et lèvent bel et
+      bien une erreur, car une requête que vous attendez est autre chose.
+    </li>
+    <li>
+      L’enregistrement ne bloque pas. La latence de votre agent ne dépend jamais
+      de la vitesse de mcpd, ni de sa disponibilité.
+    </li>
+    <li>
+      La mémoire est bornée. <code>max_queue</code> signaux, 8192 par défaut.
+      Quand elle est pleine, les plus anciens sont écartés,
+      <code>mcpd.dropped</code> les compte et un avertissement est journalisé
+      par intervalle. Un tampon sans limite transforme une panne réseau en arrêt
+      pour mémoire épuisée.
+    </li>
+    <li>
+      La décision d’échantillonnage est prise une seule fois, à la racine, à
+      partir de l’identifiant de trace, puis héritée par chaque enfant. Un
+      <code>traceparent</code> entrant l’emporte toujours.
+    </li>
+    <li>
+      Un span est exporté quand il démarre et mis à jour quand il se termine, si
+      bien qu’une exécution qui plante en plein vol reste visible.
+    </li>
+    <li>
+      Les horodatages viennent de <code>time.time_ns()</code> et partent sur le
+      réseau en UTC avec neuf chiffres. L’heure locale rend une trace
+      distribuée illisible.
+    </li>
+  </ul>
+
+  <h2>Relire ce qui a été enregistré</h2>
+  <p>
+    Les méthodes de lecture reflètent l’API HTTP et renvoient les types générés.
+    Elles sont synchrones et lèvent <code>McpdError</code> en cas d’échec.
+    <code>from_</code> et <code>to</code> acceptent un <code>datetime</code> ou
+    un raccourci tel que <code>-15m</code>, <code>-1h</code> ou
+    <code>-7d</code>. En code asynchrone, exécutez-les hors de la boucle avec
+    <code>asyncio.to_thread</code>.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="query" title="rechercher et analyser" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">Retrouver une exécution</a>
+    couvre les filtres en détail.
+    <a href={linkTo('/docs/reference/data-model')} class="link">Le modèle de données</a>
+    liste chaque champ que ces types portent.
+  </p>
+</Doc>

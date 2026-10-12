@@ -1,0 +1,698 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import SearchDemo from '@/components/SearchDemo.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const loc = localeOf(Astro.url.pathname)
+const link = (route: string) => urlFor(route, loc)
+
+/* Questi esempi sono scritti qui invece di essere letti da un programma di
+   esempio, perché sono query che un lettore esegue sul proprio daemon,
+   non codice che la CI possa eseguire. Ogni parametro che contengono è un
+   parametro che il server analizza. */
+const finding = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# Le esecuzioni fallite dell'ultimo giorno che citano tutte e due le parole,
+# ovunque in un nome di span, in un prompt o in un completion.
+curl -s --get http://localhost:4317/v1/api/traces \\
+  --data-urlencode 'q=Leeds depot' \\
+  --data-urlencode 'status=error' \\
+  --data-urlencode 'from=-24h'
+
+# Ogni passo che ha chiamato un modello ed è fallito, su tutte le
+# esecuzioni in una volta sola.
+curl -s --get http://localhost:4317/v1/api/spans \\
+  --data-urlencode 'model=gpt-4o-mini' \\
+  --data-urlencode 'status=error' \\
+  --data-urlencode 'min_duration_ms=2000'
+`,
+  },
+  {
+    lang: 'typescript' as const,
+    label: 'TypeScript',
+    shiki: 'typescript',
+    code: `import { Mcpd } from '@mcpd/sdk'
+
+const mcpd = new Mcpd()
+
+const bad = await mcpd.listTraces({
+  q: 'Leeds depot',
+  status: 'error',
+  from: '-24h',
+  limit: 20,
+})
+
+for (const trace of bad.traces) {
+  console.log(trace.traceId, trace.name, trace.status)
+}`,
+  },
+  {
+    lang: 'python' as const,
+    label: 'Python',
+    shiki: 'python',
+    code: `from mcpd import Mcpd
+
+mcpd = Mcpd()
+
+bad = mcpd.list_traces(q="Leeds depot", status="error", from_="-24h", limit=20)
+
+for trace in bad.traces:
+    print(trace.trace_id, trace.name, trace.status.value)`,
+  },
+]
+
+const discovery = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# Ogni ambiente che questo progetto ha riferito, per una casella di filtro.
+curl -s --get http://localhost:4317/v1/api/discovery \\
+  --data-urlencode 'project=default' \\
+  --data-urlencode 'facet=environment'
+
+# Digitazione assistita: i nomi di servizio che cominciano per "check".
+curl -s --get http://localhost:4317/v1/api/discovery \\
+  --data-urlencode 'facet=service_name' \\
+  --data-urlencode 'prefix=check'
+
+# I valori che prende un'etichetta di metrica.
+curl -s --get http://localhost:4317/v1/api/discovery \\
+  --data-urlencode 'facet=metric_label_value' \\
+  --data-urlencode 'key=model'
+`,
+  },
+  {
+    lang: 'curl' as const,
+    label: '200 OK',
+    shiki: 'json',
+    code: `{
+  "facet": "environment",
+  "values": [
+    { "value": "production", "last_seen": "2026-09-03T08:04:18Z" },
+    { "value": "staging", "last_seen": "2026-09-02T17:41:02Z" }
+  ]
+}`,
+  },
+  {
+    lang: 'curl' as const,
+    label: '501 Not Implemented',
+    shiki: 'json',
+    code: `{
+  "error": "not_implemented",
+  "capability": "discovery",
+  "message": "this deployment stores signals in <backend>, which does not support discovery: ... GET /v1/api/capabilities lists what it does support."
+}`,
+  },
+]
+
+const badParam = [
+  {
+    lang: 'curl' as const,
+    label: '400 Bad Request',
+    shiki: 'json',
+    code: `{
+  "error": "bad_parameter",
+  "field": "from",
+  "message": "\\"yesterday\\" is not an RFC 3339 timestamp or a relative duration like -1h"
+}`,
+  },
+]
+
+const paging = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# La prima pagina restituisce un cursore in page.next_cursor.
+curl -s --get http://localhost:4317/v1/api/traces \\
+  --data-urlencode 'q=refund' \\
+  --data-urlencode 'sort=cost' \\
+  --data-urlencode 'limit=100'
+
+# La pagina dopo: gli stessi filtri, lo stesso ordinamento, più il cursore.
+curl -s --get http://localhost:4317/v1/api/traces \\
+  --data-urlencode 'q=refund' \\
+  --data-urlencode 'sort=cost' \\
+  --data-urlencode 'limit=100' \\
+  --data-urlencode 'cursor=MzEzNzQyfDBhZjM...'
+`,
+  },
+  {
+    lang: 'typescript' as const,
+    label: 'TypeScript',
+    shiki: 'typescript',
+    code: `let cursor: string | undefined
+
+do {
+  const page = await mcpd.listTraces({
+    q: 'refund',
+    sort: 'cost',
+    order: 'desc',
+    limit: 100,
+    cursor,
+  })
+
+  for (const trace of page.traces) {
+    console.log(trace.traceId, trace.cost?.totalCost ?? 'not priced')
+  }
+
+  // Cicla su hasMore. Non esiste un totale verso cui contare.
+  cursor = page.page.hasMore ? page.page.nextCursor : undefined
+} while (cursor)`,
+  },
+  {
+    lang: 'python' as const,
+    label: 'Python',
+    shiki: 'python',
+    code: `cursor = None
+
+while True:
+    page = mcpd.list_traces(
+        q="refund", sort="cost", order="desc", limit=100, cursor=cursor
+    )
+
+    for trace in page.traces:
+        cost = trace.cost.total_cost if trace.cost else "not priced"
+        print(trace.trace_id, cost)
+
+    # Cicla su has_more. Non esiste un totale verso cui contare.
+    if not page.page.has_more:
+        break
+    cursor = page.page.next_cursor`,
+  },
+]
+---
+
+<Doc
+  title="Trovare un’esecuzione"
+  description="Ricerca full-text su prompt e completion, ogni filtro che mcpd accetta su tracce e span, e la query che trova le risposte penalizzate da uno scorer."
+  lede="Un’indagine comincia da una lamentela, non da una dashboard. Questa pagina spiega come trasformare una lamentela nell’unica esecuzione che l’ha provocata."
+  og="docs"
+>
+  <h2>Cerca nel payload, non nell’etichetta</h2>
+  <p>
+    Quasi tutti gli strumenti di tracing indicizzano nomi e attributi. mcpd
+    indicizza anche il prompt e il completion, perché quello di cui una persona
+    si lamenta è una cosa che ha detto il modello, e le parole che ti ripete
+    sono l’unica presa che hai. Il parametro <code>q</code> è quell’indice.
+  </p>
+
+  <SearchDemo class="not-prose my-8" />
+
+  <h2>Che cosa copre q, per la precisione</h2>
+  <p>
+    L’indice tiene tre campi per span: il suo nome, il suo input e il suo
+    output. Input e output sono JSON, quindi prima di indicizzare mcpd percorre
+    il payload e ne tiene soltanto le stringhe e i numeri, scartando le
+    parentesi graffe, le virgolette e le chiavi. Indicizzare il JSON grezzo
+    farebbe di ogni segno di punteggiatura un token e seppellirebbe le parole
+    che stai davvero cercando.
+  </p>
+  <p>Sei conseguenze da conoscere prima di farci affidamento:</p>
+  <ul>
+    <li>
+      Un’esecuzione corrisponde quando corrisponde <strong>un suo span
+      qualsiasi</strong>. Ti tornano indietro esecuzioni intere; aprine una per
+      vedere di quale passo si trattava.
+    </li>
+    <li>
+      Le parole sono messe insieme in AND. <code>q=refund delayed</code> trova
+      gli span che le contengono tutte e due, ovunque nel testo indicizzato,
+      non una accanto all’altra.
+    </li>
+    <li>
+      La corrispondenza è a parola intera e non distingue maiuscole da
+      minuscole, e i segni diacritici sono appiattiti, quindi
+      <code>resume</code> trova <code>résumé</code>. Non c’è nessuno stemming:
+      <code>refund</code> non trova <code>refunds</code>.
+    </li>
+    <li>
+      Nell’indice finiscono i primi 64 KiB dell’input e i primi 64 KiB
+      dell’output. I payload più lunghi sono archiviati e mostrati per intero;
+      soltanto la coda di un prompt molto grande resta fuori dalla ricerca.
+    </li>
+    <li>
+      L’oscuramento gira prima dello storage, quindi quello che ha tolto
+      non è mai stato nemmeno indicizzato. Vedi
+      <a href={link('/docs/privacy')} class="link">Oscuramento e conservazione</a>.
+    </li>
+    <li>
+      Uno span scritto più di una volta, com’è uno span di lunga durata quando
+      finisce, sostituisce la propria riga nell’indice, così la ricerca mostra
+      sempre la versione di adesso.
+    </li>
+  </ul>
+
+  <h2>Una virgoletta di troppo è una ricerca, non un errore</h2>
+  <p>
+    L’indice che sta sotto ha un linguaggio di query suo: una virgoletta doppia
+    apre una frase, e <code>NEAR</code>, <code>OR</code> e <code>*</code> sono
+    operatori. Consegnargli il tuo testo così com’è vorrebbe dire che il
+    messaggio di un cliente che contiene una virgoletta torna indietro come
+    errore di sintassi invece che come risultato, e una casella di ricerca che
+    può sollevare un errore è una casella di ricerca che la gente smette di
+    usare.
+  </p>
+  <p>
+    Perciò il tuo testo non arriva mai a quel parser. mcpd divide quello che hai
+    scritto sugli spazi, toglie da ogni parola qualunque virgoletta doppia,
+    avvolge ogni parola come termine letterale e le unisce in AND.
+    <code>q=say "no"</code> cerca le parole <em>say</em> e <em>no</em>.
+    <code>q=NEAR</code> cerca la parola NEAR. Niente di quello che puoi
+    scrivere è un errore di sintassi, e nessun operatore è a tua disposizione. È
+    questo il compromesso, fatto in questa direzione di proposito.
+  </p>
+  <p>
+    Un <code>q</code> fatto di soli spazi viene scartato invece di non
+    corrispondere a niente, e un <code>q=</code> vuoto è trattato come assente.
+    Ogni parametro si comporta così, perché un modulo che manda anche le sue
+    caselle di filtro vuote non finisca per filtrare sulla stringa vuota.
+  </p>
+
+  <h2>Restringere un elenco di esecuzioni</h2>
+  <p>
+    <code>GET /v1/api/traces</code> prende quello che segue. Quello che lasci
+    fuori non viene applicato.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Parametro</th><th>Che cosa seleziona</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>q</code></td>
+        <td>Full text sul nome, sull’input e sull’output di ogni span.</td>
+      </tr>
+      <tr>
+        <td><code>status</code></td>
+        <td>
+          <code>unset</code>, <code>ok</code>, <code>error</code> o
+          <code>cancelled</code>. Un’esecuzione è <code>error</code> quando un
+          suo span qualsiasi è fallito, anche uno il cui errore è stato
+          intercettato.
+        </td>
+      </tr>
+      <tr>
+        <td><code>kind</code></td>
+        <td>
+          Il tipo dello span radice dell’esecuzione, per esempio
+          <code>agent_run</code> o <code>workflow_run</code>.
+        </td>
+      </tr>
+      <tr>
+        <td><code>name</code></td>
+        <td>Il nome dello span radice, esatto. Non un prefisso e non uno schema.</td>
+      </tr>
+      <tr>
+        <td><code>tags</code></td>
+        <td>
+          Separati da virgola. Un’esecuzione deve portare <em>tutti</em> i tag
+          elencati, non uno qualsiasi.
+        </td>
+      </tr>
+      <tr><td><code>session_id</code></td><td>Ogni esecuzione di una stessa conversazione.</td></tr>
+      <tr><td><code>thread_id</code></td><td>Ogni esecuzione di uno stesso thread.</td></tr>
+      <tr><td><code>user_id</code></td><td>Ogni esecuzione per uno stesso utente finale.</td></tr>
+      <tr><td><code>environment</code></td><td>Un solo ambiente, per esempio <code>production</code>.</td></tr>
+      <tr>
+        <td><code>model</code></td>
+        <td>Le esecuzioni con almeno uno span su questo id di modello.</td>
+      </tr>
+      <tr>
+        <td><code>from</code>, <code>to</code></td>
+        <td>La finestra, misurata sull’ora di inizio dell’esecuzione.</td>
+      </tr>
+      <tr>
+        <td><code>min_duration_ms</code></td>
+        <td>Le esecuzioni lente almeno così, in millisecondi.</td>
+      </tr>
+      <tr>
+        <td><code>min_cost</code></td>
+        <td>
+          Le esecuzioni che costano almeno questo. Un’esecuzione senza span
+          valorizzati conta come zero, quindi qualunque valore positivo la
+          esclude.
+        </td>
+      </tr>
+      <tr>
+        <td><code>has_score</code></td>
+        <td>Le esecuzioni che portano un punteggio di questo id di scorer.</td>
+      </tr>
+      <tr>
+        <td><code>score_below</code></td>
+        <td>Insieme a <code>has_score</code>: le esecuzioni che quello scorer ha messo sotto questo valore.</td>
+      </tr>
+      <tr>
+        <td><code>sort</code></td>
+        <td>
+          <code>start_time</code>, <code>duration</code>, <code>cost</code>,
+          <code>span_count</code> o <code>score</code>. Se non dici altro,
+          <code>start_time</code>. <code>score</code> ordina le esecuzioni per
+          il punteggio più basso che uno scorer qualsiasi ha dato loro, quindi
+          in ordine crescente la peggiore viene per prima; un’esecuzione senza
+          punteggio vale zero.
+        </td>
+      </tr>
+      <tr>
+        <td><code>order</code></td>
+        <td><code>asc</code> o <code>desc</code>. Se non dici altro, <code>desc</code>.</td>
+      </tr>
+      <tr>
+        <td><code>limit</code></td>
+        <td>La dimensione della pagina, tenuta fra 1 e 500. Se non dici altro, 50.</td>
+      </tr>
+      <tr>
+        <td><code>cursor</code></td>
+        <td>Il cursore opaco della pagina precedente.</td>
+      </tr>
+      <tr>
+        <td><code>project</code></td>
+        <td>
+          Quale progetto leggere. Se non dici altro, il progetto predefinito del
+          daemon, così un’installazione con un solo progetto non deve mai
+          passarlo.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>name</code>, gli id di correlazione e <code>environment</code> sono
+    test di uguaglianza, ed è questo che li rende leggeri. Se vuoi una
+    corrispondenza parziale su un nome, usa <code>q</code>: anche i nomi degli
+    span stanno nell’indice testuale.
+  </p>
+
+  <h2>Quanto costa una riga di elenco</h2>
+  <p>
+    Non c’è un secondo elenco di esecuzioni più leggero, perché il primo è già
+    leggero. La proiezione archiviata di una traccia non porta nessun input,
+    nessun output e nessun attributo: nomi, conteggi, tempi, costo, tag e
+    correlazione, e niente di quello che ha detto un modello. È l’apertura di
+    un’esecuzione a portarsi dietro il payload.
+  </p>
+  <p>
+    Misurato su un’esecuzione realistica, un agente di assistenza in otto passi
+    che recupera tre documenti di policy, chiama due strumenti e fa due chiamate
+    al modello con prompt e completion veri: la riga di elenco è
+    <strong>577 byte</strong> e l’esecuzione intera è
+    <strong>10.717 byte</strong>, cioè una <strong>riduzione del 94,6%</strong>.
+    È questo daemon, su quell’esecuzione, sulla vera superficie HTTP. Le
+    tue esecuzioni saranno diverse, e quello che conta è la direzione: il
+    risparmio cresce con la dimensione dei prompt, perché la parte che cresce è
+    la parte che l’elenco non porta.
+  </p>
+  <p>
+    La cifra è prodotta da un test invece di essere scritta qui a mano, così non
+    può invecchiare in un posto senza far fallire l’altro. Esegui
+    <code>cargo test -p mcpd-server --test payload_size -- --nocapture</code>
+    e ti stampa tutti e due i conteggi di byte. Un campo aggiunto alla proiezione
+    che si porti dietro del payload fa fallire quel test.
+  </p>
+
+  <h2>Tutto il resto è rifiutato, per nome</h2>
+  <p>
+    Quella tabella è tutto il vocabolario. Un parametro che non ci sta dentro è
+    rifiutato con un 400 che lo nomina, invece di essere accettato e scartato.
+    Questo è cambiato: mcpd ignorava un parametro che non
+    conosceva, quindi <code>?statuss=error</code> tornava 200 con ogni
+    esecuzione del progetto e niente nella risposta diceva che il filtro non era
+    stato applicato. Una risposta sbagliata ma credibile è peggio di un errore,
+    perché non c’è niente da notare.
+  </p>
+  <p>
+    Vale la pena dire quale compromesso comporta. Un client che manda un filtro che
+    un daemon più recente capisce ora prende un 400 da uno più vecchio, invece
+    di un insieme di risultati più largo. È il migliore dei due guasti: il 400
+    nomina il parametro e si ferma.
+  </p>
+  <p>
+    Certi rifiuti dicono più di «sconosciuto». mcpd registra
+    <code>service_name</code>, <code>service_version</code>,
+    <code>resource_id</code>, <code>run_id</code>, <code>request_id</code>,
+    <code>experiment_id</code> e <code>release</code> su ogni traccia, ma
+    l’elenco delle esecuzioni non permette ancora di filtrarli. Dei sette, solo
+    <code>service_name</code> è una faccetta della
+    <a href="#filling-a-filter-box" class="link">discovery</a>, quindi la
+    discovery elenca i suoi valori e nessuno degli altri. Quei sette sono
+    rifiutati con un messaggio che lo dice, perché
+    <code>service_name=checkout-api</code> non è un refuso, e dire a qualcuno
+    che è un parametro sconosciuto lo manda a caccia di un errore di ortografia
+    che non esiste.
+  </p>
+
+  <p>
+    La regola non è solo dell’elenco delle esecuzioni.
+    <code>GET /v1/api/spans</code>, <code>/v1/api/logs</code>,
+    <code>/v1/api/scores</code>, <code>/v1/api/metrics</code> e
+    <code>/v1/api/feedback</code> fanno valere ciascuno il proprio vocabolario
+    allo stesso modo. Vale la pena conoscerne due prima di incontrarli:
+    l’elenco dei punteggi non prende <code>order</code>, perché va dal più
+    recente e il suo cursore confronta in una sola direzione, e l’elenco dei
+    feedback vuole un <code>trace_id</code>, perché mcpd non sa ancora elencare
+    i feedback di un intero progetto e un elenco vuoto si leggerebbe come se non
+    ce ne fosse nessuno.
+  </p>
+
+  <h2 id="filling-a-filter-box">Riempire una casella di filtro</h2>
+  <p>
+    Un filtro serve a qualcosa solo se sai che cosa scriverci dentro, e i valori
+    non sono un elenco fisso: sono quello che i servizi che riferiscono a un
+    progetto mandano di fatto. <code>GET /v1/api/discovery</code> risponde a
+    questo. Chiedi una dimensione alla volta con <code>facet</code>, e ti
+    restituisce i valori che quella dimensione ha preso nel progetto, ordinati
+    per valore, ognuno con l’ultima volta che un segnale lo ha portato.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Facet</th><th>Che cosa elenca</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>entity_kind</code></td><td>Agent, workflow, tool, model, scorer, processor, pipeline o service.</td></tr>
+      <tr><td><code>entity_name</code></td><td>I nomi che quelle cose hanno, per esempio gli strumenti che sono stati chiamati.</td></tr>
+      <tr><td><code>service_name</code></td><td>I servizi che hanno riferito qualcosa.</td></tr>
+      <tr><td><code>environment</code></td><td>Gli ambienti visti, per esempio <code>production</code>.</td></tr>
+      <tr><td><code>tag</code></td><td>Ogni tag che porti una qualunque esecuzione.</td></tr>
+      <tr><td><code>metric_name</code></td><td>I nomi di metrica registrati, compresi quelli che mcpd ricava.</td></tr>
+      <tr><td><code>metric_label_key</code></td><td>Ogni chiave di etichetta vista nel progetto.</td></tr>
+      <tr><td><code>metric_label_value</code></td><td>I valori di una sola etichetta. Vuole <code>key</code>.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>prefix</code> restringe l’elenco per la digitazione assistita, e la
+    corrispondenza è alla lettera e distingue maiuscole da minuscole, perché
+    questi valori sono quelli con cui un filtro verrà confrontato e appiattirli
+    qui vorrebbe dire offrirne uno che poi non corrisponde a niente.
+    <code>limit</code> tiene la risposta entro 1000. I valori sono ordinati per
+    valore e non per data, così un elenco che qualcuno sta leggendo non si
+    rimescola sotto i suoi occhi fra un poll e l’altro.
+  </p>
+  <p>
+    C’è un limite che vale la pena conoscere prima di costruirci sopra.
+    <code>metric_label_key</code> elenca ogni chiave di etichetta vista in
+    qualunque punto del progetto, non le chiavi di una metrica con un nome
+    preciso: l’elenco dei valori distinti è indicizzato per etichetta, non per
+    la metrica che la portava.
+  </p>
+
+  <h2>Aggiornare un elenco senza rilanciarlo</h2>
+  <p>
+    <code>GET /v1/api/deltas</code> restituisce quello che è arrivato dopo un
+    cursore, dal più vecchio, per <code>traces</code>, <code>spans</code> o
+    <code>logs</code>. Tieni il cursore dell’ultimo poll, rimandalo indietro, e
+    applica le righe all’elenco che hai già.
+  </p>
+  <p>
+    Un poll non è una pagina, e i due cursori non sono intercambiabili, di
+    proposito. Sfogliare le pagine percorre all’indietro un insieme di risultati
+    fisso, nell’ordinamento che hai scelto; fare polling va in avanti
+    nell’ordine di arrivo e non finisce mai. Il watermark è l’ora di arrivo di
+    una riga insieme al suo id, perché un batch scrive ogni sua riga
+    con un solo timestamp, e un watermark capace di dire soltanto «dopo questo
+    nanosecondo» o rigiocherebbe tutto il batch o ne salterebbe il resto. Un
+    poll vuoto restituisce il cursore invariato: spostarlo in avanti farebbe
+    cadere una riga che atterra un istante dopo con un’ora di arrivo precedente.
+  </p>
+  <p>
+    Su punteggi e feedback non si può fare polling. Portano il timestamp che ha
+    mandato il chiamante e non hanno nessuna ora di arrivo messa dal server,
+    quindi un watermark su di loro o salterebbe una riga in ritardo o
+    ripeterebbe ogni riga per sempre. <code>signal=scores</code> è rifiutato,
+    non risposto con una pagina vuota.
+  </p>
+
+  <h2>Che cosa sa fare questo deploy</h2>
+  <p>
+    mcpd ha un solo trait di storage e tre backend dietro di esso, e non sono
+    uguali. Su ClickHouse una cancellazione viene accettata e applicata dopo
+    che la chiamata ritorna, quindi i conteggi della sua risposta dicono che
+    cosa corrispondeva e non che cosa ha già lasciato il disco. Su SQLite e
+    Postgres le righe non ci sono più quando la chiamata ritorna.
+    <code>GET /v1/api/capabilities</code> è il posto dove
+    tutto questo è scritto: quale backend sta dietro il daemon, che cosa fa
+    corrispondere <code>q</code>, se le maiuscole sono appiattite anche fuori da
+    ASCII, se una cancellazione è su disco quando la chiamata ritorna, e se la
+    discovery e il polling dei delta rispondono o no.
+  </p>
+  <p>
+    Leggilo una volta al momento della connessione e offri soltanto quello a cui
+    il deploy risponde. Un endpoint la cui capacità è falsa rifiuta con
+    <code>501</code> e con un corpo il cui campo <code>capability</code> nomina
+    la stessa parola che pubblica l’insieme delle capacità, così i due non
+    possono mai essere in disaccordo e un client che ha incontrato il rifiuto lo
+    può andare a cercare invece di riprovare una cosa che non cambierà mai.
+  </p>
+  <p>
+    Tutti e tre i backend disponibili oggi rispondono sia alla discovery sia al
+    polling dei delta, quindi il 501 qui sotto è la forma con cui rifiuterebbe
+    un backend aggiunto più avanti, e non una risposta che vedrai da SQLite, da
+    Postgres o da ClickHouse. L’insieme delle capacità è quello che ti dice di
+    quale si tratta, e vale la pena leggerlo anche adesso: i tre differiscono
+    sul fatto che una cancellazione sia su disco quando la chiamata ritorna, e
+    su come viene fatta valere la conservazione. Tutti e tre appiattiscono le
+    maiuscole anche fuori da ASCII.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={discovery} title="su che cosa posso filtrare?" />
+
+  <h2>Le finestre</h2>
+  <p>
+    <code>from</code> e <code>to</code> accettano un timestamp RFC 3339, oppure
+    una forma breve relativa: un segno meno, un numero e una fra <code>s</code>,
+    <code>m</code>, <code>h</code> e <code>d</code>. <code>-15m</code>,
+    <code>-1h</code> e <code>-7d</code> funzionano tutte. La forma breve esiste
+    perché scrivere a mano un timestamp ISO per guardare l’ultima ora è un
+    attrito che nessuno dovrebbe pagare.
+  </p>
+  <p>
+    <code>from</code> è inclusivo e <code>to</code> è esclusivo, e tutti e due si
+    confrontano con l’ora in cui l’esecuzione è <em>partita</em>. Un’esecuzione
+    lunga che è cominciata prima della tua finestra ed era ancora in corso
+    dentro di essa non viene restituita. Se stai dando la caccia a qualcosa che
+    girava alle 09:00, allarga <code>from</code> all’indietro invece di
+    stringerlo.
+  </p>
+  <p>
+    Un valore che non è né un timestamp né una durata è rifiutato per nome,
+    invece che ignorato. Ogni parametro di ogni endpoint di elenco fallisce
+    così, perché un filtro scartato in silenzio restituisce una risposta
+    sbagliata ma credibile, e una risposta sbagliata ma credibile è peggio di un
+    errore.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={badParam} title="from=yesterday" />
+
+  <h2>La query che trova le risposte sbagliate</h2>
+  <p>
+    <code>has_score=answer_relevance&amp;score_below=0.5</code> restituisce ogni
+    esecuzione che quello scorer ha messo sotto la metà. È questa la query da
+    prendere quando la lamentela riguarda la qualità e non un guasto, perché una risposta
+    sbagliata di solito sta dentro un’esecuzione riuscita.
+  </p>
+  <p>
+    <code>has_score</code> da solo restituisce ogni esecuzione che quello scorer
+    ha guardato. <code>score_below</code> da solo non fa proprio niente: una
+    soglia senza uno scorer attaccato non vuol dire niente, e mcpd dovrebbe
+    indovinare quale scorer intendevi. Non indovina.
+    <a href={link('/docs/evaluation')} class="link">Punteggi e feedback</a>
+    racconta da dove vengono quei valori.
+  </p>
+
+  <h2>Cercare passi invece di esecuzioni</h2>
+  <p>
+    <code>GET /v1/api/spans</code> cerca i singoli passi su tutte le esecuzioni
+    in una volta sola. Usalo per le domande su un passo e non su una
+    sessione: quale chiamata a uno strumento è lenta, quali chiamate a un
+    modello hanno dato errore, quanto dura un recupero.
+  </p>
+  <p>
+    Prende <code>q</code>, <code>kind</code>, <code>status</code>,
+    <code>name</code>, <code>model</code>, <code>trace_id</code>,
+    <code>from</code>, <code>to</code>, <code>min_duration_ms</code>,
+    <code>sort</code>, <code>order</code>, <code>limit</code> e
+    <code>cursor</code>, con gli stessi significati e gli stessi valori
+    predefiniti. Qui non c’è nessun filtro <code>tags</code>,
+    <code>session_id</code> o <code>user_id</code>, perché quelli appartengono
+    all’esecuzione, e tutti e tre sono rifiutati per nome invece che accettati
+    e scartati.
+  </p>
+  <p>
+    <code>sort</code> prende qui meno valori che nell’elenco delle esecuzioni:
+    <code>start_time</code>, <code>duration</code> o <code>cost</code>, e
+    nient’altro. Uno span non porta nessun conteggio di span e nessun riepilogo
+    dei punteggi, quindi <code>span_count</code> e <code>score</code> non hanno
+    niente su cui ordinare e sono rifiutati per nome invece che ignorati.
+  </p>
+  <p>
+    Su un’esecuzione, <code>model</code> chiede se uno span qualsiasi lo ha
+    usato. Su uno span, <code>model</code> è il modello di quello span. La
+    stessa parola, due domande.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={finding} title="trovarla" />
+
+  <h2>Le pagine, e perché il cursore è opaco</h2>
+  <p>
+    Un elenco restituisce al massimo <code>limit</code> righe e un oggetto
+    <code>page</code>. <code>page.next_cursor</code> c’è quando c’è dell’altro,
+    e <code>page.has_more</code> dice la stessa cosa come booleano.
+  </p>
+  <p>
+    Le pagine vanno a keyset, non a offset. Il cursore nomina l’ultima riga che
+    ti è stata data, e la pagina dopo comincia subito dopo di essa. Le pagine a
+    offset andrebbero alla deriva: le tracce arrivano di continuo, quindi quando
+    chiedi le righe dalla 50 alla 99 la finestra si è già spostata sotto di te, e
+    leggi due volte un’esecuzione mentre un’altra non compare mai. In
+    un’indagine, l’esecuzione che ti sfugge è quella che stavi cercando.
+  </p>
+  <p>
+    Il cursore è una coppia, codificata in esadecimale, fatta del valore di
+    ordinamento e dell’id della riga, e devi trattarlo come privo di
+    significato. È opaco perché la codifica possa cambiare senza rompere ogni
+    chiamante, e perché il valore che sta dentro è una quantità diversa per ogni
+    ordinamento: nanosecondi per <code>start_time</code> e
+    <code>duration</code>, un intero scalato per <code>cost</code>, un conteggio
+    semplice per <code>span_count</code>, il punteggio più basso
+    dell’esecuzione per <code>score</code>.
+  </p>
+  <p>
+    A questo è attaccata una regola. <strong>Rimanda indietro un cursore con gli
+    stessi filtri, lo stesso <code>sort</code> e lo stesso <code>order</code>
+    che lo hanno prodotto.</strong> mcpd non controlla che tu l’abbia fatto, e
+    un cursore rigiocato su un ordinamento diverso si confronta con la
+    colonna sbagliata e salta delle righe. Un cursore modificato o troncato è
+    rifiutato con <code>invalid_query</code> e il messaggio
+    <code>malformed cursor</code>.
+  </p>
+  <p>
+    Non c’è nessun totale. <code>page.total</code> è tenuto da parte per un
+    backend che sappia contare le corrispondenze a poco prezzo, e lo storage
+    SQLite integrato non lo riempie, quindi cicla su <code>has_more</code>
+    invece di contare verso un numero.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={paging} title="scorrere le pagine" />
+
+  <h2>Una volta che hai l’esecuzione</h2>
+  <p>
+    Un id di traccia preso da una qualunque di queste query va a
+    <code>GET /v1/api/traces/{'{trace_id}'}</code>, che restituisce l’esecuzione
+    e ogni span al suo interno, già ordinati perché un waterfall si disegni
+    senza una seconda richiesta. Aggiungi
+    <code>include=logs,scores,feedback</code> per avere nella stessa risposta
+    tutto quello che le sta attaccato.
+  </p>
+  <p>
+    Da lì,
+    <a href={link('/docs/cost')} class="link">Contabilità dei costi</a> spiega le
+    cifre su ogni passo, e il
+    <a href={link('/docs/reference/api')} class="link">riferimento dell’API HTTP</a>
+    elenca ogni endpoint e ogni campo come li dichiara la specifica.
+  </p>
+</Doc>

@@ -1,0 +1,457 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import Command from '@/components/Command.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+/* 예제 프로그램에서 읽어 오지 않고 여기에 직접 적었습니다. 이것들은 CI가 실행할
+   수 있는 코드가 아니라, 읽는 사람이 자기 데몬을 상대로 실행하는 질의입니다. */
+const breakdown = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# Where the money went last week, by model.
+curl -s --get http://localhost:4317/v1/api/analytics/cost \\
+  --data-urlencode 'from=-7d' \\
+  --data-urlencode 'group_by=model'
+
+# The same week as a daily series, so you can see the day it changed.
+curl -s --get http://localhost:4317/v1/api/analytics/cost \\
+  --data-urlencode 'from=-7d' \\
+  --data-urlencode 'group_by=model' \\
+  --data-urlencode 'bucket=1d'
+`,
+  },
+  {
+    lang: 'typescript' as const,
+    label: 'TypeScript',
+    shiki: 'typescript',
+    code: `import { Mcpd } from '@mcpd/sdk'
+
+const mcpd = new Mcpd()
+
+const spend = await mcpd.analyticsCost({
+  from: '-7d',
+  to: '-0s',
+  groupBy: 'model',
+  bucket: '1d',
+})
+
+console.log(\`\${spend.currency} \${spend.totalCost.toFixed(4)} over the window\`)
+for (const group of spend.groups) {
+  console.log(group.key, group.totalCost, group.inputTokens, group.outputTokens)
+}`,
+  },
+  {
+    lang: 'python' as const,
+    label: 'Python',
+    shiki: 'python',
+    code: `from mcpd import Mcpd
+
+mcpd = Mcpd()
+
+spend = mcpd.analytics_cost("-7d", "-0s", group_by="model", bucket="1d")
+
+print(f"{spend.currency} {spend.total_cost:.4f} over the window")
+for group in spend.groups:
+    print(group.key, group.total_cost, group.input_tokens, group.output_tokens)`,
+  },
+]
+
+const response = [
+  {
+    lang: 'curl' as const,
+    label: 'CostBreakdown',
+    shiki: 'json',
+    code: `{
+  "from": "2026-08-20T09:00:00Z",
+  "to": "2026-08-27T09:00:00Z",
+  "currency": "USD",
+  "total_cost": 12.418264,
+  "groups": [
+    {
+      "key": "claude-sonnet-4",
+      "count": 1841,
+      "error_count": 12,
+      "total_cost": 9.612055,
+      "input_tokens": 2903118,
+      "output_tokens": 214477,
+      "latency": { "mean": 1840.2, "max": 24193.0 }
+    },
+    {
+      "key": "gpt-4o-mini",
+      "count": 6204,
+      "error_count": 3,
+      "total_cost": 2.806209,
+      "input_tokens": 9114882,
+      "output_tokens": 388310,
+      "latency": { "mean": 612.4, "max": 8801.0 }
+    }
+  ]
+}`,
+  },
+]
+---
+
+<Doc
+  title="비용 산정"
+  description="mcpd가 토큰 수를 비용 수치로 바꾸는 방법. 과거가 다시 쓰이지 않도록 수집 시점에 값을 매기고, 캐시된 토큰은 따로 계산하며, 모르는 모델은 무료가 아니라 값이 없는 상태로 둡니다."
+  lede="비용 수치는 그것이 어디서 나왔는지 말할 수 있을 때에만 가질 값어치가 있습니다. 토큰 수와 화면의 숫자 사이에 있는 모든 단계를 여기에 적었습니다."
+  og="docs"
+>
+  <h2>값은 수집 시점에 한 번 매깁니다</h2>
+  <p>
+    모델 id와 토큰 수를 달고 스팬이 도착하면, mcpd는 그 모델을 가격표에서 찾아 그
+    호출의 비용을 계산하고 결과를 스팬에 저장합니다. 읽을 때 다시 계산하는 것은
+    없습니다.
+  </p>
+  <p>
+    이것이 이 페이지에서 중요한 결정입니다. 가격은 바뀝니다. 비용을 조회 시점에,
+    그날 마침 올라와 있던 가격표로 계산한다면 다음 달의 가격 인하가 지난달의
+    비용을 조용히 다시 써 버릴 것이고, 누군가에게 보고한 숫자는 그 사람이 확인하러
+    갔을 때 거기에 없을 것입니다. 수집 시점에 값을 매기면 그 수치는 호출이 일어난
+    때에 유효했던 요율에 고정됩니다. 저장되는 모든 비용은 그것을 만들어 낸
+    가격표의 id도 함께 기록하므로, 어떤 수치든 그 뒤의 요율까지 거슬러 갈 수
+    있습니다.
+  </p>
+  <p>
+    이미 비용을 달고 있는 스팬은 도착한 그대로 둡니다. 제공업체가 실제 수치를
+    주고 그것을 기록했다면 mcpd는 그 값을 그대로 두고 그 위에 값을 매기지
+    않습니다. <code>is_estimated</code> 플래그가 둘을 구분합니다. mcpd가
+    가격표에서 계산한 것은 추정치로 표시되는데, 실제로 추정치이기 때문입니다.
+  </p>
+
+  <h2>요율은 100만 토큰당입니다</h2>
+  <p>
+    가격표의 모든 요율은 100만 토큰당 통화 단위이며, 모든 제공업체가 이 방식으로
+    가격을 공개합니다. 가격 페이지에서 옮겨 적은 요율이 그대로 가격표에 들어가고,
+    새벽 세 시에 잘못 나눌 일이 없습니다. 계량기 하나의 계산은
+    <code>tokens × rate ÷ 1,000,000</code>입니다.
+  </p>
+
+  <h2>비용은 실행이 아니라 단계에 붙습니다</h2>
+  <p>
+    모델 호출마다 자기 수치를 답니다. 실행의 합계는 그 스팬들의 합이고, mcpd는
+    카운터를 올리는 대신 스팬이 하나 도착할 때마다 그 합을 스팬들로부터 다시
+    계산합니다. 스팬은 순서가 뒤바뀌어 도착하고, 재시도되고, 제자리에서
+    갱신되는데, 누적하는 합계는 이 세 가지 모두에서 어긋납니다. 아래의 행들과
+    맞지 않는 대표 숫자는 그 페이지의 다른 모든 숫자에 대한 신뢰까지 무너뜨립니다.
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>
+    위의 세 모델 호출은 각각 $0.00015, $0.00018, $0.00021로 값이 매겨졌습니다.
+    헤더의 실행 합계는 그 셋의 합이며 그 외에는 없습니다. 도구 호출, 메모리 조회,
+    가드레일은 토큰을 쓰지 않았으므로 비용이 없고 합계에도 보태지 않습니다.
+  </p>
+
+  <h2>계량기</h2>
+  <p>
+    모델 호출은 토큰 수 하나가 아닙니다. 제공업체는 여러 계량기를 서로 다른
+    요율로 청구하고, 가격표는 그 각각에 요율을 줍니다.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>요율</th><th>적용 대상</th><th>가격표에 없을 때</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>input</code></td>
+        <td>보통의 입력 토큰.</td>
+        <td>필수입니다.</td>
+      </tr>
+      <tr>
+        <td><code>output</code></td>
+        <td>보통의 출력 토큰.</td>
+        <td>필수입니다.</td>
+      </tr>
+      <tr>
+        <td><code>cache_read</code></td>
+        <td>프롬프트 캐시에서 읽어 온 토큰.</td>
+        <td><code>input</code> 요율로 청구합니다.</td>
+      </tr>
+      <tr>
+        <td><code>cache_write</code></td>
+        <td>프롬프트 캐시에 쓴 토큰.</td>
+        <td><code>input</code> 요율로 청구합니다.</td>
+      </tr>
+      <tr>
+        <td><code>cache_write_5m</code></td>
+        <td>제공업체가 TTL별로 값을 따로 매길 때, 5분 캐시에 쓴 토큰.</td>
+        <td><code>cache_write</code>로, 다시 <code>input</code>으로 폴백합니다.</td>
+      </tr>
+      <tr>
+        <td><code>cache_write_1h</code></td>
+        <td>1시간 캐시에 쓴 토큰.</td>
+        <td><code>cache_write</code>로, 다시 <code>input</code>으로 폴백합니다.</td>
+      </tr>
+      <tr>
+        <td><code>audio_input</code></td>
+        <td>오디오 입력 토큰.</td>
+        <td><code>input</code> 요율로 청구합니다.</td>
+      </tr>
+      <tr>
+        <td><code>audio_output</code></td>
+        <td>오디오 출력 토큰.</td>
+        <td><code>output</code> 요율로 청구합니다.</td>
+      </tr>
+      <tr>
+        <td><code>reasoning</code></td>
+        <td>제공업체가 따로 청구하는 경우의 숨은 추론 토큰.</td>
+        <td>
+          폴백이 없습니다. 주요 제공업체가 청구하는 방식대로 출력 합계의 일부로서
+          <code>output</code> 요율로 청구되며, 제공업체가 별도의
+          <code>text</code> 개수도 보고한 경우는 예외입니다. 아래를 보십시오.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>캐시된 토큰은 한 번만 청구됩니다</h2>
+  <p>
+    청구액을 부풀리는 전형적인 방법은 캐시된 토큰을 두 번 세는 것입니다. 한 번은
+    캐시 요율로, 또 한 번은 그 토큰이 이미 들어 있는 입력 합계의 일부로 말입니다.
+    그래서 제공업체가 내역을 보고하면 그 내역이 이깁니다. mcpd는 계량기마다 자기
+    요율로 값을 매기고, 나머지만 보통의 입력 요율로 청구합니다.
+  </p>
+  <p>
+    입력 토큰 100만 개를 보고한 <code>claude-sonnet-4</code> 호출에서 그중 90만
+    개가 캐시에서 읽힌 것이라면, 내장 가격표로는 이렇게 값이 매겨집니다.
+  </p>
+  <ul>
+    <li>캐시 읽기 900,000개, 100만 개당 $0.30 요율로 $0.27.</li>
+    <li>남은 입력 토큰 100,000개, 100만 개당 $3.00 요율로 $0.30.</li>
+    <li>
+      보고된 합계만으로 계산했을 때의 $3.00이 아니라, 입력 비용 $0.57.
+    </li>
+  </ul>
+  <p>
+    제공업체가 명시적인 <code>text</code> 개수를 주는 경우에는 그 개수를 나머지로
+    바로 씁니다. 주지 않는 경우 나머지는 보고된 합계에서 계량된 모든 필드를 뺀
+    값입니다.
+  </p>
+  <p>
+    여기에 짚어 둘 빈틈이 하나 남습니다. 가격표에 요율이 없는 계량기는 나머지의
+    일부로만 청구되므로, 제공업체가 <code>text</code> 개수까지 보낸 경우에는 아예
+    청구되지 않습니다. 추론 토큰은 가격표가 그 토큰에 자기 요율을 주지 않는 한
+    거기에 놓이고, 요율을 선언하면 해결됩니다. 이미지 토큰은 언제나 거기에
+    놓입니다. 가격표에 줄 이미지 요율 자체가 없기 때문입니다. 그러니 멀티모달이
+    많은 작업에서는 그 수치를 정확한 값이 아니라 낮게 잡힌 값으로 읽으십시오.
+  </p>
+
+  <h2>모르는 모델은 비용이 0이 아니라 비용이 없습니다</h2>
+  <p>
+    가격표에 그 모델의 요율이 없으면 mcpd는 비용 필드를 아예 붙이지 않고 스팬을
+    저장합니다. 0을 저장하지 않습니다.
+  </p>
+  <p>
+    0은 주장입니다. 이 호출은 공짜였다는 것입니다. 없음은 인정입니다. 이 호출이
+    얼마였는지 모른다는 것입니다. 둘은 서로 다른 결정으로 이어지고, 두 번째를 첫
+    번째인 것처럼 보고하는 도구는 청구액에 대해 거짓말을 하는 것입니다. 같은
+    규칙이 읽기 경로에도 흐릅니다. 스팬의 합이 아무것도 아닌 실행은 비용 0이
+    아니라 비용 수치 없이 돌아오므로, 비어 있는 비용 열은 <em>값이 매겨지지
+    않음</em>을 뜻하고 결코 <em>무료</em>를 뜻하지 않습니다.
+  </p>
+  <p>
+    실무에서 따라오는 결과는 몸에 익혀 둘 만합니다. 가격표에 없는 모델은 모든
+    합계에서도 빠집니다. 그 모델의 지출은
+    <code>/v1/api/analytics/cost</code>에 나타나지 않고, 그 모델의 실행은 0보다 큰
+    <code>min_cost</code> 필터에서 모두 제외됩니다. 주간 합계가 너무 낮아 보인다면
+    대개는 한가한 한 주가 아니라, 해석되지 않는 모델 id가 있는 것입니다.
+  </p>
+
+  <h2>모델 id 해석하기</h2>
+  <p>
+    스팬에 붙은 id는 클라이언트가 보낸 그대로이고, 클라이언트는 여기에 장식을
+    붙입니다. 게이트웨이는 벤더를 앞에 붙이고, 클라우드는 리전을 앞에 붙이고,
+    제공업체는 릴리스 날짜를 고정해 붙입니다. 가격표는 맨 모델 이름을 키로 쓰므로,
+    조회는 네 가지를 순서대로 시도하고 처음 맞는 곳에서 멈춥니다.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>단계</th><th>예</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>주어진 그대로의 id, 대소문자를 접어서</td>
+        <td><code>GPT-4o</code>가 <code>gpt-4o</code>를 찾습니다</td>
+      </tr>
+      <tr>
+        <td>마지막 슬래시 뒤의 부분</td>
+        <td><code>openai/gpt-4o</code>가 <code>gpt-4o</code>를 찾습니다</td>
+      </tr>
+      <tr>
+        <td>클라우드 id의 점 뒤 꼬리</td>
+        <td>
+          <code>us.anthropic.claude-sonnet-4</code>가
+          <code>claude-sonnet-4</code>를 찾습니다
+        </td>
+      </tr>
+      <tr>
+        <td>뒤에 붙은 날짜를 뗀 id, 접두사가 있든 없든</td>
+        <td>
+          <code>openai/gpt-4o-2024-08-06</code>이 <code>gpt-4o</code>를 찾습니다
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>-YYYY-MM-DD</code>와 <code>-YYYYMMDD</code> 접미사를 모두 알아봅니다.
+    네 단계가 모두 실패하는 것은 오류가 아니라 정상적인 결과입니다. 위에서 말한
+    대로 비용이 없다는 뜻입니다.
+  </p>
+
+  <h2>함께 실려 오는 가격표</h2>
+  <p>
+    mcpd는 작은 내장 가격표를 지니고 있어서, 설정을 전혀 하지 않아도
+    <code>docker run</code>이 실제 수치를 내놓습니다. 이름은
+    <code>builtin</code>이고 USD로 값을 매기며, 이 가격표가 만들어 낸 모든 비용은
+    그 이름을 기록합니다.
+  </p>
+
+  {/* crates/mcpd-core/src/cost.rs의 `builtin_book`에서 옮겨 적었습니다. 거기에서
+      요율이 바뀌면 여기에서도 바뀝니다. */}
+  <table>
+    <thead>
+      <tr>
+        <th>모델</th><th>입력</th><th>출력</th><th>캐시 읽기</th><th>캐시 쓰기, 5분</th><th>캐시 쓰기, 1시간</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><code>claude-opus-4</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
+      <tr><td><code>claude-opus-4-1</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
+      <tr><td><code>claude-opus-4-5</code></td><td>5.00</td><td>25.00</td><td>0.50</td><td>6.25</td><td>10.00</td></tr>
+      <tr><td><code>claude-sonnet-4</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
+      <tr><td><code>claude-sonnet-4-5</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
+      <tr><td><code>claude-haiku-4-5</code></td><td>1.00</td><td>5.00</td><td>0.10</td><td>1.25</td><td>2.00</td></tr>
+      <tr><td><code>claude-3-5-haiku</code></td><td>0.80</td><td>4.00</td><td>0.08</td><td>1.00</td><td>1.60</td></tr>
+      <tr><td><code>gpt-4o</code></td><td>2.50</td><td>10.00</td><td>1.25</td><td>입력 요율</td><td>입력 요율</td></tr>
+      <tr><td><code>gpt-4o-mini</code></td><td>0.15</td><td>0.60</td><td>0.075</td><td>입력 요율</td><td>입력 요율</td></tr>
+      <tr><td><code>gpt-4.1</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>입력 요율</td><td>입력 요율</td></tr>
+      <tr><td><code>gpt-4.1-mini</code></td><td>0.40</td><td>1.60</td><td>0.10</td><td>입력 요율</td><td>입력 요율</td></tr>
+      <tr><td><code>o3</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>입력 요율</td><td>입력 요율</td></tr>
+      <tr><td><code>o4-mini</code></td><td>1.10</td><td>4.40</td><td>0.275</td><td>입력 요율</td><td>입력 요율</td></tr>
+      <tr><td><code>gemini-2.5-pro</code></td><td>1.25</td><td>10.00</td><td>0.31</td><td>입력 요율</td><td>입력 요율</td></tr>
+      <tr><td><code>gemini-2.5-flash</code></td><td>0.30</td><td>2.50</td><td>0.075</td><td>입력 요율</td><td>입력 요율</td></tr>
+      <tr><td><code>text-embedding-3-small</code></td><td>0.02</td><td>0.00</td><td>입력 요율</td><td>입력 요율</td><td>입력 요율</td></tr>
+      <tr><td><code>text-embedding-3-large</code></td><td>0.13</td><td>0.00</td><td>입력 요율</td><td>입력 요율</td><td>입력 요율</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    100만 토큰당 USD이며, 서드파티 모델 카탈로그와 마지막으로 대조했을 때의
+    가격표 상태입니다. 그 시점을 가격표는 자기 <code>as_of</code> 날짜로
+    기록합니다. Anthropic 항목이 캐시 쓰기 요율을 둘 다 담고 있는 이유는 데몬이
+    1시간 요율에서 5분 요율로 폴백하기 때문이고, 더 긴 쪽을 빼놓은 가격표는 조용히
+    적게 청구할 것이기 때문입니다. OpenAI는 캐시에 쓰는 데 요금을 받지 않으므로
+    거기에서 캐시 쓰기는 입력 요율로 청구됩니다. <code>gemini-2.5-flash</code>는
+    1.00의 오디오 입력 요율도 함께 담고 있고, 나머지 항목은 오디오를 자기 텍스트
+    요율로 계산합니다. <code>claude-haiku-4</code>는 없습니다. Anthropic이
+    제공하는 id는 <code>claude-haiku-4-5</code>이고, 아무것에도 해석되지 않는
+    id는 추측하지 않고 값이 매겨지지 않은 채로 둡니다.
+  </p>
+  <p>
+    이것은 공개된 정가이지, 실제로 치르는 가격이 아닙니다. 협상한 요율이 있거나 이 표에
+    없는 모델을 쓰고 있다면, mcpd가 보여 주는 수치는 추정치이고 그렇게 읽어야
+    합니다. 가격표를 일부러 짧게 두었습니다. 긴 가격표는 더 많은 자리에서 낡을
+    것이고, 실제보다 정확하다는 인상을 더 강하게 줄 것이기 때문입니다.
+  </p>
+  <p>
+    자기 가격표를 넣는 명령줄 플래그는 아직 없습니다. 가격표는 서버 상태의
+    일부이고, 오늘 그것을 바꾸는 방법은 mcpd를 라이브러리로 넣고
+    <code>AppState::with_price_book</code>에 가격표를 넘기는 것입니다. 가격표는
+    id 하나, ISO 4217 통화 하나, 모델 id에서 요율로 가는 맵으로 이루어지고, 여기서
+    나온 모든 수치에는 그 id가 찍히므로 나중에 두 가격표를 구분할 수 있습니다. 한
+    프로젝트 안의 가격은 하나의 통화를 함께 써야 합니다. mcpd는 실행의 스팬을
+    산술적으로 더할 뿐 통화 사이를 환산하지 않습니다.
+  </p>
+
+  <h2>돈을 다시 읽어 오기</h2>
+  <p>
+    <code>GET /v1/api/analytics/cost</code>는 어떤 기간 동안 돈이 어디로 갔는지,
+    스프레드시트로 내보낼 필요 없이 답해 줍니다.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    command="curl -s 'http://localhost:4317/v1/api/analytics/cost?from=-7d&group_by=model'"
+  />
+
+  <table>
+    <thead>
+      <tr><th>매개변수</th><th>뜻</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>from</code>, <code>to</code></td>
+        <td>
+          기간입니다. RFC 3339이거나 상대 시간 축약형입니다. 기본값은 지금 끝나는
+          최근 7일입니다.
+        </td>
+      </tr>
+      <tr>
+        <td><code>group_by</code></td>
+        <td>
+          기본값은 <code>model</code>입니다. <code>provider</code>,
+          <code>entity_name</code>, <code>environment</code>,
+          <code>status</code>, <code>session_id</code>, <code>user_id</code>,
+          <code>service_name</code>, <code>name</code>도 됩니다.
+        </td>
+      </tr>
+      <tr>
+        <td><code>bucket</code></td>
+        <td>
+          <code>30s</code>, <code>5m</code>, <code>1h</code>, <code>1d</code>.
+          합계만 원하면 빼고, 합계와 함께 시계열을 원하면 넣으십시오.
+        </td>
+      </tr>
+      <tr>
+        <td><code>project</code></td>
+        <td>어느 프로젝트를 읽을지. 기본값은 데몬의 기본 프로젝트입니다.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <CodeSwitcher class="not-prose my-6" samples={breakdown} title="어디로 갔는지" />
+
+  <p>
+    그룹은 큰 것부터 돌아오고 최대 100행이며, 버킷으로 나눈 시계열은 최대 5,000
+    지점입니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={response} title="응답" />
+
+  <p>
+    <code>count</code>에는 미묘한 점이 하나 있습니다. <code>model</code>,
+    <code>provider</code>, <code>entity_name</code>으로 묶으면 스팬을 읽으므로
+    <code>count</code>는 모델 호출의 수입니다. 그 밖의 것으로 묶으면 실행 요약을
+    읽으므로 <code>count</code>는 실행의 수입니다. 둘 다 쓸모가 있지만 같은 숫자가
+    아니고, 하나를 다른 하나와 견주는 것이 여기에서 가장 저지르기 쉬운 실수입니다.
+  </p>
+  <p>
+    이 응답의 그룹별 지연 시간은 평균과 최댓값만 담습니다. 백분위수는
+    <code>GET /v1/api/analytics/summary</code>에서 나오며, 그 엔드포인트가 기간
+    전체에 대해 계산합니다.
+  </p>
+
+  <h2>다음에 볼 곳</h2>
+  <p>
+    비용은 실행 목록의 한 열이고, 조사는 실제로 그 실행 목록에서 시작합니다.
+    <a href={linkTo('/docs/searching')} class="link">실행 찾기</a>가
+    <code>min_cost</code>와 지출 기준 정렬을 다룹니다. 값이 매겨지기 전에
+    페이로드가 버려지고 있어서 수치가 이상해 보인다면, 무엇이 기록될지를 결정하는
+    <a href={linkTo('/docs/sampling')} class="link">샘플링</a>을 확인하십시오. 이
+    페이지에 나온 모든 필드는
+    <a href={linkTo('/docs/reference/data-model')} class="link">데이터 모델</a>에
+    실려 있습니다.
+  </p>
+</Doc>

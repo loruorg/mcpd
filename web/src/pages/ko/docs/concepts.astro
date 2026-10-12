@@ -1,0 +1,306 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+/* English routes, rebuilt for this locale. */
+const code = localeOf(Astro.url.pathname)
+const to = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="개념"
+  description="mcpd가 쓰는 용어. 트레이스와 스팬, 스팬 종류, 루트 스팬과 이벤트 스팬, 여섯 가지 시그널, 상관 정보, 그리고 generation에서 chunk까지 이어지는 모델 계층."
+  lede="몇 개 안 되는 단어가 데이터 모델 전체를 지탱합니다. 나머지 문서는 그 단어를 안다고 전제하므로, 이 페이지에서 하나씩 정의하고 무엇에 쓰는지 밝힙니다."
+  og="docs"
+>
+  <h2>스팬</h2>
+  <p>
+    스팬은 작업 한 단위입니다. 이름, 종류, 시작 시각, 대개는 종료 시각, 그리고
+    상태를 가집니다. 무엇이 들어갔는지, 무엇이 나왔는지, 토큰을 얼마나 썼는지,
+    비용이 얼마였는지, 실패했다면 어떤 오류였는지도 담을 수 있습니다.
+  </p>
+  <p>
+    이름의 카디널리티는 낮게 유지하십시오. <code>search_docs</code>는
+    이름입니다. <code>search_docs(query=hello)</code>는 이름과 값을 붙여 놓은
+    것이고, 실행이 두 번만 쌓여도 이름으로 묶는 일이 쓸모없어집니다.
+  </p>
+
+  <h2>트레이스</h2>
+  <p>
+    트레이스는 한 번의 실행에서 나온 모든 스팬이고, 128비트 트레이스 id로 묶입니다.
+    트레이스 안에서 트리 모양을 정하는 것은 <code>parent_span_id</code>입니다. 모델
+    단계 안에서 일어난 도구 호출은 그 단계의 자식이므로, 화면에 보이는 중첩이
+    실제로 일어난 중첩입니다.
+  </p>
+  <p>
+    id는 OpenTelemetry 형태입니다. 트레이스는 소문자 16진수 32자, 스팬은 16자입니다.
+    장식이 아닙니다. 웹 계층에서 시작해 에이전트에서 끝난 트레이스가 양쪽에 걸쳐
+    하나의 트레이스로 남게 해 주고, 이미 텔레메트리를 읽고 있는 다른 도구 옆에
+    mcpd가 나란히 놓일 수 있게 해 줍니다.
+  </p>
+  <p>
+    부모가 외부 추적 시스템에서 온 스팬은 그 값을
+    <code>external_parent_span_id</code>에 담습니다. mcpd는 상관 정보로 그
+    값을 보관하지만, 트리를 그 값으로 세우지는 않습니다. mcpd가 받은 적 없는
+    스팬을 가리키는 부모 id는 하위 트리 전체를 아무것도 없는 곳에 매달아 버리기
+    때문입니다.
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>
+    mcpd는 트레이스마다 요약본도 저장합니다. 스팬 개수, 오류 개수, 총 토큰, 총 비용,
+    모델 호출 수, 도구 호출 수입니다. 이 행은 값을 더해 가는 대신, 쓰기가 있을
+    때마다 스팬에서 다시 계산합니다. 스팬은 순서가 뒤바뀌어 도착하고, 재시도되고,
+    제자리에서 갱신되기 때문입니다. 세 경우 모두에서 카운터는 틀어집니다. 그리고
+    목록에 눈에 띄게 틀린 스팬 개수가 하나 있으면, 읽는 사람은 그 페이지의 다른
+    숫자도 믿지 않게 됩니다.
+  </p>
+
+  <h2>루트 스팬과 이벤트 스팬</h2>
+  <p>
+    루트 스팬은 트레이스 안에 부모가 없는 스팬입니다. 보통 <code>agent_run</code>이나
+    <code>workflow_run</code>이고, 트레이스의 이름과 태그와 상관 정보가 여기서
+    나옵니다. 태그는 루트에서만 뜻이 있습니다. 거기서 실행 전체를 가리키기
+    때문입니다.
+  </p>
+  <p>
+    이벤트 스팬은 구간이 아니라 한 시점이므로 종료 시각도 소요 시간도 없습니다.
+    스트리밍 청크가 대표적인 경우입니다. 이 구분은 종료 시각이 없다는 사실에서
+    추론하지 않고 따로 저장합니다. "애초에 끝이 없다"와 "아직 끝나지 않았다"는
+    서로 다른 사실이고, 그중 하나만 문제이기 때문입니다.
+  </p>
+  <p>
+    트레이스는 루트가 끝나고 열린 스팬이 하나도 남지 않았을 때 완료됩니다.
+    그전까지도 목록에서 감추지 않고, 쓸 수 있는 이름 가운데 가장 나은 것으로
+    보여 줍니다. 끝내 끝나지 않은 실행이야말로 보러 온 그 실행인 경우가 많습니다.
+  </p>
+
+  <h2>스팬 종류</h2>
+  <p>
+    종류는 그 작업이 <em>무엇인지</em>를 말합니다. 스팬을 어떻게 그릴지, 어떤
+    속성이 그 위에서 뜻을 가지는지, 비용 산정이 그것을 볼지가 종류로 정해집니다.
+    mcpd는 33가지 종류를 계열로 나누어 정의합니다.
+  </p>
+  <div class="scroll-x">
+    <table>
+    <thead>
+      <tr><th>계열</th><th>종류</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>에이전트</td>
+        <td><code>agent_run</code></td>
+      </tr>
+      <tr>
+        <td>모델</td>
+        <td>
+          <code>model_generation</code>, <code>model_step</code>,
+          <code>model_inference</code>, <code>model_chunk</code>
+        </td>
+      </tr>
+      <tr>
+        <td>도구</td>
+        <td>
+          <code>tool_call</code>, <code>client_tool_call</code>,
+          <code>provider_tool_call</code>, <code>mcp_tool_call</code>
+        </td>
+      </tr>
+      <tr>
+        <td>워크플로</td>
+        <td>
+          <code>workflow_run</code>, <code>workflow_step</code>,
+          <code>workflow_conditional</code>, <code>workflow_parallel</code>,
+          <code>workflow_loop</code>, 그 밖의 것들
+        </td>
+      </tr>
+      <tr>
+        <td>검색</td>
+        <td>
+          <code>rag_ingestion</code>, <code>rag_embedding</code>,
+          <code>rag_vector_operation</code>, <code>rag_action</code>,
+          <code>retrieval</code>, <code>memory_operation</code>,
+          <code>graph_action</code>
+        </td>
+      </tr>
+      <tr>
+        <td>평가</td>
+        <td>
+          <code>scorer_run</code>, <code>scorer_step</code>,
+          <code>guardrail</code>, <code>processor_run</code>
+        </td>
+      </tr>
+      <tr>
+        <td>기타</td>
+        <td>
+          <code>mapping</code>, <code>skill_resolution</code>,
+          <code>workspace_action</code>, <code>http_request</code>,
+          <code>generic</code>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    토큰을 청구하는 종류는 넷입니다. <code>model_generation</code>,
+    <code>model_step</code>, <code>model_inference</code>,
+    <code>rag_embedding</code>입니다. 비용 산정이 읽는 스팬이 이것들입니다.
+    <code>generic</code>은 언제나 유효하고 추론으로 붙는 일이 없습니다. 그래서
+    mcpd가 분류하지 못한 스팬에는 추측한 이름 대신 정직한 이름이 붙습니다. 종류
+    하나하나가 무슨 뜻인지는
+    <a href={to('/docs/reference/data-model')} class="link">데이터 모델</a>에 모두
+    나열되어 있습니다.
+  </p>
+
+  <h2>모델 계층</h2>
+  <p>
+    그 종류 가운데 넷은 서로 안쪽으로 중첩되고, 그 중첩이 이 모델에서 가장 쓸모
+    있는 부분입니다.
+  </p>
+  <ul>
+    <li>
+      <code>model_generation</code>은 논리적인 생성 한 번입니다. 첫 요청부터
+      마지막 답까지 전부입니다.
+    </li>
+    <li>
+      <code>model_step</code>은 그 안의 단계 하나입니다. 도구를 두 번 호출하는
+      생성에는 단계가 셋 있습니다.
+    </li>
+    <li>
+      <code>model_inference</code>는 프로바이더 왕복만을 가리킵니다. 프로세서도,
+      도구 실행도 그 안에 들어가지 않습니다.
+    </li>
+    <li>
+      <code>model_chunk</code>는 스트리밍 청크 하나이고, 이벤트로 기록됩니다.
+    </li>
+  </ul>
+  <p>
+    층을 하나가 아니라 넷으로 둔 이유는 "모델 호출이 느렸다"는 말이 그대로 참인
+    경우가 거의 없기 때문입니다. 도구가 끼면, 코드에서 한 번 부른 것이 HTTP 왕복
+    한 번이 아닙니다. 요청, 도구, 다시 요청, 가드레일, 다시 요청입니다. 그것을
+    스팬 하나로 뭉치면, 직접 만든 재시도 루프에서 6초를 쓴 실행과 프로바이더를
+    기다리며 6초를 쓴 실행이 똑같아 보입니다. inference와 step과 generation을
+    나누는 것이 그 차이를 읽을 수 있게 만들고, 첫 청크 이벤트가 첫 토큰까지 걸린
+    시간을 알려 줍니다.
+  </p>
+  <p>
+    토큰 사용량은 프로바이더를 호출한 스팬에 <strong>한 번만</strong>
+    기록하십시오. 트레이스 요약본은 트레이스 안의 모든 스팬에서 입력 토큰과 출력 토큰을
+    합산합니다. 그래서 같은 수치를 generation에 붙이고 그 단계마다 또 붙이면,
+    화면의 토큰 합계도 비용도 두 배가 됩니다. 계층은 시간을 보기 위한 것이고,
+    토큰은 실제로 프로바이더와 이야기한 층의 것입니다.
+  </p>
+
+  <h2>여섯 가지 시그널</h2>
+  <p>
+    스팬은 mcpd가 저장하는 여섯 가지 가운데 하나입니다. 로그는 실행이 남긴
+    줄입니다. 메트릭은 카운터나 게이지나 히스토그램 형태의 수치 관측값입니다.
+    점수는 스팬이나 트레이스에 대한 기계의 평가이고, 피드백은 사람의 평가입니다.
+    관점 노트는 끝난 실행 하나를 두고 쓴 한 문장입니다. 대부분은 모델이 씁니다.
+    <code>outcome</code> 노트는 실행의 상태와 이미 가진 다른 사실로부터 데몬이
+    씁니다.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <p>
+    여섯 가지 모두 자신이 속한 트레이스 id를 지니고 다니고, 대부분은 스팬 id도
+    함께 지니며, 무엇이든 쓰이기 전에 여섯 가지 모두 같은 마스킹 파이프라인을
+    지납니다. 비밀 값은 프롬프트에서
+    새는 것과 똑같이 로그 한 줄에서도 샙니다.
+  </p>
+  <p>
+    점수는 언제나 자신의 척도를 함께 밝힙니다. 값, 그리고 그 값이 놓인 최솟값과
+    최댓값입니다. 모든 SDK가 호출 지점에서 둘 다 요구합니다. 척도 없이 놓인 0.7은
+    무엇과도 비교할 수 없고, 지난주에 같은 스코어러가 낸 값과도 비교할 수 없기
+    때문입니다.
+  </p>
+  <p>
+    피드백은 점수와 다른 곳에 보관하고, 점수와 평균 내지 않습니다. 형태는 다섯
+    가지입니다. <code>thumbs</code>, <code>rating</code>,
+    <code>correction</code>, <code>tag</code>, <code>comment</code>입니다. 그중
+    <code>correction</code>이 가장 값어치가 큽니다. 정답을 담고 있는 유일한
+    시그널이기 때문입니다.
+  </p>
+
+  <h2>상관 정보</h2>
+  <p>
+    상관 정보는 시그널이 속한 맥락입니다. 실행이 쌓여 있기만 한 더미와, 잘라서
+    볼 수 있는 집합을 가르는 것이 이것입니다.
+  </p>
+  <div class="scroll-x">
+    <table>
+    <thead>
+      <tr><th>필드</th><th>담는 내용</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>project</code></td><td>테넌시 키. 모든 시그널은 정확히 하나에 속합니다.</td></tr>
+      <tr><td><code>environment</code></td><td>실행된 곳. production이나 staging 같은 값입니다.</td></tr>
+      <tr><td><code>service_name</code></td><td>시그널을 보낸 서비스.</td></tr>
+      <tr><td><code>service_version</code></td><td>그 서비스의 버전. 회귀를 특정 릴리스에 묶을 수 있습니다.</td></tr>
+      <tr><td><code>session_id</code></td><td>사용자에게 보이는 세션. 여러 트레이스를 한 대화로 묶습니다.</td></tr>
+      <tr><td><code>thread_id</code></td><td>그 세션 안의 스레드.</td></tr>
+      <tr><td><code>user_id</code></td><td>그 실행의 대상이 된 최종 사용자.</td></tr>
+      <tr><td><code>resource_id</code></td><td>애플리케이션 안의 테넌트나 워크스페이스.</td></tr>
+      <tr><td><code>run_id</code></td><td>이 실행에 직접 붙인 식별자.</td></tr>
+      <tr><td><code>request_id</code></td><td>이 작업을 일으킨, 들어온 요청.</td></tr>
+      <tr><td><code>experiment_id</code></td><td>실험이 만든 실행일 때 설정합니다.</td></tr>
+      <tr><td><code>release</code></td><td>릴리스 이름이나 git sha.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    필수 필드는 <code>project</code> 하나뿐입니다. 보내는 쪽이 이름을 대지 않으면
+    데몬이 <code>--project</code> 기본값 아래에 그 시그널을 넣습니다. 그래서 속할
+    곳 없이 저장되는 것은 없습니다.
+  </p>
+  <p>
+    <code>session_id</code>는 군더더기처럼 보여도 설정하십시오. 에이전트 실행 한
+    번은 트레이스 하나이지만, 항의는 거의 언제나 대화 하나에 대한 것입니다. 세션
+    id가 없으면 따로 떨어진 트레이스 열한 개를 그 사람이 실제로 주고받은 대화로
+    되돌릴 방법이 없습니다.
+  </p>
+  <p>
+    트레이스 목록은 <code>environment</code>와 <code>session_id</code>와
+    <code>thread_id</code>와 <code>user_id</code>로 곧바로 거를 수 있고, 상태와
+    종류와 이름과 태그와 모델과 기간과 최소 소요 시간과 최소 비용과 점수로도
+    거를 수 있습니다.
+    <a href={to('/docs/searching')} class="link">실행 찾기</a>에서 그것들을 함께
+    씁니다.
+  </p>
+
+  <h2>링크</h2>
+  <p>
+    스팬에는 부모가 하나 있고, 링크는 몇 개든 있을 수 있습니다. 링크는 다른
+    스팬이나 다른 트레이스를 가리키면서 이유를 밝힙니다. <code>follows_from</code>,
+    <code>retry_of</code>, <code>replay_of</code>, 또는 직접 붙인 이름입니다.
+  </p>
+  <p>
+    링크가 있는 이유는 부모 관계로는 팬인을 나타낼 수 없기 때문입니다. 요청 스무
+    개가 일으킨 배치 작업에는 링크가 스무 개, 부모가 하나 있습니다. 그것을 트리에
+    억지로 넣으면 하위 트리를 열아홉 개 복제해 만들거나, 원인 열아홉 개를
+    버려야 합니다.
+  </p>
+
+  <h2>다음</h2>
+  <ul>
+    <li>
+      모든 엔티티와 필드 전체:
+      <a href={to('/docs/reference/data-model')} class="link">데이터 모델</a>.
+    </li>
+    <li>
+      이 단어들이 코드에서 어떻게 나타나는지:
+      <a href={to('/docs/sdks/typescript')} class="link">SDK</a>.
+    </li>
+    <li>
+      스팬이 OTLP로 도착할 때 mcpd가 무엇을 추론하는지:
+      <a href={to('/docs/opentelemetry')} class="link">OpenTelemetry</a>.
+    </li>
+    <li>
+      이 용어를 질의로 바꾸려면:
+      <a href={to('/docs/searching')} class="link">실행 찾기</a>.
+    </li>
+  </ul>
+</Doc>

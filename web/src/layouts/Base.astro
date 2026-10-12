@@ -1,0 +1,185 @@
+---
+import '@/styles/panel.css'
+import { SITE } from '@/lib/site'
+import { localeOf, routeOf, urlFor, locale, localesWithPage, DEFAULT_LOCALE } from '@/lib/i18n'
+import { strings } from '@/lib/ui-strings'
+import Rail from '@/components/Rail.astro'
+import Colophon from '@/components/Colophon.astro'
+
+interface Props {
+  title: string
+  description: string
+  /** Path of the share image under /og/, without extension. */
+  og?: string
+  /** Set on the operator UI so search engines leave it alone. */
+  noindex?: boolean
+  /** Adds Article structured data on documentation pages. */
+  kind?: 'website' | 'article' | 'software'
+  /** ISO date the page's content last changed, for article metadata. */
+  updated?: string
+  /** Set when the page's last section already sits on the dark floor. */
+  flushFooter?: boolean
+}
+
+const {
+  title,
+  description,
+  og = 'default',
+  noindex = false,
+  kind = 'website',
+  updated,
+  flushFooter = false,
+} = Astro.props
+
+/* Language. The page's own locale decides the `lang` attribute, and `title` and
+   `description` still arrive as props, so a translated page supplies translated
+   text and the head follows it with no special case. */
+const code = localeOf(Astro.url.pathname)
+const here = locale(code)
+const route = routeOf(Astro.url.pathname)
+
+const absolute = (path: string) => new URL(path, SITE.url).href.replace(/\/$/, '') || SITE.url
+
+/* Canonical points at this locale's own URL, never at English. Built from the
+   same helper as the alternates below, so the two cannot disagree about where a
+   translation lives. */
+const canonical = absolute(urlFor(route, code))
+
+/* Alternates, and only for locales that have actually been written. A page
+   translated into three languages lists three; one that exists only in English
+   lists none at all, because a self-referencing alternate says nothing and an
+   alternate pointing at an unwritten page points at a 404. `x-default` names
+   English, which is the copy a reader lands on when nothing matches them. */
+const translations = localesWithPage(route)
+const alternates =
+  translations.length > 1
+    ? translations.map((c) => ({ tag: locale(c).tag, href: absolute(urlFor(route, c)) }))
+    : []
+const xDefault = alternates.length > 0 ? absolute(urlFor(route, DEFAULT_LOCALE)) : undefined
+
+/* The skip link is the first thing a keyboard reader reaches, so it is read
+   from the catalogue like the rest of the chrome rather than left in English. */
+const s = strings(code)
+
+const ogImage = new URL(`/og/${og}.png`, SITE.url).href
+const fullTitle = title === SITE.name ? `${SITE.name} · ${SITE.tagline}` : `${title} · ${SITE.name}`
+
+/* Structured data. Only claims that are true: mcpd is free and open source,
+   so `offers` is priced at zero rather than omitted, and no rating, review or
+   organisation is asserted because none exists. */
+const structured =
+  kind === 'software'
+    ? {
+        '@context': 'https://schema.org',
+        '@type': 'SoftwareApplication',
+        name: SITE.name,
+        description: SITE.description,
+        applicationCategory: 'DeveloperApplication',
+        operatingSystem: 'Linux, macOS, Windows',
+        url: SITE.url,
+        codeRepository: SITE.repo,
+        license: `https://spdx.org/licenses/${SITE.licence}.html`,
+        offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+      }
+    : kind === 'article'
+      ? {
+          '@context': 'https://schema.org',
+          '@type': 'TechArticle',
+          headline: title,
+          description,
+          url: canonical,
+          ...(updated ? { dateModified: updated } : {}),
+          isPartOf: { '@type': 'WebSite', name: SITE.name, url: SITE.url },
+        }
+      : {
+          '@context': 'https://schema.org',
+          '@type': 'WebSite',
+          name: SITE.name,
+          url: SITE.url,
+          description: SITE.description,
+        }
+---
+
+<!doctype html>
+<html lang={here.tag} dir={here.dir === 'ltr' ? undefined : here.dir}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{fullTitle}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    {noindex && <meta name="robots" content="noindex, nofollow" />}
+
+    {alternates.map((a) => <link rel="alternate" hreflang={a.tag} href={a.href} />)}
+    {xDefault && <link rel="alternate" hreflang="x-default" href={xDefault} />}
+
+    {/* The panel legends are letterspaced and load `block`; preloading stops
+        the composition shifting once they arrive. These three faces carry the
+        brand in every locale, because a fallback stack keeps Latin on them and
+        only hands the CJK glyphs to the reader's system face. Nothing is
+        preloaded for Chinese, Japanese or Korean: a subsetted CJK web font is
+        megabytes, and every one of those systems already ships a good one. */}
+    <link rel="preload" href="/fonts/technor.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/supreme.woff2" as="font" type="font/woff2" crossorigin />
+
+    <meta property="og:type" content={kind === 'article' ? 'article' : 'website'} />
+    <meta property="og:site_name" content={SITE.name} />
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content={`${title} · ${SITE.name}`} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={fullTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+
+    <meta name="theme-color" content="#d4d5ca" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+
+    <script type="application/ld+json" set:html={JSON.stringify(structured)} />
+  </head>
+
+  <body>
+    <!--
+      mcpd, direction contract (seed afd87fbc)
+
+      THESIS: mcpd is a daemon you run beside your agent, so the page is an
+      instrument panel already reading a signal. It refuses the dark neon
+      developer-tool landing page and its predictable opposite, the white SaaS
+      page with a soft product screenshot.
+
+      OWN-WORLD: Painted mineral grey-green panel. Depth is tonal, never a
+      shadow. Scribed seams divide sections; legends are engraved Technor caps;
+      annunciator tiles latch on real state; calibration ticks appear only where
+      something is measured; instruments are chart fields recessed into the
+      panel; the close steps onto a dark painted floor.
+
+      STORY: This records what your agent actually did. Read the run, see the
+      cost, run one command.
+
+      FIRST VIEWPORT: Full-width recessed chart field drawing a live latency
+      trace under an engraved channel legend; the claim sits on the panel to its
+      left at display scale; the install command is a single sunken well beneath
+      it. No hero stack, no right-hand product card.
+
+      FORM: mission-control annunciator panel, candidate 4 of the ordered list,
+      seed key afd87fbc.
+
+      FINISH: unreviewed and undocumented is unfinished; this build ends with
+      the finish review, the verdict, and DESIGN.md.
+    -->
+    <a
+      href="#main"
+      class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:bg-panel-3 focus:px-4 focus:py-2 focus:text-ink"
+      >{s('base.skipToContent')}</a
+    >
+    <Rail />
+    <main id="main">
+      <slot />
+    </main>
+    <Colophon flush={flushFooter} />
+  </body>
+</html>

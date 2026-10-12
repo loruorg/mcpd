@@ -1,0 +1,1331 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcpd.sh/spec/definition.schema.json",
+  "title": "Definition document",
+  "description": "The body of a workflow definition: section 3 of the run contract. The daemon validates a posted body against this schema and against the Rust validator in crates/mcpd-runs, and refuses one the walker could not run with a 400 that names the field. Unknown fields are refused everywhere, so a guard that is spelled wrong is an error and not a run that skips its guard. The rules this schema cannot express are the validator's: ids unique within the document, which roots a path may read at its position, a `matches` pattern that compiles.",
+  "type": "object",
+  "properties": {
+    "input_schema": {
+      "type": "object",
+      "description": "An optional JSON Schema for the run's input. A run started with an input that fails it is a 400. Absent means any input."
+    },
+    "limits": {
+      "$ref": "#/$defs/Limits",
+      "description": "The ceilings on the run. Every one is optional."
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Node"
+      },
+      "description": "The nodes, walked in array order. That order is the whole of the ordering rule: there are no edges and no `after` in version 1, and a guard that needs an earlier result reads `steps.<id>`."
+    },
+    "output": {
+      "$ref": "#/$defs/Template",
+      "description": "An optional template rendered when the run reaches the end of the graph and stored on the run."
+    }
+  },
+  "required": [
+    "steps"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "A step id: a lowercase letter, then lowercase letters, digits and underscores, so every generator can turn it into an identifier."
+    },
+    "Path": {
+      "type": "string",
+      "pattern": "^[^.\\[\\]{}$\\s]+(?:\\.[^.\\[\\]{}$\\s]+|\\[[0-9]+\\])*$",
+      "description": "A path into the context a node sees: dot-separated names with `[n]` for array positions, such as `input.order.lines[0].sku`. The roots are `input`, `steps.<id>`, `run`, and inside a `foreach` body `item` and `index`, inside a `loop` body `iter.index`. A path that names nothing reads as null."
+    },
+    "TemplateString": {
+      "type": "string",
+      "pattern": "^(?:[^$]|\\$[^{]|\\$\\{[^${}]+\\})*\\$?$",
+      "description": "A string in which every `${path}` is replaced by the value the path names: a string verbatim, a number or bool as JSON, an object or array as compact JSON, null as an empty string. A string that is exactly one `${path}` yields the JSON value itself rather than its text. There is no escape sequence; a literal `${` is not expressible."
+    },
+    "Template": {
+      "description": "Any JSON value. Strings render as `TemplateString`; objects and arrays render their values recursively, with keys left as written; numbers, bools and null pass through.",
+      "anyOf": [
+        {
+          "type": [
+            "null",
+            "boolean",
+            "number"
+          ]
+        },
+        {
+          "$ref": "#/$defs/TemplateString"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Template"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Template"
+          }
+        }
+      ]
+    },
+    "Predicate": {
+      "description": "A guard: one comparison, or `all`, `any` or `not` over other predicates. Comparison of unlike JSON types is false, never an error, and a path that resolves to nothing is treated as JSON null.",
+      "oneOf": [
+        {
+          "type": "object",
+          "description": "One comparison of the value at `path` against `value`.",
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/Path",
+              "description": "What to read."
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "eq",
+                "ne",
+                "lt",
+                "lte",
+                "gt",
+                "gte",
+                "in",
+                "exists",
+                "matches"
+              ],
+              "description": "How to compare. `eq` and `ne` by JSON value, with `1` and `1.0` equal. `lt`, `lte`, `gt` and `gte` order numbers numerically and strings by code point. `in` is true when the value is equal to any element of the array in `value`. `exists` is true when the path names a value that is not null, and takes no `value`. `matches` applies the regular expression in `value` to a string; a pattern that does not compile is false. `ne` needs the same JSON type and a different value; write `{ \"not\": { \"op\": \"eq\" } }` for the test that is also true across types."
+            },
+            "value": {
+              "description": "What to compare against. Required for every op but `exists`. An array for `in`, a string for `matches`, a number or a string for the ordering ops. A JSON null is a value, so `eq null` is a test for absent-or-null."
+            }
+          },
+          "required": [
+            "path",
+            "op"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "const": "exists"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "value": false
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "enum": [
+                      "eq",
+                      "ne",
+                      "lt",
+                      "lte",
+                      "gt",
+                      "gte",
+                      "in",
+                      "matches"
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "value"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "const": "in"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "value": {
+                    "type": "array"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "const": "matches"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "enum": [
+                      "lt",
+                      "lte",
+                      "gt",
+                      "gte"
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "value": {
+                    "type": [
+                      "number",
+                      "string"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "description": "True when every member is true. At least one member: an empty `all` would always be true, and a guard that always passes is a mistake.",
+          "properties": {
+            "all": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/Predicate"
+              },
+              "description": "The members."
+            }
+          },
+          "required": [
+            "all"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "True when at least one member is true. At least one member: an empty `any` would never be true, and the node it guards would never run.",
+          "properties": {
+            "any": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/Predicate"
+              },
+              "description": "The members."
+            }
+          },
+          "required": [
+            "any"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "The negation of its member.",
+          "properties": {
+            "not": {
+              "$ref": "#/$defs/Predicate",
+              "description": "The member."
+            }
+          },
+          "required": [
+            "not"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "RetryPolicy": {
+      "type": "object",
+      "description": "How a claimable step is retried after a `retryable` failure. A `fatal`, `invalid_input` or `cancelled` failure is never retried. A worker's `retry_after_ms` is honoured when it is larger than the computed backoff.",
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "How many attempts in total, counting the first. `1` means no retry."
+        },
+        "backoff": {
+          "type": "string",
+          "enum": [
+            "fixed",
+            "exponential"
+          ],
+          "description": "How the wait before each retry grows. `fixed` waits `initial_ms` every time. `exponential` grows from `initial_ms` and never exceeds `max_ms`."
+        },
+        "initial_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 315360000000,
+          "default": 1000,
+          "description": "The wait before the second attempt, in milliseconds."
+        },
+        "max_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 315360000000,
+          "default": 60000,
+          "description": "The ceiling on any one wait, in milliseconds."
+        }
+      },
+      "additionalProperties": false
+    },
+    "Limits": {
+      "type": "object",
+      "description": "The ceilings a definition declares. A run that reaches one is ended `failed` with an error naming the ceiling. On a root run, `max_steps` and `max_cost_usd` bound the whole tree of subworkflows; a child's own limits also apply to it.",
+      "properties": {
+        "max_steps": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How many steps the run tree may complete."
+        },
+        "run_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 315360000000,
+          "description": "How long the whole run may take, in milliseconds."
+        },
+        "max_cost_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "How much the run tree may spend, as priced by the daemon's price book from the usage workers report."
+        }
+      },
+      "additionalProperties": false
+    },
+    "ClaimableNode": {
+      "description": "A `task` or `agent` node: the only kinds a branch, a foreach body or a loop body may be, because each of those is one claimable step in version 1.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TaskNode"
+        },
+        {
+          "$ref": "#/$defs/AgentNode"
+        }
+      ]
+    },
+    "TaskNode": {
+      "type": "object",
+      "description": "Claimable work. The worker runs whatever code it registered under this id.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id",
+          "description": "The step id. Unique within the document; the schema checks the spelling and the Rust validator checks the uniqueness. It names the step in `steps.<id>` paths, on leases and in the trace."
+        },
+        "kind": {
+          "const": "task",
+          "description": "Claimable work. The worker runs whatever code it registered under this id."
+        },
+        "when": {
+          "$ref": "#/$defs/Predicate",
+          "description": "A guard. Evaluated when the cursor reaches the node. False writes an attempt row with status `skipped` and the cursor moves on. Absent means true."
+        },
+        "on_error": {
+          "type": "string",
+          "enum": [
+            "fail_run",
+            "continue"
+          ],
+          "default": "fail_run",
+          "description": "What happens when the node fails after its retries. `fail_run` ends the run `failed` with the message. `continue` marks the step `failed` and advances, so a later `when` can read `steps.<id>.status` and `steps.<id>.error`."
+        },
+        "input": {
+          "$ref": "#/$defs/Template",
+          "description": "Rendered per attempt and handed to the worker as the lease's `input`. Absent means the run's input."
+        },
+        "effect": {
+          "type": "string",
+          "enum": [
+            "at_least_once",
+            "at_most_once"
+          ],
+          "default": "at_least_once",
+          "description": "What a duplicated body would cost. Under `at_least_once` a lease that expires mid-body is requeued. Under `at_most_once` a started attempt whose outcome is unknown fails the run rather than running twice, and the worker must post `started` before `complete` or `fail`."
+        },
+        "step_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 315360000000,
+          "description": "Bounds one attempt in milliseconds, heartbeats or not. Absent means only the run's own deadline applies."
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy",
+          "description": "How a `retryable` failure is retried. Absent means one attempt and no retry."
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "AgentNode": {
+      "type": "object",
+      "description": "Claimable work, identical to `task` on the wire. The kind is recorded so the trace and the UI can tell an agent turn from a plain step. The worker resolves the body; the daemon does not care.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id",
+          "description": "The step id. Unique within the document; the schema checks the spelling and the Rust validator checks the uniqueness. It names the step in `steps.<id>` paths, on leases and in the trace."
+        },
+        "kind": {
+          "const": "agent",
+          "description": "Claimable work, identical to `task` on the wire. The kind is recorded so the trace and the UI can tell an agent turn from a plain step. The worker resolves the body; the daemon does not care."
+        },
+        "when": {
+          "$ref": "#/$defs/Predicate",
+          "description": "A guard. Evaluated when the cursor reaches the node. False writes an attempt row with status `skipped` and the cursor moves on. Absent means true."
+        },
+        "on_error": {
+          "type": "string",
+          "enum": [
+            "fail_run",
+            "continue"
+          ],
+          "default": "fail_run",
+          "description": "What happens when the node fails after its retries. `fail_run` ends the run `failed` with the message. `continue` marks the step `failed` and advances, so a later `when` can read `steps.<id>.status` and `steps.<id>.error`."
+        },
+        "input": {
+          "$ref": "#/$defs/Template",
+          "description": "Rendered per attempt and handed to the worker as the lease's `input`. Absent means the run's input."
+        },
+        "effect": {
+          "type": "string",
+          "enum": [
+            "at_least_once",
+            "at_most_once"
+          ],
+          "default": "at_least_once",
+          "description": "What a duplicated body would cost. Under `at_least_once` a lease that expires mid-body is requeued. Under `at_most_once` a started attempt whose outcome is unknown fails the run rather than running twice, and the worker must post `started` before `complete` or `fail`."
+        },
+        "step_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 315360000000,
+          "description": "Bounds one attempt in milliseconds, heartbeats or not. Absent means only the run's own deadline applies."
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy",
+          "description": "How a `retryable` failure is retried. Absent means one attempt and no retry."
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "SleepNode": {
+      "type": "object",
+      "description": "A relative delay. No process is alive during it.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id",
+          "description": "The step id. Unique within the document; the schema checks the spelling and the Rust validator checks the uniqueness. It names the step in `steps.<id>` paths, on leases and in the trace."
+        },
+        "kind": {
+          "const": "sleep",
+          "description": "A relative delay. No process is alive during it."
+        },
+        "when": {
+          "$ref": "#/$defs/Predicate",
+          "description": "A guard. Evaluated when the cursor reaches the node. False writes an attempt row with status `skipped` and the cursor moves on. Absent means true."
+        },
+        "on_error": {
+          "type": "string",
+          "enum": [
+            "fail_run",
+            "continue"
+          ],
+          "default": "fail_run",
+          "description": "What happens when the node fails after its retries. `fail_run` ends the run `failed` with the message. `continue` marks the step `failed` and advances, so a later `when` can read `steps.<id>.status` and `steps.<id>.error`."
+        },
+        "ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 315360000000,
+          "description": "How long to sleep, in milliseconds."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "ms"
+      ],
+      "additionalProperties": false
+    },
+    "SleepUntilNode": {
+      "type": "object",
+      "description": "An absolute delay. No process is alive during it.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id",
+          "description": "The step id. Unique within the document; the schema checks the spelling and the Rust validator checks the uniqueness. It names the step in `steps.<id>` paths, on leases and in the trace."
+        },
+        "kind": {
+          "const": "sleep_until",
+          "description": "An absolute delay. No process is alive during it."
+        },
+        "when": {
+          "$ref": "#/$defs/Predicate",
+          "description": "A guard. Evaluated when the cursor reaches the node. False writes an attempt row with status `skipped` and the cursor moves on. Absent means true."
+        },
+        "on_error": {
+          "type": "string",
+          "enum": [
+            "fail_run",
+            "continue"
+          ],
+          "default": "fail_run",
+          "description": "What happens when the node fails after its retries. `fail_run` ends the run `failed` with the message. `continue` marks the step `failed` and advances, so a later `when` can read `steps.<id>.status` and `steps.<id>.error`."
+        },
+        "at": {
+          "$ref": "#/$defs/TemplateString",
+          "description": "A template rendering to an RFC 3339 timestamp, such as `${input.send_at}`."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "at"
+      ],
+      "additionalProperties": false
+    },
+    "WaitEventNode": {
+      "type": "object",
+      "description": "A suspension an inbound event resumes. The event's payload becomes the step's output.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id",
+          "description": "The step id. Unique within the document; the schema checks the spelling and the Rust validator checks the uniqueness. It names the step in `steps.<id>` paths, on leases and in the trace."
+        },
+        "kind": {
+          "const": "wait_event",
+          "description": "A suspension an inbound event resumes. The event's payload becomes the step's output."
+        },
+        "when": {
+          "$ref": "#/$defs/Predicate",
+          "description": "A guard. Evaluated when the cursor reaches the node. False writes an attempt row with status `skipped` and the cursor moves on. Absent means true."
+        },
+        "on_error": {
+          "type": "string",
+          "enum": [
+            "fail_run",
+            "continue"
+          ],
+          "default": "fail_run",
+          "description": "What happens when the node fails after its retries. `fail_run` ends the run `failed` with the message. `continue` marks the step `failed` and advances, so a later `when` can read `steps.<id>.status` and `steps.<id>.error`."
+        },
+        "event": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The event name an inbound `POST /v1/api/events` must carry."
+        },
+        "key": {
+          "$ref": "#/$defs/TemplateString",
+          "description": "Rendered per run, so `${input.order_id}` addresses this run and no other. The daemon matches `(project, event, key)` against live waits."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 315360000000,
+          "description": "How long to wait, in milliseconds, before `on_timeout` applies."
+        },
+        "accept_parked": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether an event that arrived before the run reached this node counts. A parked event is consumed oldest first and is deleted after 24 hours."
+        },
+        "on_timeout": {
+          "type": "string",
+          "enum": [
+            "fail",
+            "continue"
+          ],
+          "default": "fail",
+          "description": "What the wait does when its deadline passes. `fail` treats the passed deadline as the node failing, so `on_error` applies. `continue` moves the cursor on with no event delivered, so a later `when` can read `steps.<id>.status`."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "event",
+        "key",
+        "timeout_ms"
+      ],
+      "additionalProperties": false
+    },
+    "ParallelNode": {
+      "type": "object",
+      "description": "A fixed fan-out. Each branch is one claimable step keyed `<id>/<branch id>`, all on disk before any is offered. The node is done when every branch has ended; a branch that fails follows its own `on_error`, and `continue` lets the join finish.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id",
+          "description": "The step id. Unique within the document; the schema checks the spelling and the Rust validator checks the uniqueness. It names the step in `steps.<id>` paths, on leases and in the trace."
+        },
+        "kind": {
+          "const": "parallel",
+          "description": "A fixed fan-out. Each branch is one claimable step keyed `<id>/<branch id>`, all on disk before any is offered. The node is done when every branch has ended; a branch that fails follows its own `on_error`, and `continue` lets the join finish."
+        },
+        "when": {
+          "$ref": "#/$defs/Predicate",
+          "description": "A guard. Evaluated when the cursor reaches the node. False writes an attempt row with status `skipped` and the cursor moves on. Absent means true."
+        },
+        "on_error": {
+          "type": "string",
+          "enum": [
+            "fail_run",
+            "continue"
+          ],
+          "default": "fail_run",
+          "description": "What happens when the node fails after its retries. `fail_run` ends the run `failed` with the message. `continue` marks the step `failed` and advances, so a later `when` can read `steps.<id>.status` and `steps.<id>.error`."
+        },
+        "branches": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/ClaimableNode"
+          },
+          "description": "The branches. Each is a `task` or `agent` node; a multi-step branch is a `subworkflow`. Read a branch's result at `steps.<id>.<branch id>`."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "branches"
+      ],
+      "additionalProperties": false
+    },
+    "ForeachNode": {
+      "type": "object",
+      "description": "A fan-out over the items of an array. Each item becomes one attempt keyed `<id>[<index>]`. Afterwards `steps.<id>.outputs` is the array of item outputs in item order.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id",
+          "description": "The step id. Unique within the document; the schema checks the spelling and the Rust validator checks the uniqueness. It names the step in `steps.<id>` paths, on leases and in the trace."
+        },
+        "kind": {
+          "const": "foreach",
+          "description": "A fan-out over the items of an array. Each item becomes one attempt keyed `<id>[<index>]`. Afterwards `steps.<id>.outputs` is the array of item outputs in item order."
+        },
+        "when": {
+          "$ref": "#/$defs/Predicate",
+          "description": "A guard. Evaluated when the cursor reaches the node. False writes an attempt row with status `skipped` and the cursor moves on. Absent means true."
+        },
+        "on_error": {
+          "type": "string",
+          "enum": [
+            "fail_run",
+            "continue"
+          ],
+          "default": "fail_run",
+          "description": "What happens when the node fails after its retries. `fail_run` ends the run `failed` with the message. `continue` marks the step `failed` and advances, so a later `when` can read `steps.<id>.status` and `steps.<id>.error`."
+        },
+        "over": {
+          "$ref": "#/$defs/Path",
+          "description": "A path, not a template. It must resolve to a JSON array when the cursor reaches the node."
+        },
+        "body": {
+          "$ref": "#/$defs/ClaimableNode",
+          "description": "The `task` or `agent` run once per item. Its `input` template can read `item` and `index`. A multi-step body is a `subworkflow`."
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 8,
+          "description": "How many items are claimable at once."
+        },
+        "max_items": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 500,
+          "description": "An array longer than this fails the run, so a bad input cannot fan out without bound."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "over",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "LoopNode": {
+      "type": "object",
+      "description": "A bounded loop. Iteration `i` is keyed `<id>[<i>]/<body id>`. Afterwards `steps.<id>.outputs` is the array of iteration outputs.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id",
+          "description": "The step id. Unique within the document; the schema checks the spelling and the Rust validator checks the uniqueness. It names the step in `steps.<id>` paths, on leases and in the trace."
+        },
+        "kind": {
+          "const": "loop",
+          "description": "A bounded loop. Iteration `i` is keyed `<id>[<i>]/<body id>`. Afterwards `steps.<id>.outputs` is the array of iteration outputs."
+        },
+        "when": {
+          "$ref": "#/$defs/Predicate",
+          "description": "A guard. Evaluated when the cursor reaches the node. False writes an attempt row with status `skipped` and the cursor moves on. Absent means true."
+        },
+        "on_error": {
+          "type": "string",
+          "enum": [
+            "fail_run",
+            "continue"
+          ],
+          "default": "fail_run",
+          "description": "What happens when the node fails after its retries. `fail_run` ends the run `failed` with the message. `continue` marks the step `failed` and advances, so a later `when` can read `steps.<id>.status` and `steps.<id>.error`."
+        },
+        "body": {
+          "$ref": "#/$defs/ClaimableNode",
+          "description": "The `task` or `agent` run each iteration. Inside it, `iter.index` is the iteration number and `steps.<body id>` is this iteration's attempt."
+        },
+        "max_iterations": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The bound. Required, because an unbounded loop is a run that never ends and no ceiling above it is cheaper than this one."
+        },
+        "until": {
+          "$ref": "#/$defs/Predicate",
+          "description": "Evaluated after each iteration; true ends the loop. Absent means run `max_iterations` times."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "body",
+        "max_iterations"
+      ],
+      "additionalProperties": false
+    },
+    "SubworkflowNode": {
+      "type": "object",
+      "description": "A child run. The child's output becomes `steps.<id>.output`. A child that ends `failed`, `timed_out` or `cancelled` fails the parent step, which then follows its `on_error`. Cancel walks down. `max_steps` and `max_cost_usd` on the root bound the whole tree.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id",
+          "description": "The step id. Unique within the document; the schema checks the spelling and the Rust validator checks the uniqueness. It names the step in `steps.<id>` paths, on leases and in the trace."
+        },
+        "kind": {
+          "const": "subworkflow",
+          "description": "A child run. The child's output becomes `steps.<id>.output`. A child that ends `failed`, `timed_out` or `cancelled` fails the parent step, which then follows its `on_error`. Cancel walks down. `max_steps` and `max_cost_usd` on the root bound the whole tree."
+        },
+        "when": {
+          "$ref": "#/$defs/Predicate",
+          "description": "A guard. Evaluated when the cursor reaches the node. False writes an attempt row with status `skipped` and the cursor moves on. Absent means true."
+        },
+        "on_error": {
+          "type": "string",
+          "enum": [
+            "fail_run",
+            "continue"
+          ],
+          "default": "fail_run",
+          "description": "What happens when the node fails after its retries. `fail_run` ends the run `failed` with the message. `continue` marks the step `failed` and advances, so a later `when` can read `steps.<id>.status` and `steps.<id>.error`."
+        },
+        "definition": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The child definition's id."
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Which version of the child to run. Absent pins the highest stored version at the parent's start, recorded in the parent run's `bindings`."
+        },
+        "input": {
+          "$ref": "#/$defs/Template",
+          "description": "Rendered when the child starts and posted as its input. Absent means the parent's input."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "definition"
+      ],
+      "additionalProperties": false
+    },
+    "Node": {
+      "description": "One node of the graph, told apart by `kind`. Every kind accepts `id`, `kind`, `when` and `on_error`; the claimable kinds also accept `input`, `effect`, `step_timeout_ms` and `retry`. `end` is never written: it is what the cursor names after the last node.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TaskNode"
+        },
+        {
+          "$ref": "#/$defs/AgentNode"
+        },
+        {
+          "$ref": "#/$defs/SleepNode"
+        },
+        {
+          "$ref": "#/$defs/SleepUntilNode"
+        },
+        {
+          "$ref": "#/$defs/WaitEventNode"
+        },
+        {
+          "$ref": "#/$defs/ParallelNode"
+        },
+        {
+          "$ref": "#/$defs/ForeachNode"
+        },
+        {
+          "$ref": "#/$defs/LoopNode"
+        },
+        {
+          "$ref": "#/$defs/SubworkflowNode"
+        }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "question"
+        ]
+      },
+      "steps": [
+        {
+          "id": "answer",
+          "kind": "task",
+          "input": {
+            "question": "${input.question}"
+          },
+          "retry": {
+            "max_attempts": 3,
+            "backoff": "exponential",
+            "initial_ms": 500,
+            "max_ms": 30000
+          },
+          "step_timeout_ms": 60000
+        }
+      ],
+      "output": {
+        "answer": "${steps.answer.output.answer}"
+      }
+    },
+    {
+      "limits": {
+        "max_cost_usd": 0.5,
+        "run_timeout_ms": 600000
+      },
+      "steps": [
+        {
+          "id": "support",
+          "kind": "agent",
+          "effect": "at_least_once",
+          "input": {
+            "prompt": "${input.question}",
+            "customer": "${input.customer_id}"
+          },
+          "step_timeout_ms": 120000
+        }
+      ],
+      "output": "${steps.support.output}"
+    },
+    {
+      "steps": [
+        {
+          "id": "send",
+          "kind": "task",
+          "input": {
+            "to": "${input.email}"
+          }
+        },
+        {
+          "id": "wait_a_day",
+          "kind": "sleep",
+          "ms": 86400000
+        },
+        {
+          "id": "follow_up",
+          "kind": "task",
+          "when": {
+            "not": {
+              "path": "steps.send.output.opened",
+              "op": "eq",
+              "value": true
+            }
+          },
+          "input": {
+            "to": "${input.email}",
+            "first_message_id": "${steps.send.output.message_id}"
+          }
+        }
+      ]
+    },
+    {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "send_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "email": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "send_at",
+          "email"
+        ]
+      },
+      "steps": [
+        {
+          "id": "until_send_time",
+          "kind": "sleep_until",
+          "at": "${input.send_at}"
+        },
+        {
+          "id": "send",
+          "kind": "task",
+          "effect": "at_most_once",
+          "input": {
+            "to": "${input.email}"
+          }
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "id": "request",
+          "kind": "task",
+          "input": {
+            "request_id": "${input.request_id}"
+          }
+        },
+        {
+          "id": "approval",
+          "kind": "wait_event",
+          "event": "approval",
+          "key": "${input.request_id}",
+          "timeout_ms": 604800000,
+          "accept_parked": true,
+          "on_timeout": "continue"
+        },
+        {
+          "id": "apply",
+          "kind": "task",
+          "when": {
+            "path": "steps.approval.output.approved",
+            "op": "eq",
+            "value": true
+          },
+          "input": {
+            "request_id": "${input.request_id}",
+            "approved_by": "${steps.approval.output.approver}"
+          }
+        }
+      ],
+      "output": {
+        "approved": "${steps.approval.output.approved}",
+        "status": "${steps.approval.status}"
+      }
+    },
+    {
+      "steps": [
+        {
+          "id": "fan_out",
+          "kind": "parallel",
+          "branches": [
+            {
+              "id": "search_web",
+              "kind": "task",
+              "input": {
+                "query": "${input.query}"
+              },
+              "on_error": "continue"
+            },
+            {
+              "id": "search_docs",
+              "kind": "task",
+              "input": {
+                "query": "${input.query}"
+              }
+            }
+          ]
+        },
+        {
+          "id": "merge",
+          "kind": "task",
+          "input": {
+            "web": "${steps.fan_out.search_web.output}",
+            "docs": "${steps.fan_out.search_docs.output}"
+          }
+        }
+      ],
+      "output": "${steps.merge.output}"
+    },
+    {
+      "limits": {
+        "max_steps": 250
+      },
+      "steps": [
+        {
+          "id": "each_file",
+          "kind": "foreach",
+          "over": "input.files",
+          "concurrency": 4,
+          "max_items": 200,
+          "body": {
+            "id": "summarise",
+            "kind": "task",
+            "input": {
+              "file": "${item}",
+              "position": "${index}"
+            }
+          }
+        }
+      ],
+      "output": {
+        "summaries": "${steps.each_file.outputs}"
+      }
+    },
+    {
+      "steps": [
+        {
+          "id": "refine",
+          "kind": "loop",
+          "max_iterations": 5,
+          "body": {
+            "id": "draft",
+            "kind": "agent",
+            "input": {
+              "brief": "${input.brief}",
+              "pass": "${iter.index}"
+            }
+          },
+          "until": {
+            "path": "steps.draft.output.score",
+            "op": "gte",
+            "value": 0.9
+          }
+        }
+      ],
+      "output": {
+        "drafts": "${steps.refine.outputs}"
+      }
+    },
+    {
+      "steps": [
+        {
+          "id": "check",
+          "kind": "subworkflow",
+          "definition": "fraud_check",
+          "version": 2,
+          "input": {
+            "order_id": "${input.order_id}"
+          }
+        },
+        {
+          "id": "act",
+          "kind": "task",
+          "when": {
+            "path": "steps.check.output.verdict",
+            "op": "in",
+            "value": [
+              "clear",
+              "review"
+            ]
+          },
+          "input": "${steps.check.output}"
+        }
+      ]
+    },
+    {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "order_id": {
+            "type": "string"
+          },
+          "ticket_id": {
+            "type": "string"
+          },
+          "not_before": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "order_id",
+          "ticket_id"
+        ]
+      },
+      "limits": {
+        "max_steps": 200,
+        "run_timeout_ms": 900000,
+        "max_cost_usd": 2.5
+      },
+      "steps": [
+        {
+          "id": "order",
+          "kind": "task",
+          "input": {
+            "order_id": "${input.order_id}"
+          },
+          "retry": {
+            "max_attempts": 3,
+            "backoff": "exponential",
+            "initial_ms": 500,
+            "max_ms": 30000
+          },
+          "step_timeout_ms": 30000
+        },
+        {
+          "id": "fraud_check",
+          "kind": "subworkflow",
+          "definition": "fraud_check",
+          "version": 2,
+          "when": {
+            "path": "steps.order.output.amount_usd",
+            "op": "gt",
+            "value": 100
+          },
+          "on_error": "continue",
+          "input": {
+            "order_id": "${input.order_id}",
+            "amount_usd": "${steps.order.output.amount_usd}"
+          }
+        },
+        {
+          "id": "small_refund",
+          "kind": "task",
+          "effect": "at_most_once",
+          "on_error": "continue",
+          "when": {
+            "path": "steps.order.output.amount_usd",
+            "op": "lte",
+            "value": 100
+          },
+          "input": {
+            "order_id": "${input.order_id}",
+            "amount_usd": "${steps.order.output.amount_usd}"
+          }
+        },
+        {
+          "id": "escalate",
+          "kind": "task",
+          "when": {
+            "any": [
+              {
+                "path": "steps.small_refund.status",
+                "op": "eq",
+                "value": "failed"
+              },
+              {
+                "path": "steps.fraud_check.output.verdict",
+                "op": "in",
+                "value": [
+                  "suspect",
+                  "blocked"
+                ]
+              },
+              {
+                "path": "steps.fraud_check.output.confidence",
+                "op": "lt",
+                "value": 0.5
+              }
+            ]
+          },
+          "input": {
+            "ticket_id": "${input.ticket_id}",
+            "note": "Refund of ${steps.order.output.amount_usd} USD for ${input.order_id} needs a person: ${steps.small_refund.error.message}"
+          }
+        },
+        {
+          "id": "not_before",
+          "kind": "sleep_until",
+          "at": "${input.not_before}",
+          "when": {
+            "path": "input.not_before",
+            "op": "exists"
+          }
+        },
+        {
+          "id": "approval",
+          "kind": "wait_event",
+          "event": "approval",
+          "key": "${input.order_id}",
+          "timeout_ms": 259200000,
+          "accept_parked": true,
+          "on_timeout": "fail",
+          "when": {
+            "all": [
+              {
+                "path": "steps.order.output.amount_usd",
+                "op": "gt",
+                "value": 100
+              },
+              {
+                "not": {
+                  "path": "steps.fraud_check.output.verdict",
+                  "op": "eq",
+                  "value": "blocked"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "large_refund",
+          "kind": "task",
+          "effect": "at_most_once",
+          "when": {
+            "path": "steps.approval.output.approved",
+            "op": "eq",
+            "value": true
+          },
+          "input": {
+            "order_id": "${input.order_id}",
+            "amount_usd": "${steps.order.output.amount_usd}",
+            "approved_by": "${steps.approval.output.approver}"
+          }
+        },
+        {
+          "id": "settle",
+          "kind": "loop",
+          "max_iterations": 12,
+          "when": {
+            "any": [
+              {
+                "path": "steps.small_refund.status",
+                "op": "eq",
+                "value": "succeeded"
+              },
+              {
+                "path": "steps.large_refund.status",
+                "op": "eq",
+                "value": "succeeded"
+              }
+            ]
+          },
+          "body": {
+            "id": "poll_refund",
+            "kind": "task",
+            "input": {
+              "order_id": "${input.order_id}",
+              "poll": "${iter.index}"
+            },
+            "step_timeout_ms": 10000
+          },
+          "until": {
+            "path": "steps.poll_refund.output.state",
+            "op": "matches",
+            "value": "^(settled|reversed)$"
+          }
+        },
+        {
+          "id": "restock",
+          "kind": "foreach",
+          "over": "steps.order.output.lines",
+          "concurrency": 4,
+          "max_items": 100,
+          "when": {
+            "all": [
+              {
+                "path": "steps.order.output.lines",
+                "op": "exists"
+              },
+              {
+                "path": "steps.settle.outputs",
+                "op": "ne",
+                "value": []
+              }
+            ]
+          },
+          "body": {
+            "id": "restock_line",
+            "kind": "task",
+            "input": {
+              "sku": "${item.sku}",
+              "qty": "${item.qty}",
+              "position": "${index}"
+            },
+            "retry": {
+              "max_attempts": 2,
+              "backoff": "fixed",
+              "initial_ms": 2000
+            }
+          }
+        },
+        {
+          "id": "notify",
+          "kind": "parallel",
+          "branches": [
+            {
+              "id": "email",
+              "kind": "task",
+              "on_error": "continue",
+              "input": {
+                "order_id": "${input.order_id}",
+                "to": "${steps.order.output.customer_email}"
+              }
+            },
+            {
+              "id": "ticket",
+              "kind": "task",
+              "input": {
+                "ticket_id": "${input.ticket_id}",
+                "note": "Refund of ${steps.order.output.amount_usd} USD handled."
+              }
+            }
+          ]
+        },
+        {
+          "id": "cool_down",
+          "kind": "sleep",
+          "ms": 60000,
+          "when": {
+            "path": "steps.order.output.amount_usd",
+            "op": "gte",
+            "value": 1000
+          }
+        },
+        {
+          "id": "reply",
+          "kind": "agent",
+          "step_timeout_ms": 120000,
+          "input": {
+            "prompt": "Tell the customer what happened with order ${input.order_id}.",
+            "ticket": "${steps.notify.ticket.output}",
+            "run": "${run.run_id}"
+          }
+        }
+      ],
+      "output": {
+        "text": "${steps.reply.output.text}",
+        "refunded_usd": "${steps.order.output.amount_usd}",
+        "restocked": "${steps.restock.outputs}",
+        "definition_version": "${run.definition_version}"
+      }
+    }
+  ]
+}

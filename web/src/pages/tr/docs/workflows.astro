@@ -1,0 +1,256 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import RunCursor from '@/components/RunCursor.astro'
+import { exampleLanguages } from '@/lib/snippets'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const langs = exampleLanguages('workflow')
+const loc = localeOf(Astro.url.pathname)
+const link = (route: string) => urlFor(route, loc)
+---
+
+<Doc
+  title="İş akışları"
+  description="mcpd'de kalıcı bir iş akışı: daemon'un yürüdüğü tanım, dokuz yapı, şablonlar ve guard'lar, yeniden denemeler ve etkiler, bir de bunu altı dilde yazan builder."
+  lede="Bir iş akışı, daemon'un tuttuğu veri ile daemon'un hiç görmediği gövdelerdir. Bu sayfa veri kısmıdır: bir tanım neler söyleyebilir ve her yapı daemon'a ne yaptırır."
+  og="docs"
+>
+  <h2>İş bölümü</h2>
+  <p>
+    Kalıcı bir çalıştırmanın iki sahibi vardır. Adımlar arasında çalıştırma
+    daemon'undur: imleç, günlük, yeniden deneme bütçesi, zamanlayıcılar ve
+    beklemeler. Bir adımın içindeki her şey sizin sürecinizindir: çağırdığınız
+    model, gönderdiğiniz prompt, çalıştırdığınız araçlar, elinizdeki kimlik
+    bilgileri. Bunların hiçbiri daemon'a verilmez ve daemon sizin adınıza hiçbir
+    zaman model çalıştırmaz.
+  </p>
+  <p>
+    Bu yüzden bir iş akışı tek bir dosyadan iki parça hâlinde çıkar. Graf,
+    daemon'a bir tanım olarak, yani daemon'un yürüdüğü bir belge olarak gider.
+    Adım gövdeleri, hangi dilde yazdıysanız o dilde sizin sürecinizde kalır ve
+    onları bir <a href={link('/docs/workers')} class="link">worker</a> sunar.
+    Daemon'a dağıtılması gereken bir şey yoktur ve bir gövde, tanım hiç
+    değişmeden değişebilir.
+  </p>
+
+  <RunCursor class="not-prose my-8" />
+
+  <h2>İş akışı yazmak</h2>
+  <p>
+    Builder her iki parçayı da üretir. <code>document()</code> tanımdır; her
+    <code>step</code> ya da <code>agent</code> çağrısı da gövdesini worker için
+    geride bırakır. Her SDK'da aynı dokuz yapıya sahip aynı builder vardır, yani
+    bir dilde yazılmış bir iş akışı başka bir dilde de aynı okunur ve hangisi
+    yazmış olursa olsun daemon aynı belgeyi saklar.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" example="workflow" region="workflow" only={langs} title="bir destek iş akışı" />
+
+  <p>
+    O örnekteki üç şey, her iş akışının biçimini verir. Bir adımın girdisi,
+    daemon'un her deneme için işlediği bir şablondur; böylece
+    <code>draft</code>, iki gövde birbirinden habersizken <code>classify</code>
+    ne yanıtladıysa onu okur. Bir
+    guard, bir düğümün hiç çalışıp çalışmayacağına karar verir: bir soru olduğu
+    gibi gönderilir, bir hata bir insanı bekler. Son adım ise yeniden deneme
+    politikası olan bir <code>at_most_once</code> adımıdır; bir yan etkinin
+    ihtiyaç duyduğu birleşim de budur: daemon geçici bir hatayı yeniden dener ve
+    söylenmedikçe bir gövdeyi asla iki kez çalıştırmaz.
+  </p>
+
+  <h2>Yapılar</h2>
+  <p>
+    Dokuz tane ve her SDK'da dokuzu da var. İkisi talep edilebilir, yani onları
+    bir worker sunar; geri kalanı daemon'un kendi işidir.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Yapı</th><th>Kim çalıştırır</th><th>Ne yapar</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>task</code></td>
+        <td>Bir worker</td>
+        <td>Talep edilebilir iş. Worker, bu kimlik altında kaydettiği kodu çalıştırır.</td>
+      </tr>
+      <tr>
+        <td><code>agent</code></td>
+        <td>Bir worker</td>
+        <td>Hat üzerinde aynısı, bir ajan turu olarak kaydedilir: kendi döngünüz, kaç model çağrısı olursa olsun, tek bir kalıcı adım olarak. Trace ve arayüz bunu düz bir görevden ayırt eder.</td>
+      </tr>
+      <tr>
+        <td><code>sleep</code></td>
+        <td>Daemon</td>
+        <td>Şu kadar milisaniyelik gecikme. O sırada ayakta hiçbir süreç yoktur.</td>
+      </tr>
+      <tr>
+        <td><code>sleep_until</code></td>
+        <td>Daemon</td>
+        <td>Bir şablondan işlenen bir ana kadar gecikme; örneğin girdide taşınan bir fatura tarihine kadar.</td>
+      </tr>
+      <tr>
+        <td><code>wait_event</code></td>
+        <td>Daemon</td>
+        <td>Bu ad ve anahtarla bir olay gelene ya da süre sonu geçene kadar duraklama. Anahtar her çalıştırma için işlenir, yani bir bekleme tek bir siparişi hedefler, başkasını değil.</td>
+      </tr>
+      <tr>
+        <td><code>parallel</code></td>
+        <td>İkisi de</td>
+        <td>Adlandırılmış dallar; her biri talep edilebilir tek bir adım, herhangi biri sunulmadan önce hepsi diskte. Son dal bittiğinde çalıştırma ilerler.</td>
+      </tr>
+      <tr>
+        <td><code>foreach</code></td>
+        <td>İkisi de</td>
+        <td>Bir yoldaki dizinin her öğesi için talep edilebilir bir adım; <code>max_items</code> ile ve siz söylerseniz aynı anda kaç tanesinin çalışacağıyla sınırlanır. Çıktılar öğe sırasına göre bir dizi olarak döner.</td>
+      </tr>
+      <tr>
+        <td><code>loop</code></td>
+        <td>İkisi de</td>
+        <td>Talep edilebilir tek bir adım üzerinde sınırlı bir döngü. <code>until</code> her yinelemeden sonra değerlendirilir ve döngüyü erken bitirebilir.</td>
+      </tr>
+      <tr>
+        <td><code>subworkflow</code></td>
+        <td>Daemon</td>
+        <td>Başka bir tanımın, kendi günlüğü olan bir alt çalıştırması. Çıktısı bu adımın çıktısı olur ve üst çalıştırmayı iptal etmek onu da iptal eder.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Bir dal, bir <code>foreach</code> gövdesi ve bir <code>loop</code> gövdesi,
+    her biri talep edilebilir tek bir adımdır. Birkaç adıma ihtiyaç duyan bir
+    gövde bir alt iş akışıdır; her günlüğü düz tutan da budur: bir çalıştırma bir
+    listedir, hiçbir zaman listelerden oluşan bir ağaç değil.
+  </p>
+
+  <h2>Şablonlar ve guard'lar</h2>
+  <p>
+    Bir şablon, dizgilerinde <code>${'${path}'}</code> başvuruları olan JSON'dur.
+    Daemon onu, bir deneme oluşturulduğunda, çalıştırmanın o andaki içeriğinden
+    işler: <code>input</code>, çalıştırmanın girdisi;
+    <code>steps.&lt;id&gt;</code>, daha önceki bir adımın verdiği yanıt,
+    <code>.output</code>, <code>.status</code> ve <code>.error</code> ile;
+    <code>run</code>, çalıştırmanın kendi kimliği ve ilişkilendirmesi; ve bir
+    <code>foreach</code> ya da <code>loop</code> içinde <code>item</code>,
+    <code>index</code> ve <code>iter.index</code>. Dizginin tamamı olan bir
+    başvuru türünü korur, yani
+    <code>"${'${steps.classify.output}'}"</code> bir sonraki adıma bir nesne
+    verir, onun dizgiye çevrilmiş hâlini değil.
+  </p>
+  <p>
+    Bir guard, aynı yollar üzerinde bir yüklemdir: <code>eq</code>,
+    <code>ne</code>, <code>lt</code>, <code>lte</code>, <code>gt</code>,
+    <code>gte</code>, <code>in</code>, <code>exists</code> ve
+    <code>matches</code>; bunlar <code>all</code>, <code>any</code> ve
+    <code>not</code> ile birleşir. Yanlış çıkan bir guard düğümü
+    <code>skipped</code> olarak yazar ve çalıştırma ilerler. Bulunmayan bir yol,
+    hata fırlatmak yerine her karşılaştırmayı yanlış yapar; çünkü eksik bir alan
+    yüzünden ölen bir çalıştırma, kimsenin bitiremeyeceği bir çalıştırmadır.
+  </p>
+  <p>
+    Daemon belgeyi saklarken doğrular. Hiçbir şeyin üretemeyeceği bir yolu
+    adlandıran bir guard, sonradan bildirilen bir adımı okuyan bir şablon, bir
+    yol olmayan bir şey üzerinde <code>foreach</code>,
+    <code>^[a-z][a-z0-9_]*$</code> ile eşleşmeyen bir kimlik: her biri, alanı
+    adlandıran bir 400 ile reddedilir. Bilinmeyen alanlar da reddedilir, yani
+    yanlış yazılmış bir guard bir hatadır, guard'ını atlayan bir çalıştırma
+    değil.
+  </p>
+  <p>
+    Her sürenin bir tabanı olduğu gibi bir tavanı da vardır.
+    <code>run_timeout_ms</code>, <code>step_timeout_ms</code>, bir yeniden
+    denemenin <code>initial_ms</code> ve <code>max_ms</code> değerleri, bir
+    uykunun <code>ms</code> değeri ve bir beklemenin <code>timeout_ms</code>
+    değeri, her biri en çok <code>315360000000</code>, yani 3650 gündür; daha
+    uzun olanı, alanı, tavanı ve gönderdiğiniz değeri adlandıran bir 400 ile
+    reddedilir. Bundan daha ileri bir süre sonu, daemon'un onu sakladığı saate
+    sığmazdı.
+  </p>
+
+  <h2>Yeniden denemeler, etkiler ve başarısızlık</h2>
+  <p>
+    Başarısız olan bir gövde, daemon'a bunun nasıl olduğunu bir sınıfla söyler.
+    <code>retryable</code>, bir deneme daha yapmaya değer demektir; düğümün
+    <code>retry</code> bütçesi sürdükçe daemon, düğümün beklemesine uyarak ve en
+    az gövdenin istediği <code>retry_after_ms</code> kadar bekleyerek bir deneme
+    daha yapar; bu değer de diğer her süreyle aynı 3650 günlük tavana bağlıdır.
+    <code>fatal</code> ve <code>invalid_input</code> yeniden denenmez.
+    <code>unservable</code>, bu worker'ın tanımı ya da adımı tutmadığı anlamına
+    gelir; deneme, bütçeyi harcamadan başka bir worker için kuyruğa
+    döner. Başka bir şey fırlatan bir gövde <code>fatal</code> sayılır.
+  </p>
+  <p>
+    <code>max_attempts</code> ilki dahil her denemeyi sayar, yani varsayılan olan
+    bir, hiç yeniden deneme yok demektir. Bütçe bittikten sonra
+    <code>on_error</code> karar verir: varsayılan olan <code>fail_run</code>,
+    adımın mesajını hata olarak alıp çalıştırmayı bitirir; <code>continue</code>
+    ise adımı başarısız olarak işaretler ve devam eder, böylece sonraki bir guard
+    <code>steps.&lt;id&gt;.status</code> değerini okuyup etrafından dolaşabilir.
+  </p>
+  <p>
+    <code>effect</code>, tekrarlanmış bir gövdenin neye mal olacağını söyler.
+    Varsayılan olan <code>at_least_once</code> altında, kaybedilen bir lease
+    denemeyi kuyruğa geri koyar ve gövde yeniden çalışabilir.
+    <code>at_most_once</code> altında worker gövdeden önce <code>started</code>
+    göndermek zorundadır ve lease'i kaybedilen, başlamış bir deneme yeniden
+    çalışmak yerine başarısız olur. Bunu e-postayı gönderen ya da karttan çeken
+    adım için kullanın ve o gövdeye, üçüncü tarafa iletmesi için lease'in
+    <code>idempotency_key</code> değerini verin: aynı adımın yeniden denemeleri
+    boyunca sabittir, yani kaybolan bir yanıttan sonraki yeniden deneme karşı
+    tarafta da tanınır.
+  </p>
+
+  <h2>Sürümler</h2>
+  <p>
+    Bir tanım saklandıktan sonra değişmezdir. Aynı gövdeyi yeniden gönderirseniz
+    aynı sürümü geri alırsınız; var olan bir sürüm altında farklı bir gövde
+    gönderirseniz daemon 409 ile reddeder, çünkü aksi hâlde o sürümü sabitlemiş
+    bir çalıştırmanın altından tanım değişirdi. Sürümü yazmazsanız daemon bir
+    sonraki numarayı verir; bir worker'ın açılışta yaptığı da budur. Bir
+    çalıştırma başladığı sürümü sabitler ve onu bir daha çözmez, yani sürüm 3'ü
+    saklayan bir dağıtım, sürüm 2 üzerindeki çalıştırmaları yazıldıkları gibi
+    bitirir.
+  </p>
+
+  <h2>Sınırlar</h2>
+  <p>
+    Bir tanım <code>max_steps</code>, <code>run_timeout_ms</code> ve
+    <code>max_cost_usd</code> bildirebilir. Daemon her denemeyi birinciye,
+    çalıştırmanın yaşını ikinciye, adımların bildirdiği fiyatlanmış kullanımı da
+    üçüncüye sayar; tavanda çalıştırmayı <code>timed_out</code> ya da
+    <code>failed</code> olarak bitirir ve hata olarak tavanın adını verir.
+    Yakınsamayan bir döngü ile harcamayı kesmeyen bir ajan adımı daemon için aynı
+    sorundur ve ikisini de aynı ayar durdurur.
+  </p>
+
+  <h2>Daemon'un sakladıkları</h2>
+  <p>
+    Bir çalıştırmanın girdisi, durum verisi, çıktısı ve her adımın girdisi ve
+    çıktısı, çalıştırma deposunda gönderildikleri gibi tutulur. Maskelenmezler:
+    bunlar iş akışının kendi çalışma durumudur, sonraki bir adım onları geri
+    okur ve maskeleyicinin yeniden yazdığı bir değer çalıştırmanın yaptığı şeyi
+    değiştirirdi. Bir çalıştırmanın trace deposuna yazdığı span'ler, diğer her
+    span gibi maskelenir. Saklama ve silme, sona ermiş çalıştırmalar için
+    çalıştırma deposunu da kapsar. Her birinin tam olarak neyi sildiğini
+    <a href={`${link('/docs/runs')}#storage`} class="link">Çalıştırmalar</a>
+    sayfası söyler.
+  </p>
+
+  <h2>Sonraki</h2>
+  <ul>
+    <li>
+      Gövdeleri sunmak ve bir worker'ın konuştuğu protokol:
+      <a href={link('/docs/workers')} class="link">Worker'lar</a>.
+    </li>
+    <li>
+      Bir çalıştırmayı başlatmak, izlemek, sinyal göndermek ve iptal etmek:
+      <a href={link('/docs/runs')} class="link">Çalıştırmalar</a>.
+    </li>
+    <li>
+      Belgenin kendisi, alan alan:
+      <a href="https://github.com/mcpd/mcpd/blob/main/spec/definition.schema.json" class="link">definition.schema.json</a>,
+      bir de bağlayıcı sözleşme:
+      <a href="https://github.com/mcpd/mcpd/blob/main/internal/run-contract-v1.md" class="link">run-contract-v1.md</a>.
+    </li>
+  </ul>
+</Doc>

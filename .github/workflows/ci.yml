@@ -1,0 +1,500 @@
+name: ci
+
+# Both branch names, because a clone or a mirror that still calls its default
+# branch `master` would otherwise run none of this and report nothing, which
+# reads as green. CONTRIBUTING.md names `main` as the branch the project uses.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+# Read-only, at the top level, so every job inherits the least it can do. A
+# workflow with no permissions block inherits whatever the repository default
+# is, which on an older repository is write to everything.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Every `uses:` below is pinned to a commit, with the tag it was read from in
+# the comment, as the other workflows here already are. A tag can be moved to
+# different code by anyone with write access to the action's repository; a
+# commit cannot. Dependabot reads the comment and proposes the next pin.
+jobs:
+  # The gate that makes the spec the source of truth. If this fails, someone
+  # edited a generated file or changed the spec without regenerating.
+  drift:
+    name: generated files match the spec
+    runs-on: ubuntu-latest
+    # Every job has a ceiling. Without one a hung step holds a runner for the
+    # six-hour default, and the pull request reads as pending, not failed.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22' }
+      # cargo, for `cargo metadata`: THIRD_PARTY.md is generated from the crate
+      # graph and the npm lock file, and it is checked here for the same reason
+      # the SDK types are. A dependency bump that changes a licence has to
+      # change a committed file in the same pull request.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08-05
+        with: { toolchain: stable }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: node tools/codegen --check
+      # The consistency checks compare the documentation with the binary's own
+      # `--help` and `mcpd config` output. Without a binary those comparisons
+      # used to skip with a note, so this job never made them. The interface
+      # is not built here: an empty directory is enough for `include_dir!`, and
+      # nothing below reads the interface.
+      - name: build the daemon for the consistency checks
+        run: |
+          mkdir -p crates/mcpd-server/ui
+          cargo build -p mcpd
+      - name: consistency
+        env:
+          # A missing binary fails rather than skips, so a change to the step
+          # above cannot quietly turn three checks back into notes.
+          MCPD_REQUIRE_BINARY: '1'
+        run: node tools/check-consistency.mjs
+      - name: THIRD_PARTY.md matches the lock files
+        run: node tools/third-party.mjs --check
+
+  rust:
+    name: rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08-05
+        with: { toolchain: stable, components: 'rustfmt, clippy' }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  # Every SDK is tested against a real daemon, not a mock. A mock cannot catch
+  # a field name that does not match the wire.
+  sdks:
+    name: sdk (${{ matrix.lang }}${{ matrix.lang == 'python' && format(' {0}', matrix.python) || '' }})
+    runs-on: ubuntu-latest
+    needs: rust
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        lang: [typescript, python, rust, go, kotlin, elixir]
+        # The Python SDK claims 3.9 to 3.14 in its classifiers, so it is
+        # tested on both ends. The newest is the default every entry carries;
+        # the include adds a second Python entry for the oldest. Only the
+        # Python steps read this value.
+        python: ['3.14']
+        include:
+          - lang: python
+            python: '3.9'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08-05
+        with: { toolchain: stable }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: build the daemon
+        run: cargo build -p mcpd
+
+      - name: start a daemon with demo data
+        run: |
+          ./target/debug/mcpd demo --data /tmp/ci.db --listen 127.0.0.1:4317 &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:4317/healthz && break || sleep 0.25
+          done
+          curl -sf http://127.0.0.1:4317/healthz
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: matrix.lang == 'typescript'
+        with: { node-version: '22' }
+      - name: typescript
+        if: matrix.lang == 'typescript'
+        working-directory: sdks/typescript
+        env:
+          MCPD_TEST_ENDPOINT: http://127.0.0.1:4317
+          # This job starts a daemon, so a skipped live suite here means the
+          # endpoint variable stopped reaching the tests. Fail instead.
+          MCPD_REQUIRE_LIVE: '1'
+        # `npm ci`, never `npm install`: a lock file that no longer matches
+        # package.json should fail here, not be rewritten on the runner.
+        run: |
+          npm ci --no-audit --no-fund
+          npx tsc --noEmit
+          npm test
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: matrix.lang == 'python'
+        with: { python-version: '${{ matrix.python }}' }
+      - name: python
+        if: matrix.lang == 'python'
+        working-directory: sdks/python
+        env:
+          MCPD_TEST_ENDPOINT: http://127.0.0.1:4317
+          # This job starts a daemon, so a skipped live suite here means the
+          # endpoint variable stopped reaching the tests. Fail instead.
+          MCPD_REQUIRE_LIVE: '1'
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest -q
+
+      - name: rust sdk
+        if: matrix.lang == 'rust'
+        env:
+          MCPD_TEST_ENDPOINT: http://127.0.0.1:4317
+          # Turns a silently skipped live suite into a failure. Without it, a
+          # renamed or dropped endpoint variable leaves the tests returning on
+          # their first line and reporting green.
+          MCPD_REQUIRE_LIVE: '1'
+        run: |
+          cargo test -p mcpd-sdk
+          # The live suite is #[ignore] by default because it needs a server.
+          # This job has one, so it is the job that must run it; without
+          # --include-ignored the three round-trip tests never start.
+          cargo test -p mcpd-sdk --test live -- --include-ignored
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: matrix.lang == 'go'
+        with: { go-version: '1.27' }
+      - name: go
+        if: matrix.lang == 'go'
+        working-directory: sdks/go
+        env:
+          MCPD_TEST_ENDPOINT: http://127.0.0.1:4317
+          # This job starts a daemon, so a skipped live suite here means the
+          # endpoint variable stopped reaching the tests. Fail instead.
+          MCPD_REQUIRE_LIVE: '1'
+        # gofmt first. generated.go is written by tools/codegen/go.mjs, so a
+        # file gofmt would rewrite means the emitter is wrong, and a hand fix
+        # to the file would be undone by the next `make gen`.
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt would rewrite these files:"
+            echo "$unformatted"
+            exit 1
+          fi
+          go vet ./...
+          go test ./...
+
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        if: matrix.lang == 'kotlin'
+        with: { distribution: temurin, java-version: '17' }
+      # No Gradle wrapper is tracked in sdks/kotlin, so `./gradlew` does not
+      # exist there and the Gradle version is chosen here instead. 9.7.0 is the
+      # newest Gradle the Kotlin 2.4.20 plugin lists as fully supported.
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        if: matrix.lang == 'kotlin'
+        with: { gradle-version: '9.7.0' }
+      - name: kotlin
+        if: matrix.lang == 'kotlin'
+        working-directory: sdks/kotlin
+        env:
+          MCPD_TEST_ENDPOINT: http://127.0.0.1:4317
+          # This job starts a daemon, so a skipped live suite here means the
+          # endpoint variable stopped reaching the tests. Fail instead.
+          MCPD_REQUIRE_LIVE: '1'
+        run: gradle build --no-daemon
+      # The example the Kotlin docs read. It takes the SDK from source through
+      # includeBuild, so this compiles it against the code in this commit.
+      - name: kotlin example
+        if: matrix.lang == 'kotlin'
+        working-directory: examples/kotlin
+        run: gradle build --no-daemon
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        if: matrix.lang == 'elixir'
+        with: { otp-version: '27', elixir-version: '1.18' }
+      - name: elixir
+        if: matrix.lang == 'elixir'
+        working-directory: sdks/elixir
+        env:
+          MCPD_TEST_ENDPOINT: http://127.0.0.1:4317
+          # This job starts a daemon, so a skipped live suite here means the
+          # endpoint variable stopped reaching the tests. Fail instead.
+          MCPD_REQUIRE_LIVE: '1'
+        run: mix test
+      # The Elixir examples are scripts, and compiling a script runs it, so
+      # this only parses them: a syntax error fails here. Running them against
+      # the daemon above is the stronger check, and it is not here yet because
+      # both currently fail at run time.
+      - name: elixir examples parse
+        if: matrix.lang == 'elixir'
+        working-directory: sdks/elixir
+        run: >-
+          mix run --no-start -e
+          'for f <- Path.wildcard("../../examples/elixir/*.exs"),
+          do: Code.string_to_quoted!(File.read!(f), file: f)'
+
+  # The examples are what the documentation shows. If they stop compiling, the
+  # documentation is showing code that does not work.
+  examples:
+    name: examples compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22' }
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08-05
+        with: { toolchain: stable }
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: '3.13' }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version: '1.27' }
+      - run: cd examples/typescript && npm ci --no-audit --no-fund && npx tsc --noEmit
+      - run: python -m py_compile examples/python/quickstart.py
+      - run: cargo build --example quickstart -p mcpd-sdk || cargo check -p mcpd-sdk
+      - run: cd examples/go && go vet ./...
+      - run: bash -n examples/curl/quickstart.sh
+
+  clickhouse:
+    name: clickhouse backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8-alpine
+        ports: ['8123:8123']
+        env:
+          CLICKHOUSE_SKIP_USER_SETUP: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08-05
+        with: { toolchain: stable }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: wait for clickhouse
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf "http://localhost:8123/ping" && break || sleep 1
+          done
+          curl -sf "http://localhost:8123/ping"
+      # Every ClickHouse bug found while building this was one that only
+      # appeared when the query reached the engine: an aggregate nested inside
+      # an `if`, and an alias shadowing the column it read. A mock would have
+      # passed both.
+      #
+      # Named test targets, not a name filter. The trailing `clickhouse` here
+      # used to be an argument to the test binary, so it selected tests whose
+      # names contain the word and quietly dropped
+      # `a_hostile_filter_value_cannot_break_out_of_its_quotes`, the one test
+      # that checks the quoting against a real engine. It had never run. There
+      # is nothing `#[ignore]`d in this crate either, so `--include-ignored`
+      # was selecting nothing.
+      #
+      # `datasets` runs here as well because `dataset_project` decides which
+      # tenant may read a dataset, and this is the only job with a ClickHouse to
+      # prove it against.
+      #
+      # `conformance` is the suite every backend shares. It reads the same URL,
+      # so this is where its ClickHouse arm runs; without it, the shared suite
+      # proved every behaviour against SQLite alone.
+      - name: run the backend against a real server
+        env:
+          MCPD_TEST_CLICKHOUSE_URL: http://localhost:8123
+          # Every test in both suites skips when its URL is missing, and a skip
+          # here is indistinguishable from a pass. With this set, a missing URL
+          # fails the job instead.
+          MCPD_REQUIRE_LIVE: '1'
+        run: cargo test -p mcpd-store --features clickhouse --test clickhouse --test datasets --test conformance
+
+  conformance:
+    name: cross-language conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Seven toolchains, three SDK builds and the daemon, from one place, so
+      # this job and the e2e job below cannot drift apart. What it installs
+      # and why is in .github/actions/conformance-setup/action.yml.
+      - uses: ./.github/actions/conformance-setup
+      # Every SDK writes the same canonical run through its own code, and the
+      # harness asserts the traces are structurally identical. A behaviour that
+      # holds in one language and not another shows up here and nowhere else,
+      # which is what makes SDK-CONTRACT.md's "binding in every language"
+      # checkable rather than aspirational.
+      #
+      # Every language, or the job fails. A probe the harness could not run is
+      # reported as a skip, and with this set a skip is a failure: seven
+      # toolchains are installed above precisely so that none can be missing.
+      - name: every SDK produces the same trace
+        env:
+          MCPD_REQUIRE_ALL_LANGUAGES: '1'
+        run: node tests/e2e/run.mjs
+      # The same idea for durable runs: every SDK's worker serves the canonical
+      # workflow against one daemon, and the definition, the run, its journal
+      # and its trace are compared across languages and against what
+      # tests/e2e/probes/runs/canonical.json pins.
+      - name: every SDK serves the same durable run
+        env:
+          MCPD_REQUIRE_ALL_LANGUAGES: '1'
+        run: node tests/e2e/runs.mjs
+
+  # The other three end-to-end suites. Each starts its own daemon on a port
+  # the operating system assigns, and each is a check that reported nothing
+  # until a job ran it. `make e2e` runs the same three.
+  e2e:
+    name: end-to-end suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/conformance-setup
+      # Every SDK against a daemon that is broken in eight ways. The agent has
+      # to survive its telemetry, and the curl probe is the control that must
+      # not. Every language, or the job fails, for the same reason as above.
+      - name: every SDK survives a broken daemon
+        env:
+          MCPD_REQUIRE_ALL_LANGUAGES: '1'
+        run: node tests/e2e/errors.mjs
+      # `mcpd mcp` over stdio: JSON-RPC and nothing else on stdout, readable
+      # results, and the key scopes obeyed.
+      - name: the MCP server answers over stdio
+        run: node tests/e2e/mcp.mjs
+      # Corrupts batches on the wire and asserts the conformance checks go red.
+      # It drives two languages, so MCPD_REQUIRE_ALL_LANGUAGES is deliberately
+      # not set here: the harness it spawns would report the other five as
+      # skipped, and that skip is the design, not a gap.
+      - name: the conformance checks can fail
+        run: node tests/e2e/mutations.mjs
+
+  postgres:
+    name: postgres backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        ports: ['5432:5432']
+        env:
+          POSTGRES_USER: mcpd
+          POSTGRES_PASSWORD: mcpd
+          POSTGRES_DB: mcpd
+        options: >-
+          --health-cmd "pg_isready -U mcpd"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08-05
+        with: { toolchain: stable }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The bugs this suite found were all ones a mock would have passed: two
+      # replicas deadlocking on concurrent `CREATE TABLE IF NOT EXISTS`, and a
+      # JSON feedback value sent to a text column. Both only appear against a
+      # real server, and the second only under concurrency.
+      #
+      # `datasets` runs here too. Its Postgres arm is gated on the same URL, so
+      # without this job it was proving six behaviours against SQLite alone.
+      #
+      # `conformance` is the suite every backend shares, and this is where its
+      # Postgres arm runs, for the same reason.
+      - name: run the backend against a real server
+        env:
+          MCPD_TEST_POSTGRES_URL: postgres://mcpd:mcpd@localhost:5432/mcpd
+          # Every test in both suites skips when its URL is missing, and a skip
+          # here is indistinguishable from a pass. With this set, a missing URL
+          # fails the job instead.
+          MCPD_REQUIRE_LIVE: '1'
+        run: cargo test -p mcpd-store --features postgres --test postgres --test datasets --test conformance
+
+  site:
+    name: site
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22' }
+      # `npm ci`: this install is the interface that ends up inside the binary,
+      # so it is built from the lock file or not at all.
+      - working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: the direction contract must survive the build
+        run: grep -q "afd87fbc" web/dist/index.html
+
+  image:
+    name: container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      # Loaded into the runner's Docker, so the next step can start it. A
+      # build that is never run proves the Dockerfile parses and nothing more.
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: mcpd:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # The image the chart and the manifests assume: it answers both probes,
+      # runs as uid 10001, and can write to /data.
+      - name: the image starts, answers its probes and writes its data
+        run: |
+          set -euo pipefail
+          docker run -d --name mcpd-ci -p 127.0.0.1:4317:4317 mcpd:ci
+          for _ in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:4317/healthz; then break; fi
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:4317/healthz
+          curl -sf http://127.0.0.1:4317/readyz
+          test "$(docker exec mcpd-ci id -u)" = 10001
+          docker exec mcpd-ci test -s /data/mcpd.db
+          docker exec mcpd-ci test -s /data/mcpd.runs.db
+          docker rm -f mcpd-ci
+
+  # Every combination of chart values that changes what renders, and every
+  # refusal, each with the setting its message has to name. The chart's own
+  # comments promise a message instead of a crash loop; this is what holds it
+  # to that.
+  chart:
+    name: helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Helm comes with the runner image; the version is printed so a change
+      # of behaviour can be traced to the runner rather than to the chart.
+      - name: lint, render and refuse
+        run: |
+          helm version
+          helm lint deploy/helm/mcpd --set keys.ingest=a --set keys.read=b
+          bash deploy/helm/test-chart.sh

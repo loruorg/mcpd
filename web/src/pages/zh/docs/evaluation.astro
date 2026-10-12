@@ -1,0 +1,276 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="评分与反馈"
+  description="mcpd 怎样记录机器给出的评估和人给出的判断，为什么把两者分开存放，以及找出被某个评分器打了低分的那些运行的查询。"
+  lede="一个评分是机器的看法。一条反馈是人的看法。mcpd 把它们当作两种信号保存，绝不把其中一个平均进另一个。"
+  og="docs"
+>
+  <h2>是两种信号，不是一个数字</h2>
+  <p>
+    一个<strong>评分</strong>是机器给出的评估：一个裁判模型、一个正则表达式、
+    一个单元测试，任何能对一次运行给出数字的东西。一条<strong>反馈</strong>
+    记录是人给出的判断：你的产品里的一次点踩、一位审核者的打分、一份改正过的
+    答案。
+  </p>
+  <p>
+    两者都挂在一个 <code>trace_id</code> 或一个 <code>span_id</code> 上，都作为
+    各自独立的信号到来，也都存在各自的表里。它们从不被合并。一个裁判模型在
+    相关性上打了 0.9，和一位客户按下点踩，是两句都为真的话，而它们之间的分歧
+    正是这次运行上最有用的东西。取平均恰好会把这一点抹掉，留给你一个谁也没法
+    据以行动的数字。
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>一个评分要声明自己的量程</h2>
+  <p>
+    <code>min</code> 和 <code>max</code> 是评分的一部分。没有它们，一个值就无法
+    解释：0.86 可能是 0 到 1 这个量程上的好结果，是 0 到 5 上的差结果，也可能是
+    一个越小越好的距离。半年之后，同一个项目里有两个评分器，谁也说不清是哪一种。
+    规范把它们默认为 0 和 1，而每个 SDK 都要求在调用处写出它们，这样一个默认值
+    就不会被不小心接受下来。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>字段</th><th>用来做什么</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>scorer_id</code></td>
+        <td>这是哪个评分器给出的，比如 <code>answer_relevance</code>。必填。</td>
+      </tr>
+      <tr>
+        <td><code>scorer_version</code></td>
+        <td>一个评分只和同一版本的另一个评分比较。改了一个裁判模型的提示词，你得到的是一个新的评分器，而不是旧那个的延续。</td>
+      </tr>
+      <tr>
+        <td><code>value</code></td>
+        <td>那个数字。</td>
+      </tr>
+      <tr>
+        <td><code>min</code>、<code>max</code></td>
+        <td>这个数字所在的、已经声明出来的量程。</td>
+      </tr>
+      <tr>
+        <td><code>label</code></td>
+        <td>一个分类结果，当评分器在数字之外还给出一个的时候。</td>
+      </tr>
+      <tr>
+        <td><code>reason</code></td>
+        <td>为什么。对一个裁判模型来说这是它的解释，也正是这一项让评分可以被争论，而不是变成魔法。</td>
+      </tr>
+      <tr>
+        <td><code>source</code></td>
+        <td>线上、离线、实验或人工。</td>
+      </tr>
+      <tr>
+        <td><code>score_trace_id</code></td>
+        <td>打分这次运行本身的 trace，这样一个可疑的评分也能像别的运行一样被打开来读。</td>
+      </tr>
+      <tr>
+        <td><code>cost</code></td>
+        <td>产生这个评分花了多少钱。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>写入一个评分</h2>
+  <p>
+    SDK 的辅助方法把一个评分排进队列，和它排一个 span 的方式一样，所以这次调用
+    不会阻塞，也不会抛异常。不给 <code>traceId</code> 时，它挂在当前活动 span
+    所在的 trace 上。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="score" title="写入评分与反馈" />
+
+  <p>
+    走 HTTP 就是 <code>POST /v1/api/scores</code>，请求体是一个
+    <code>Score</code>。一个评分必须说出它讲的是哪个 <code>trace_id</code> 或
+    哪个 <code>span_id</code>；一个什么都没挂上的评分会被 400 拒掉，而不是存到
+    一个再也找不到它的地方。把 <code>score_id</code> 发成空字符串，服务端会替你
+    生成一个。
+  </p>
+
+  <h2>一个评分是从哪里来的</h2>
+  <p>
+    <code>source</code> 和 <code>scorer_id</code> 是分开的，因为同一个评分器会在
+    不止一种场景下运行，而这些场景之间没有可比性。用今天的裁判模型重新给上周的
+    流量打一遍分，并不能证明质量变好了。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>来源</th><th>含义</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>live</code></td><td>在线产生，就在被记录的那次运行发生的时候。</td></tr>
+      <tr><td><code>offline</code></td><td>之后产生，对存下来的 trace 打分。</td></tr>
+      <tr><td><code>experiment</code></td><td>由一次针对数据集的实验运行产生。</td></tr>
+      <tr><td><code>manual</code></td><td>由人通过 API 或界面录入。</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    通过 SDK 写入的评分默认是 <code>live</code>。另外三种要你自己设。
+  </p>
+
+  <h2>打分要花钱，所以它被记下来</h2>
+  <p>
+    一次由裁判模型做的评估，通常又是一次模型调用。用一个大裁判模型给每一次生产
+    运行打分，花的钱可能比服务这些流量还多，而这是一笔人们很晚才发现的账。所以
+    一个 <code>Score</code> 带着一个 <code>cost</code>，形状和一个 span 上的
+    一样：一种货币、输入与输出的拆分，以及产生这个数字的那份价目表。当你通过
+    HTTP API 或一批原生接收数据写入评分时，把它设上。
+  </p>
+  <p>
+    <code>score_trace_id</code> 是同一个想法的另一半。把打分这次运行本身也记录
+    下来，它的 id 就写在评分上，于是一个开始把什么都往低了打的裁判模型，可以被
+    打开、被读，也可以被指出它坏了。
+  </p>
+
+  <h2>人给出的反馈</h2>
+  <p>
+    反馈是从你自己的产品里写入的。就在那个人真正按下的控件里调用它，这份判断
+    就落在产生了他所回应的那个答案的那条 trace 上。<code>kind</code> 决定
+    <code>value</code> 的形状。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>种类</th><th><code>value</code></th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>thumbs</code></td><td><code>up</code> 或 <code>down</code>。</td></tr>
+      <tr><td><code>rating</code></td><td>一个数字，量程由写入它的一方声明。</td></tr>
+      <tr><td><code>correction</code></td><td>正确的答案，以文本形式给出。</td></tr>
+      <tr><td><code>tag</code></td><td>从一个集合里选出来的一个标签。</td></tr>
+      <tr><td><code>comment</code></td><td>自由的文字，不带任何评分。</td></tr>
+    </tbody>
+  </table>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="来自你自己产品的一次点踩"
+    samples={[
+      {
+        lang: 'typescript',
+        label: 'TypeScript',
+        shiki: 'typescript',
+        code: `// No traceId: it attaches to the active span's trace.
+mcpd.feedback({
+  kind: 'thumbs',
+  value: 'down',
+  comment: 'Named the wrong depot.',
+  authorKind: 'end_user',
+})`,
+      },
+      {
+        lang: 'curl',
+        label: 'cURL',
+        shiki: 'bash',
+        code: `curl -s -X POST "$MCPD/v1/api/feedback" \\
+  -H 'content-type: application/json' \\
+  -d "{
+    \\"feedback_id\\": \\"\\",
+    \\"trace_id\\": \\"$TRACE\\",
+    \\"kind\\": \\"thumbs\\",
+    \\"value\\": \\"down\\",
+    \\"comment\\": \\"Named the wrong depot.\\",
+    \\"author_kind\\": \\"end_user\\",
+    \\"timestamp\\": \\"$NOW\\",
+    \\"correlation\\": { \\"project\\": \\"default\\" }
+  }"`,
+      },
+    ]}
+  />
+
+  <p>
+    脱敏按键名匹配，它会跑过你挂在一份判断上的 <code>metadata</code>。
+    <code>author_id</code> 按你发来的样子存下，所以请发一个假名 id，不要发电子
+    邮件地址。参见<a href={linkTo('/docs/privacy')} class="link">脱敏与保留期</a>。
+  </p>
+
+  <h2>找出糟糕回答的那个查询</h2>
+  <p>
+    评分就是为这个而存在的。<code>has_score</code> 指定一个评分器，
+    <code>score_below</code> 划一条线，trace 列表就把那个评分器打到这条线以下的
+    运行返回给你。这个比较是严格的，所以 <code>score_below=0.5</code> 不包含
+    正好打了 0.5 的那次运行。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="query" title="找出打了低分的那些运行" />
+
+  <p>
+    <code>score_below</code> 只有旁边有 <code>has_score</code> 时才有意义：
+    一条不挂在任何评分器上的线，是划在虚空里的线。两者都是
+    <code>GET /v1/api/traces</code> 的参数，所以它们能和那里的每一个别的过滤
+    条件组合起来。某一个模型在生产环境里、最近一天内给出的糟糕回答，是一次请求。
+  </p>
+
+  <h2>把它们读回来</h2>
+  <p>
+    <code>GET /v1/api/scores</code> 列出机器给出的评估，可以按
+    <code>scorer_id</code>、<code>source</code>、<code>trace_id</code>、
+    <code>experiment_id</code>、<code>min_value</code>、<code>max_value</code>
+    和一个时间窗口过滤，并带游标分页。<code>source</code> 接受
+    <code>live</code>、<code>offline</code>、<code>experiment</code> 或
+    <code>manual</code>，你就是这样把裁判模型自己打的分读回来，而不带上人手
+    输入的那些。<code>GET /v1/api/feedback</code> 接受一个
+    <code>trace_id</code>，返回那次运行上的判断。不指定运行、只列一个项目的
+    反馈，在这个构建里还没有实现，端点也是这么说的：不给 <code>trace_id</code>
+    时，它用一个 400 拒掉，并点出这个参数的名字。它以前会答一份空列表，读起来
+    像是谁也没有判断过任何东西。
+  </p>
+  <p>
+    评分列表不接受 <code>order</code>：它是最新的在前，而它的游标只朝一个方向
+    比较。运行列表和 span 列表接受，所以这里是点着名字拒掉，而不是收下再丢掉。
+    <code>kind</code>、<code>from</code>、<code>to</code> 和
+    <code>cursor</code> 这几个过滤条件也一样，有几个 SDK 客户端会让你在一次
+    反馈查询上设它们。它们从来没有被应用过，现在四个都会被拒掉。
+  </p>
+  <p>
+    要一次读到一次运行和挂在它上面的所有东西，按名字把附加项要过来：
+    <code>GET /v1/api/traces/{'{trace_id}'}?include=scores,feedback</code>，
+    或者用 <code>include=all</code> 把日志也带上。
+  </p>
+
+  <h2>trace 列表带着什么，又不带什么</h2>
+  <p>
+    每一条存下来的 trace 都保留两个汇总值，这样列表不需要 join。一个是
+    <em>按评分器</em>算的均值：<code>answer_relevance</code> 内部的一个平均，
+    和 <code>groundedness</code> 内部另一个单独的平均。另一个是<em>按种类</em>
+    算的反馈条数：三条 thumbs，一条 correction。是计数，不是均值，因为一次点赞
+    和一次改正的平均不是一个量。
+  </p>
+  <p>
+    没有一个总体的质量分，以后也不会有。把一个裁判模型、一个正则表达式和一位
+    客户的点踩合成一个数字，那会是一个没有单位、也没法跟它争论的数。mcpd 把
+    各个部分摆给你看，让你自己判断。
+  </p>
+
+  <h2>接下来</h2>
+  <ul>
+    <li>
+      你还能按别的什么来过滤：
+      <a href={linkTo('/docs/searching')} class="link">查找一次运行</a>。
+    </li>
+    <li>
+      一个成本数字是由什么构成的：
+      <a href={linkTo('/docs/cost')} class="link">成本核算</a>。
+    </li>
+    <li>
+      一个作者 id 在被存下来之前会经历什么：
+      <a href={linkTo('/docs/privacy')} class="link">脱敏与保留期</a>。
+    </li>
+  </ul>
+</Doc>

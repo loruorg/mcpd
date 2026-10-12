@@ -1,0 +1,246 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (href: string) => urlFor(href, code)
+---
+
+<Doc
+  title="Elixir"
+  description="Le SDK mcpd pour Elixir : un worker GenServer, l’arbre des spans assemblé depuis le dictionnaire de processus, et aucune dépendance, car OTP fournit déjà un codec JSON et un client HTTP."
+  lede="Un GenServer pour le worker, le processus pour le contexte, et rien d’ajouté à votre arbre de dépendances."
+  og="docs"
+>
+  <h2>Installation</h2>
+  <p>
+    Ajoutez-le à <code>mix.exs</code>. Il n’amène rien avec lui.
+  </p>
+
+  <pre><code class="language-elixir">{`defp deps do
+  [{:mcpd, "~> 0.1"}]
+end`}</code></pre>
+
+  <p>
+    C’est là toute la liste des dépendances, et c’est délibéré. OTP 27 fournit
+    un codec JSON (<code>:json</code>) et un client HTTP (<code>:inets</code>) :
+    une bibliothèque dont le travail est de surveiller votre système n’a donc
+    pas à devenir une raison pour laquelle la compilation de ce système change.
+    Les cinq autres SDK font la même promesse dans leur propre langage.
+  </p>
+
+  <h2>Construire le client</h2>
+  <p>
+    Chaque option retombe sur sa variable d’environnement, et le code l’emporte.
+    <code>Mcpd.start_link()</code> sans argument s’adresse à un daemon local.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="init" title="se connecter" />
+
+  <p>
+    Placez-le dans votre arbre de supervision et il se comporte comme n’importe
+    quel autre worker :
+  </p>
+
+  <pre><code class="language-elixir">{`children = [
+  {Mcpd, project: "support-desk", environment: "production"}
+]
+
+Supervisor.start_link(children, strategy: :one_for_one)`}</code></pre>
+
+  <h2>Enregistrer une exécution</h2>
+  <p>
+    <code>span</code> est une macro : une exécution est donc un bloc et sa
+    valeur est la valeur du bloc.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="trace" title="enregistrer une exécution" />
+
+  <p>
+    Les macros doivent être requises avant de pouvoir être appelées, ce qui est
+    une règle du langage et non un choix fait ici. <code>use Mcpd</code> s’en
+    charge pour vous :
+  </p>
+
+  <pre><code class="language-elixir">{`defmodule MyAgent do
+  use Mcpd
+
+  def answer(mcpd, question) do
+    Mcpd.span mcpd, "agent", kind: :agent_run, input: question do
+      do_the_work(question)
+    end
+  end
+end`}</code></pre>
+
+  <p>
+    Si le corps est déjà une fonction plutôt qu’un bloc, appelez
+    <code>Mcpd.with_span/4</code> à la place. C’est la même chose sans la macro.
+  </p>
+
+  <h2>L’arbre s’assemble tout seul</h2>
+  <p>
+    Le span actif vit dans le dictionnaire de processus, et c’est le bon endroit
+    en Elixir précisément, non un raccourci. Le processus est ici l’unité de
+    concurrence : deux requêtes traitées en même temps ne peuvent donc pas voir
+    le span l’une de l’autre, et rien n’a besoin d’être passé de fonction en
+    fonction pour tenir l’arbre ensemble.
+  </p>
+  <p>
+    Un enfant démarré trois appels plus bas trouve son parent tout seul :
+  </p>
+
+  <pre><code class="language-elixir">{`Mcpd.span mcpd, "agent", kind: :agent_run do
+  plan(mcpd)          # ouvre un enfant de "agent" sans qu’on le lui dise
+end
+
+defp plan(mcpd) do
+  Mcpd.span mcpd, "plan_answer", kind: :model_generation, model: "gpt-4o" do
+    call_the_model()
+  end
+end`}</code></pre>
+
+  <p>
+    La conséquence à connaître : un span ouvert à l’intérieur de
+    <code>Task.async</code> démarre une nouvelle trace, parce que c’est un autre
+    processus. Faites passer la trace avec <code>Mcpd.traceparent/0</code> et
+    <code>Mcpd.continue/2</code>, la même paire que vous emploieriez pour
+    franchir une frontière HTTP.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>Rien ne bloque, et rien ne lève d’exception</h2>
+  <p>
+    Enregistrer un span envoie un message au worker et rend la main. Le réseau
+    se passe sur ce worker : la latence de votre agent ne dépend donc jamais de
+    la vitesse de mcpd, ni de sa disponibilité, ni même du fait qu’il tourne.
+  </p>
+  <p>
+    Une exception levée dans un bloc est enregistrée sur le span comme une
+    erreur, puis relevée telle quelle. Le travail de mcpd est de voir ce qui
+    s’est passé, jamais de décider ce que votre code en fait.
+  </p>
+  <p>
+    La file d’attente est bornée, et quand elle se remplit les signaux les plus
+    anciens sont écartés. Ce sens est un choix : quand le daemon est
+    injoignable, ce sont les signaux les plus récents qui décrivent ce qui se
+    passe maintenant, et ce sont ceux-là que quelqu’un voudra à son retour.
+    <code>Mcpd.stats/1</code> répond ce que le client a fait :
+    <code>queued</code>, <code>dropped</code>, <code>capacity</code>,
+    <code>exported</code>, <code>failed</code> et <code>rejected</code>.
+  </p>
+
+  <p>
+    <code>log_level:</code>, ou <code>MCPD_LOG_LEVEL</code>, pose un plancher
+    sous <code>Mcpd.log/4</code>. La valeur par défaut est <code>debug</code>,
+    qui garde tout. Une ligne sous le plancher est écartée avant que
+    l’enregistrement ne soit construit : une ligne de debug dans un déploiement
+    de production coûte donc une comparaison. Le plancher ne concerne que les
+    logs ; les spans, les métriques, les scores et le feedback ne sont pas
+    touchés.
+  </p>
+
+  <h2>Garder les payloads dans le processus</h2>
+  <p>
+    <code>capture_payloads: false</code>, ou
+    <code>MCPD_CAPTURE_PAYLOADS=false</code>, garde les prompts et les
+    complétions là où ils sont. Les spans sortent toujours avec leurs temps,
+    leur statut, leur consommation, leur modèle, leur corrélation et leurs
+    erreurs ; <code>input:</code>, <code>output:</code> et la valeur capturée
+    d’un bloc sont écartés avant d’atteindre la file d’attente, si bien que rien
+    de sensible n’est mis en file et que rien de sensible ne sort lors d’un
+    flush. Un span peut décider autrement pour lui-même avec
+    <code>capture_payloads: true</code>.
+  </p>
+
+  <h2>Vérifier ce que vous avez enregistré</h2>
+  <p>
+    Un sink est l’endroit où part un lot vidé. Le transport HTTP est le sink par
+    défaut ; <code>Mcpd.Sink.Recorder</code> garde chaque lot en mémoire, si
+    bien qu’un test relit les spans, les logs, les métriques, les scores et le
+    feedback que l’instrumentation a enregistrés sans daemon, et
+    <code>Mcpd.Sink.Console</code> imprime une ligne JSON par signal sur stderr.
+    Un sink à vous implémente <code>Mcpd.Sink</code> ; un sink qui lève une
+    exception donne un lot en échec, compté et signalé, jamais relevé chez
+    l’appelant.
+  </p>
+  <p>
+    <code>Mcpd.record/3</code> met en file un span déjà terminé, tel quel : ses
+    propres identifiants, son parent, son début et sa fin, jamais re-parenté,
+    re-daté ni ré-échantillonné. C’est ce que détient un adaptateur pour un
+    autre système de tracing, ou un import par lots. Un enregistrement dont les
+    identifiants n’ont pas la forme OpenTelemetry est refusé et compté, et il
+    ne lève jamais d’exception. <code>external_parent_span_id:</code>, sur
+    n’importe quel span, porte un parent venu d’un système de tracing autre
+    que mcpd, pour la seule corrélation.
+  </p>
+
+  <h2>Exécutions durables</h2>
+  <p>
+    Le même client dessert les exécutions durables du daemon.
+    <code>Mcpd.Workflow</code> construit la définition et retient le corps des
+    étapes sous forme de fonctions d’arité trois ; un
+    <code>Mcpd.StepWorker</code> l’enregistre, attend des leases en long polling
+    et sert chacun d’eux sur un processus à lui, et
+    <code>Mcpd.start_run/3</code>, <code>Mcpd.watch_run/3</code>,
+    <code>Mcpd.publish_event/4</code> et les autres reprennent un pour un la
+    surface des exécutions. Un corps d’étape lève
+    <code>Mcpd.StepException</code> avec <code>class: :retryable</code> pour
+    être réessayé dans le budget de l’étape, et enregistre des spans sous son
+    étape via <code>Mcpd.StepContext.span/4</code>. Chaque span que le corps
+    referme ajoute sa consommation à celle de l’étape, et le dernier modèle vu
+    l’emporte : le daemon tarife donc ce que montre la trace ;
+    <code>set_usage/2</code> est la substitution explicite.
+    <code>on_lease</code>, <code>on_step_start</code>,
+    <code>on_step_end</code> et <code>on_conflict</code> accompagnent
+    <code>on_error</code> sur le worker, et <code>StepWorker.stats/1</code>
+    compte ce qu’il a pris, achevé, échoué par classe et abandonné par motif.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} example="workflow" region="workflow" title="un workflow" />
+  <p>
+    Ce que fait chaque construction, le protocole de lease et l’API des
+    exécutions sont décrits dans
+    <a href={linkTo('/docs/workflows')} class="link">Workflows</a>,
+    <a href={linkTo('/docs/workers')} class="link">Workers</a> et
+    <a href={linkTo('/docs/runs')} class="link">Exécutions</a>.
+  </p>
+
+  <h2>Scores et feedback</h2>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="score" title="score et feedback" />
+
+  <h2>Relire ce qui a été enregistré</h2>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="query" title="lire l’exécution" />
+
+  <h2>Les processus de courte durée doivent vider la file</h2>
+  <p>
+    Un script ou une tâche qui se termine vite perd tout ce qui n’avait pas été
+    envoyé. <code>Mcpd.shutdown/1</code> vide la file et arrête le worker, et
+    peut être appelé deux fois sans risque.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="lancer l’exemple face à un daemon local"
+    command={`mcpd serve --data ./mcpd.db
+elixir examples/elixir/quickstart.exs`}
+  />
+
+  <h2>La suite</h2>
+  <ul>
+    <li>
+      Tous les comportements que ce SDK partage avec les cinq autres :
+      <a href="https://github.com/mcpd/mcpd/blob/main/sdks/SDK-CONTRACT.md" class="link">le contrat des SDK</a>.
+    </li>
+    <li>
+      Ce que porte un span :
+      <a href={linkTo('/docs/reference/data-model')} class="link">Modèle de données</a>.
+    </li>
+    <li>
+      Mettre ensuite la main sur l’exécution qui vous intéresse :
+      <a href={linkTo('/docs/searching')} class="link">Retrouver une exécution</a>.
+    </li>
+  </ul>
+</Doc>

@@ -1,0 +1,59 @@
+{{/*
+  The review question this answers: "how does anything outside the cluster
+  reach mcpd, and who terminates TLS?"
+
+  Off by default. The five-minute path is a port-forward, and NOTES.txt tells
+  you to use one.
+
+  Read the comment on `ingress` in values.yaml before turning this on. mcpd
+  serves OTLP ingest, the query API and the operator interface from one port
+  and one path root, so publishing "/" publishes all three.
+*/}}
+{{- if .Values.ingress.enabled }}
+{{- /*
+  An Ingress puts mcpd on a hostname, and mcpd serves ingest, the query API and
+  the operator interface from one path root, so a hostname with no keys behind
+  it is a prompt store anyone who can resolve the name can read and write. The
+  Secret template already refuses to render without the two keys; this guard
+  exists so the refusal names the ingress, which is the thing that makes the
+  gap reachable, and so it still fires if the Secret template ever changes.
+*/}}
+{{- if and (not .Values.keys.existingSecret) (or (not .Values.keys.ingest) (not .Values.keys.read)) }}
+{{- fail "ingress.enabled is true but keys.ingest or keys.read is empty. An Ingress publishes mcpd on a hostname, and until both keys are set anything that can resolve that name can write spans and read every stored prompt and completion. Set keys.ingest and keys.read (generate each with `openssl rand -hex 32`), or point keys.existingSecret at a Secret that carries ingest-keys and read-keys, before turning the ingress on." }}
+{{- end }}
+{{- $fullName := include "mcpd.fullname" . -}}
+{{- $port := .Values.service.port -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "mcpd.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ default "Prefix" .pathType }}
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $port }}
+          {{- end }}
+    {{- end }}
+{{- end }}

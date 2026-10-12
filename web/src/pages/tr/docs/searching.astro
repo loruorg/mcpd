@@ -1,0 +1,677 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import SearchDemo from '@/components/SearchDemo.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const loc = localeOf(Astro.url.pathname)
+const link = (route: string) => urlFor(route, loc)
+
+/* Bu örnekler bir örnek programdan okunmak yerine burada yazılmıştır, çünkü
+   bunlar okuyucunun kendi daemon'una karşı çalıştırdığı sorgulardır, CI'ın
+   çalıştırabileceği kod değil. İçlerindeki her parametre sunucunun
+   ayrıştırdığı bir parametredir. */
+const finding = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# Son bir günde başarısız olan ve her iki sözcüğü de bir span adında, bir
+# prompt'ta ya da bir tamamlamada geçiren çalıştırmalar.
+curl -s --get http://localhost:4317/v1/api/traces \\
+  --data-urlencode 'q=Leeds depot' \\
+  --data-urlencode 'status=error' \\
+  --data-urlencode 'from=-24h'
+
+# Tek bir modeli çağırıp başarısız olan her adım, bütün çalıştırmalarda.
+curl -s --get http://localhost:4317/v1/api/spans \\
+  --data-urlencode 'model=gpt-4o-mini' \\
+  --data-urlencode 'status=error' \\
+  --data-urlencode 'min_duration_ms=2000'
+`,
+  },
+  {
+    lang: 'typescript' as const,
+    label: 'TypeScript',
+    shiki: 'typescript',
+    code: `import { Mcpd } from '@mcpd/sdk'
+
+const mcpd = new Mcpd()
+
+const bad = await mcpd.listTraces({
+  q: 'Leeds depot',
+  status: 'error',
+  from: '-24h',
+  limit: 20,
+})
+
+for (const trace of bad.traces) {
+  console.log(trace.traceId, trace.name, trace.status)
+}`,
+  },
+  {
+    lang: 'python' as const,
+    label: 'Python',
+    shiki: 'python',
+    code: `from mcpd import Mcpd
+
+mcpd = Mcpd()
+
+bad = mcpd.list_traces(q="Leeds depot", status="error", from_="-24h", limit=20)
+
+for trace in bad.traces:
+    print(trace.trace_id, trace.name, trace.status.value)`,
+  },
+]
+
+const discovery = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# Bu projenin bildirdiği her ortam, bir filtre kutusu için.
+curl -s --get http://localhost:4317/v1/api/discovery \\
+  --data-urlencode 'project=default' \\
+  --data-urlencode 'facet=environment'
+
+# Yazarken tamamlama: "check" ile başlayan servis adları.
+curl -s --get http://localhost:4317/v1/api/discovery \\
+  --data-urlencode 'facet=service_name' \\
+  --data-urlencode 'prefix=check'
+
+# Tek bir metrik etiketinin aldığı değerler.
+curl -s --get http://localhost:4317/v1/api/discovery \\
+  --data-urlencode 'facet=metric_label_value' \\
+  --data-urlencode 'key=model'
+`,
+  },
+  {
+    lang: 'curl' as const,
+    label: '200 OK',
+    shiki: 'json',
+    code: `{
+  "facet": "environment",
+  "values": [
+    { "value": "production", "last_seen": "2026-09-03T08:04:18Z" },
+    { "value": "staging", "last_seen": "2026-09-02T17:41:02Z" }
+  ]
+}`,
+  },
+  {
+    lang: 'curl' as const,
+    label: '501 Not Implemented',
+    shiki: 'json',
+    code: `{
+  "error": "not_implemented",
+  "capability": "discovery",
+  "message": "this deployment stores signals in <backend>, which does not support discovery: ... GET /v1/api/capabilities lists what it does support."
+}`,
+  },
+]
+
+const badParam = [
+  {
+    lang: 'curl' as const,
+    label: '400 Bad Request',
+    shiki: 'json',
+    code: `{
+  "error": "bad_parameter",
+  "field": "from",
+  "message": "\\"yesterday\\" is not an RFC 3339 timestamp or a relative duration like -1h"
+}`,
+  },
+]
+
+const paging = [
+  {
+    lang: 'curl' as const,
+    label: 'cURL',
+    shiki: 'bash',
+    code: `# İlk sayfa, page.next_cursor içinde bir imleç döndürür.
+curl -s --get http://localhost:4317/v1/api/traces \\
+  --data-urlencode 'q=refund' \\
+  --data-urlencode 'sort=cost' \\
+  --data-urlencode 'limit=100'
+
+# Sonraki sayfa: aynı filtreler, aynı sıralama, artı imleç.
+curl -s --get http://localhost:4317/v1/api/traces \\
+  --data-urlencode 'q=refund' \\
+  --data-urlencode 'sort=cost' \\
+  --data-urlencode 'limit=100' \\
+  --data-urlencode 'cursor=MzEzNzQyfDBhZjM...'
+`,
+  },
+  {
+    lang: 'typescript' as const,
+    label: 'TypeScript',
+    shiki: 'typescript',
+    code: `let cursor: string | undefined
+
+do {
+  const page = await mcpd.listTraces({
+    q: 'refund',
+    sort: 'cost',
+    order: 'desc',
+    limit: 100,
+    cursor,
+  })
+
+  for (const trace of page.traces) {
+    console.log(trace.traceId, trace.cost?.totalCost ?? 'not priced')
+  }
+
+  // hasMore üzerinde döngü kurun. Sayacağınız bir toplam yok.
+  cursor = page.page.hasMore ? page.page.nextCursor : undefined
+} while (cursor)`,
+  },
+  {
+    lang: 'python' as const,
+    label: 'Python',
+    shiki: 'python',
+    code: `cursor = None
+
+while True:
+    page = mcpd.list_traces(
+        q="refund", sort="cost", order="desc", limit=100, cursor=cursor
+    )
+
+    for trace in page.traces:
+        cost = trace.cost.total_cost if trace.cost else "not priced"
+        print(trace.trace_id, cost)
+
+    # has_more üzerinde döngü kurun. Sayacağınız bir toplam yok.
+    if not page.page.has_more:
+        break
+    cursor = page.page.next_cursor`,
+  },
+]
+---
+
+<Doc
+  title="Çalıştırma bulma"
+  description="Prompt'lar ve tamamlamalar üzerinde tam metin arama, mcpd'nin trace ve span'lerde kabul ettiği her filtre ve bir puanlayıcının düşük puanladığı yanıtları bulan sorgu."
+  lede="Bir inceleme bir gösterge paneliyle değil, bir şikâyetle başlar. Bu sayfa, bir şikâyeti ona sebep olan tek çalıştırmaya nasıl çevireceğinizi anlatır."
+  og="docs"
+>
+  <h2>Etiketi değil, payload'ı aramak</h2>
+  <p>
+    Çoğu izleme aracı yalnızca adları ve öznitelikleri dizine ekler. mcpd
+    prompt'u ve tamamlamayı da dizine ekler, çünkü bir insanın şikâyet ettiği
+    şey modelin söylediği bir şeydir ve size aktardığı sözcükler elinizdeki tek
+    tutamaktır. <code>q</code> parametresi işte o dizindir.
+  </p>
+
+  <SearchDemo class="not-prose my-8" />
+
+  <h2>q tam olarak neyi kapsar</h2>
+  <p>
+    Dizin her span için üç alan tutar: adı, girdisi ve çıktısı. Girdi ve çıktı
+    JSON'dur, bu yüzden mcpd dizine eklemeden önce payload'ı gezer ve yalnızca
+    dizgilerini ve sayılarını tutar; süslü parantezleri, tırnakları ve
+    anahtarları atar. Ham JSON'u dizine eklemek her noktalama işaretini bir
+    belirteç yapar ve asıl aradığınız sözcükleri gömerdi.
+  </p>
+  <p>Buna güvenmeden önce bilmeye değer altı sonuç:</p>
+  <ul>
+    <li>
+      <strong>İçindeki tek bir span</strong> eşleştiğinde çalıştırma eşleşir.
+      Geriye tek tek span'ler değil, çalıştırmalar bütün olarak döner; hangi
+      adım olduğunu görmek için birini açın.
+    </li>
+    <li>
+      Sözcükler AND ile birleşir. <code>q=refund delayed</code>, ikisini de
+      dizine eklenmiş metnin herhangi bir yerinde, yan yana olmadan içeren
+      span'leri bulur.
+    </li>
+    <li>
+      Eşleşme tam sözcük üzerindendir, büyük küçük harf ayrımı gözetmez ve
+      aksanlar eşitlenir; yani <code>resume</code>, <code>résumé</code> sonucunu
+      bulur. Kök bulma yoktur: <code>refund</code>, <code>refunds</code> sonucunu
+      bulmaz.
+    </li>
+    <li>
+      Girdinin ve çıktının her birinin ilk 64 KiB'ı dizine girer. Daha uzun
+      payload'lar bütün olarak saklanır ve gösterilir; yalnızca çok büyük bir
+      prompt'un kuyruğu aranamaz.
+    </li>
+    <li>
+      Maskeleme depolamadan önce çalışır, yani maskeleyicinin kaldırdığı
+      hiçbir şey dizine de girmemiştir.
+      <a href={link('/docs/privacy')} class="link">Maskeleme ve saklama</a>
+      sayfasına bakın.
+    </li>
+    <li>
+      Birden çok kez yazılan bir span, uzun süren bir span'in bittiğinde
+      yazıldığı gibi, kendi dizin satırının yerine geçer; böylece arama her
+      zaman güncel sürümü yansıtır.
+    </li>
+  </ul>
+
+  <h2>Kaçak bir tırnak hata değil, aramadır</h2>
+  <p>
+    Alttaki dizinin kendi sorgu dili vardır: çift tırnak bir öbek açar;
+    <code>NEAR</code>, <code>OR</code> ve <code>*</code> ise operatördür.
+    Metninizi olduğu gibi ona vermek, içinde tırnak işareti geçen bir müşteri
+    mesajının sonuç yerine sözdizimi hatası olarak dönmesi demek olurdu; hata
+    verebilen bir arama kutusu da insanların kullanmayı bıraktığı bir arama
+    kutusudur.
+  </p>
+  <p>
+    Bu yüzden metniniz o ayrıştırıcıya hiç ulaşmaz. mcpd yazdığınızı boşluklardan
+    böler, her sözcükten çift tırnakları çıkarır, her sözcüğü birebir bir terim
+    olarak sarar ve hepsini AND ile birleştirir. <code>q=say "no"</code>,
+    <em>say</em> ve <em>no</em> sözcüklerini arar. <code>q=NEAR</code>, NEAR
+    sözcüğünü arar. Yazabileceğiniz hiçbir şey sözdizimi hatası değildir ve size
+    açık hiçbir operatör yoktur. Ödünleşim budur ve bilerek bu yönde yapılmıştır.
+  </p>
+  <p>
+    Yalnızca boşluktan oluşan bir <code>q</code>, hiçbir şeyle eşleşmek yerine
+    düşürülür; boş bir <code>q=</code> ise yok sayılır. Her parametre böyle
+    davranır, yani boş filtre kutularını da gönderen bir form yanlışlıkla boş
+    dizgiye göre filtrelemez.
+  </p>
+
+  <h2>Çalıştırma listesini daraltmak</h2>
+  <p>
+    <code>GET /v1/api/traces</code> şunları alır. Yazmadığınız hiçbir şey
+    uygulanmaz.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Parametre</th><th>Neyi seçtiği</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>q</code></td>
+        <td>Her span'in adı, girdisi ve çıktısı üzerinde tam metin.</td>
+      </tr>
+      <tr>
+        <td><code>status</code></td>
+        <td>
+          <code>unset</code>, <code>ok</code>, <code>error</code> ya da
+          <code>cancelled</code>. İçindeki herhangi bir span başarısız olduğunda,
+          hatası yakalanmış olsa bile çalıştırma <code>error</code> olur.
+        </td>
+      </tr>
+      <tr>
+        <td><code>kind</code></td>
+        <td>
+          Çalıştırmanın kök span'inin türü; örneğin <code>agent_run</code> ya da
+          <code>workflow_run</code>.
+        </td>
+      </tr>
+      <tr>
+        <td><code>name</code></td>
+        <td>Kök span'in adı, birebir. Ön ek değil, kalıp değil.</td>
+      </tr>
+      <tr>
+        <td><code>tags</code></td>
+        <td>
+          Virgülle ayrılır. Bir çalıştırma listelenen etiketlerin <em>hepsini</em>
+          taşımalıdır, herhangi birini değil.
+        </td>
+      </tr>
+      <tr><td><code>session_id</code></td><td>Tek bir konuşmadaki her çalıştırma.</td></tr>
+      <tr><td><code>thread_id</code></td><td>Tek bir thread'deki her çalıştırma.</td></tr>
+      <tr><td><code>user_id</code></td><td>Tek bir son kullanıcı için her çalıştırma.</td></tr>
+      <tr><td><code>environment</code></td><td>Tek bir ortam; örneğin <code>production</code>.</td></tr>
+      <tr>
+        <td><code>model</code></td>
+        <td>Bu model kimliğine karşı en az bir span'i olan çalıştırmalar.</td>
+      </tr>
+      <tr>
+        <td><code>from</code>, <code>to</code></td>
+        <td>Pencere; çalıştırmanın başlangıç zamanına göre ölçülür.</td>
+      </tr>
+      <tr>
+        <td><code>min_duration_ms</code></td>
+        <td>En az bu kadar yavaş olan çalıştırmalar, milisaniye olarak.</td>
+      </tr>
+      <tr>
+        <td><code>min_cost</code></td>
+        <td>
+          En az bu kadar tutan çalıştırmalar. Fiyatlanmış span'i olmayan bir
+          çalıştırma sıfır sayılır, yani pozitif her değer onu dışarıda bırakır.
+        </td>
+      </tr>
+      <tr>
+        <td><code>has_score</code></td>
+        <td>Bu puanlayıcı kimliğinden bir puan taşıyan çalıştırmalar.</td>
+      </tr>
+      <tr>
+        <td><code>score_below</code></td>
+        <td><code>has_score</code> ile: o puanlayıcının bu değerin altına koyduğu çalıştırmalar.</td>
+      </tr>
+      <tr>
+        <td><code>sort</code></td>
+        <td>
+          <code>start_time</code>, <code>duration</code>, <code>cost</code>,
+          <code>span_count</code> ya da <code>score</code>. Varsayılanı
+          <code>start_time</code>. <code>score</code>, çalıştırmaları herhangi bir
+          puanlayıcının verdiği en düşük puana göre sıralar, yani artan sıra
+          en kötü çalıştırmayı başa koyar; puanı olmayan bir çalıştırma sıfır
+          sayılır.
+        </td>
+      </tr>
+      <tr>
+        <td><code>order</code></td>
+        <td><code>asc</code> ya da <code>desc</code>. Varsayılanı <code>desc</code>.</td>
+      </tr>
+      <tr>
+        <td><code>limit</code></td>
+        <td>Sayfa boyutu, 1 ile 500 arasına sıkıştırılır. Varsayılanı 50.</td>
+      </tr>
+      <tr>
+        <td><code>cursor</code></td>
+        <td>Önceki sayfadan gelen opak imleç.</td>
+      </tr>
+      <tr>
+        <td><code>project</code></td>
+        <td>
+          Hangi projenin okunacağı. Varsayılanı daemon'un kendi varsayılan
+          projesidir, yani tek projeli bir kurulumun bunu hiç göndermesi gerekmez.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>name</code>, ilişkilendirme kimlikleri ve <code>environment</code>
+    eşitlik sınamalarıdır; onları ucuz kılan da budur. Bir adda kısmi eşleşme
+    istiyorsanız <code>q</code> kullanın: span adları da metin dizinindedir.
+  </p>
+
+  <h2>Bir liste satırının maliyeti</h2>
+  <p>
+    İkinci, daha hafif bir çalıştırma listesi yoktur, çünkü ilki zaten hafiftir.
+    Saklanan trace izdüşümü hiç girdi, çıktı ve öznitelik taşımaz: adlar,
+    sayılar, zamanlar, maliyet, etiketler ve ilişkilendirme vardır, modelin
+    söylediği hiçbir şey yoktur. Payload'ı getiren şey bir çalıştırmayı açmaktır.
+  </p>
+  <p>
+    Gerçekçi tek bir çalıştırma üzerinde ölçüldü: üç politika belgesi getiren,
+    iki araç çağıran ve gerçek prompt ile tamamlamalarla iki model çağrısı
+    yapan sekiz adımlık bir destek ajanı. Liste satırı <strong>577 bayt</strong>,
+    çalıştırmanın tamamı ise <strong>10.717 bayt</strong>, yani
+    <strong>%94,6 azalma</strong>. Ölçüm, bu daemon üzerinde, o çalıştırmada
+    ve gerçek HTTP yüzeyinden yapılmıştır. Sizin çalıştırmalarınız farklı
+    olacaktır ve asıl
+    önemlisi yön: prompt'lar büyüdükçe kazanç da büyür, çünkü büyüyen kısım
+    listenin taşımadığı kısımdır.
+  </p>
+  <p>
+    Bu rakam buraya elle yazılmaz, bir test tarafından üretilir; böylece bir
+    yerde eskiyip diğerinde hata vermemesi mümkün değildir.
+    <code>cargo test -p mcpd-server --test payload_size -- --nocapture</code>
+    komutunu çalıştırın, iki bayt sayısını da yazar. İzdüşüme payload taşıyan bir
+    alan eklemek o testi başarısız kılar.
+  </p>
+
+  <h2>Geri kalan her şey, adıyla reddedilir</h2>
+  <p>
+    O tablo sözlüğün tamamıdır. Orada olmayan bir parametre, kabul edilip
+    düşürülmek yerine kendisini adlandıran bir 400 ile reddedilir. Bu değişti:
+    mcpd eskiden bilmediği bir parametreyi yok sayardı, yani
+    <code>?statuss=error</code> projedeki her çalıştırmayla birlikte 200 dönerdi
+    ve yanıtta filtrenin uygulanmadığını söyleyen hiçbir şey olmazdı. İnandırıcı
+    ama yanlış bir yanıt, bir hatadan kötüdür, çünkü fark edilecek bir şey yoktur.
+  </p>
+  <p>
+    Bunun getirdiği ödünleşimi anmakta yarar var. Daha yeni bir daemon'un
+    anladığı bir filtreyi gönderen bir istemci, artık daha eski bir daemon'dan
+    daha geniş bir sonuç kümesi yerine 400 alır. İki başarısızlıktan iyisi budur:
+    400 parametreyi adlandırır ve durur.
+  </p>
+  <p>
+    Bazı retler "bilinmiyor" demekten fazlasını söyler. mcpd her trace'te
+    <code>service_name</code>, <code>service_version</code>,
+    <code>resource_id</code>, <code>run_id</code>, <code>request_id</code>,
+    <code>experiment_id</code> ve <code>release</code> kaydeder, ama çalıştırma
+    listesi henüz bunlara göre filtreleyemez. Yedisinden yalnızca
+    <code>service_name</code> bir
+    <a href="#filling-a-filter-box" class="link">keşif</a> boyutudur; bu yüzden
+    keşif yalnızca onun değerlerini listeler, diğerlerininkini listelemez. Bu
+    yedisi durumu söyleyen bir mesajla reddedilir; çünkü
+    <code>service_name=checkout-api</code> bir yazım hatası değildir ve birine
+    bunun bilinmeyen bir parametre olduğunu söylemek, onu var olmayan bir yazım
+    hatasının peşine takar.
+  </p>
+
+  <p>
+    Bu kural yalnızca çalıştırma listesinin kuralı değildir.
+    <code>GET /v1/api/spans</code>, <code>/v1/api/logs</code>,
+    <code>/v1/api/scores</code>, <code>/v1/api/metrics</code> ve
+    <code>/v1/api/feedback</code>, her biri kendi sözlüğünü aynı şekilde uygular.
+    Karşılaşmadan önce bilmeye değer iki tanesi: puan listesi <code>order</code>
+    almaz, çünkü en yenisi baştadır ve imleci tek yönde karşılaştırır; geri
+    bildirim listesi ise bir <code>trace_id</code> ister, çünkü mcpd henüz bütün
+    bir projenin geri bildirimini listeleyemez ve boş bir liste hiç geri bildirim
+    yokmuş gibi okunurdu.
+  </p>
+
+  <h2 id="filling-a-filter-box">Bir filtre kutusunu doldurmak</h2>
+  <p>
+    Bir filtre ancak içine ne yazacağınızı biliyorsanız kullanılabilir ve değerler
+    sabit bir liste değildir: bir projeye rapor veren servisler ne gönderiyorsa
+    odur. <code>GET /v1/api/discovery</code> bunu yanıtlar. <code>facet</code> ile
+    her seferinde tek bir boyut isteyin; o boyutun projede aldığı değerleri,
+    değere göre sıralanmış olarak ve her birini bir sinyalin onu en son ne zaman
+    taşıdığı bilgisiyle döndürür.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Facet</th><th>Neyi listelediği</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>entity_kind</code></td><td>Ajan, iş akışı, araç, model, puanlayıcı, işleyici, boru hattı ya da servis.</td></tr>
+      <tr><td><code>entity_name</code></td><td>Bu şeylerin taşıdığı adlar; örneğin çağrılan araçlar.</td></tr>
+      <tr><td><code>service_name</code></td><td>Rapor vermiş olan servisler.</td></tr>
+      <tr><td><code>environment</code></td><td>Görülen ortamlar; örneğin <code>production</code>.</td></tr>
+      <tr><td><code>tag</code></td><td>Herhangi bir çalıştırmanın taşıdığı her etiket.</td></tr>
+      <tr><td><code>metric_name</code></td><td>Kaydedilen metrik adları, mcpd'nin türettikleri dahil.</td></tr>
+      <tr><td><code>metric_label_key</code></td><td>Projede görülen her etiket anahtarı.</td></tr>
+      <tr><td><code>metric_label_value</code></td><td>Tek bir etiketin değerleri. <code>key</code> gerektirir.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>prefix</code>, yazarken tamamlama için listeyi daraltır; birebir ve
+    büyük küçük harfe duyarlı eşleşir, çünkü bu değerler bir filtrenin
+    karşılaştırılacağı değerlerdir ve burada harfleri eşitlemek, sonra hiçbir
+    şeyle eşleşmeyen bir değer önermek olurdu. <code>limit</code> yanıtı 1000 ile
+    sınırlar. Değerler yeniden eskiye değil değere göre sıralanır, yani birinin
+    okumakta olduğu liste iki yoklama arasında altından yeniden dizilmez.
+  </p>
+  <p>
+    Buna karşı bir şey yazmadan önce bilmeye değer bir sınır var.
+    <code>metric_label_key</code>, adı verilen tek bir metriğin anahtarlarını
+    değil, projenin herhangi bir yerinde görülmüş her etiket anahtarını listeler:
+    benzersiz değer listesi, onu taşıyan metriğe göre değil etikete göre
+    anahtarlanır.
+  </p>
+
+  <h2>Bir listeyi yeniden sorgulamadan tazelemek</h2>
+  <p>
+    <code>GET /v1/api/deltas</code>, bir imleçten bu yana geleni, en eskisi başta
+    olacak şekilde <code>traces</code>, <code>spans</code> ya da
+    <code>logs</code> için döndürür. Son yoklamadan gelen imleci saklayın, geri
+    gönderin ve satırları elinizde tuttuğunuz listeye uygulayın.
+  </p>
+  <p>
+    Bir yoklama bir sayfa değildir ve iki imleç bilerek birbirinin yerine
+    kullanılamaz.
+    Sayfalama, seçtiğiniz sıralamada sabit bir sonuç kümesinde geriye doğru
+    yürür; yoklama ise varış sırasında ileri yürür ve hiç bitmez. Watermark, bir
+    satırın varış zamanı ile kimliğinden oluşur; çünkü bir yığın,
+    içindeki her satırı tek bir zaman damgasıyla yazar ve yalnızca "bu
+    nanosaniyeden sonra" diyebilen bir watermark ya bütün yığını baştan oynatır
+    ya da kalanını atlar. Boş bir yoklama imleci değiştirmeden döndürür: imleci
+    ileri almak, biraz sonra daha erken bir varış zamanıyla düşen bir satırı
+    kaybetmek olurdu.
+  </p>
+  <p>
+    Puanlar ve geri bildirimler yoklanamaz. Çağıranın gönderdiği zaman damgasıyla
+    damgalanırlar ve sunucunun koyduğu bir varış zamanı taşımazlar, yani onların
+    üzerindeki bir watermark ya geç gelen bir satırı atlar ya da her satırı
+    sonsuza kadar tekrarlar. <code>signal=scores</code>, boş bir sayfayla
+    yanıtlanmak yerine reddedilir.
+  </p>
+
+  <h2>Bu dağıtım neler yapabilir</h2>
+  <p>
+    mcpd'nin tek bir depolama trait'i ve onun arkasında üç arka ucu vardır; bunlar
+    eşit değildir. ClickHouse'ta bir silme kabul edilir ve çağrı döndükten sonra
+    uygulanır; bu yüzden yanıttaki sayılar diskten neyin gittiğini değil, neyin
+    eşleştiğini söyler. SQLite ve Postgres'te satırlar çağrı döndüğünde gitmiş
+    olur.
+    <code>GET /v1/api/capabilities</code> bunun
+    yazılı olduğu yerdir: daemon'un arkasında hangi arka uç var, <code>q</code>
+    neyle eşleşir, ASCII dışında harfler eşitlenir mi, çağrı döndüğünde silme
+    diske işlenmiş olur mu ve keşif ile delta yoklaması yanıt veriyor mu.
+  </p>
+  <p>
+    Bağlanırken bir kez okuyun ve yalnızca dağıtımın yanıtladığını sunun. Yeteneği
+    kapalı olan bir endpoint <code>501</code> ile reddeder ve gövdesindeki
+    <code>capability</code> alanı, yetenek kümesinin yayımladığı sözcüğün
+    aynısını adlandırır; böylece ikisi asla çelişemez ve bu retle karşılaşan bir
+    istemci, hiç değişmeyecek bir şeyi yeniden denemek yerine bakıp öğrenebilir.
+  </p>
+  <p>
+    Bugün gelen üç arka uç da hem keşfe hem delta yoklamasına yanıt verir, yani
+    aşağıdaki 501, SQLite, Postgres ya da ClickHouse'tan göreceğiniz bir yanıt
+    değil, sonradan eklenen bir arka ucun reddederken kullanacağı biçimdir.
+    Hangisi olduğunu size yetenek kümesi söyler ve şimdiden okumaya değer: üçü,
+    çağrı döndüğünde silmenin diskte olup olmadığında ve saklamanın nasıl
+    uygulandığında ayrışır. ASCII dışındaki harfleri üçü de eşitler.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={discovery} title="neye göre filtreleyebilirim?" />
+
+  <h2>Zaman pencereleri</h2>
+  <p>
+    <code>from</code> ve <code>to</code>, bir RFC 3339 zaman damgası ya da göreli
+    bir kısaltma alır: bir eksi işareti, bir sayı ve <code>s</code>,
+    <code>m</code>, <code>h</code> veya <code>d</code> harflerinden biri.
+    <code>-15m</code>, <code>-1h</code> ve <code>-7d</code>, hepsi çalışır.
+    Kısaltma var, çünkü son bir saate bakmak için elle ISO zaman damgası yazmak
+    kimsenin ödemesi gerekmeyen bir sürtünmedir.
+  </p>
+  <p>
+    <code>from</code> dahildir, <code>to</code> hariçtir ve ikisi de çalıştırmanın
+    <em>başladığı</em> zamanla karşılaştırılır. Pencerenizden önce başlayıp
+    pencerenin içinde hâlâ süren uzun bir çalıştırma dönmez. Saat 09:00'da
+    çalışmakta olan bir şeyin peşindeyseniz, <code>from</code> değerini daraltmak
+    yerine geriye doğru genişletin.
+  </p>
+  <p>
+    Ne zaman damgası ne de süre olan bir değer, yok sayılmak yerine adıyla
+    reddedilir. Her liste endpoint'indeki her parametre böyle davranır, çünkü
+    sessizce düşürülen bir filtre inandırıcı ama yanlış bir yanıt döndürür ve
+    inandırıcı ama yanlış bir yanıt bir hatadan kötüdür.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={badParam} title="from=yesterday" />
+
+  <h2>Kötü yanıtları bulan sorgu</h2>
+  <p>
+    <code>has_score=answer_relevance&amp;score_below=0.5</code>, o puanlayıcının
+    yarımın altına koyduğu her çalıştırmayı döndürür. Şikâyet bir arızayla değil
+    kaliteyle ilgiliyse başvuracağınız sorgu budur, çünkü kötü bir yanıt
+    genellikle başarılı olmuş bir çalıştırmadır.
+  </p>
+  <p>
+    <code>has_score</code> tek başına, o puanlayıcının baktığı her çalıştırmayı
+    döndürür. <code>score_below</code> tek başına hiçbir şey yapmaz: bir
+    puanlayıcıya bağlanmamış bir eşiğin anlamı yoktur ve mcpd hangi puanlayıcıyı
+    kastettiğinizi tahmin etmek zorunda kalırdı. Tahmin etmez. Bu değerlerin
+    nereden geldiğini
+    <a href={link('/docs/evaluation')} class="link">Puanlar ve geri bildirim</a>
+    anlatır.
+  </p>
+
+  <h2>Çalıştırma yerine adım aramak</h2>
+  <p>
+    <code>GET /v1/api/spans</code>, tek tek adımları bütün çalıştırmalar boyunca
+    aynı anda arar. Bir oturumla değil bir adımla ilgili sorular için kullanın:
+    hangi araç çağrısı yavaş, tek bir modele yapılan hangi çağrılar hata verdi,
+    bir getirme ne kadar sürüyor.
+  </p>
+  <p>
+    <code>q</code>, <code>kind</code>, <code>status</code>, <code>name</code>,
+    <code>model</code>, <code>trace_id</code>, <code>from</code>,
+    <code>to</code>, <code>min_duration_ms</code>, <code>sort</code>,
+    <code>order</code>, <code>limit</code> ve <code>cursor</code> alır; aynı
+    anlamlar ve aynı varsayılanlarla. Burada <code>tags</code>,
+    <code>session_id</code> ya da <code>user_id</code> filtresi yoktur, çünkü
+    bunlar çalıştırmaya aittir; üçü de kabul edilip düşürülmek yerine adıyla
+    reddedilir.
+  </p>
+  <p>
+    <code>sort</code> burada çalıştırma listesindekinden daha az değer alır:
+    <code>start_time</code>, <code>duration</code> ya da <code>cost</code>, başka
+    bir şey değil. Bir span, span sayısı ve puan toplamı taşımaz, yani
+    <code>span_count</code> ve <code>score</code> sıralanacak bir şey bulamaz ve
+    yok sayılmak yerine adıyla reddedilir.
+  </p>
+  <p>
+    Bir çalıştırmada <code>model</code>, herhangi bir span'in onu kullanıp
+    kullanmadığını sorar. Bir span'de <code>model</code>, o span'in kendi
+    modelidir. Aynı sözcük, iki soru.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={finding} title="bul" />
+
+  <h2>Sayfalama ve imlecin neden opak olduğu</h2>
+  <p>
+    Bir liste en çok <code>limit</code> kadar satır ve bir <code>page</code>
+    nesnesi döndürür. Devamı varsa <code>page.next_cursor</code> bulunur;
+    <code>page.has_more</code> aynı şeyi bir mantıksal değerle söyler.
+  </p>
+  <p>
+    Sayfalama offset ile değil keyset ile yapılır. İmleç size verilen son
+    satırı adlandırır ve sonraki sayfa kesinlikle ondan sonra başlar. Offset
+    sayfalama kayardı: trace'ler sürekli gelir, yani siz 50 ile 99 arasındaki
+    satırları isteyene kadar pencere altınızdan kaymış olur ve bir çalıştırmayı iki kez okurken bir
+    başkası hiç görünmez. Bir incelemede kaçırdığınız çalıştırma, aradığınız
+    çalıştırmadır.
+  </p>
+  <p>
+    İmleç, sıralama değeri ile satır kimliğinin onaltılık kodlanmış çiftidir ve
+    onu anlamsız kabul etmelisiniz. Opaktır, böylece kodlama her çağıranı bozmadan
+    değişebilir; ayrıca içindeki değer her sıralamada başka bir niceliktir:
+    <code>start_time</code> ve <code>duration</code> için nanosaniye,
+    <code>cost</code> için ölçeklenmiş bir tam sayı, <code>span_count</code> için
+    düz bir sayı, <code>score</code> için çalıştırmanın en düşük puanı.
+  </p>
+  <p>
+    Buna bağlı tek bir kural var. <strong>Bir imleci, onu üreten filtrelerle, aynı
+    <code>sort</code> ve aynı <code>order</code> değeriyle geri gönderin.</strong>
+    mcpd bunu yapıp yapmadığınızı denetlemez ve farklı bir sıralamada
+    yeniden oynatılan bir imleç yanlış sütunla karşılaştırılır ve satır atlar.
+    Düzenlenmiş ya da kırpılmış bir imleç <code>invalid_query</code> ve
+    <code>malformed cursor</code> mesajıyla reddedilir.
+  </p>
+  <p>
+    Toplam yoktur. <code>page.total</code>, eşleşmeleri ucuza sayabilen bir arka
+    uç için ayrılmıştır ve yerleşik SQLite deposu onu doldurmaz, bu yüzden bir
+    sayıya doğru saymak yerine <code>has_more</code> üzerinde döngü kurun.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={paging} title="sayfalarda gezinmek" />
+
+  <h2>Çalıştırmayı bulduktan sonra</h2>
+  <p>
+    Bu sorguların herhangi birinden çıkan bir trace kimliği
+    <code>GET /v1/api/traces/{'{trace_id}'}</code> adresine gider; bu da
+    çalıştırmayı ve içindeki her span'i, bir şelale ikinci bir istek olmadan
+    çizilebilecek şekilde sıralanmış olarak döndürür. Ona bağlı her şeyi aynı
+    yanıtta almak için <code>include=logs,scores,feedback</code> ekleyin.
+  </p>
+  <p>
+    Oradan sonra
+    <a href={link('/docs/cost')} class="link">Maliyet muhasebesi</a> her adımdaki
+    rakamları açıklar,
+    <a href={link('/docs/reference/api')} class="link">HTTP API referansı</a> ise
+    her endpoint ve alanı belirtimin bildirdiği hâliyle listeler.
+  </p>
+</Doc>

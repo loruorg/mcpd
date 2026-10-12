@@ -1,0 +1,343 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+const scoped = `ctx, span := m.Start(ctx, "retrieve_docs", mcpd.WithSpanKind(mcpd.SpanKindRetrieval))
+defer span.End()
+
+// ここから下でこの ctx を受け取るものは、すべてこのスパンの子になる。End は
+// 冪等なので、defer と明示的な呼び出しが所要時間で食い違うことはない。`
+
+const nesting = `func handle(ctx context.Context, m *mcpd.Client, q string) string {
+    ctx, run := m.Start(ctx, "support_agent", mcpd.WithSpanKind(mcpd.SpanKindAgentRun))
+    defer run.End()
+
+    // draft に渡すのはスパンではなく ctx。仕組みはそれだけ。
+    return draft(ctx, m, q)
+}
+
+func draft(ctx context.Context, m *mcpd.Client, q string) string {
+    _, span := m.Start(ctx, "draft_answer", mcpd.WithSpanKind(mcpd.SpanKindModelGeneration))
+    defer span.End()
+    return "..."
+}`
+
+const propagation = `// 送信側: アクティブなトレースコンテキストをリクエストに書く。
+req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+mcpd.Inject(ctx, req.Header)
+
+// 受信側: それを読み返して同じトレースを続ける。
+func handler(w http.ResponseWriter, r *http.Request) {
+    ctx, span := m.Start(mcpd.Extract(r.Context(), r.Header), "handle_request")
+    defer span.End()
+}`
+
+const payload = `span.SetModel("gpt-4o-mini", "openai")
+span.SetTokens(812, 96)
+
+// あるいは内訳ごと。キャッシュされたプロンプトは、そのまま
+// キャッシュされたプロンプトとして値付けされる。
+span.SetUsage(mcpd.TokenUsage{
+    InputTokens:  ptr(uint64(812)),
+    OutputTokens: ptr(uint64(96)),
+    InputDetails: &mcpd.InputTokenDetails{CacheRead: ptr(uint64(640))},
+})
+
+// RecordError は error を取るので、記録された失敗には必ずメッセージが付く。
+span.RecordError(err,
+    mcpd.ErrorKind("SMTPTemporaryFailure"),
+    mcpd.ErrorRetryable(true),
+    mcpd.ErrorStack(mcpd.Stack()),
+)`
+
+const serverless = `func Handler(ctx context.Context, event Event) (Response, error) {
+    ctx, run := m.Start(ctx, "answer")
+    answer := agent(ctx, event.Body)
+    run.SetOutput(answer)
+    run.End()
+
+    // この時点でバッチはまだメモリの中。ハンドラーが戻った瞬間にランタイムが
+    // このプロセスを凍結し、ワーカーのゴルーチンは二度と動かない。
+    if err := m.Flush(ctx); err != nil {
+        log.Printf("mcpd flush: %v", err)
+    }
+    return Response{Body: answer}, nil
+}`
+---
+
+<Doc
+  title="Go"
+  description="Go 向けの mcpd SDK。context.Context を一貫して使い、標準ライブラリだけで動きます。計装はエラーを返さず、nil のクライアントに対して呼んでも安全です。"
+  lede="アクティブなスパンは、ほかの Go ライブラリと同じく context.Context が運びます。サードパーティ依存はなく、記録の呼び出しが失敗することもありません。"
+  og="docs"
+>
+  <h2>インストール</h2>
+  <p>
+    Go 1.21 以降で動きます。サードパーティ依存はありません。トランスポートは
+    標準ライブラリの <code>net/http</code> と <code>compress/gzip</code> なので、
+    mcpd を足してもモジュールグラフにはほかに何も増えません。
+  </p>
+
+  <Command command="go get github.com/mcpd/mcpd/sdks/go" />
+
+  <h2>クライアントの構築</h2>
+  <p>
+    クライアントは 1 プロセスに 1 つです。どの設定にもオプションと環境変数が
+    あるので、同じコードを書き換えずに開発環境でも本番環境でも動かせます。
+    オプションを何も渡さない <code>mcpd.New()</code> は、ローカルのデーモンに
+    対して動きます。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="init" title="接続" />
+
+  <p>コードが環境変数より優先され、環境変数が既定値より優先されます。</p>
+
+  <table>
+    <thead>
+      <tr><th>オプション</th><th>環境変数</th><th>既定値</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>WithEndpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>WithAPIKey</code></td><td><code>MCPD_API_KEY</code></td><td>なし</td></tr>
+      <tr><td><code>WithProject</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>WithEnvironment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>なし</td></tr>
+      <tr><td><code>WithService</code></td><td><code>MCPD_SERVICE_NAME</code>, <code>MCPD_SERVICE_VERSION</code></td><td>なし</td></tr>
+      <tr><td><code>WithSampleRate</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>WithBatchSize</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>WithFlushInterval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2s</code></td></tr>
+      <tr><td><code>WithMaxQueue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>WithTimeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10s</code></td></tr>
+      <tr><td><code>WithEnabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>WithCapturePayloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>WithLogLevel</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>WithEnabled(false)</code> にすると、記録は何もしなくなりますが、返る
+    スパンと id は有効なままです。呼び出し箇所を変えずに、テストのあいだ mcpd を
+    止められます。読み出しのメソッドはそのまま動きます。計装を止めたことで、
+    クエリの答えが黙って空になってはいけないからです。
+  </p>
+
+  <p>
+    <code>WithCapturePayloads(false)</code> にすると、プロンプトと補完は
+    プロセスの中に留まります。スパンは所要時間、ステータス、使用量、モデル、
+    相関、エラーを持ったままで、<code>input</code> と <code>output</code> は
+    キューに入る前に捨てられます。個々のスパンは
+    <code>WithSpanCapturePayloads</code> で別の扱いにでき、有効にも無効にも
+    できます。
+  </p>
+
+  <p>
+    <code>WithSink</code> は、バッチの行き先を差し替えます。
+    <code>RecordingSink</code> はバッチをメモリに保持するので、テストはサーバー
+    なしで計装が記録した内容を検証できます。<code>ConsoleSink</code> は、
+    シグナル 1 件につき JSON を 1 行書きます。失敗したシンクは
+    <code>Stats()</code> に数えられ、シグナルを記録したコードまで届くことは
+    ありません。<code>Record</code> は、すでに終了したスパンを id と時刻ごと、
+    渡されたままキューに入れます。形式の壊れたものは受け付けられずに数えられ、
+    エラーとして返ることはありません。<code>WithExternalParent</code> は、別の
+    トレーシングシステムの親を相関のためだけに運びます。
+  </p>
+
+  <h2>実行の記録</h2>
+  <p>
+    <code>Start</code> は新しいコンテキストとスパンを返し、
+    <code>defer span.End()</code> がそれを閉じます。この組み合わせが、Go での
+    スコープ付きの書き方です。defer は途中の return でもパニックでも実行されるので、
+    思いつかなかった制御フローのせいでスパンが開いたままになることはありません。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="スコープ付きの書き方"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: scoped }]}
+  />
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="trace" title="実行の記録" />
+
+  <h2>コンテキスト</h2>
+  <p>
+    <code>Start</code> は、コンテキストに入っているスパンの子を作り、何も入って
+    いなければルートを作ります。<code>Trace</code> は必ずルートを開始し、
+    <code>span.Child(ctx, name)</code> は、コンテキストで持ち回っていない特定の
+    スパンの子を開始します。ここで 2 つ目の伝播の仕組みを作ってはいません。親は、
+    もともと渡していた <code>ctx</code> の中にあります。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="入れ子"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: nesting }]}
+  />
+
+  <p>
+    サービスの境界をまたぐときは、<code>Inject</code> が送信するヘッダーに W3C の
+    <code>traceparent</code> を書き、<code>Extract</code> が受信したヘッダーから
+    それを読んでコンテキストに入れます。<code>traceparent</code> のないヘッダーは
+    そのまま返るので、読めないヘッダーは、それを運んできたリクエストを失敗させる
+    のではなく、新しいトレースを始めます。上流のサンプリングの判断は引き継がれる
+    ので、トレースの前半と後半が食い違うことはありません。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="サービス境界をまたぐ"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: propagation }]}
+  />
+
+  <h2>モデル、使用量、エラー</h2>
+  <p>
+    mcpd は取り込み時にトークン数から料金を計算するので、トレースに出るコストは
+    実際に請求されたコストになります。<code>RecordError</code> は文字列ではなく
+    <code>error</code> を受け取ります。記録された失敗に必ずメッセージが付くのは、
+    これによります。そのあと <code>End</code> は、ステータスとして
+    <code>ok</code> ではなく <code>error</code> を記録します。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="スパンが持つもの"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: payload }]}
+  />
+
+  <p>
+    そのほかのスパンのメソッドは <code>SetInput</code>、
+    <code>SetOutput</code>、<code>SetMetadata</code>、
+    <code>SetAttributes</code>、<code>SetTags</code>、<code>SetStatus</code>、
+    <code>SetSession</code>、<code>SetThread</code>、<code>SetUser</code>、
+    <code>Event</code>、<code>EndWithStatus</code> です。同じフィールドは、
+    <code>With...</code> オプションでスパンの開始時にも設定できます。
+  </p>
+
+  <h2>永続実行</h2>
+  <p>
+    同じクライアントがデーモンの永続実行も扱います。<code>NewWorkflow</code> が
+    定義を組み立ててステップの本体を保持し、<code>Worker</code> がそれを登録し、
+    リースをロングポーリングで受け取って 1 件ずつゴルーチンの上で処理します。
+    <code>StartRun</code>、<code>WatchRun</code>、<code>PublishEvent</code> なども、
+    実行の API を 1 対 1 で写しています。本体が
+    <code>mcpd.Retryable(err, wait)</code> を返すと、ステップの予算の範囲でリトライ
+    されます。ハンドラーの <code>ctx</code> から開始したスパンは、実行のトレースの
+    中で自分のステップの下に入ります。そうしたスパンが使った分が、そのステップの
+    使用量です。カウントは各スパンの終了時に合計され、最後に見えたモデルが採用され、
+    <code>SetUsage</code> は設定したフィールドだけを上書きします。ワーカーの中の
+    様子は、<code>WorkerOnLease</code>、<code>WorkerOnStepStart</code>、
+    <code>WorkerOnStepEnd</code>、<code>WorkerOnConflict</code>、
+    <code>worker.Stats()</code> から見られます。
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['go']} example="workflow" region="workflow" title="ワークフロー" />
+  <p>
+    それぞれの構成要素の働き、リースのプロトコル、実行の API は
+    <a href={linkTo('/docs/workflows')} class="link">ワークフロー</a>、
+    <a href={linkTo('/docs/workers')} class="link">ワーカー</a>、
+    <a href={linkTo('/docs/runs')} class="link">実行</a>のページにあります。
+  </p>
+
+  <h2>スコアとフィードバック</h2>
+  <p>
+    <code>Score</code> は <code>min</code> と <code>max</code> を普通の位置引数
+    として取るので、スケールを省くことはできません。0.86 という数値だけでは、
+    どの範囲の上にあるのかが分からないかぎり何の意味もありません。フィードバックは
+    人の判断であり、スコアとは別に保たれます。2 つは別の問いに答えるものなので、
+    まとめて平均してはいけません。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="score" title="スコアとフィードバック" />
+
+  <p>
+    判断の対象を指すには <code>mcpd.TraceTarget(id)</code> か <code>mcpd.SpanTarget(id, spanID)</code>
+    を渡します。空の <code>mcpd.Target&#123;&#125;</code> を渡すと、コンテキストに
+    入っているスパンが使われます。
+  </p>
+
+  <h2>5 つのシグナル、1 組の id</h2>
+  <p>
+    <code>Log</code>、<code>Metric</code>、<code>Score</code>、
+    <code>Feedback</code> はどれもコンテキストを取るので、5 つのシグナルはすべて
+    同じトレース id とスパン id を持ちます。だからこそ、チャート上のスパイクから、
+    それを起こした実行を開けます。
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>フラッシュとシャットダウン</h2>
+  <p>
+    <code>Start</code> と <code>End</code> はメモリ上のキューに追加して戻るだけで、
+    バッチにまとめて送るのはバックグラウンドのゴルーチンです。
+    <code>Flush(ctx)</code> は、何も止めずにキューにあるものを送ります。
+    <code>Shutdown(ctx)</code> はフラッシュしてワーカーを止め、何度呼んでも結果は
+    同じです。<code>New</code> のすぐ隣に <code>defer m.Shutdown(ctx)</code> を
+    書くのが良い習慣なのは、そのためです。
+  </p>
+  <p>
+    サーバーレス関数では、ハンドラーが戻った瞬間にランタイムがプロセスを凍結し、
+    ワーカーのゴルーチンは二度と動かないので、キューに残っていたバッチは失われます。
+    戻る前にフラッシュしてください。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="サーバーレスのハンドラー"
+    samples={[{ lang: 'go', label: 'Go', shiki: 'go', code: serverless }]}
+  />
+
+  <h2>保証されること</h2>
+  <ul>
+    <li>
+      何かを記録するメソッドは、エラーを返すこともパニックすることもありません。
+      nil のクライアントに対して呼んだ場合も同じです。エクスポートの失敗は、
+      フラッシュ間隔ごとに多くても 1 回ログに出て、捨てられます。可観測性が、
+      観測している相手を落としてはいけません。
+    </li>
+    <li>
+      記録はブロックしないので、エージェントのレイテンシが、mcpd の速さや、
+      mcpd が動いているかどうかに左右されることはありません。
+    </li>
+    <li>
+      メモリには上限があります。キューが保持するシグナルは
+      <code>WithMaxQueue</code> 件で、それを超えると古いものから捨てられ、
+      数えられます。その数は、エクスポートできた数、あきらめた数、
+      <code>Record</code> が受け付けなかった数とともに <code>Stats()</code> で
+      見られます。上限のないバッファは、ネットワーク障害をメモリ不足による強制
+      終了に変えてしまいます。
+    </li>
+    <li>
+      サンプリングの判断は、ルートでトレース id のハッシュから一度だけ行われ、
+      すべての子に引き継がれます。そのため、いくつのプロセスが動いていても、
+      同じトレースについてはどれも同じ判断をします。
+    </li>
+    <li>
+      終わっていないスパンもエクスポートされます。長く動くスパンは開始時に出て
+      いき、終了時に更新されるので、途中でクラッシュした実行も見えます。次の
+      フラッシュより前に終わったスパンは、完了した状態で 1 回だけ送られます。
+    </li>
+    <li>
+      エンコードできない値は、呼び出しを失敗させるのではなく、捨ててログに出します。
+      ペイロードのシリアライズの失敗が、エージェントの失敗として表に出てはいけない
+      からです。
+    </li>
+  </ul>
+
+  <h2>読み出し</h2>
+  <p>
+    読み出しのメソッドは HTTP API を写したもので、生成された型を返します。
+    エラーを返すのはこれらのメソッドだけです。呼び出し側が答えを待っているから
+    です。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="query" title="検索と分析" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">実行を探す</a>に、フィルターの
+    全体があります。<a href={linkTo('/docs/reference/data-model')} class="link">データモデル</a>
+    には、これらの型が持つすべてのフィールドが並んでいます。
+  </p>
+</Doc>

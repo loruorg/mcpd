@@ -1,0 +1,302 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+---
+
+<Doc
+  title="Concepts"
+  description="The vocabulary mcpd uses: traces and spans, span kinds, root and event spans, the six signals, correlation, and the model hierarchy from generation down to chunk."
+  lede="A handful of words carry the whole data model. The rest of the documentation assumes you know them, so this page defines each one and says what it is for."
+  og="docs"
+>
+  <h2>Span</h2>
+  <p>
+    A span is one unit of work. It has a name, a kind, a start time, usually an
+    end time, and a status. It can carry what went in, what came out, how many
+    tokens it used, what it cost, and an error if it failed.
+  </p>
+  <p>
+    Keep the name low-cardinality. <code>search_docs</code> is a name;
+    <code>search_docs(query=hello)</code> is a name and a value glued together,
+    and it makes grouping by name useless the moment you have two runs.
+  </p>
+
+  <h2>Trace</h2>
+  <p>
+    A trace is every span from one run, joined by a 128-bit trace id. Inside the
+    trace, <code>parent_span_id</code> gives the tree its shape: a tool call made
+    inside a model step is a child of that step, so the nesting on screen is the
+    nesting that actually happened.
+  </p>
+  <p>
+    Ids are OpenTelemetry-shaped, 32 lowercase hex characters for a trace and 16
+    for a span. That is not decoration. It is what lets a trace that started in
+    your web tier and ended in your agent stay one trace across both, and what
+    lets mcpd sit beside whatever else already reads your telemetry.
+  </p>
+  <p>
+    A span whose parent came from a foreign tracing system carries it in
+    <code>external_parent_span_id</code> instead. mcpd keeps that value for
+    correlation but never builds its tree from it, because a parent id that
+    names a span mcpd never received would hang the whole subtree under nothing.
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>
+    mcpd also stores a projection of each trace: the span count, the error
+    count, total tokens, total cost, how many model calls and how many tool
+    calls. That row is recomputed from the spans on every write rather than
+    incremented, because spans arrive out of order, get retried and get updated
+    in place. A counter drifts under all three, and a span count that is visibly
+    wrong in the list makes a reader distrust every other number on the page.
+  </p>
+
+  <h2>Root spans and event spans</h2>
+  <p>
+    A root span is one with no parent inside the trace. It is normally an
+    <code>agent_run</code> or a <code>workflow_run</code>, and it is where the
+    trace gets its name, its tags and its correlation. Tags are only meaningful
+    on a root, where they label the whole run.
+  </p>
+  <p>
+    An event span is a point in time rather than a duration, so it has no end
+    and no duration. A streamed chunk is the usual case. The distinction is
+    stored rather than inferred from a missing end time, because "this never
+    had an end" and "this has not finished yet" are different facts and only
+    one of them is a problem.
+  </p>
+  <p>
+    A trace is complete once its root has ended and no span is still open. Until
+    then it is still listed, with the best name available, rather than hidden
+    until it finishes. The run that never finished is often the one you came to
+    look at.
+  </p>
+
+  <h2>Span kind</h2>
+  <p>
+    The kind says what an operation <em>is</em>. It decides how the span is drawn,
+    which attributes mean anything on it, and whether cost accounting looks at
+    it. mcpd defines 33 kinds, in families:
+  </p>
+  <div class="scroll-x">
+    <table>
+    <thead>
+      <tr><th>Family</th><th>Kinds</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Agent</td>
+        <td><code>agent_run</code></td>
+      </tr>
+      <tr>
+        <td>Model</td>
+        <td>
+          <code>model_generation</code>, <code>model_step</code>,
+          <code>model_inference</code>, <code>model_chunk</code>
+        </td>
+      </tr>
+      <tr>
+        <td>Tools</td>
+        <td>
+          <code>tool_call</code>, <code>client_tool_call</code>,
+          <code>provider_tool_call</code>, <code>mcp_tool_call</code>
+        </td>
+      </tr>
+      <tr>
+        <td>Workflow</td>
+        <td>
+          <code>workflow_run</code>, <code>workflow_step</code>,
+          <code>workflow_conditional</code>, <code>workflow_parallel</code>,
+          <code>workflow_loop</code>, and the rest
+        </td>
+      </tr>
+      <tr>
+        <td>Retrieval</td>
+        <td>
+          <code>rag_ingestion</code>, <code>rag_embedding</code>,
+          <code>rag_vector_operation</code>, <code>rag_action</code>,
+          <code>retrieval</code>, <code>memory_operation</code>,
+          <code>graph_action</code>
+        </td>
+      </tr>
+      <tr>
+        <td>Evaluation</td>
+        <td>
+          <code>scorer_run</code>, <code>scorer_step</code>,
+          <code>guardrail</code>, <code>processor_run</code>
+        </td>
+      </tr>
+      <tr>
+        <td>Other</td>
+        <td>
+          <code>mapping</code>, <code>skill_resolution</code>,
+          <code>workspace_action</code>, <code>http_request</code>,
+          <code>generic</code>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    Four kinds bill tokens: <code>model_generation</code>,
+    <code>model_step</code>, <code>model_inference</code> and
+    <code>rag_embedding</code>. Those are the spans cost accounting reads.
+    <code>generic</code> is always valid and never inferred, so a span mcpd
+    cannot classify is labelled honestly rather than guessed at.
+    <a href="/docs/reference/data-model" class="link">The data model</a> lists
+    every kind with what it means.
+  </p>
+
+  <h2>The model hierarchy</h2>
+  <p>
+    Four of those kinds nest inside each other, and the nesting is the most
+    useful thing in the model:
+  </p>
+  <ul>
+    <li>
+      <code>model_generation</code> is one logical generation: everything from
+      the first request to the final answer.
+    </li>
+    <li>
+      <code>model_step</code> is one step inside it. A generation that calls
+      tools twice has three steps.
+    </li>
+    <li>
+      <code>model_inference</code> is the provider round-trip alone, with no
+      processors and no tool execution inside it.
+    </li>
+    <li>
+      <code>model_chunk</code> is one streamed chunk, recorded as an event.
+    </li>
+  </ul>
+  <p>
+    The reason for four levels rather than one is that "the model call was slow"
+    is almost never true as stated. One call from your code is not one HTTP
+    round trip once tools are involved: it is a request, a tool, another
+    request, a guardrail, another request. Collapse that into a single span and
+    a run that spent six seconds in your own retry loop looks identical to one
+    that spent six seconds waiting on a provider. Separating inference from step
+    from generation is what makes the difference readable, and the first chunk
+    event is what gives you time to first token.
+  </p>
+  <p>
+    Record token usage <strong>once</strong>, on the span that made the provider
+    call. The trace projection sums input and output tokens across every span in
+    the trace, so the same counts attached to a generation and again to each of
+    its steps will double the token total and double the cost on screen. The
+    hierarchy is for timing; the tokens belong to whichever level actually spoke
+    to the provider.
+  </p>
+
+  <h2>The six signals</h2>
+  <p>
+    Spans are one of six things mcpd stores. Logs are the lines a run emitted.
+    Metrics are numeric observations, as counters, gauges or histograms. Scores
+    are a machine's evaluation of a span or a trace. Feedback is a person's. An
+    aspect note is one sentence about a run, written after it finished. A model
+    writes most of them. The daemon writes the <code>outcome</code> notes, from
+    the run's status and other facts it already holds.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <p>
+    All six carry the trace id they belong to, most of them the span id as well,
+    and all six pass through the same redaction pipeline before anything is
+    written. A secret leaks out of a log line exactly as well as out of a
+    prompt.
+  </p>
+  <p>
+    A score always declares its scale: the value, and the minimum and maximum it
+    sits between. Every SDK requires both at the call site, because a bare 0.7
+    with no scale attached cannot be compared with anything, including the same
+    scorer's output last week.
+  </p>
+  <p>
+    Feedback is kept in a separate place from scores, and never averaged with
+    them. It comes in five shapes: <code>thumbs</code>, <code>rating</code>,
+    <code>correction</code>, <code>tag</code> and <code>comment</code>. A
+    correction is the most valuable of the five, because it is the only signal
+    that carries the right answer.
+  </p>
+
+  <h2>Correlation</h2>
+  <p>
+    Correlation is the context a signal belongs to. It is the difference between
+    a pile of runs and a set you can slice.
+  </p>
+  <div class="scroll-x">
+    <table>
+    <thead>
+      <tr><th>Field</th><th>What it holds</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>project</code></td><td>The tenancy key. Every signal belongs to exactly one.</td></tr>
+      <tr><td><code>environment</code></td><td>Where it ran, such as production or staging.</td></tr>
+      <tr><td><code>service_name</code></td><td>The emitting service.</td></tr>
+      <tr><td><code>service_version</code></td><td>Its version, so a regression can be pinned to a release.</td></tr>
+      <tr><td><code>session_id</code></td><td>A user-facing session. Groups many traces into one conversation.</td></tr>
+      <tr><td><code>thread_id</code></td><td>A thread within that session.</td></tr>
+      <tr><td><code>user_id</code></td><td>The end user the run was for.</td></tr>
+      <tr><td><code>resource_id</code></td><td>A tenant or workspace inside your own application.</td></tr>
+      <tr><td><code>run_id</code></td><td>Your own identifier for this run.</td></tr>
+      <tr><td><code>request_id</code></td><td>The inbound request that caused the work.</td></tr>
+      <tr><td><code>experiment_id</code></td><td>Set when an experiment produced the run.</td></tr>
+      <tr><td><code>release</code></td><td>A release name or a git sha.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    <code>project</code> is the only required field. When a sender does not name
+    one, the daemon files the signal under its <code>--project</code> default, so
+    nothing is ever stored with nowhere to belong.
+  </p>
+  <p>
+    Set <code>session_id</code> even when it looks redundant. One agent run is a
+    trace, but a complaint is almost always about a conversation, and without a
+    session id there is nothing that turns eleven separate traces back into the
+    exchange the person actually had.
+  </p>
+  <p>
+    The trace list filters on <code>environment</code>,
+    <code>session_id</code>, <code>thread_id</code> and <code>user_id</code>
+    directly, alongside status, kind, name, tags, model, time range, minimum
+    duration, minimum cost and score.
+    <a href="/docs/searching" class="link">Finding a run</a> puts them together.
+  </p>
+
+  <h2>Links</h2>
+  <p>
+    A span has one parent and any number of links. A link points at another span
+    or another trace and says why: <code>follows_from</code>,
+    <code>retry_of</code>, <code>replay_of</code>, or whatever you name it.
+  </p>
+  <p>
+    Links exist because parentage cannot express fan-in. A batch job caused by
+    twenty requests has twenty links and one parent. Forcing that into the tree
+    would either invent nineteen duplicate subtrees or throw nineteen of the
+    causes away.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>
+      Every entity and field in full:
+      <a href="/docs/reference/data-model" class="link">Data model</a>.
+    </li>
+    <li>
+      How these words appear in code:
+      <a href="/docs/sdks/typescript" class="link">the SDKs</a>.
+    </li>
+    <li>
+      What mcpd infers when the spans arrive as OTLP:
+      <a href="/docs/opentelemetry" class="link">OpenTelemetry</a>.
+    </li>
+    <li>
+      Turning the vocabulary into a query:
+      <a href="/docs/searching" class="link">Finding a run</a>.
+    </li>
+  </ul>
+</Doc>

@@ -1,0 +1,699 @@
+---
+/**
+ * mcpd のデプロイ。
+ *
+ * このページのマニフェストは書き写したものではありません。ビルド時に
+ * `deploy/` から読み込むので、読者がコピーするファイルはリポジトリにある
+ * ファイルそのものです。ずれた例は、例が無いより悪いからです。
+ */
+import fs from 'node:fs'
+import path from 'node:path'
+import Doc from '@/layouts/Doc.astro'
+import Unreleased from '@/components/Unreleased.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+/* 英語のルートを、この言語で組み直します。 */
+const locale = localeOf(Astro.url.pathname)
+const to = (route: string) => urlFor(route, locale)
+
+const ROOT = path.resolve(process.cwd(), '..')
+const read = (rel: string) => fs.readFileSync(path.join(ROOT, rel), 'utf8').trimEnd()
+
+const docker = [
+  {
+    lang: 'curl' as const,
+    label: 'docker-compose.yml',
+    shiki: 'yaml',
+    code: read('deploy/docker/docker-compose.yml'),
+  },
+  {
+    lang: 'kotlin' as const,
+    label: '.env.example',
+    shiki: 'bash',
+    code: read('deploy/docker/.env.example'),
+  },
+]
+
+const kubernetes = [
+  { lang: 'typescript' as const, label: 'deployment.yaml', shiki: 'yaml', code: read('deploy/k8s/deployment.yaml') },
+  { lang: 'python' as const, label: 'service.yaml', shiki: 'yaml', code: read('deploy/k8s/service.yaml') },
+  { lang: 'go' as const, label: 'pvc.yaml', shiki: 'yaml', code: read('deploy/k8s/pvc.yaml') },
+  { lang: 'rust' as const, label: 'secret.yaml.example', shiki: 'yaml', code: read('deploy/k8s/secret.yaml.example') },
+]
+
+const chartValues = [
+  { lang: 'curl' as const, label: 'values.yaml', shiki: 'yaml', code: read('deploy/helm/mcpd/values.yaml') },
+]
+---
+
+<Doc
+  title="Docker と Kubernetes"
+  description="mcpd をコンテナで、あるいは Kubernetes で動かす方法。compose ファイル、実際のプローブを備えたマニフェスト、Helm チャート、そしてポートが他から届く前に設定すべき 2 つのキー。"
+  lede="プロセスは 1 つ、ボリュームは 1 つ、バックアップするファイルも 1 つです。このページでいちばん長い節は、自分以外の誰かが届くようになる前に何を設定するかについての節です。"
+  og="docs"
+>
+  <h2>コンテナ 1 つ</h2>
+  <Unreleased class="not-prose my-6" />
+  <p>
+    mcpd はストレージを組み込んだ単一のプロセスです。横で動かすデータベース
+    も、サイドカーも、静的ファイルサーバーもありません。取り込みも、クエリ
+    API も、インターフェースも、すべて 1 つのポートで提供されます。
+  </p>
+
+  <Command
+    command="docker run -p 4317:4317 -v mcpd-data:/data -e MCPD_DATA=/data/mcpd.db ghcr.io/mcpd/mcpd:0.1.0"
+    secondary={[
+      { label: '設定を表示して終了する', command: 'docker run --rm ghcr.io/mcpd/mcpd:0.1.0 config' },
+      { label: '何も残さない', command: 'docker run -p 4317:4317 -e MCPD_DATA=:memory: ghcr.io/mcpd/mcpd:0.1.0' },
+    ]}
+  />
+
+  <p>
+    二度読む価値があるのはボリュームの部分です。これが無いと SQLite の
+    ファイルはコンテナの書き込み可能レイヤーに置かれ、コンテナが消えると
+    トレースも消えます。<code>MCPD_DATA</code> を明示的に設定しているのも
+    同じ理由です。デーモンが書くパスとマウントしたパスがずれても、mcpd は
+    動き続け、ボリュームは空のままになります。それは、データが必要になった
+    日に初めて気付く類の失敗です。
+  </p>
+  <p>
+    タグは固定してください。<code>latest</code> は、誰も選んでいない時刻に
+    再起動をアップグレードに変えてしまいます。どのタグも
+    <code>linux/amd64</code> と <code>linux/arm64</code> 向けにビルドされ、
+    uid 10001 で動きます。イメージの中で <code>/data</code> を所有して
+    いるのはこの uid です。
+  </p>
+
+  <h2>ポートと、そこで応答するもの</h2>
+  <p>
+    すべてが 4317 にあります。デプロイがコンテナ 1 つで済むのはそのおかげ
+    ですが、ingress のルールやネットワークポリシーを書くときには知って
+    おく必要があります。パスごとにリスクが同じではないからです。
+  </p>
+
+  <div class="scroll-x">
+  <table>
+    <thead>
+      <tr>
+        <th>パス</th>
+        <th>内容</th>
+        <th>必要なキー</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>/v1/traces</code>, <code>/v1/logs</code>, <code>/v1/metrics</code></td>
+        <td>OTLP 取り込み。どの OpenTelemetry SDK からでも</td>
+        <td>取り込み</td>
+      </tr>
+      <tr>
+        <td><code>/v1/ingest</code></td>
+        <td>ネイティブ取り込み。1 つのリクエストでモデル全体を送れます</td>
+        <td>取り込み</td>
+      </tr>
+      <tr>
+        <td><code>/v1/api/…</code></td>
+        <td>クエリ API。トレース、スパン、ログ、スコア、分析</td>
+        <td>読み取り</td>
+      </tr>
+      <tr>
+        <td><code>/</code></td>
+        <td>運用者向けインターフェース。バイナリに埋め込まれています</td>
+        <td>不要</td>
+      </tr>
+      <tr>
+        <td><code>/healthz</code>, <code>/readyz</code>, <code>/metrics</code></td>
+        <td>liveness、readiness、そして mcpd 自身の Prometheus カウンター</td>
+        <td>不要</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    取り込みリクエストの上限は 32 MiB です。プロンプトは大きいので、この
+    上限は意図的に余裕を持たせてありますが、mcpd の手前に立つプロキシは
+    たいていもっと小さい上限を持っています。3 MiB のバッチを拒否する
+    リバースプロキシは、トレースが届かない理由としていちばんよくあるもの
+    です。
+  </p>
+
+  <h2>Compose</h2>
+  <p>
+    このファイルには説明する価値のある判断が 2 つあります。どちらも書き忘れ
+    のように見えるからです。ポートは <code>127.0.0.1</code> に公開されて
+    いるので、キーをまだ設定している最中に、ホストの外から届くことはあり
+    ません。そしてこのファイルにヘルスチェックがないのは、イメージが
+    持っているからです。イメージの中の busybox の <code>wget</code> で、
+    <code>MCPD_LISTEN</code> のポートの <code>/healthz</code> に 30 秒ごとに
+    リクエストし、結果は <code>docker compose ps</code> に表示されます。
+    Docker は unhealthy になったコンテナを再起動しません。再起動ポリシーが
+    働くのは、プロセスが終了したときです。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={docker} title="deploy/docker" />
+
+  <Command
+    class="my-6"
+    command="docker compose -f deploy/docker/docker-compose.yml up -d"
+    secondary={[
+      { label: 'ログ', command: 'docker compose -f deploy/docker/docker-compose.yml logs -f mcpd' },
+    ]}
+  />
+
+  <p>
+    キーの各行にある <code>:?</code> は飾りではありません。変数が未設定の
+    とき、Compose はそのサービスの起動を拒否します。設定し忘れたキーが、
+    静かに開いたポートではなくエラーメッセージになります。実行用の 2 つの
+    キーはファイルの中で値をまったく持たないので、Compose が渡すのは
+    <code>.env</code> が設定したときだけです。空の値を渡すと、デーモンには
+    キーなしではなく、空のキー 1 つとして届きます。
+  </p>
+
+  <h2>Kubernetes</h2>
+  <p>
+    オブジェクトは 4 つです。Deployment、Service、PersistentVolumeClaim、
+    そして自分で作る Secret。Deployment は <code>Recreate</code> 戦略でレプリカを 1 つ動かし、
+    これらのマニフェストの中で変えてはいけない 1 行がそこです。mcpd は
+    すべてを 1 つの SQLite ファイルに保存し、それを書くプロセスは 1 つで、
+    ローリングアップデートは、最初の Pod がまだファイルを握っている間に
+    同じボリュームの上で 2 つ目の Pod を起動してしまいます。それはスケール
+    の話ではなく、破損の話です。
+  </p>
+  <p>
+    Secret は <code>kubectl apply</code> が読むファイルには入っていません。
+    <code>secret.yaml.example</code> がその形を示し、拡張子のおかげで apply
+    の対象から外れています。そのまま適用された Secret は、プレースホルダー
+    の文字列をそのままキーにしてしまうからです。代わりに、その場で生成した
+    キーでコマンドラインから作ってください。Pod は uid 10001 で、読み取り
+    専用のルートファイルシステム、ケーパビリティなし、ランタイム既定の
+    seccomp プロファイルで動きます。Pod Security の
+    <code>restricted</code> レベルが求めるのはこれです。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={kubernetes} title="deploy/k8s" />
+
+  <pre><code class="language-bash">{`export INGEST_KEY=$(openssl rand -hex 32) READ_KEY=$(openssl rand -hex 32) ADMIN_KEY=$(openssl rand -hex 32)
+kubectl create namespace mcpd
+kubectl -n mcpd create secret generic mcpd-keys \\
+  --from-literal=ingest-keys=$INGEST_KEY \\
+  --from-literal=read-keys=$READ_KEY \\
+  --from-literal=admin-keys=$ADMIN_KEY \\
+  --from-literal=redact-key=$(openssl rand -hex 32)
+kubectl -n mcpd apply -f deploy/k8s/`}</code></pre>
+
+  <p>
+    3 つのキーは、チームがシークレットを置いている場所に保管してください。
+    取り込みキーはすべてのエージェントへ、読み取りキーはインターフェースを
+    読む人へ、管理キーはデータを削除してよい人へ渡します。ワーカーが
+    クラスターの外で動くようになったら、<code>execute-keys</code> と
+    <code>worker-keys</code> を同じ方法で追加してください。それまでは、
+    どちらにも取り込みキーが受け付けられます。
+  </p>
+
+  <pre class="my-6"><code>{`export EXECUTE_KEY=$(openssl rand -hex 32) WORKER_KEY=$(openssl rand -hex 32)
+kubectl -n mcpd patch secret mcpd-keys --type merge \\
+  -p '{"stringData":{"execute-keys":"'$EXECUTE_KEY'","worker-keys":"'$WORKER_KEY'"}}'
+kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
+
+  <Command
+    class="my-6"
+    command="kubectl -n mcpd port-forward svc/mcpd 4317:4317"
+    primaryLabel="自分のマシンから届かせる"
+  />
+
+  <p>
+    クラスター内のエージェントは Service を指します。SDK はこの 2 つを環境
+    から読むので、計装済みのコードは変えなくて済みます。
+  </p>
+
+  <Command command="MCPD_ENDPOINT=http://mcpd.mcpd.svc:4317 MCPD_API_KEY=$INGEST_KEY" />
+
+  <h3>プローブ</h3>
+  <p>
+    この 2 つのエンドポイントは意図的に違うことをしていて、入れ替えると
+    特定の、見苦しい失敗を起こします。
+  </p>
+  <ul>
+    <li>
+      <code>/healthz</code> はストレージに一切触れません。プロセスの状態
+      だけで答えます。データベースに問い合わせる liveness プローブは、
+      大きなクエリで遅くなるたびに健康なデーモンを再起動してしまいます。
+      先行書き込みログを書き出している最中の再起動こそ、いちばん避けたい
+      ことです。
+    </li>
+    <li>
+      <code>/readyz</code> はストアに ping を打ち、届かないときは
+      <code>"status": "degraded"</code> と、何がおかしいかを書いた 1 行を
+      添えて 503 を返します。処理できないインスタンスから、それを殺さずに
+      トラフィックを遠ざけます。
+    </li>
+  </ul>
+  <p>
+    startup プローブがあるのは、起動時にマイグレーションが走るからです。
+    マイグレーションは冪等でたいていは一瞬ですが、大きなデータベースでは
+    liveness プローブが許すより長くかかることがあり、毎回マイグレーションの
+    途中で殺される Pod は、いつまでも起動しません。
+  </p>
+
+  <h3>割り当てるもの</h3>
+  <p>
+    ここの数字は、このプロセスが実際に何をするかから来ています。ベンチ
+    マークから来たものではなく、ベンチマークを主張してもいません。
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>リソース</th>
+        <th>値</th>
+        <th>理由</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>CPU request</td>
+        <td><code>100m</code></td>
+        <td>待機中はほとんど何も使いません。request があるのは、スケジューラーが騒がしいものの下に重ねて置かないようにするためです。</td>
+      </tr>
+      <tr>
+        <td>CPU limit</td>
+        <td>なし</td>
+        <td>取り込みはバーストで届きます。バーストの最中に書き手を絞ると、クライアントのキューが埋まり、スパンが落ちます。</td>
+      </tr>
+      <tr>
+        <td>メモリー request</td>
+        <td><code>128Mi</code></td>
+        <td>静的バイナリ 1 つ、SQLite の接続 5 つ、そのページキャッシュ。</td>
+      </tr>
+      <tr>
+        <td>メモリー limit</td>
+        <td><code>512Mi</code></td>
+        <td>同時取り込みのための余裕。1 つのリクエストが 32 MiB のプロンプト文を抱えうるので、メモリーは大きなバッチが同時にいくつ届くかで決まります。</td>
+      </tr>
+      <tr>
+        <td>ボリューム</td>
+        <td><code>20Gi</code>、ReadWriteOnce</td>
+        <td>自分のペイロードから見積もってください。支配的なのはテキストで、検索インデックスは外部内容参照型ではないので、インデックスされたプロンプトと出力はもう一度保存されます。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    ボリュームはローカルのブロックデバイスに置いてください。SQLite の
+    ロックが正しく働くのはそこだけです。NFS などの共有ファイルシステム
+    ではロックはよくてアドバイザリー止まりで、その失敗はエラーとしては
+    現れません。数週間後に壊れたデータベースとして現れます。
+  </p>
+
+  <h2>Helm チャート</h2>
+  <p>
+    チャートは同じ 4 つのオブジェクトを、その手前に値を置いた形で描画し、
+    さらに値で有効にするまで無効な 6 つを持ちます。Ingress、
+    NetworkPolicy、PodDisruptionBudget、ServiceAccount、ServiceMonitor、
+    そして設定ファイル用の ConfigMap または Secret です。リリースのたびに、
+    チャートはイメージと同じレジストリーへ push されます。先にキーを生成し、
+    チームがシークレットを置いている場所に保管してください。インストールが
+    キーを表示し返すことはありません。
+  </p>
+
+  <Command
+    command="helm install mcpd oci://ghcr.io/mcpd/charts/mcpd -n mcpd --create-namespace --set keys.ingest=$INGEST_KEY --set keys.read=$READ_KEY"
+    primaryLabel="レジストリーからインストールする"
+    secondary={[
+      { label: 'キーを生成する', command: 'export INGEST_KEY=$(openssl rand -hex 32) READ_KEY=$(openssl rand -hex 32)' },
+      { label: 'クローンから', command: 'helm install mcpd ./deploy/helm/mcpd -n mcpd --create-namespace -f values.yaml' },
+      { label: 'アップグレード', command: 'helm upgrade mcpd oci://ghcr.io/mcpd/charts/mcpd -n mcpd --reset-then-reuse-values' },
+    ]}
+  />
+
+  <p>
+    <code>keys.ingest</code> か <code>keys.read</code> が未設定だと
+    インストールは失敗し、理由を伝えます。取り込みエンドポイントが開いて
+    いることに後から気付かせるチャートは、仕事をしていません。Secret を
+    自分で管理しているなら、代わりに <code>keys.existingSecret</code> を
+    設定してください。チャートは Secret を作りません。
+  </p>
+  <p>
+    Pod テンプレートは Secret のチェックサムを持つので、キーを入れ替えて
+    <code>helm upgrade</code> を実行すると Pod が再起動します。これが
+    なければ、新しいキーはクラスターに置かれたまま、デーモンは古いキーを
+    強制し続けます。
+  </p>
+  <p>
+    モニター、SLO、ジャッジ、プロジェクトごとのキー、実行ストアのタイミング
+    は、フラグではなくデーモンの設定ファイルから読まれます。その JSON
+    オブジェクトを <code>configFile.content</code> に書くと、チャートは
+    それを読み取り専用でマウントし、<code>MCPD_CONFIG_FILE</code> をそこに
+    向けます。プロジェクトごとのキー、ジャッジの <code>api_key</code>、
+    転送のヘッダーは資格情報なので、これらを含む内容を ConfigMap に置くこと
+    をチャートは拒否します。<code>configFile.kind</code> を
+    <code>Secret</code> にするか、自分で管理する Secret にファイルを置いて
+    <code>configFile.existingSecret</code> で名指ししてください。それ以外は
+    <code>extraEnv</code>、<code>extraVolumes</code>、
+    <code>extraVolumeMounts</code> で扱えます。たとえばプライベート CA の
+    バンドルです。
+  </p>
+  <p>
+    チャートが扱えない組み合わせは、すべてインストール時に拒否されます。
+    メッセージは変えるべき値を名指しし、インストール後のクラッシュループに
+    任せることはありません。拒否の一覧はチャートの README にあります。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={chartValues} title="deploy/helm/mcpd" />
+
+  <h2>他の何かが届くようになる前に</h2>
+  <p>
+    取り込みは既定で開いています。これはノート PC での最初の 5 分に
+    ついては意図した選択です。最初のトレースの前に資格情報を求めるのは、
+    得るもののない摩擦だからです。そして、ポートが他の何かから届くように
+    なった瞬間には、これは誤った既定になります。だからデーモンは、キーの
+    無いままループバックでないアドレスで起動するたびに、そう伝えます。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="保護されていない起動の様子"
+    lines={[
+      { cmd: 'docker run -p 4317:4317 -v mcpd-data:/data ghcr.io/mcpd/mcpd:0.1.0' },
+      { out: 'mcpd 0.1.0 listening on http://0.0.0.0:4317', tone: 'ok' },
+      { out: 'WARN listening on 0.0.0.0:4317 with open ingest. Anyone who can', tone: 'warn' },
+      { out: '     reach this port can write to it. Set --ingest-key (or', tone: 'warn' },
+      { out: '     MCPD_INGEST_KEYS) before exposing it.', tone: 'warn' },
+      { out: 'WARN listening on 0.0.0.0:4317 with an open read API. Stored', tone: 'warn' },
+      { out: '     prompts and completions are readable by anyone who can reach', tone: 'warn' },
+      { out: '     this port. Set --read-key to require a key.', tone: 'warn' },
+    ]}
+  />
+
+  <p>
+    mcpd は起動を拒否するのではなく警告します。拒否すれば、これを動かす
+    価値そのものにつながる道が断たれるからです。この警告が約束です。
+    デプロイのログでこれを見たなら、そのデプロイは開いています。
+  </p>
+
+  <h3>6 つのキー、6 つのスコープ</h3>
+  <p>
+    <code>--ingest-key</code> はシグナルの書き込みを許します。
+    <code>--read-key</code> はその読み取りを許します。
+    <code>--write-key</code> は保存済みデータの変更を許します。スコア、
+    フィードバック、データセット、実験、確認応答です。
+    <code>--execute-key</code> は実行の開始、キャンセル、シグナル送信を許します。<code>--worker-key</code> はステップの受け取りと結果の報告を許し、ステップ本体を動かすプロセスに置く鍵がこれです。<code>--admin-key</code> はトレースの削除と監査ログの読み取りを許します。
+  </p>
+  <p>
+    最初の分割が被害範囲を決めます。対象となる集団の大きさが違うからです。
+    フリートのすべてのエージェントプロセスが取り込みキーを必要とし、
+    それ以外を必要とする人はずっと少数です。読み取りもできる 1 つのキーを
+    フリートに配れば、保存されたすべてのプロンプトへの資格情報を、スパンを
+    出すすべてのコンテナに置くことになります。その中には第三者のコードを
+    動かしているコンテナも含まれます。
+  </p>
+  <p>
+    実行をデータセットに取り込む操作が書き込みスコープに移ったのも、その
+    ためです。この操作は途中でその実行の入力と出力を読むので、フリートが
+    持ち歩くキーで許可すると、それらのコンテナすべてに、保存済みの
+    プロンプトを外へ写す手段を渡すことになります。
+  </p>
+  <p>
+    どのフラグもカンマ区切りのリストを取り、それぞれに環境変数があります。
+    <code>MCPD_INGEST_KEYS</code>、<code>MCPD_READ_KEYS</code>、
+    <code>MCPD_WRITE_KEYS</code>、<code>MCPD_ADMIN_KEYS</code> です。複数
+    使ってください。チームごと、フリートごとにキーを分けておけば、漏れた
+    キーはリストから外すだけで失効させられます。スパンを出すものすべてを
+    再デプロイする必要はありません。キーは
+    <code>Authorization: Bearer …</code> か <code>X-Mcpd-Key</code>
+    ヘッダーで提示し、比較は定数時間です。
+  </p>
+  <p>
+    知っておくべき非対称性は、新しいほうの 2 つのフラグを未設定のままにした
+    ときの挙動です。書き込みリストが未設定なら取り込みキーを受け付け、
+    管理リストが未設定なら読み取りキーを受け付けます。だからアップグレード
+    が、動いていたキーを失効させることはありません。
+    <code>--admin-key</code> を設定するまで、読み取りキーは読み取りと削除の
+    ためのキーであって、厳密な読み取り専用ではなく、デーモンは起動時に
+    そう伝えます。それを踏まえて配るか、フラグを設定してください。
+  </p>
+
+  <h3>誰が何を読んだか</h3>
+  <p>
+    ペイロードを返すハンドラーは、そのアクセスを記録します。トレースの
+    詳細、スパンとログの検索、フィードバック、データセットの項目、取り込み、
+    削除です。行には時刻、操作したキーの短いダイジェスト、操作、
+    プロジェクト、リソース、そして認可が許可したかどうかが入ります。キー
+    自体が書き残されることはないので、このログが資格情報の 2 つ目の置き場に
+    なることはありません。
+  </p>
+  <p>
+    読むには <code>GET /v1/api/audit</code> を使います。管理スコープが必要
+    です。これに頼る前に知っておく性質が 2 つあります。1 つ、このログは
+    <code>--retention-days</code> では削除されません。説明対象のデータと
+    同じ日程で自分自身を消してしまうログでは、すでに消えたデータを誰が
+    読んだのかを答えられないからです。2 つ、行の書き込みが、それが説明する
+    読み取りを失敗させることはありません。書けなかった行は
+    <code>/metrics</code> の <code>mcpd_audit_write_failures_total</code> に
+    数えられ、これがアラートを付けるべきカウンターです。
+  </p>
+
+  <h3>キーが覆わないもの</h3>
+  <ul>
+    <li>
+      <strong>インターフェース。</strong><code>/</code> のマークアップは、
+      ポートに届く誰にでも配信されます。その後ろのデータは違います。
+      インターフェースが出すリクエストはすべてクエリ API を通り、そこで
+      読み取りキーが強制されます。デーモンにログイン画面はないので、
+      サービスではなく人がアクセスするなら、すでに運用している ID プロキシ
+      の後ろに置いてください。
+    </li>
+    <li>
+      <strong>プローブと <code>/metrics</code>。</strong>意図的に認証なし
+      です。kubelet も Prometheus のスクレイパーもキーを持てないからです。
+      公開するのはカウンターと稼働時間だけで、ペイロードは決して出しません。
+    </li>
+    <li>
+      <strong>通信路。</strong>mcpd は平文の HTTP を話し、TLS の終端は
+      しません。ingress かメッシュで終端してください。プロンプトと出力は
+      その経路をそのまま通ります。
+    </li>
+    <li>
+      <strong>秘匿化されたペイロードの中のハッシュ。</strong>
+      <code>--no-redact</code> を渡さないかぎり秘匿化は有効ですが、
+      識別子をハッシュする場合、そのダイジェストはソルトと同じ程度にしか
+      秘密ではありません。<code>--redact-key</code> を設定してください。
+      さもないと短い識別子は総当たりで復元できます。
+      <a href={to('/docs/privacy')} class="link">秘匿化と保持期間</a>を
+      参照してください。
+    </li>
+  </ul>
+
+  <h3>公開する前の確認</h3>
+  <p>
+    <code>mcpd config</code> は、その呼び出しで使われる設定を表示して終了
+    します。間違った場所に設定した環境変数が何もしていなかった、と気付く
+    いちばん安上がりな方法です。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="事前確認"
+    lines={[
+      { cmd: 'docker compose -f deploy/docker/docker-compose.yml run --rm mcpd config' },
+      { out: 'listen          0.0.0.0:4317' },
+      { out: 'storage         sqlite at /data/mcpd.db' },
+      { out: 'config file     none' },
+      { out: 'log format      json' },
+      { out: 'project         default' },
+      { out: 'projects        none' },
+      { out: 'retention       30 days' },
+      { out: 'ingest auth     key required', tone: 'ok' },
+      { out: 'read auth       key required', tone: 'ok' },
+      { out: 'write auth      key required (ingest keys)', tone: 'ok' },
+      { out: 'admin auth      key required (read keys)', tone: 'warn' },
+      { out: 'execute auth    key required (ingest keys)', tone: 'warn' },
+      { out: 'worker auth     key required (ingest keys)', tone: 'warn' },
+      { out: 'signup          off' },
+      { out: 'runs            sqlite at /data/mcpd.runs.db' },
+      { out: 'run settings    lease_ttl_ms 30000, reclaim_window_ms 30000, stall_window_ms 300000, idempotency_window_ms 86400000, park_ttl_ms 86400000, max_depth 8, max_step_repeats 16' },
+      { out: 'identity        off' },
+      { out: 'client ip       peer address' },
+      { out: 'sampling        keep everything' },
+      { out: 'quota           unlimited' },
+      { out: 'redaction       on' },
+      { out: 'redact key      set', tone: 'ok' },
+      { out: 'cors            same-origin only' },
+      { out: 'timeout         30s per request' },
+      { out: 'limits          32 MiB per request, 10000 signals per batch' },
+      { out: 'derived         duration and token metrics' },
+      { out: 'aspects         off' },
+      { out: 'monitors        none' },
+      { out: 'objectives      none' },
+      { out: 'judge           off' },
+      { out: 'forwarding      off' },
+    ]}
+  />
+
+  <p>
+    ここで重要なのは 6 行です。認証の行に <code>open</code> とあれば、その
+    スコープはポートに届く相手に開いています。括弧付きの行は、そのスコープ
+    がどの広いリストを継承しているかを示します。上の呼び出しは
+    <code>--admin-key</code> を設定していないので、その読み取りキーは読む
+    だけでなく削除もします。<code>--execute-key</code> と
+    <code>--worker-key</code> も設定していないので、その取り込みキーは実行の開始と
+    ステップの取得もでき、mcpd は起動時にそのことを警告します。ここに表示されるフラグはすべて
+    <a href={to('/docs/configuration')} class="link">設定</a>に載っています。
+  </p>
+
+  <h2>バックアップ</h2>
+  <p>
+    バックアップの対象はファイル 1 つです。検索インデックスを含め、mcpd が
+    保存するものはすべて <code>MCPD_DATA</code> のファイルにあります。
+  </p>
+  <p>
+    デーモンが動いている間にそのファイルをコピーすること、それだけはやめて
+    ください。mcpd は SQLite を WAL モードで動かすので、最近の書き込みは
+    横の <code>-wal</code> ファイルにあり、データベース単体のコピーは
+    それらが欠けたコピーになります。代わりに一貫したコピーを取ってください。
+    <code>sqlite3</code> ツールがあり、同じボリュームをマウントしている
+    イメージなら、どれからでも取れます。
+  </p>
+
+  <Command
+    command={`sqlite3 /data/mcpd.db ".backup '/backup/mcpd-$(date -u +%Y%m%dT%H%M).db'"`}
+    primaryLabel="オンラインバックアップ"
+    secondary={[
+      { label: '圧縮したコピー', command: 'sqlite3 /data/mcpd.db "VACUUM INTO \'/backup/mcpd.db\'"' },
+    ]}
+  />
+
+  <p>
+    どちらも、書き込みが続いている間に一貫したスナップショットを読みます。
+    CSI ドライバーが取るボリュームスナップショットも、そのスナップショットが
+    アトミックなら使えます。動いているディレクトリの <code>tar</code> は
+    そうではありません。リストアは、デーモンを止め、ファイルを
+    <code>MCPD_DATA</code> に戻し、その横の <code>-wal</code> と
+    <code>-shm</code> のファイルを削除し、デーモンをまた起動することです。
+    <a href={to('/docs/operations')} class="link">運用</a>で順を追って
+    説明しています。
+  </p>
+  <p>
+    削除された行はファイルの中のページを解放するだけで、ファイルは小さく
+    なりません。だから多くのデータを期限切れにしたデータベースも、大きさは
+    そのままです。ディスクを取り戻したいときは <code>VACUUM</code> を実行
+    してください。
+  </p>
+
+  <h2>アップグレード</h2>
+  <p>
+    タグを変えて再起動します。マイグレーションは起動時に走り、毎回走らせて
+    も安全なので、プロセスの外で行う手順はありません。それでも先に
+    バックアップを取ってください。マイグレーションは、データの下でスキーマ
+    が変わる唯一の瞬間です。
+  </p>
+  <p>
+    再起動はローリングではなく短い停止です。レプリカが 1 つである理由と同じ
+    です。エージェントはこれを乗り切ります。SDK はメモリーにキューを持って
+    再送し、そのキューには上限があるので、数秒で終わる再起動は何も損なわず、
+    1 時間かかる再起動は古いスパンから落とし、そのことをクライアントの
+    ログに書きます。
+  </p>
+  <p>
+    mcpd は SIGTERM を処理して正常に停止します。Kubernetes が送るのはこの
+    シグナルです。<code>terminationGracePeriodSeconds</code> は最も長い
+    リクエストより長くなければなりません。短いと、kubelet は書き込みの
+    途中でプロセスを殺します。リクエストは 30 秒のリクエストタイムアウト
+    まで続くことがあるので、マニフェストとチャートは Pod に 45 秒を与え、
+    compose ファイルもコンテナに同じ時間を与えます。上げるときは両方を
+    一緒に上げてください。
+  </p>
+
+  <h2>1 つの SQLite ファイルの限界と、その先の手立て</h2>
+  <p>
+    組み込みファイルは正しい既定であり、動かせない制限を 2 つ持ちます。
+    どちらも mcpd ではなく SQLite のものです。
+  </p>
+  <ul>
+    <li>
+      <strong>書き手は 1 つ。</strong>読み取りは自分の接続で走り、書き手を
+      止めることは決してありません。WAL モードはそのためにあります。しかし
+      ファイルを所有するプロセスは 1 つです。そのインスタンスは、外へでは
+      なく上へスケールさせます。
+    </li>
+    <li>
+      <strong>ボリューム 1 つ、アベイラビリティーゾーン 1 つ。</strong>
+      ReadWriteOnce のクレームは Pod をそこに固定します。データを保った
+      まま別のノードへフェイルオーバーする道はありません。
+    </li>
+  </ul>
+  <p>
+    たいていは、新しいバックエンドより 2 つの設定のほうが多くを取り返します。
+    <a href={to('/docs/sampling')} class="link">サンプリング</a>はトレースの
+    一部だけを残し、残すと決めたトレースはまるごと残します。判定はトレース
+    id のハッシュで行うので、フリートのどのインスタンスも同じ判断をします。
+    保持期間は、ファイルがどこまで遡るかを抑えます。チームごとに、それぞれ
+    自分のボリュームを持つインスタンスを 1 つずつ動かすのも有効で、騒がしい
+    チームが全員のディスクを埋めるのを防げます。
+  </p>
+  <p>
+    それでも足りなくなったら、mcpd をデータベースに向けてください。
+    チャートで <code>externalStore.type</code> を <code>postgres</code> か
+    <code>clickhouse</code> にし、接続文字列を
+    <code>externalStore.postgresUrl</code> か
+    <code>externalStore.clickhouseUrl</code> に設定します。接続文字列は
+    Pod の spec ではなく、チャートの Secret に保持されます。values からも
+    完全に外したいなら、自分で管理する Secret の <code>postgres-url</code>
+    か <code>clickhouse-url</code> に置き、その Secret を
+    <code>keys.existingSecret</code> で名指しし、それでも type は設定して
+    ください。バックエンドを選ぶのは URL ではなく type です。
+  </p>
+  <p>
+    これでシグナルは移りますが、ディスクにはファイルが 1 つ残ります。実行
+    ストアです。シグナルのストアが何であっても、これは組み込みの SQLite
+    です。<code>runs.enabled</code> が true（既定）なら、チャートはそれを
+    ボリュームに置き、レプリカを 1 つ動かします。複数の Pod を動かすには、
+    実行の機能を止めてください。するとチャートは
+    <code>replicaCount</code> 個の Pod を動かし、<code>Recreate</code> から
+    ローリングアップデートに切り替え、PersistentVolumeClaim を外します。
+    奪い合うローカルのものが何も残らないからです。デーモンは実行の
+    エンドポイントに、そのことを伝える 503 で応答します。実行が有効な間、
+    チャートは 1 を超える <code>replicaCount</code> を拒否します。それぞれが
+    自分だけの実行ストアを持つ Pod を起動するよりよいからです。
+  </p>
+
+  <pre><code class="language-bash">{`helm install mcpd ./deploy/helm/mcpd \\
+  --set keys.ingest=$INGEST_KEY \\
+  --set keys.read=$READ_KEY \\
+  --set externalStore.type=postgres \\
+  --set externalStore.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
+  --set runs.enabled=false \\
+  --set replicaCount=3`}</code></pre>
+
+  <p>
+    まず Postgres を選んでください。たいていのチームがすでに運用し、
+    バックアップし、監視しているデータベースの上で、2 つの制限を外せます。
+    マイグレーションはアドバイザリーロックを取り、スキーマが最新なら
+    飛ばされるので、複数のレプリカが同時に起動しても安全です。保持期間が
+    数十億スパンで測られるようになったら ClickHouse です。type が名指し
+    しないバックエンドの URL は、無視されるのではなく拒否されます。
+  </p>
+  <p>
+    バックエンドを変えても変わらないことが 1 つあります。
+    <strong>保持期間が覆うのは、書き留めたプロジェクトだけです。</strong>
+    1 時間ごとの処理は、<code>--project</code> が名指しするプロジェクトと、
+    <code>projects</code> ブロックのすべてのプロジェクトで、
+    <code>--retention-days</code> より古いシグナルを削除します。
+    <code>retention_days</code> を持つプロジェクトはその値で削除されます。
+    どちらにも現れないプロジェクト名で送られたトレースは期間を持たず、
+    一度も削除されません。エージェントが自分でプロジェクト名を決めている
+    なら、量に気を配ってください。
+  </p>
+
+  <h2>次に</h2>
+  <ul>
+    <li>すべてのフラグと環境変数：<a href={to('/docs/configuration')} class="link">設定</a>。</li>
+    <li>プローブ、カウンター、日々の運用：<a href={to('/docs/operations')} class="link">運用</a>。</li>
+    <li>ディスクに決して届かないもの：<a href={to('/docs/privacy')} class="link">秘匿化と保持期間</a>。</li>
+    <li>まだ何もデプロイしていないなら：<a href={to('/docs/quickstart')} class="link">クイックスタート</a>。</li>
+  </ul>
+</Doc>

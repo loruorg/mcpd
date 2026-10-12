@@ -1,0 +1,533 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+
+const exporterEnv = `# Taban adres. /v1/traces yolunu exporter'ın kendisi ekler.
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+
+# İsteğe bağlı. Payload'larınız büyükse gzip gönderin.
+export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
+
+# Yalnızca mcpd --ingest-key ile çalışıyorsa.
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer YOUR_INGEST_KEY"`
+
+const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
+  -H 'content-type: application/json' \\
+  -d '{
+  "resourceSpans": [{
+    "resource": { "attributes": [
+      { "key": "service.name", "value": { "stringValue": "checkout-agent" } }
+    ]},
+    "scopeSpans": [{
+      "spans": [{
+        "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "spanId": "00f067aa0ba902b7",
+        "name": "chat gpt-4o",
+        "startTimeUnixNano": "1700000000000000000",
+        "endTimeUnixNano": "1700000001500000000",
+        "status": { "code": 1 },
+        "attributes": [
+          { "key": "gen_ai.system", "value": { "stringValue": "openai" } },
+          { "key": "gen_ai.request.model", "value": { "stringValue": "gpt-4o" } },
+          { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+          { "key": "gen_ai.usage.input_tokens", "value": { "intValue": "1200" } },
+          { "key": "gen_ai.usage.output_tokens", "value": { "intValue": "350" } }
+        ]
+      }]
+    }]
+  }]
+}'
+
+# {"partialSuccess":{"rejectedSpans":0,"errorMessage":""}}`
+---
+
+<Doc
+  title="OpenTelemetry"
+  description="mcpd, /v1/traces, /v1/logs ve /v1/metrics üzerinde OTLP/JSON kabul eder; hem OpenTelemetry gen_ai.* hem de OpenInference llm.* semantik kurallarını okur. mcpd'ye özel kod gerekmez."
+  lede="Ajanınız zaten OpenTelemetry yayıyorsa, mcpd bir endpoint değişikliğinden ibarettir. Bu sayfa OTLP yolunun tamamıdır: üç endpoint, kodlama ve mcpd'nin okuduğu her öznitelik."
+  og="docs"
+>
+  <h2>Üç endpoint</h2>
+  <p>
+    mcpd, OTLP HTTP endpoint'lerini sorgu API'si ve arayüzüyle aynı porttan
+    sunar. Önüne konacak bir collector, ikinci bir konteyner ve ayrı bir alıcı
+    portu yoktur.
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Endpoint</th>
+          <th>Kabul ettiği</th>
+          <th>Yanıtladığı</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>POST /v1/traces</code></td>
+          <td><code>ExportTraceServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedSpans</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/logs</code></td>
+          <td><code>ExportLogsServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedLogRecords</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /v1/metrics</code></td>
+          <td><code>ExportMetricsServiceRequest</code></td>
+          <td><code>partialSuccess.rejectedDataPoints</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Başarılı her dışa aktarım, OTLP'nin bir sayı taşıyan kendi
+    <code>partialSuccess</code> biçimiyle yanıtlanır. Bir collector'ın
+    gönderene bir şey düşürdüğünü söyleme yolu budur ve exporter'lar bunu okur.
+    Boş bir gövde döndürmek, gönderenin almadığı bir başarıyı bildirmesine yol
+    açardı.
+  </p>
+
+  <h2>Bir exporter'ı buraya yöneltmek</h2>
+  <p>
+    İşi iki değişken görür. Bunları ajanınızı çalıştıran sürecin ortamında
+    ayarlayın, başka hiçbir şey değişmez.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="exporter"
+    samples={[{ lang: 'curl', label: 'Ortam', shiki: 'bash', code: exporterEnv }]}
+  />
+
+  <p>
+    Bir sessizliğin nedenini aramadan önce bilinmeye değer iki ayrıntı var.
+    Birincisi, <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> bir taban adrestir ve
+    exporter sinyal yolunu onun sonuna kendisi ekler. Yolu da içeren tam adresi
+    vermek isterseniz bunun yerine
+    <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code> ayarlayın. İkincisi,
+    OpenTelemetry'de 4317 portu alışılageldiği üzere gRPC portudur, 4318 ise
+    HTTP portudur. mcpd her şeyi tek porttan sunduğu için HTTP'yi 4317'den
+    sunar; yani varsayılan portunda bırakılmış bir exporter 4318'e gönderir ve
+    siz hiçbir şeyin geldiğini görmezsiniz. Portu açıkça yazın.
+  </p>
+
+  <h2>Trace'ler için her iki kodlama</h2>
+  <p>
+    <code>/v1/traces</code>, <code>content-type</code> başlığını okur ve iki
+    kodlamayı da kabul eder: içinde <code>protobuf</code> geçiyorsa
+    OTLP/protobuf, geçmiyorsa OTLP/JSON. OpenTelemetry'nin varsayılanı
+    protobuf'tur, yani mcpd'ye yöneltilmiş, değiştirilmemiş bir SDK'nın
+    gönderdiği trace'ler hiçbir yapılandırma olmadan yerine ulaşır.
+  </p>
+  <p>
+    <code>/v1/logs</code> ve <code>/v1/metrics</code> yalnızca JSON kabul eder.
+    Oraya gelen bir protobuf gövdesi <code>body is not valid JSON</code>
+    diyerek geri çevrilir. Üç sinyali de gönderiyorsanız protokolü bir kez,
+    genel olarak ayarlayın:
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="her sinyal için json"
+    command="export OTEL_EXPORTER_OTLP_PROTOCOL=http/json"
+  />
+
+  <p>
+    Hiç <code>content-type</code> gönderilmediğinde mcpd
+    <code>application/json</code> varsayar.
+  </p>
+
+  <h2>Sıkıştırma ve boyut</h2>
+  <p>
+    Bir istek gövdesi <code>content-encoding: gzip</code> ile,
+    <code>identity</code> ile ya da hiç kodlama başlığı olmadan gelebilir. Başka
+    her şey adıyla geri çevrilir: <code>content-encoding "br" is not supported;
+    use gzip or send the body uncompressed</code>. Yanıtlar içerik pazarlığıyla
+    sıkıştırılır, yani yavaş bir hat üzerinden geri okunan büyük bir trace de
+    sıkıştırılır.
+  </p>
+  <p>
+    Tek bir isteğe iki sınır uygulanır. Gövde sınırı 32 MiB; gelen şeyin
+    üzerinden ölçülür, yani gzip size yer kazandırır. Yığın sınırı 10.000
+    sinyaldir ve her alım kapısında kod çözüldükten sonra sayılır:
+    <code>/v1/traces</code> üzerinde span'ler, <code>/v1/logs</code> üzerinde
+    kayıtlar, <code>/v1/metrics</code> üzerinde veri noktaları ve
+    <code>/v1/ingest</code> üzerinde istekteki her şey. Daha büyük bir yığın,
+    iki sayıyı da adlandıran <code>413 payload_too_large</code> ile geri
+    çevrilir. İki sınır da birer ayardır:
+    <a href={urlFor('/docs/configuration', locale)} class="link">Yapılandırma</a>
+    sayfasında anlatılan <code>--max-body-bytes</code> ve
+    <code>--max-batch-signals</code>.
+  </p>
+
+  <h2>Gelmekle saklanmak arasında ne olur</h2>
+  <p>
+    Bir OTLP span'i ile yerel bir span aynı yoldan geçer. Hattın ortak olmasının
+    amacı budur: aşağıdaki sıra iki kapı arasında ayrışamaz.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    Bir OTLP span'inin maliyet rakamı almasının sebebi, maliyetin alım anında
+    hesaplanmasıdır. mcpd, span geldiği anda bu sunucunun çalıştığı fiyat
+    listesine göre onu fiyatlandırır; böylece oranlarınızı sonradan değiştirmeniz geçen ayın
+    maliyetini sessizce yeniden yazamaz. Bakınız
+    <a href={urlFor('/docs/cost', locale)} class="link">Maliyet muhasebesi</a>.
+  </p>
+
+  <h2>Her iki semantik kural kümesi</h2>
+  <p>
+    Yapay zekâ span'leri için birbiriyle yarışan iki öznitelik adı kümesi
+    kullanılıyor: OpenTelemetry'nin kendi <code>gen_ai.*</code> adları ve
+    OpenInference'ın <code>openinference.span.kind</code> ile birlikte gelen
+    <code>llm.*</code> adları. mcpd ikisini de okur, üstüne kendi
+    <code>mcpd.*</code> adlarını da. Hiçbir şeyi yeniden adlandırmazsınız.
+  </p>
+  <p>
+    Aşağıdaki her satır sırayla okunur, ilk eşleşen kazanır. Hiçbir satırın
+    adlandırmadığı bir öznitelik yine de saklanır: düzleştirilmiş öznitelik
+    haritasının tamamı span'in üzerinde durur, yani gönderdiğiniz hiçbir şey
+    eşlenmediği için kaybolmaz.
+  </p>
+
+  <h3>Model, payload ve kullanım</h3>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>mcpd alanı</th>
+          <th>Sırayla şuradan okunur</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>model</code></td>
+          <td><code>gen_ai.request.model</code>, <code>gen_ai.response.model</code>, <code>llm.model_name</code>, <code>mcpd.model</code></td>
+        </tr>
+        <tr>
+          <td><code>provider</code></td>
+          <td><code>gen_ai.system</code>, <code>llm.provider</code>, <code>mcpd.provider</code></td>
+        </tr>
+        <tr>
+          <td><code>input</code></td>
+          <td><code>input.value</code>, <code>gen_ai.prompt</code>, <code>mcpd.input</code></td>
+        </tr>
+        <tr>
+          <td><code>output</code></td>
+          <td><code>output.value</code>, <code>gen_ai.completion</code>, <code>mcpd.output</code></td>
+        </tr>
+        <tr>
+          <td><code>entity_name</code></td>
+          <td><code>gen_ai.agent.name</code>, <code>mcpd.entity.name</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.input_tokens</code></td>
+          <td><code>gen_ai.usage.input_tokens</code>, <code>gen_ai.usage.prompt_tokens</code>, <code>llm.token_count.prompt</code>, <code>mcpd.usage.input_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.output_tokens</code></td>
+          <td><code>gen_ai.usage.output_tokens</code>, <code>gen_ai.usage.completion_tokens</code>, <code>llm.token_count.completion</code>, <code>mcpd.usage.output_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>usage.total_tokens</code></td>
+          <td><code>llm.token_count.total</code>, <code>gen_ai.usage.total_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.cache_read</code></td>
+          <td><code>gen_ai.usage.cache_read_input_tokens</code>, <code>llm.token_count.prompt_details.cache_read</code>, <code>mcpd.usage.cache_read_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.cache_write</code></td>
+          <td><code>gen_ai.usage.cache_creation_input_tokens</code>, <code>llm.token_count.prompt_details.cache_write</code>, <code>mcpd.usage.cache_write_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>input_details.audio</code></td>
+          <td><code>llm.token_count.prompt_details.audio</code></td>
+        </tr>
+        <tr>
+          <td><code>output_details.reasoning</code></td>
+          <td><code>llm.token_count.completion_details.reasoning</code>, <code>gen_ai.usage.reasoning_tokens</code></td>
+        </tr>
+        <tr>
+          <td><code>output_details.audio</code></td>
+          <td><code>llm.token_count.completion_details.audio</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Üç token sayısından hiçbirini taşımayan bir span, sıfırlarla dolu bir
+    kullanım nesnesi yerine hiç kullanım nesnesi taşımaz. Sıfır girdi token'ı
+    ile bilinmeyen girdi token'ı farklı olgulardır ve ikincisi kastedilirken
+    birincisine dayanılarak kurulmuş bir maliyet raporu, kimsenin fark
+    etmeyeceği bir biçimde yanlıştır.
+  </p>
+
+  <h3>İlişkilendirme</h3>
+  <p>
+    İlişkilendirme alanları, tek bir kullanıcının ya da tek bir oturumun
+    çalıştırmalarını istemenizi sağlayan şeydir. Önce span öznitelikleri, sonra
+    kaynak öznitelikleri okunur.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>mcpd alanı</th>
+          <th>Sırayla şuradan okunur</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>project</code></td>
+          <td>span üzerindeki <code>mcpd.project</code>, sonra kaynak üzerindeki, sonra daemon'ın <code>--project</code> değeri</td>
+        </tr>
+        <tr>
+          <td><code>environment</code></td>
+          <td><code>mcpd.environment</code>, kaynak <code>deployment.environment.name</code>, kaynak <code>deployment.environment</code></td>
+        </tr>
+        <tr>
+          <td><code>service_name</code></td>
+          <td>kaynak <code>service.name</code></td>
+        </tr>
+        <tr>
+          <td><code>service_version</code></td>
+          <td>kaynak <code>service.version</code></td>
+        </tr>
+        <tr>
+          <td><code>session_id</code></td>
+          <td><code>gen_ai.conversation.id</code>, <code>session.id</code>, <code>mcpd.session_id</code></td>
+        </tr>
+        <tr>
+          <td><code>thread_id</code></td>
+          <td><code>mcpd.thread_id</code>, <code>thread.id</code></td>
+        </tr>
+        <tr>
+          <td><code>user_id</code></td>
+          <td><code>user.id</code>, <code>enduser.id</code>, <code>mcpd.user_id</code></td>
+        </tr>
+        <tr>
+          <td><code>request_id</code></td>
+          <td><code>mcpd.request_id</code>, <code>http.request.id</code></td>
+        </tr>
+        <tr>
+          <td><code>release</code></td>
+          <td><code>mcpd.release</code>, kaynak <code>service.version</code></td>
+        </tr>
+        <tr>
+          <td><code>run_id</code>, <code>resource_id</code>, <code>experiment_id</code></td>
+          <td><code>mcpd.run_id</code>, <code>mcpd.resource_id</code>, <code>mcpd.experiment_id</code></td>
+        </tr>
+        <tr>
+          <td><code>tags</code></td>
+          <td>dize dizisi olarak <code>mcpd.tags</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Durum ve hatalar</h3>
+  <p>
+    OTLP durum kodu <code>1</code> ise <code>ok</code>, <code>2</code> ise
+    <code>error</code> olur. Bitiş zamanı olan ve durumu ayarlanmamış bir span
+    <code>ok</code> olarak kaydedilir, çünkü şikâyet etmeden biten bir span
+    başarılı olmuştur. Bitiş zamanı olmayan ve durumu ayarlanmamış bir span
+    <code>unset</code> kalır: span hâlâ çalışıyordur ve mcpd bir sonuç
+    uydurmak yerine onu böyle saklar.
+  </p>
+  <p>
+    Hatalı bir span'de mesaj önce <code>status.message</code>, sonra
+    <code>exception.message</code> alanından gelir; ikisi de yoksa
+    <code>unspecified error</code> dizesi yazılır. Hata türü
+    <code>exception.type</code> alanından, yığın izi
+    <code>exception.stacktrace</code> alanından gelir. Hatalı bir span her zaman
+    bir mesaj taşır, çünkü metni olmayan bir "bir şey başarısız oldu" ile
+    yapabileceğiniz bir şey yoktur.
+  </p>
+
+  <h3>Span türü</h3>
+  <p>
+    Tür, bir span'in şelalede nasıl çizileceğini belirler. mcpd bunu
+    özgüllük sırasına göre çıkarır ve her zaman güvenli olan
+    <code>generic</code> değerine düşer. Bir span'i yanlış etiketlemek, hiç
+    etiketlememekten kötüdür.
+  </p>
+  <ol>
+    <li>mcpd'nin bildiği bir türü adlandırdığında <code>mcpd.span.kind</code>.</li>
+    <li><code>openinference.span.kind</code>.</li>
+    <li><code>gen_ai.operation.name</code>.</li>
+    <li>Yalnızca tek bir span türünün taşıdığı bir özniteliğin varlığı.</li>
+  </ol>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Öznitelik değeri</th>
+          <th>mcpd türü</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>openinference.span.kind=LLM</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>openinference.span.kind=CHAIN</code></td><td><code>workflow_run</code></td></tr>
+        <tr><td><code>openinference.span.kind=TOOL</code></td><td><code>tool_call</code></td></tr>
+        <tr><td><code>openinference.span.kind=AGENT</code></td><td><code>agent_run</code></td></tr>
+        <tr><td><code>openinference.span.kind=RETRIEVER</code></td><td><code>retrieval</code></td></tr>
+        <tr><td><code>openinference.span.kind=EMBEDDING</code></td><td><code>rag_embedding</code></td></tr>
+        <tr><td><code>openinference.span.kind=RERANKER</code></td><td><code>rag_action</code></td></tr>
+        <tr><td><code>openinference.span.kind=GUARDRAIL</code></td><td><code>guardrail</code></td></tr>
+        <tr><td><code>openinference.span.kind=EVALUATOR</code></td><td><code>scorer_run</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=chat</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=text_completion</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=generate_content</code></td><td><code>model_generation</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=embeddings</code></td><td><code>rag_embedding</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=execute_tool</code></td><td><code>tool_call</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=invoke_agent</code></td><td><code>agent_run</code></td></tr>
+        <tr><td><code>gen_ai.operation.name=create_agent</code></td><td><code>agent_run</code></td></tr>
+        <tr><td><code>gen_ai.system</code>, <code>llm.model_name</code>, <code>llm.provider</code> özniteliklerinden herhangi biri varsa</td><td><code>model_generation</code></td></tr>
+        <tr><td><code>mcp.tool.name</code> varsa</td><td><code>mcp_tool_call</code></td></tr>
+        <tr><td><code>http.request.method</code> ya da <code>http.method</code> varsa</td><td><code>http_request</code></td></tr>
+        <tr><td>başka her şey</td><td><code>generic</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    <code>openinference.span.kind</code> ya da
+    <code>gen_ai.operation.name</code> altında mcpd'nin tanımadığı bir span
+    türü, geri çevrilmek yerine <code>generic</code> değerine düşer. Türlerin
+    tam listesi
+    <a href={urlFor('/docs/reference/data-model', locale)} class="link">veri modelinde</a>
+    bulunur.
+  </p>
+
+  <h2>Loglar ve metrikler</h2>
+  <p>
+    Log kayıtları, spesifikasyonun öngördüğü gibi önem derecesi numarasına göre
+    eşlenir: 1 ile 4 arası trace, 5 ile 8 arası debug, 9 ile 12 arası info, 13
+    ile 16 arası warn, 17 ile 20 arası error ve bunun üstündeki her şey fatal.
+    Önem derecesi numarası olmayan bir kayıt info sayılır. Mesaj
+    <code>body.stringValue</code> alanından, logger adı scope adından gelir;
+    <code>traceId</code> ve <code>spanId</code> geçerli oldukları sürece
+    saklanır, ki bir log satırını onu yayan span'in yanına koyan şey budur.
+  </p>
+  <p>
+    Metriklerde sum'lar counter, gauge'ler gauge olur. Histogramlar toplamları
+    ve sayılarıyla, bucket sınırları korunarak kaydedilir: mcpd, önceden
+    toplanmış bir histogramdan kesin bir kuantili yeniden türetebiliyormuş gibi
+    yapmaz. Exemplar'lar saklanır, ki bir grafikteki sıçramadan onu doğuran
+    çalıştırmayı açmanızı sağlayan şey budur. Çoğu araç bunları atar.
+  </p>
+
+  <h2>Id'ler ve W3C traceparent</h2>
+  <p>
+    mcpd, OpenTelemetry'nin tanımlayıcı biçimlerini birebir kullanır: trace id
+    128 bittir ve 32 küçük harfli onaltılık karakterle, span id 64 bittir ve 16
+    karakterle yazılır. Çeviri katmanını ortadan kaldıran şey, tel biçiminin
+    aynı tutulmasıdır. Tümü sıfır olan id, "trace yok" anlamına ayrılmıştır ve
+    mcpd'nin kendi ürettiği id'ler de dahil olmak üzere geçtiği her yerde geri
+    çevrilir.
+  </p>
+  <p>
+    OTLP/JSON, id alanları için onaltılık öngörür, ama birkaç SDK base64 yayar.
+    mcpd ikisini de kabul eder ve onaltılık saklar. Id'leri eksik, yanlış
+    uzunlukta ya da tümü sıfır olan bir span atlanır ve yığının geri kalanı yine
+    de yazılır; çünkü bir tane kötü span yüzünden on bin iyi span'i geri çeviren
+    bir collector, insanların kapattığı bir collector'dır.
+  </p>
+  <p>
+    Zaman damgaları, Unix epoch'undan bu yana geçen nanosaniyelerdir.
+    2<sup>53</sup> değerini aştıkları için OTLP/JSON onları dize olarak gönderir
+    ve mcpd de dize olarak ayrıştırır. Kayan noktalı sayı olarak okumak
+    duyarlılık kaybettirir; bu da aslında öyle olmadığı hâlde birbirinden
+    mikrosaniyelerle ayrılmış gibi görünen span'ler olarak ortaya çıkar.
+    <code>0</code> olan ya da hiç bulunmayan bir <code>endTimeUnixNano</code>,
+    span'in bitmediği anlamına gelir.
+  </p>
+  <p>
+    Bir <code>traceparent</code> başlığı
+    <code>version-traceid-parentid-flags</code> biçimindedir. mcpd bunu
+    spesifikasyonun koyduğu kurallarla ayrıştırır: <code>ff</code> sürümü geri
+    çevrilir, <code>00</code> sürümünde tam olarak dört alan bulunmalıdır,
+    sonraki sürümler daha fazlasını taşıyabilir, id'ler doğrulanmalıdır ve
+    bayrak baytının 0. biti örneklenmiş bayrağıdır. Bozuk bir başlık hiçbir
+    zaman bir isteği geri çevirme nedeni değildir. mcpd onun yerine yeni bir
+    trace başlatır.
+  </p>
+  <p>
+    Bunun önemli olduğu yer: mcpd SDK'ları gelen bir <code>traceparent</code>
+    başlığını okur ve giden çağrılarda bir tane yayar, böylece bir trace servis
+    sınırından sağ çıkar. OTLP endpoint'leri id'lerini payload'dan alır, çünkü
+    exporter'ınız onları zaten span'lerin içine koymuştur. Bir trace, mcpd ile
+    ölçümlemediğiniz bir serviste başlıyorsa onun <code>traceparent</code>
+    başlığını iletin; iki yarı da tek bir trace id altında yerine ulaşsın.
+  </p>
+
+  <h2>Bir istek, eksiksiz</h2>
+  <p>
+    Yukarıdakilerin hiçbiri SDK istemez. Bu, bir terminale yapıştırabileceğiniz
+    eksiksiz ve geçerli bir dışa aktarımdır:
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="ham OTLP/JSON"
+    samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: rawPost }]}
+  />
+
+  <h2>OTLP'nin taşıyamadıkları</h2>
+  <p>
+    OTLP'nin span, log ve metrik için bir biçimi vardır. Bir makine puanı, bir
+    insanın başparmak aşağısı ya da bir yön notu için hiçbir biçimi, modern
+    bir sağlayıcının fatura kestiği token ayrıntısı için de hiçbir sözcük
+    dağarcığı yoktur.
+    Bunları göndermenin iki yolu var:
+  </p>
+  <ul>
+    <li>
+      Veri modelinin tamamını tek bir istekte taşıyan, mcpd'nin yerel yığın uç
+      noktası <code>POST /v1/ingest</code>.
+    </li>
+    <li>
+      OTLP üzerinden zaten gönderdiğiniz bir trace'e iliştirilen
+      <code>POST /v1/api/scores</code> ve <code>POST /v1/api/feedback</code>.
+    </li>
+  </ul>
+  <p>
+    İkisini karıştırmak olağandır ve beklenir. Span'leri zaten çalıştırdığınız
+    OpenTelemetry SDK'sıyla dışa aktarın, puanları da değerlendirme işinizden
+    gönderin. Trace id üzerinden birleşirler. Bakınız
+    <a href={urlFor('/docs/evaluation', locale)} class="link">Puanlar ve geri bildirim</a>
+    ve <a href={urlFor('/docs/reference/api', locale)} class="link">HTTP API</a>.
+  </p>
+
+  <h2>Portu açmadan önce</h2>
+  <p>
+    <code>--ingest-key</code> ayarlanmamışsa 4317'ye erişebilen herkes oraya
+    yazabilir; <code>--read-key</code> ayarlanmamışsa saklanan her prompt'u
+    okuyabilir. mcpd, ikisinden biri açık bırakılmışken loopback dışı bir adrese
+    bağlandığında başlangıçta bir uyarı loglar. Bunları
+    <a href={urlFor('/docs/configuration', locale)} class="link">yapılandırmayla</a>
+    ayarlayın, sonra anahtarı <code>Authorization: Bearer</code> olarak
+    gönderin; yukarıdaki <code>OTEL_EXPORTER_OTLP_HEADERS</code> tam da bunu
+    yapar.
+  </p>
+
+  <Command
+    class="my-6"
+    label="anahtarlarla çalıştır"
+    command="mcpd --ingest-key $INGEST_KEY --read-key $READ_KEY"
+  />
+</Doc>

@@ -1,0 +1,405 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+---
+
+<Doc
+  title="Scores and feedback"
+  description="How mcpd records machine evaluation and human judgement, why they are stored apart, and the query that finds the runs a scorer marked down."
+  lede="A score is what a machine thought. Feedback is what a person thought. mcpd keeps them as two signals and never averages one into the other."
+  og="docs"
+>
+  <h2>Two signals, not one number</h2>
+  <p>
+    A <strong>score</strong> is a machine evaluation: a judge model, a regular
+    expression, a unit test, anything that can produce a number about a run. A
+    <strong>feedback</strong> record is a person's judgement: a thumbs-down in
+    your product, a reviewer's rating, a corrected answer.
+  </p>
+  <p>
+    Both attach to a <code>trace_id</code> or a <code>span_id</code>, both
+    arrive as signals in their own right, and both are stored in their own
+    table. They are
+    never combined. A judge scoring 0.9 for relevance and a customer pressing
+    thumbs-down are both true statements, and the disagreement between them is
+    the most useful thing on the run. An average would erase exactly that, and
+    leave you with a number nobody can act on.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>A score declares its scale</h2>
+  <p>
+    <code>min</code> and <code>max</code> are part of the score. Without them a
+    value is not interpretable: 0.86 could be a good result on a 0 to 1 scale,
+    a poor one on a 0 to 5 scale, or a distance where lower is better. Six
+    months later, with two scorers in the same project, nobody can tell which.
+    The spec defaults them to 0 and 1, and every SDK requires them at the call
+    site so that a default is never accepted by accident.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Field</th><th>What it is for</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>scorer_id</code></td>
+        <td>Which scorer produced this, such as <code>answer_relevance</code>. Required.</td>
+      </tr>
+      <tr>
+        <td><code>scorer_version</code></td>
+        <td>A score compares only to another score from the same version. Change the prompt of a judge and you have a new scorer, not a continuation of the old one.</td>
+      </tr>
+      <tr>
+        <td><code>value</code></td>
+        <td>The number.</td>
+      </tr>
+      <tr>
+        <td><code>min</code>, <code>max</code></td>
+        <td>The declared scale the number sits on.</td>
+      </tr>
+      <tr>
+        <td><code>label</code></td>
+        <td>A categorical result, when the scorer produces one alongside the number.</td>
+      </tr>
+      <tr>
+        <td><code>reason</code></td>
+        <td>Why. For a judge model this is its explanation, and it is what makes a score arguable instead of magic.</td>
+      </tr>
+      <tr>
+        <td><code>source</code></td>
+        <td>Live, offline, experiment or manual.</td>
+      </tr>
+      <tr>
+        <td><code>score_trace_id</code></td>
+        <td>The trace of the scoring run itself, so a suspicious score can be opened and read like any other run.</td>
+      </tr>
+      <tr>
+        <td><code>cost</code></td>
+        <td>What producing the score cost.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Recording one</h2>
+  <p>
+    The SDK helper queues a score the same way it queues a span, so the call
+    does not block and cannot throw. With no <code>traceId</code> given it
+    attaches to the active span's trace.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="score" title="score and feedback" />
+
+  <p>
+    Over HTTP that is <code>POST /v1/api/scores</code>, taking a
+    <code>Score</code> as the body. A score must name the
+    <code>trace_id</code> or the <code>span_id</code> it is about; a score
+    attached to nothing is refused with 400 rather than stored where it can
+    never be found. Send <code>score_id</code> as an empty string and the
+    server generates one.
+  </p>
+
+  <h2>Where a score came from</h2>
+  <p>
+    <code>source</code> is separate from <code>scorer_id</code> because the
+    same scorer runs in more than one context, and the contexts are not
+    comparable. Re-scoring last week's traffic with today's judge is not
+    evidence that quality improved.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Source</th><th>Meaning</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>live</code></td><td>Produced online, as the traced run happened.</td></tr>
+      <tr><td><code>offline</code></td><td>Produced later, by scoring stored traces.</td></tr>
+      <tr><td><code>experiment</code></td><td>Produced by an experiment run against a dataset.</td></tr>
+      <tr><td><code>manual</code></td><td>Entered by a person, through the API or the interface.</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    A score written through an SDK defaults to <code>live</code>. Set it
+    yourself for the other three.
+  </p>
+
+  <h2>Scoring costs money, so it is recorded</h2>
+  <p>
+    A judged evaluation is usually another model call. Scoring every production
+    run with a large judge can cost more than serving the traffic did, and that
+    is a bill people discover late. A <code>Score</code> therefore carries a
+    <code>cost</code> in the same shape a span does, with a currency, an input
+    and output split, and the price book that produced the figure. Set it when
+    you write the score through the HTTP API or a native ingest batch.
+  </p>
+  <p>
+    <code>score_trace_id</code> is the other half of the same idea. Trace the
+    scoring run itself and the id goes on the score, so a judge that started
+    marking everything down can be opened, read, and shown to be broken.
+  </p>
+
+  <h2>Human feedback</h2>
+  <p>
+    Feedback is written from your own product. Call it from the control the
+    person actually pressed and the judgement lands on the exact trace that
+    produced the answer they were reacting to. <code>kind</code> decides the
+    shape of <code>value</code>.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Kind</th><th><code>value</code></th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>thumbs</code></td><td><code>up</code> or <code>down</code>.</td></tr>
+      <tr><td><code>rating</code></td><td>A number, on a scale the producer declares.</td></tr>
+      <tr><td><code>correction</code></td><td>The right answer, as text.</td></tr>
+      <tr><td><code>tag</code></td><td>A label chosen from a set.</td></tr>
+      <tr><td><code>comment</code></td><td>Free prose, with no score attached.</td></tr>
+    </tbody>
+  </table>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="a thumbs-down from your product"
+    samples={[
+      {
+        lang: 'typescript',
+        label: 'TypeScript',
+        shiki: 'typescript',
+        code: `// No traceId: it attaches to the active span's trace.
+mcpd.feedback({
+  kind: 'thumbs',
+  value: 'down',
+  comment: 'Named the wrong depot.',
+  authorKind: 'end_user',
+})`,
+      },
+      {
+        lang: 'curl',
+        label: 'cURL',
+        shiki: 'bash',
+        code: `curl -s -X POST "$MCPD/v1/api/feedback" \\
+  -H 'content-type: application/json' \\
+  -d "{
+    \\"feedback_id\\": \\"\\",
+    \\"trace_id\\": \\"$TRACE\\",
+    \\"kind\\": \\"thumbs\\",
+    \\"value\\": \\"down\\",
+    \\"comment\\": \\"Named the wrong depot.\\",
+    \\"author_kind\\": \\"end_user\\",
+    \\"timestamp\\": \\"$NOW\\",
+    \\"correlation\\": { \\"project\\": \\"default\\" }
+  }"`,
+      },
+    ]}
+  />
+
+  <p>
+    Redaction matches on key names, and it runs over the <code>metadata</code>
+    you attach to a judgement. <code>author_id</code> is stored as you send it,
+    so send a pseudonymous id rather than an email address. See
+    <a href="/docs/privacy" class="link">Redaction and retention</a>.
+  </p>
+
+  <h2>Scoring what the run did, not what it said</h2>
+  <p>
+    Most scorers read a run's answer. An agent that finishes with <em>I ran all
+    the tests and there were no regressions</em> satisfies every one of them,
+    and satisfies a judge model too, because the sentence is well formed and
+    says the right thing. The sentence is the agent's account of its own work,
+    and an account is not evidence. If the test command never ran, no scorer
+    that reads the answer can tell you so.
+  </p>
+  <p>
+    Two built-in scorers read the trace instead. They ignore the answer
+    entirely and ask what the run recorded.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Scorer</th><th>Scores 1 when</th><th>Configured with</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>span_present</code></td>
+        <td>The run recorded at least one span of the required kind or name.</td>
+        <td><code>span_kind</code>, <code>span_name</code>, or both together. Set both and both must hold.</td>
+      </tr>
+      <tr>
+        <td><code>tool_succeeded</code></td>
+        <td>A tool span with that name ran, and at least one call of it ended <code>ok</code>.</td>
+        <td><code>tool_name</code>.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Both need configuration, so neither runs in the default set. A scorer that
+    passed because nobody told it what to look for would report every run as
+    having done work no one checked, which is the failure it exists to catch.
+    Name them, and give them their settings:
+  </p>
+
+  <pre><code class="language-json">{`{
+  "trace_ids": ["4bf92f3577b34da6a3ce929d0e0e4736"],
+  "scorers": ["tool_succeeded", "span_present"],
+  "config": {
+    "tool_name": "run_tests",
+    "span_kind": "tool_call",
+    "span_name": "run_tests"
+  }
+}`}</code></pre>
+
+  <p>
+    <code>span_name</code> and <code>tool_name</code> are compared exactly, and
+    <code>case_sensitive</code> does not loosen them. A span name is an
+    identifier your code chose rather than prose, and a loose comparison would
+    let <code>run_tests_dry</code> satisfy an assertion about
+    <code>run_tests</code>, on precisely the run the check was written for.
+    <code>tool_succeeded</code> accepts any of the four tool span kinds,
+    <code>tool_call</code>, <code>client_tool_call</code>,
+    <code>provider_tool_call</code> and <code>mcp_tool_call</code>, because
+    which one a run records says where the tool lives, not whether it ran.
+  </p>
+
+  <h3>Two ways to score zero, and they are different bugs</h3>
+  <p>
+    A tool that never ran and a tool that ran and failed are both a zero, and
+    fixing them are opposite jobs: one is a step the agent skipped, the other a
+    step that broke. The <code>reason</code> separates them, and carries the
+    recorded error so the score is actionable without opening the run.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>What happened</th><th><code>reason</code></th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>The tool never ran.</td>
+        <td><code>"run_tests" never ran; the run records 2 tool call(s), named: lookup_order, send_email</code></td>
+      </tr>
+      <tr>
+        <td>It ran and failed.</td>
+        <td><code>"run_tests" ran 1 time(s) and none ended ok; the last ended error: pytest exited 1: 3 failed</code></td>
+      </tr>
+      <tr>
+        <td>It failed, was retried, and worked.</td>
+        <td><code>"run_tests" ran 2 time(s), 1 ended ok and 1 did not</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>span_present</code> does the same thing for its own zero: it names
+    what it looked for and then what the run actually holds, because a wrong
+    name and absent instrumentation are indistinguishable from a bare
+    <em>not found</em> and have nothing in common as fixes.
+  </p>
+
+  <h3>What these scorers prove, and what they do not</h3>
+  <p>
+    They prove an action was <strong>recorded</strong>. They do not prove it was
+    correct. A <code>run_tests</code> span that ended <code>ok</code> says the
+    tool returned without raising, not that it ran the right suite, not that it
+    ran the whole suite, and not that anything read the result. Treating a green
+    <code>tool_succeeded</code> as proof the code works is the same mistake as
+    trusting the sentence, one step further along.
+  </p>
+  <p>
+    They also measure the trace rather than the world. A span exists because
+    your process recorded one. Work that happened inside a step you never
+    instrumented is invisible here, and reads exactly like work that never
+    happened, which is the one way these scorers report a failure that is not
+    one. When one of them scores zero, check the instrumentation before you
+    conclude the agent lied.
+  </p>
+  <p>
+    Both hold even when payload capture is off. Neither reads an input, an
+    output or a completion: they read span kind, span name and span status,
+    which the daemon holds whatever your capture settings are.
+  </p>
+
+  <h2>The query that finds bad answers</h2>
+  <p>
+    This is what the scores are for. <code>has_score</code> names a scorer and
+    <code>score_below</code> sets the bar, and the trace list returns the runs
+    that scorer put underneath it. The comparison is strict, so
+    <code>score_below=0.5</code> excludes a run that scored exactly 0.5.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="query" title="find the runs that scored badly" />
+
+  <p>
+    <code>score_below</code> only means something with <code>has_score</code>
+    beside it: a bar with no scorer named is a bar on nothing. Both are
+    parameters of <code>GET /v1/api/traces</code>, so they combine with every
+    other filter there. Bad answers from one model, in production, in the last
+    day, is one request.
+  </p>
+
+  <h2>Reading them back</h2>
+  <p>
+    <code>GET /v1/api/scores</code> lists machine evaluations, filtered by
+    <code>scorer_id</code>, <code>source</code>, <code>trace_id</code>,
+    <code>experiment_id</code>, <code>min_value</code>, <code>max_value</code>
+    and a time window, with cursor paging. <code>source</code> takes
+    <code>live</code>, <code>offline</code>, <code>experiment</code> or
+    <code>manual</code>, which is how you read back the judge's own scores
+    without the ones a person typed.
+    <code>GET /v1/api/feedback</code> takes a <code>trace_id</code> and returns
+    the judgements on that run. Listing a project's feedback without naming a
+    run is not implemented in this build, and the endpoint says so: with no
+    <code>trace_id</code> it refuses with a 400 naming the parameter. It used to
+    answer an empty list, which reads as though nobody had judged anything.
+  </p>
+  <p>
+    The score list takes no <code>order</code>: it is newest first, and its
+    cursor compares one way only. The run and span lists do take one, so it is
+    refused here by name rather than accepted and dropped. The same applies to
+    the <code>kind</code>, <code>from</code>, <code>to</code> and
+    <code>cursor</code> filters that several SDK clients will let you set on a
+    feedback query. None of them was ever applied, and all four are now refused.
+  </p>
+  <p>
+    To read a run and everything attached to it at once, ask for the extras by
+    name: <code>GET /v1/api/traces/{'{trace_id}'}?include=scores,feedback</code>,
+    or <code>include=all</code> for the logs as well.
+  </p>
+
+  <h2>What the trace list carries, and what it does not</h2>
+  <p>
+    Each stored trace keeps two rollups so the list needs no join. One is the
+    mean value <em>per scorer</em>: an average within
+    <code>answer_relevance</code>, and a separate average within
+    <code>groundedness</code>. The other is a count of feedback
+    <em>per kind</em>: three thumbs, one correction. Counts, not a mean, because
+    the mean of a thumbs-up and a correction is not a quantity.
+  </p>
+  <p>
+    There is no overall quality score, and there will not be one. A single
+    figure combining a judge model, a regular expression and a customer's
+    thumbs-down would be a number with no unit and no way to argue with it.
+    mcpd shows you the parts and lets you decide.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>
+      Everything else you can filter on:
+      <a href="/docs/searching" class="link">Finding a run</a>.
+    </li>
+    <li>
+      What a cost figure is made of:
+      <a href="/docs/cost" class="link">Cost accounting</a>.
+    </li>
+    <li>
+      What happens to an author id before it is stored:
+      <a href="/docs/privacy" class="link">Redaction and retention</a>.
+    </li>
+  </ul>
+</Doc>

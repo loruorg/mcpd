@@ -1,0 +1,683 @@
+---
+/**
+ * Deploying mcpd.
+ *
+ * The manifests on this page are not transcribed. They are read from
+ * `deploy/` at build time, so the file a reader copies is the file that is in
+ * the repository. A drifted example is worse than no example.
+ */
+import fs from 'node:fs'
+import path from 'node:path'
+import Doc from '@/layouts/Doc.astro'
+import Unreleased from '@/components/Unreleased.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+const href = (route: string) => urlFor(route, locale)
+
+const ROOT = path.resolve(process.cwd(), '..')
+const read = (rel: string) => fs.readFileSync(path.join(ROOT, rel), 'utf8').trimEnd()
+
+const docker = [
+  {
+    lang: 'curl' as const,
+    label: 'docker-compose.yml',
+    shiki: 'yaml',
+    code: read('deploy/docker/docker-compose.yml'),
+  },
+  {
+    lang: 'kotlin' as const,
+    label: '.env.example',
+    shiki: 'bash',
+    code: read('deploy/docker/.env.example'),
+  },
+]
+
+const kubernetes = [
+  { lang: 'typescript' as const, label: 'deployment.yaml', shiki: 'yaml', code: read('deploy/k8s/deployment.yaml') },
+  { lang: 'python' as const, label: 'service.yaml', shiki: 'yaml', code: read('deploy/k8s/service.yaml') },
+  { lang: 'go' as const, label: 'pvc.yaml', shiki: 'yaml', code: read('deploy/k8s/pvc.yaml') },
+  { lang: 'rust' as const, label: 'secret.yaml.example', shiki: 'yaml', code: read('deploy/k8s/secret.yaml.example') },
+]
+
+const chartValues = [
+  { lang: 'curl' as const, label: 'values.yaml', shiki: 'yaml', code: read('deploy/helm/mcpd/values.yaml') },
+]
+---
+
+<Doc
+  title="Docker ve Kubernetes"
+  description="mcpd'yi konteyner olarak veya Kubernetes üzerinde çalıştırın: bir compose dosyası, gerçek yoklamaları olan manifest'ler, bir Helm chart'ı ve port başkasına açılmadan önce ayarlanacak iki anahtar."
+  lede="Tek süreç, tek birim, yedeklenecek tek dosya. Bu sayfanın en uzun bölümü, sizden başkasının ona erişebilmesinden önce nelerin ayarlanacağını anlatandır."
+  og="docs"
+>
+  <h2>Tek konteyner</h2>
+  <Unreleased class="not-prose my-6" />
+  <p>
+    mcpd, deposu içine derlenmiş tek bir süreçtir. Yanında çalıştırılacak bir
+    veritabanı, bir yan araç ve bir statik dosya sunucusu yoktur: alım, sorgu
+    API'si ve arayüz hep tek bir porttan sunulur.
+  </p>
+
+  <Command
+    command="docker run -p 4317:4317 -v mcpd-data:/data -e MCPD_DATA=/data/mcpd.db ghcr.io/mcpd/mcpd:0.1.0"
+    secondary={[
+      { label: 'Yapılandırmayı yazdırıp çıkın', command: 'docker run --rm ghcr.io/mcpd/mcpd:0.1.0 config' },
+      { label: 'Hiçbir şey saklamayın', command: 'docker run -p 4317:4317 -e MCPD_DATA=:memory: ghcr.io/mcpd/mcpd:0.1.0' },
+    ]}
+  />
+
+  <p>
+    İki kez okumaya değer kısım birimdir. O olmadan SQLite dosyası konteynerin
+    yazılabilir katmanında durur ve trace'ler konteynerle birlikte gider.
+    <code>MCPD_DATA</code> aynı nedenle açıkça ayarlanır: daemon'un yazdığı yol
+    ile bağladığınız yol birbirinden ayrılırsa mcpd çalışmayı sürdürür ve birim
+    boş kalır; bu da veriye ihtiyaç duyduğunuz gün öğrendiğiniz türden bir
+    hatadır.
+  </p>
+  <p>
+    Etiketi sabitleyin. <code>latest</code>, yeniden başlatmayı kimsenin
+    seçmediği bir anda bir yükseltmeye çevirir. Her etiket
+    <code>linux/amd64</code> ve <code>linux/arm64</code> için derlenir ve
+    imajda <code>/data</code> dizininin sahibi olan uid 10001 ile çalışır.
+  </p>
+
+  <h2>Port ve üzerinde yanıt veren şeyler</h2>
+  <p>
+    Her şey 4317 üzerindedir. Kurulumu tek konteyner yapan budur; bir giriş
+    kuralı ya da bir ağ politikası yazarken bilmeniz gereken de budur, çünkü
+    yolların hepsi aynı riski taşımaz.
+  </p>
+
+  <div class="scroll-x">
+  <table>
+    <thead>
+      <tr>
+        <th>Yol</th>
+        <th>Ne olduğu</th>
+        <th>Anahtar gerekir mi</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>/v1/traces</code>, <code>/v1/logs</code>, <code>/v1/metrics</code></td>
+        <td>Herhangi bir OpenTelemetry SDK'sı için OTLP alımı</td>
+        <td>Alım</td>
+      </tr>
+      <tr>
+        <td><code>/v1/ingest</code></td>
+        <td>Yerel alım, tek bir istekte modelin tamamı</td>
+        <td>Alım</td>
+      </tr>
+      <tr>
+        <td><code>/v1/api/…</code></td>
+        <td>Sorgu API'si: trace'ler, span'ler, loglar, puanlar, analiz</td>
+        <td>Okuma</td>
+      </tr>
+      <tr>
+        <td><code>/</code></td>
+        <td>İkili dosyaya gömülü operatör arayüzü</td>
+        <td>Yok</td>
+      </tr>
+      <tr>
+        <td><code>/healthz</code>, <code>/readyz</code>, <code>/metrics</code></td>
+        <td>Canlılık, hazırlık ve mcpd'nin kendi Prometheus sayaçları</td>
+        <td>Yok</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    Bir alım isteği 32 MiB ile sınırlıdır. Prompt'lar büyüktür, o yüzden bu sınır
+    bilerek cömerttir; ancak mcpd'nin önündeki bir proxy'nin sınırı
+    genellikle daha küçüktür: 3 MiB'lik bir yığını reddeden bir ters proxy,
+    bir trace'in hiç ulaşmamasının en yaygın nedenidir.
+  </p>
+
+  <h2>Compose</h2>
+  <p>
+    Bu dosyadaki iki karar açıklanmaya değer, çünkü ikisi de eksiklik gibi
+    görünüyor. Port <code>127.0.0.1</code> üzerinde yayımlanır, böylece siz hâlâ
+    anahtarları ayarlarken makinenin dışından hiçbir şey ona erişemez. Ve
+    dosyada bir sağlık denetimi yoktur, çünkü imajda bir tane vardır: imajdaki
+    busybox <code>wget</code> ile <code>MCPD_LISTEN</code> içindeki porta her 30
+    saniyede bir <code>/healthz</code> isteği gönderir ve sonucu
+    <code>docker compose ps</code> gösterir. Docker, sağlıksız diye bir
+    konteyneri yeniden başlatmaz; yeniden başlatma politikası süreç çıktığında
+    devreye girer.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={docker} title="deploy/docker" />
+
+  <Command
+    class="my-6"
+    command="docker compose -f deploy/docker/docker-compose.yml up -d"
+    secondary={[
+      { label: 'Loglar', command: 'docker compose -f deploy/docker/docker-compose.yml logs -f mcpd' },
+    ]}
+  />
+
+  <p>
+    Her anahtar satırındaki <code>:?</code> süs değildir. Değişken ayarsızken
+    Compose hizmeti başlatmayı reddeder; bu da unutulmuş bir anahtarı sessizce
+    açık bir porttan bir hata iletisine çevirir. İki çalıştırma anahtarının
+    dosyada hiç değeri yoktur, bu yüzden Compose onları yalnızca
+    <code>.env</code> ayarladığında geçirir: boş bir değer daemon'a hiç anahtar
+    olarak değil, boş bir anahtar olarak ulaşırdı.
+  </p>
+
+  <h2>Kubernetes</h2>
+  <p>
+    Dört nesne: bir Deployment, bir Service, bir PersistentVolumeClaim ve sizin
+    oluşturduğunuz bir Secret. Deployment, <code>Recreate</code> stratejisiyle
+    tek bir kopya çalıştırır ve bu manifest'lerde değiştirmemeniz gereken tek
+    satır odur. mcpd her şeyi tek bir SQLite dosyasında saklar, onu tek bir süreç
+    yazar ve aşamalı bir güncelleme, ilki dosyayı hâlâ tutarken aynı birim
+    üzerinde ikinci bir pod başlatırdı. Bu bir ölçeklenme hikâyesi değil, bir
+    bozulma hikâyesidir.
+  </p>
+  <p>
+    Secret, <code>kubectl apply</code> komutunun okuduğu dosyalardan biri
+    değildir. <code>secret.yaml.example</code> onun biçimini gösterir ve uzantısı
+    onu apply dışında tutar, çünkü yazıldığı gibi uygulanan bir Secret yer tutucu
+    metinlerini anahtarlarınız yapardı. Bunun yerine onu komut satırından, o an
+    üretilen anahtarlarla oluşturun. Pod; uid 10001 ile, salt okunur bir kök
+    dosya sistemiyle, hiçbir yetenek (capability) olmadan ve çalışma ortamının
+    varsayılan seccomp profiliyle çalışır. Pod Security <code>restricted</code>
+    düzeyinin istediği de budur.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={kubernetes} title="deploy/k8s" />
+
+  <pre><code class="language-bash">{`export INGEST_KEY=$(openssl rand -hex 32) READ_KEY=$(openssl rand -hex 32) ADMIN_KEY=$(openssl rand -hex 32)
+kubectl create namespace mcpd
+kubectl -n mcpd create secret generic mcpd-keys \\
+  --from-literal=ingest-keys=$INGEST_KEY \\
+  --from-literal=read-keys=$READ_KEY \\
+  --from-literal=admin-keys=$ADMIN_KEY \\
+  --from-literal=redact-key=$(openssl rand -hex 32)
+kubectl -n mcpd apply -f deploy/k8s/`}</code></pre>
+
+  <p>
+    Üç anahtarı ekibinizin sırları sakladığı yerde tutun: alım anahtarı her
+    ajana, okuma anahtarı arayüzü okuyan kişiye, yönetici anahtarı da veri
+    silebilecek kişiye gider. Bir worker kümenin dışında çalışmaya başladığında
+    <code>execute-keys</code> ve <code>worker-keys</code> anahtarlarını da aynı
+    yolla ekleyin; o zamana kadar ikisi için de alım anahtarları kabul edilir.
+  </p>
+
+  <pre class="my-6"><code>{`export EXECUTE_KEY=$(openssl rand -hex 32) WORKER_KEY=$(openssl rand -hex 32)
+kubectl -n mcpd patch secret mcpd-keys --type merge \\
+  -p '{"stringData":{"execute-keys":"'$EXECUTE_KEY'","worker-keys":"'$WORKER_KEY'"}}'
+kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
+
+  <Command
+    class="my-6"
+    command="kubectl -n mcpd port-forward svc/mcpd 4317:4317"
+    primaryLabel="Kendi makinenizden erişin"
+  />
+
+  <p>
+    Küme içindeki ajanlar Service'i gösterir. SDK'lar bu ikisini de ortamdan
+    okur, yani ölçümlenmiş kodun değişmesi gerekmez:
+  </p>
+
+  <Command command="MCPD_ENDPOINT=http://mcpd.mcpd.svc:4317 MCPD_API_KEY=$INGEST_KEY" />
+
+  <h3>Yoklamalar</h3>
+  <p>
+    İki uç bilerek farklı işler yapar ve yerlerini değiştirmek belirli ve çirkin
+    bir hataya yol açar.
+  </p>
+  <ul>
+    <li>
+      <code>/healthz</code> depoya hiç dokunmaz. Yalnızca süreç durumundan yanıt
+      verir. Veritabanını sorgulayan bir canlılık yoklaması, büyük bir sorgu
+      daemon'u her yavaşlattığında sağlıklı bir daemon'u yeniden başlatırdı; oysa
+      yeniden başlatmak, bir ileri yazma günlüğü boşaltılırken tam da istemediğiniz
+      şeydir.
+    </li>
+    <li>
+      <code>/readyz</code> depoya ping atar ve yapamadığında
+      <code>"status": "degraded"</code> ile neyin yanlış olduğunu söyleyen bir
+      satırı 503 olarak döndürür. Bu, hizmet veremeyen bir örneği öldürmeden
+      trafikten uzak tutar.
+    </li>
+  </ul>
+  <p>
+    Başlangıç yoklaması oradadır, çünkü göçler açılışta çalışır. Tekrar
+    çalıştırılmaları güvenlidir ve genellikle anlıktır, ama büyük bir
+    veritabanında canlılık
+    yoklamasının hoş göreceğinden uzun sürebilirler; her denemede göçün ortasında
+    öldürülen bir pod ise hiç başlamaz.
+  </p>
+
+  <h3>Ona ne vermeli</h3>
+  <p>
+    Bu sayılar bir kıyaslamadan değil, sürecin gerçekte yaptığı işten gelir ve
+    hiçbir kıyaslama iddia edilmiyor.
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Kaynak</th>
+        <th>Değer</th>
+        <th>Neden</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>CPU isteği</td>
+        <td><code>100m</code></td>
+        <td>Boştayken neredeyse hiçbir şeye mal olmaz. İstek, zamanlayıcı onu gürültülü bir şeyin altına yığmasın diye vardır.</td>
+      </tr>
+      <tr>
+        <td>CPU sınırı</td>
+        <td>yok</td>
+        <td>Alım dalgalar hâlinde gelir. Dalga sırasında yazıcıyı kısmak, bir istemci kuyruğunun dolmasının ve span'lerin düşürülmesinin yoludur.</td>
+      </tr>
+      <tr>
+        <td>Bellek isteği</td>
+        <td><code>128Mi</code></td>
+        <td>Statik bir ikili dosya, beş SQLite bağlantısı ve onların sayfa önbellekleri.</td>
+      </tr>
+      <tr>
+        <td>Bellek sınırı</td>
+        <td><code>512Mi</code></td>
+        <td>Eşzamanlı alım için pay. Tek bir istek 32 MiB prompt metni tutabilir, yani bellek aynı anda kaç büyük yığının geldiğini izler.</td>
+      </tr>
+      <tr>
+        <td>Birim</td>
+        <td><code>20Gi</code>, ReadWriteOnce</td>
+        <td>Kendi yüklerinize göre boyutlandırın. Metin baskındır ve arama dizini dış içerikli değildir, yani dizine alınan prompt'lar ve tamamlamalar bir kez daha saklanır.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Birimi yerel bir blok aygıtında tutun. SQLite'ın kilitlemesi yalnızca orada
+    doğrudur: NFS veya başka bir paylaşımlı dosya sisteminde kilitler en iyi
+    ihtimalle danışma niteliğindedir ve hata bir hata iletisi olarak değil,
+    haftalar sonra bozuk bir veritabanı olarak ortaya çıkar.
+  </p>
+
+  <h2>Helm chart'ı</h2>
+  <p>
+    Chart aynı dört nesneyi, önlerinde bir değerler dosyasıyla oluşturur; ayrıca
+    bir değer açana kadar kapalı duran altı nesne daha: bir Ingress, bir
+    NetworkPolicy, bir PodDisruptionBudget, bir ServiceAccount, bir
+    ServiceMonitor ve yapılandırma dosyası için bir ConfigMap ya da Secret. Her
+    sürüm chart'ı imajla aynı registry'ye gönderir. Anahtarları önce üretin ve
+    ekibinizin sırları sakladığı yerde tutun, çünkü kurulum onları size geri
+    yazdırmayacak:
+  </p>
+
+  <Command
+    command="helm install mcpd oci://ghcr.io/mcpd/charts/mcpd -n mcpd --create-namespace --set keys.ingest=$INGEST_KEY --set keys.read=$READ_KEY"
+    primaryLabel="Registry'den kurun"
+    secondary={[
+      { label: 'Anahtarları üretin', command: 'export INGEST_KEY=$(openssl rand -hex 32) READ_KEY=$(openssl rand -hex 32)' },
+      { label: 'Bir klondan', command: 'helm install mcpd ./deploy/helm/mcpd -n mcpd --create-namespace -f values.yaml' },
+      { label: 'Yükseltin', command: 'helm upgrade mcpd oci://ghcr.io/mcpd/charts/mcpd -n mcpd --reset-then-reuse-values' },
+    ]}
+  />
+
+  <p>
+    <code>keys.ingest</code> veya <code>keys.read</code> ayarsız olduğunda kurulum
+    başarısız olur ve nedenini söyler. Açık bir alım ucunu sonradan keşfetmenize
+    izin veren bir chart işini yapmıyor olurdu. Secret'ı kendiniz yönetiyorsanız
+    bunun yerine <code>keys.existingSecret</code> ayarlayın; chart hiçbiri
+    oluşturmaz.
+  </p>
+  <p>
+    Pod şablonu Secret'ın bir sağlama toplamını taşır, yani bir anahtarı
+    döndürmek ve <code>helm upgrade</code> çalıştırmak pod'u yeniden başlatır.
+    Bu olmadan yeni anahtar kümede durur ve daemon eskisini uygulamayı sürdürür.
+  </p>
+  <p>
+    Monitörler, SLO'lar, hakem, proje başına anahtarlar ve çalıştırma deposunun
+    zamanlamaları bayraklardan değil, daemon'un yapılandırma dosyasından okunur.
+    Bu JSON nesnesini <code>configFile.content</code> altına yazın; chart onu
+    salt okunur bağlar ve <code>MCPD_CONFIG_FILE</code> değişkenini ona
+    yöneltir. Proje başına anahtarlar, hakemin <code>api_key</code> değeri ve
+    yönlendirme başlıkları kimlik bilgisidir, bu yüzden chart bunlardan birini
+    taşıyan içeriği bir ConfigMap'e koymayı reddeder: <code>configFile.kind</code>
+    değerini <code>Secret</code> yapın ya da dosyayı kendi yönettiğiniz bir
+    Secret'ta tutup <code>configFile.existingSecret</code> ile adlandırın.
+    <code>extraEnv</code>, <code>extraVolumes</code> ve
+    <code>extraVolumeMounts</code> özel bir CA paketi gibi geri kalan her şeyi
+    karşılar.
+  </p>
+  <p>
+    Chart'ın sunamayacağı her değer bileşimi, kurulum anında değiştirilecek
+    değeri adlandıran bir iletiyle reddedilir; hiçbiri sonradan çökme döngüsüne
+    bırakılmaz. Chart'ın README dosyası her reddi listeler.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" samples={chartValues} title="deploy/helm/mcpd" />
+
+  <h2>Başka bir şey ona erişebilmeden önce</h2>
+  <p>
+    Alım varsayılan olarak açıktır. Bu, bir dizüstündeki ilk beş dakika için
+    bilinçli bir seçimdir; orada ilk trace'ten önce bir kimlik bilgisi istemek
+    yararsız bir sürtünme olurdu. Port başka bir şey tarafından erişilebilir
+    olduğu anda ise yanlış varsayılandır. Bu yüzden daemon, anahtarsız olarak geri
+    döngü olmayan bir adreste her başladığında bunu söyler:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="korunmasız bir başlangıç nasıl görünür"
+    lines={[
+      { cmd: 'docker run -p 4317:4317 -v mcpd-data:/data ghcr.io/mcpd/mcpd:0.1.0' },
+      { out: 'mcpd 0.1.0 listening on http://0.0.0.0:4317', tone: 'ok' },
+      { out: 'WARN listening on 0.0.0.0:4317 with open ingest. Anyone who can', tone: 'warn' },
+      { out: '     reach this port can write to it. Set --ingest-key (or', tone: 'warn' },
+      { out: '     MCPD_INGEST_KEYS) before exposing it.', tone: 'warn' },
+      { out: 'WARN listening on 0.0.0.0:4317 with an open read API. Stored', tone: 'warn' },
+      { out: '     prompts and completions are readable by anyone who can reach', tone: 'warn' },
+      { out: '     this port. Set --read-key to require a key.', tone: 'warn' },
+    ]}
+  />
+
+  <p>
+    mcpd, başlamayı reddetmek yerine uyarır, çünkü reddetmek onu çalıştırmaya
+    değer kılan yolu koparırdı. Uyarı sözleşmedir: bunu bir kurulum kaydında
+    görüyorsanız o kurulum açıktır.
+  </p>
+
+  <h3>Altı anahtar, altı kapsam</h3>
+  <p>
+    <code>--ingest-key</code> sinyal yazmaya izin verir. <code>--read-key</code>
+    onları okumaya izin verir. <code>--write-key</code> saklanmış veriyi
+    değiştirmeye izin verir: puanlar, geri bildirimler, veri kümeleri, deneyler
+    ve onaylar. <code>--execute-key</code> çalıştırmaları başlatmaya, iptal etmeye ve onlara sinyal göndermeye izin verir. <code>--worker-key</code> adımları üstlenmeye ve onlara ne olduğunu bildirmeye izin verir; adım gövdelerinizi çalıştıran süreçte duran anahtar budur. <code>--admin-key</code> bir trace'i silmeye ve denetim
+    günlüğünü okumaya izin verir.
+  </p>
+  <p>
+    Patlama yarıçapınıza karar veren ilk ayrımdır, çünkü kalabalıklar farklı
+    büyüklüktedir: filonuzdaki her ajan sürecinin alım anahtarına ihtiyacı
+    vardır, diğerlerinden herhangi birine ise çok daha az sayıda insanın. Filonuza
+    aynı zamanda okuyan tek bir anahtar vermek, saklanmış her prompt'un kimlik
+    bilgisini span üreten her konteynere koyardı; üçüncü taraf kod çalıştıranlar
+    dâhil.
+  </p>
+  <p>
+    Bir çalıştırmayı veri kümesine almanın yazma kapsamına geçmesinin nedeni de
+    budur. Geçerken çalıştırmanın girdisini ve çıktısını okur, yani onu filonuzun
+    taşıdığı anahtarla yetkilendirmek o konteynerlerin her birine saklanmış
+    herhangi bir prompt'u dışarı kopyalamanın bir yolunu vermiş olurdu.
+  </p>
+  <p>
+    Her seçenek virgülle ayrılmış bir liste alır ve her birinin bir ortam
+    değişkeni vardır: <code>MCPD_INGEST_KEYS</code>, <code>MCPD_READ_KEYS</code>,
+    <code>MCPD_WRITE_KEYS</code> ve <code>MCPD_ADMIN_KEYS</code>. Birden fazla
+    kullanın: ekip başına veya filo başına bir anahtar, sızan bir anahtarın span
+    üreten her şeyi yeniden dağıtarak değil listeden çıkarılarak iptal edilmesi
+    demektir. Anahtar <code>Authorization: Bearer …</code> olarak veya
+    <code>X-Mcpd-Key</code> başlığında sunulur ve sabit zamanda karşılaştırılır.
+  </p>
+  <p>
+    Bilinmesi gereken asimetri, iki yeni seçeneği ayarsız bıraktığınızda ne
+    olduğudur. Ayarsız bir yazma listesi alım anahtarlarını, ayarsız bir admin
+    listesi okuma anahtarlarını kabul eder; yani bir yükseltme çalışmakta olan
+    bir anahtarı hiçbir zaman iptal etmez. <code>--admin-key</code> ayarlanana
+    kadar okuma anahtarı, salt okunur bir anahtar değil, okuma ve silme
+    anahtarıdır ve daemon bunu açılışta söyler. Ya buna göre dağıtın ya da
+    seçeneği ayarlayın.
+  </p>
+
+  <h3>Kim neyi okudu</h3>
+  <p>
+    Yük geri veren işleyiciler erişimi kaydeder: trace ayrıntısı, span ve log
+    aramaları, geri bildirim, veri kümesi öğeleri, alma ve silme. Bir satır
+    zamanı, işlemi yapan anahtarın kısa bir özetini, eylemi, projeyi, kaynağı ve
+    yetkilendirmenin izin verip vermediğini taşır. Anahtarın kendisi hiçbir zaman
+    yazılmaz, yani günlük kimlik bilgilerinizin durduğu ikinci bir yer değildir.
+  </p>
+  <p>
+    Onu <code>GET /v1/api/audit</code> ile okuyun; admin kapsamı ister. Ona
+    güvenmeden önce bilinmeye değer iki özelliği vardır.
+    <code>--retention-days</code> ile budanmaz, çünkü kendini anlattığı verinin
+    takvimiyle silen bir günlük, artık ortada olmayan veriyi kimin okuduğunu
+    söyleyemezdi. Ve bir satırın yazılması, anlattığı okumayı hiçbir zaman
+    başarısız kılmaz: yazılamayan bir satır <code>/metrics</code> üzerinde
+    <code>mcpd_audit_write_failures_total</code> olarak sayılır, uyarı kurulacak
+    sayaç odur.
+  </p>
+
+  <h3>Bir anahtarın kapsamadıkları</h3>
+  <ul>
+    <li>
+      <strong>Arayüz.</strong> <code>/</code> üzerindeki işaretleme, porta
+      erişebilen herkese sunulur. Arkasındaki veri sunulmaz: yaptığı her istek,
+      okuma anahtarını uygulayan sorgu API'sinden geçer. Daemon'da bir oturum
+      açma ekranı yoktur; yani hizmetlerin değil kişilerin erişmesi gerekiyorsa
+      onu zaten çalıştırdığınız kimlik proxy'sinin arkasına koyun.
+    </li>
+    <li>
+      <strong>Yoklamalar ve <code>/metrics</code>.</strong> Bilerek kimlik
+      doğrulaması yoktur, çünkü bir kubelet ve bir Prometheus collector'ı anahtar
+      taşıyamaz. Sayaçları ve çalışma süresini gösterirler, yükleri hiç.
+    </li>
+    <li>
+      <strong>Taşıma.</strong> mcpd düz HTTP konuşur ve TLS sonlandırmaz. Onu
+      girişinizde veya ağ örgünüzde sonlandırın. Prompt'lar ve tamamlamalar o
+      bağlantıdan olduğu gibi geçer.
+    </li>
+    <li>
+      <strong>Maskelenmiş yüklerdeki özetler.</strong> <code>--no-redact</code>
+      vermediğiniz sürece maskeleme açıktır ve bir tanımlayıcıyı özetlediği yerde
+      özet ancak tuzu kadar özeldir. <code>--redact-key</code> ayarlayın, yoksa
+      kısa tanımlayıcılar tahminle geri elde edilebilir. Bakınız
+      <a href={href('/docs/privacy')} class="link">Maskeleme ve saklama</a>.
+    </li>
+  </ul>
+
+  <h3>Açmadan önce denetleyin</h3>
+  <p>
+    <code>mcpd config</code>, bir çağrının kullanacağı yapılandırmayı yazdırır ve
+    çıkar. Yanlış yere ayarladığınız ortam değişkeninin hiçbir işe yaramadığını
+    öğrenmenin en ucuz yoludur:
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="uçuş öncesi"
+    lines={[
+      { cmd: 'docker compose -f deploy/docker/docker-compose.yml run --rm mcpd config' },
+      { out: 'listen          0.0.0.0:4317' },
+      { out: 'storage         sqlite at /data/mcpd.db' },
+      { out: 'config file     none' },
+      { out: 'log format      json' },
+      { out: 'project         default' },
+      { out: 'projects        none' },
+      { out: 'retention       30 days' },
+      { out: 'ingest auth     key required', tone: 'ok' },
+      { out: 'read auth       key required', tone: 'ok' },
+      { out: 'write auth      key required (ingest keys)', tone: 'ok' },
+      { out: 'admin auth      key required (read keys)', tone: 'warn' },
+      { out: 'execute auth    key required (ingest keys)', tone: 'warn' },
+      { out: 'worker auth     key required (ingest keys)', tone: 'warn' },
+      { out: 'signup          off' },
+      { out: 'runs            sqlite at /data/mcpd.runs.db' },
+      { out: 'run settings    lease_ttl_ms 30000, reclaim_window_ms 30000, stall_window_ms 300000, idempotency_window_ms 86400000, park_ttl_ms 86400000, max_depth 8, max_step_repeats 16' },
+      { out: 'identity        off' },
+      { out: 'client ip       peer address' },
+      { out: 'sampling        keep everything' },
+      { out: 'quota           unlimited' },
+      { out: 'redaction       on' },
+      { out: 'redact key      set', tone: 'ok' },
+      { out: 'cors            same-origin only' },
+      { out: 'timeout         30s per request' },
+      { out: 'limits          32 MiB per request, 10000 signals per batch' },
+      { out: 'derived         duration and token metrics' },
+      { out: 'aspects         off' },
+      { out: 'monitors        none' },
+      { out: 'objectives      none' },
+      { out: 'judge           off' },
+      { out: 'forwarding      off' },
+    ]}
+  />
+
+  <p>
+    Burada altı satır önemlidir. Herhangi bir yetki satırı <code>open</code>
+    diyorsa o kapsam, porta erişebilen herkese açıktır. Köşeli parantez içindeki
+    bir satır, o kapsamın devraldığı daha geniş listeyi adlandırır: yukarıdaki
+    çağrı hiç <code>--admin-key</code> ayarlamıyor, yani okuma anahtarları
+    okuduğu gibi siliyor. <code>--execute-key</code> ya da
+    <code>--worker-key</code> da ayarlamıyor, yani alım anahtarları çalıştırma da
+    başlatır ve adım da üstlenir; mcpd bunu başlarken uyarır. Bunun yazdırdığı her seçenek
+    <a href={href('/docs/configuration')} class="link">Yapılandırma</a>
+    sayfasında belgelenmiştir.
+  </p>
+
+  <h2>Yedekler</h2>
+  <p>
+    Yedek tek bir dosyadır. mcpd'nin sakladığı her şey, arama dizini dâhil,
+    <code>MCPD_DATA</code> konumundaki dosyanın içindedir.
+  </p>
+  <p>
+    Daemon çalışırken o dosyayı kopyalamak, yapılmaması gereken tek şeydir. mcpd
+    SQLite'ı WAL kipinde çalıştırır, yani son yazmalar yanındaki bir
+    <code>-wal</code> dosyasında durur ve yalnızca veritabanının bir kopyası,
+    onları içermeyen bir kopyadır. Bunun yerine, <code>sqlite3</code> aracı olan
+    ve aynı birimi bağlayan herhangi bir imajdan tutarlı bir kopya alın:
+  </p>
+
+  <Command
+    command={`sqlite3 /data/mcpd.db ".backup '/backup/mcpd-$(date -u +%Y%m%dT%H%M).db'"`}
+    primaryLabel="Çevrimiçi yedek"
+    secondary={[
+      { label: 'Sıkıştırılmış kopya', command: 'sqlite3 /data/mcpd.db "VACUUM INTO \'/backup/mcpd.db\'"' },
+    ]}
+  />
+
+  <p>
+    İkisi de yazmalar sürerken tutarlı bir anlık görüntü okur. CSI
+    sürücünüzün aldığı bir birim anlık görüntüsü de işe yarar, sürücünün anlık
+    görüntüsü atomikse; canlı bir dizinin <code>tar</code> arşivi yaramaz. Geri
+    yükleme, daemon'u durdurmak, dosyayı <code>MCPD_DATA</code> konumuna geri
+    koymak, yanındaki <code>-wal</code> ve <code>-shm</code> dosyalarını silmek ve
+    daemon'u yeniden başlatmaktır;
+    <a href={href('/docs/operations')} class="link">İşletme</a> bunu adım adım
+    anlatır.
+  </p>
+  <p>
+    Silinen satırlar dosyanın içinde sayfa boşaltır, dosyayı küçültmez; yani çok
+    veri eskitmiş bir veritabanı olduğu boyutta kalır. Diski geri istediğinizde
+    <code>VACUUM</code> çalıştırın.
+  </p>
+
+  <h2>Yükseltmeler</h2>
+  <p>
+    Etiketi değiştirin ve yeniden başlatın. Göçler açılışta çalışır ve her
+    açılışta çalıştırılmaları güvenlidir, yani sürecin dışında hiçbir adım olmaz.
+    Yine de önce yedeği alın: göç, bir şemanın verinizin altında değiştiği tek
+    andır.
+  </p>
+  <p>
+    Yeniden başlatma, tek kopya olmasının aynı nedeniyle, aşamalı değil kısa bir
+    kesintidir. Ajanlar bunu atlatır: SDK'lar bellekte kuyruğa alır ve yeniden
+    dener, kuyruk da sınırlıdır; yani saniyeler süren bir yeniden başlatma hiçbir
+    şeye mal olmaz, bir saat sürense en eski span'leri düşürür ve bunu istemcinin
+    kaydında söyler.
+  </p>
+  <p>
+    mcpd, Kubernetes'in gönderdiği SIGTERM sinyalini karşılar ve düzgün kapanır.
+    <code>terminationGracePeriodSeconds</code> en uzun istekten uzun olmalıdır,
+    yoksa kubelet süreci bir yazmanın ortasında öldürür. Bir istek 30 saniyelik
+    istek zaman aşımı kadar sürebilir; bu yüzden manifestler ve chart pod'a 45
+    saniye verir, compose dosyası da konteynere aynısını verir. İkisini birlikte
+    yükseltin.
+  </p>
+
+  <h2>Tek bir SQLite dosyası nerede yetmez ve bu konuda ne yapmalı</h2>
+  <p>
+    Gömülü dosya doğru varsayılandır ve iki sert sınırı vardır. İkisi de
+    mcpd'nin değil SQLite'ın sınırıdır.
+  </p>
+  <ul>
+    <li>
+      <strong>Tek yazıcı.</strong> Okumalar kendi bağlantılarında çalışır ve
+      yazıcıyı hiç engellemez, WAL kipi bunun içindir; ama dosyanın sahibi tek bir
+      süreçtir. O örneği yatay değil dikey ölçeklersiniz.
+    </li>
+    <li>
+      <strong>Tek birim, tek erişilebilirlik bölgesi.</strong> ReadWriteOnce bir
+      talep pod'u sabitler. Veri sağlamken başka bir düğüme devretme yoktur.
+    </li>
+  </ul>
+  <p>
+    İki ayar genellikle yeni bir arka ucun kazandıracağından fazlasını geri
+    kazandırır. <a href={href('/docs/sampling')} class="link">Örnekleme</a>
+    trace'lerin bir bölümünü tutar ve tuttuğu her trace'i bütün tutar; kararı
+    trace kimliğinin özetini alarak verir, böylece bir filodaki her örnek
+    anlaşır. Saklama, dosyanın ne kadar geriye gittiğini sınırlar. Her biri kendi
+    birimiyle ekip başına bir örnek çalıştırmak da işe yarar ve gürültülü bir
+    ekibin herkesin diskini doldurmasını engeller.
+  </p>
+  <p>
+    Bunlar tükendiğinde mcpd'yi bir veritabanına yönlendirin. Chart'ta
+    <code>externalStore.type</code> değerini <code>postgres</code> ya da
+    <code>clickhouse</code> yapın, bağlantı dizesini de
+    <code>externalStore.postgresUrl</code> veya
+    <code>externalStore.clickhouseUrl</code> içine yazın. Dize pod tanımında
+    değil chart'ın Secret'ında tutulur. Onu değerlerinizin tamamen dışında
+    tutmak için kendi yönettiğiniz bir Secret'a <code>postgres-url</code> ya da
+    <code>clickhouse-url</code> altında koyun, o Secret'ı
+    <code>keys.existingSecret</code> ile adlandırın ve türü yine de ayarlayın:
+    arka ucu URL değil tür seçer.
+  </p>
+  <p>
+    Bu, sinyalleri taşır ve diskte tek bir dosya bırakır: sinyal deposu ne olursa
+    olsun gömülü SQLite olan çalıştırma deposu. Varsayılan olan
+    <code>runs.enabled</code> true iken chart onu birimde tutar ve tek kopya
+    çalıştırır. Birkaç pod çalıştırmak için çalıştırma yüzeyini kapatın. Chart
+    o zaman <code>replicaCount</code> kadar pod çalıştırır,
+    <code>Recreate</code> yerine aşamalı güncellemeye geçer ve
+    PersistentVolumeClaim'i bırakır, çünkü çekişilecek yerel bir şey kalmaz;
+    daemon da çalıştırma uçlarını bunu söyleyen bir 503 ile yanıtlar. Chart,
+    çalıştırmalar açıkken 1'den büyük bir <code>replicaCount</code> değerini,
+    her biri kendi çalıştırma deposunu tutan pod'lar başlatmak yerine reddeder.
+  </p>
+
+  <pre><code class="language-bash">{`helm install mcpd ./deploy/helm/mcpd \\
+  --set keys.ingest=$INGEST_KEY \\
+  --set keys.read=$READ_KEY \\
+  --set externalStore.type=postgres \\
+  --set externalStore.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
+  --set runs.enabled=false \\
+  --set replicaCount=3`}</code></pre>
+
+  <p>
+    Önce Postgres'e uzanın: iki sınırı da, çoğu ekibin zaten çalıştırdığı,
+    yedeklediği ve izlediği bir veritabanı üzerinde kaldırır. Göç bir danışma
+    kilidi alır ve şema güncelse atlanır, yani birkaç kopyanın birlikte başlaması
+    güvenlidir. Saklama milyarlarca span ile ölçüldüğünde ClickHouse'a uzanın.
+    Türün adlandırmadığı bir arka uç için verilen URL yok sayılmaz, reddedilir.
+  </p>
+  <p>
+    Arka uçla birlikte değişmeyen bir şey var.
+    <strong>Saklama, yazdığınız projeleri kapsar.</strong> Saatlik tarama,
+    <code>--project</code> ile adlandırılan projede ve <code>projects</code>
+    bloğundaki her projede, her biri kendi <code>retention_days</code> değerini
+    ayarlamışsa ona göre, <code>--retention-days</code> değerinden eski sinyalleri
+    siler. İkisinde de görünmeyen bir proje adıyla gönderilen trace'lerin
+    penceresi yoktur ve hiç budanmazlar; yani ajanlarınız kendi projelerini
+    adlandırıyorsa hacmi izleyin.
+  </p>
+
+  <h2>Sonraki</h2>
+  <ul>
+    <li>Her seçenek ve ortam değişkeni: <a href={href('/docs/configuration')} class="link">Yapılandırma</a>.</li>
+    <li>Yoklamalar, sayaçlar ve günlük işletim: <a href={href('/docs/operations')} class="link">İşletme</a>.</li>
+    <li>Diske hiç ulaşmayanlar: <a href={href('/docs/privacy')} class="link">Maskeleme ve saklama</a>.</li>
+    <li>Henüz hiçbir şey dağıtmadıysanız: <a href={href('/docs/quickstart')} class="link">Hızlı başlangıç</a>.</li>
+  </ul>
+</Doc>

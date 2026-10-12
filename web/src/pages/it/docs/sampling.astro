@@ -1,0 +1,224 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import StripChart from '@/components/StripChart.astro'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* I link interni restano scritti come route inglesi e vengono localizzati qui.
+   Una route la cui pagina italiana non è ancora scritta porta alla pagina
+   inglese, invece che a un URL italiano senza niente dietro. */
+const code = localeOf(Astro.url.pathname)
+const url = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+---
+
+<Doc
+  title="Campionamento"
+  description="Le cinque strategie di campionamento di mcpd, perché la decisione si prende alla radice, come l’hash deterministico fa accordare una flotta, e che cosa tiene il campionamento di coda."
+  lede="Tenere una frazione delle tracce, senza tenere una frazione di ognuna."
+  og="docs"
+>
+  <h2>La decisione si prende una volta sola, alla radice</h2>
+  <p>
+    Una traccia si tiene o si scarta intera. La decisione si prende quando lo
+    span radice parte, ed è ereditata da ogni figlio, così un’esecuzione non è
+    mai registrata a metà.
+  </p>
+  <p>
+    È la regola da cui discende tutto il resto. Una traccia a cui manca un 30%
+    a caso dei suoi span non si legge come una traccia campionata. Si legge come
+    un difetto del sistema che stai osservando: una chiamata a uno strumento che
+    a quanto pare non è mai avvenuta, una chiamata al modello senza un padre, un
+    buco dove dovrebbe esserci il recupero dei documenti. Ci perderai un
+    pomeriggio prima di capire che il buco è il tuo strumento di osservabilità e
+    non il tuo agente.
+  </p>
+
+  <h2>Il comportamento predefinito tiene tutto</h2>
+  <p>
+    Senza campionamento configurato la politica è <code>always</code>, ed è il
+    valore predefinito giusto finché non è il volume a dire altro. Il
+    campionamento sacrifica proprio l’esecuzione che vorrai leggere. Pagalo solo
+    quando ti ci costringono lo storage o la banda.
+  </p>
+
+  <h2>Le cinque strategie</h2>
+  <table>
+    <thead>
+      <tr><th>Strategia</th><th>Comportamento</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>always</code></td>
+        <td>Tiene tutto. È il valore predefinito.</td>
+      </tr>
+      <tr>
+        <td><code>never</code></td>
+        <td>Non tiene niente.</td>
+      </tr>
+      <tr>
+        <td><code>ratio</code></td>
+        <td>Tiene una frazione fissa, estratta a caso una volta per traccia alla radice.</td>
+      </tr>
+      <tr>
+        <td><code>deterministic</code></td>
+        <td>Tiene una frazione fissa, decisa calcolando l’hash dell’id di traccia. Ogni collector arriva alla stessa risposta senza parlare con nessun altro.</td>
+      </tr>
+      <tr>
+        <td><code>tail</code></td>
+        <td>Rimanda la decisione a quando la traccia è finita, poi tiene ogni errore e ogni esecuzione lenta, qualunque cosa dica il tasso.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Impostare un tasso</h2>
+  <p>
+    <code>--sample</code>, oppure <code>MCPD_SAMPLE</code>, prende una frazione
+    da 0.0 a 1.0 e configura la strategia deterministica. Un valore fuori da
+    quell’intervallo ferma il daemon all’avvio con un messaggio che nomina
+    quello che gli hai passato. Non lo riporta dentro l’intervallo, perché un
+    tasso scritto male che in silenzio diventa 1.0 lo scopri un mese dopo dalla
+    fattura dello storage.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="tieni una traccia su dieci"
+    command="mcpd --sample 0.1"
+    primaryLabel="Come opzione"
+    secondary={[
+      { label: 'Come ambiente', command: 'MCPD_SAMPLE=0.1 mcpd' },
+      { label: 'Conferma che cosa ha letto', command: 'mcpd config' },
+    ]}
+  />
+
+  <p>
+    Ogni SDK legge la stessa frazione, come <code>sample</code> nella
+    configurazione del client o come <code>MCPD_SAMPLE</code> nell’ambiente.
+    Campionare nel client costa di meno: uno span non campionato non finisce mai
+    in coda e non viene mai esportato, quindi non costa niente in banda.
+    Campionare nel daemon ti costa il viaggio di andata e ritorno, ma tiene il
+    tasso in un posto solo, che è quello che vuoi quando una dozzina di servizi
+    riferiscono a una sola istanza.
+  </p>
+  <p>
+    Delle cinque strategie, il daemon ne raggiunge due,
+    <code>always</code> e <code>deterministic</code>: <code>--sample</code> e
+    il <code>sample</code> di un progetto nel file di configurazione impostano
+    entrambi la strategia deterministica. <code>never</code>,
+    <code>ratio</code> e <code>tail</code> sono implementate nel tipo della
+    politica e in questa build non si raggiungono né da un’opzione né dal file
+    di configurazione.
+  </p>
+
+  <h2>Perché l’hash fa accordare una flotta</h2>
+  <p>
+    Fai girare più istanze di mcpd dietro un bilanciatore e gli span di una
+    traccia non arrivano tutti alla stessa. Un campionatore che tira a sorte per
+    istanza, o per span, terrebbe una parte di una traccia e scarterebbe il
+    resto, che è proprio il guasto che la prima regola esiste per impedire.
+  </p>
+  <p>
+    La strategia deterministica proietta l’id di traccia su tutto l’intervallo
+    a 64 bit e tiene la traccia quando quel valore cade sotto la soglia che il
+    tasso implica. Ogni istanza calcola lo stesso numero dallo stesso id,
+    quindi vanno tutte d’accordo, senza stato condiviso, senza un protocollo
+    di coordinamento e senza niente che possa perdere il passo. Lo stesso id
+    dà anche la stessa risposta a un nuovo tentativo, quindi un batch
+    rigiocato non può arrivare a metà.
+  </p>
+  <p>
+    Due dettagli rendono onesta quella proiezione. Legge i sedici caratteri
+    esadecimali <em>in coda</em> all’id: OpenTelemetry richiede che gli id di
+    traccia siano casuali, ma qualche produttore ricava i byte di testa da un
+    timestamp, e un campionatore che leggesse quelli si correlerebbe all’ora
+    del giorno invece di campionare. Quando l’id non è affatto esadecimale,
+    ripiega su un hash vero con un mescolamento finale, invece di degenerare
+    nel tenere tutto, così il tasso ottenuto resta vicino a quello che hai
+    chiesto.
+  </p>
+
+  <h2>Negli SDK, una decisione a monte vince</h2>
+  <p>
+    Quando un SDK continua una traccia a partire da un <code>traceparent</code>
+    W3C in arrivo, eredita il flag di campionamento insieme agli id e non
+    applica il proprio tasso. Vale in tutte e due le direzioni: il flag alzato
+    tiene la traccia qualunque sia il tasso locale, e il flag abbassato la
+    scarta qualunque sia il tasso locale.
+  </p>
+  <p>
+    Il daemon non lo fa in questa versione. Quando uno span arriva via OTLP, il
+    daemon conserva il suo byte di trace-flags nell’attributo
+    <code>mcpd.otlp.flags</code>, ma il campionatore del daemon non lo legge. Un
+    daemon con un tasso applica quel tasso a ogni traccia, qualunque cosa dica
+    il flag.
+  </p>
+  <p>
+    L’alternativa è peggiore di come suona. Se ogni servizio applicasse il
+    proprio tasso, una traccia che ne attraversa quattro sarebbe tenuta da due e
+    scartata da due, e quello che ti resterebbe alla fine non è una traccia
+    distribuita. È un insieme di buchi a forma di traccia.
+  </p>
+
+  <h2>Il campionamento di coda tiene le esecuzioni che vale la pena leggere</h2>
+  <p>
+    Un campionatore di testa decide prima di sapere qualunque cosa. Costa poco,
+    ed è cieco: a un decimo, tiene anche un decimo dei fallimenti. Le tracce che
+    apri davvero sono quelle rare, ed è proprio la rarità che un campionatore
+    a rapporto gestisce peggio.
+  </p>
+
+  {/* Il pennino sta 200 unità più dentro rispetto al valore predefinito del
+      componente. Qui una colonna di articolo è larga 662px a ogni misura
+      desktop, e il braccio predefinito sta a 760, quindi questo grafico non
+      aveva mai disegnato il suo pennino: l’unico elemento che fa di un
+      registratore un registratore restava fuori campo a ogni larghezza,
+      compresa quella di un telefono. */}
+  <StripChart class="not-prose my-8" height={260} pen={200} />
+
+  <p>
+    Ecco che aspetto ha una registrazione di latenza: una linea di base piatta e
+    una manciata di escursioni. Il volume sta nella linea di base e le risposte
+    stanno nelle escursioni. Il campionamento di coda trattiene la traccia
+    finché non finisce, poi la tiene se qualcosa al suo interno è andato in
+    errore, la tiene se è durata più della soglia che hai impostato, e
+    altrimenti applica lo stesso hash deterministico di prima. Tenere gli
+    errori è attivo per impostazione predefinita, perché le tracce di cui hai
+    più bisogno sono quelle rare, ed è proprio quelle che un campionatore a
+    rapporto ha più probabilità di buttare via.
+  </p>
+  <p>
+    Il costo è il buffering. Un campionatore di coda deve tenere in memoria ogni
+    traccia non finita finché non può decidere, ed è per questo che è una scelta
+    voluta e non il valore predefinito. Come sopra, la strategia di coda è
+    implementata nel tipo della politica e in questa build non è raggiungibile
+    né da un’opzione né dal file di configurazione; il percorso di ingest del daemon applica la
+    decisione di testa.
+  </p>
+
+  <h2>Sapere che cosa è stato scartato</h2>
+  <p>
+    Ogni span che il campionatore butta via incrementa
+    <code>mcpd_traces_sampled_out_total</code>, esportato su
+    <code>/metrics</code> in formato testo Prometheus. Metti il tasso per
+    iscritto in un posto che la tua squadra legge. Una traccia mancante con un
+    tasso di campionamento documentato è una spiegazione; una traccia mancante
+    senza spiegazione è un ticket di assistenza, e di solito a scriverlo sei tu.
+  </p>
+
+  <h2>Avanti</h2>
+  <ul>
+    <li>
+      L’altro modo di archiviare di meno:
+      <a href={url('/docs/privacy')} class="link">Oscuramento e conservazione</a>.
+    </li>
+    <li>
+      Ogni opzione e ogni variabile d’ambiente:
+      <a href={url('/docs/configuration')} class="link">Configurazione</a>.
+    </li>
+    <li>
+      Leggere <code>/metrics</code> e il resto dei segnali del daemon stesso:
+      <a href={url('/docs/operations')} class="link">Gestione</a>.
+    </li>
+  </ul>
+</Doc>

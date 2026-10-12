@@ -1,0 +1,217 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import LeaseProtocol from '@/components/LeaseProtocol.astro'
+import { exampleLanguages } from '@/lib/snippets'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const langs = exampleLanguages('workflow')
+const loc = localeOf(Astro.url.pathname)
+const link = (route: string) => urlFor(route, loc)
+---
+
+<Doc
+  title="Worker"
+  description="Come un worker serve i passi di un’esecuzione durevole: registrare definizioni, prendere i lease, heartbeat, complete e fail, i quattro motivi di 409, at_most_once, scalare, l’ambito worker."
+  lede="Un worker è un tuo processo, che serve al daemon i corpi dei passi. Questa pagina è il protocollo che parla, e il perché di ogni chiamata."
+  og="docs"
+>
+  <h2>Che cos’è un worker</h2>
+  <p>
+    Un worker tiene i corpi dei passi che si possono prendere in carico e chiede
+    lavoro al daemon. Gira dove gira il tuo codice, con i tuoi import, il tuo
+    pool di connessioni e le tue credenziali, e il daemon non ne vede mai
+    nessuno. Il daemon gli consegna un lease con l’input reso dal template e
+    i passi precedenti; il worker esegue il corpo e riferisce com’è andata.
+    Il rapporto è tutto qui.
+  </p>
+  <p>
+    Ogni SDK ne porta uno. Registra i workflow che tiene, resta in long poll
+    per i lease, manda heartbeat mentre un corpo gira, e risponde a ogni
+    rifiuto in base al suo motivo. L’esempio qui sotto è lo stesso programma
+    della pagina <a href={link('/docs/workflows')} class="link">Workflow</a>;
+    questa è la parte che lo serve.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" example="workflow" region="worker" only={langs} title="servire i corpi" />
+
+  <h2>Il protocollo</h2>
+  <p>
+    Cinque chiamate, e un worker che le sa parlare si può scrivere usando
+    direttamente l’API HTTP, senza un SDK. Il worker di ogni SDK è un client di
+    queste cinque e di nient’altro.
+  </p>
+
+  <LeaseProtocol class="not-prose my-8" />
+
+  <table>
+    <thead>
+      <tr><th>Chiamata</th><th>Che cosa fa</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>POST /v1/api/workers/register</code></td>
+        <td>Annuncia il worker e archivia le definizioni che tiene. La risposta porta <code>lease_ttl_ms</code> e <code>heartbeat_ms</code>, i due numeri su cui gira tutto il resto del protocollo.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/claim</code></td>
+        <td>Offre fino a <code>max</code> passi eseguibili, tenendo aperta la richiesta fino a <code>wait_ms</code> quando non ce n’è nessuno. Il daemon tiene aperta una presa in carico al massimo per quattro quinti del suo timeout di richiesta, 24 secondi con il valore predefinito, e risponde subito quando smette, quindi una presa in carico può tornare vuota prima di <code>wait_ms</code>: fanne un’altra. Una presa in carico può essere ristretta a una sola esecuzione, ed è così che uno script porta fino in fondo la propria.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/{'{lease}'}/started</code></td>
+        <td>Dichiara che il corpo è partito. Prima del corpo, sempre: è quello che dice al daemon la differenza fra offerto e in esecuzione.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/{'{lease}'}/heartbeat</code></td>
+        <td>Allunga il lease. È l’unica prova di vita che il daemon ha di un worker.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/{'{lease}'}/complete</code>, <code>/fail</code></td>
+        <td>Chiude il passo: l’output, una modifica allo stato dell’esecuzione e il consumo che il daemon valorizza; oppure un errore con la classe che decide se ci sarà un nuovo tentativo.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>I lease</h2>
+  <p>
+    Un lease è un tentativo, tenuto da un worker, per un tempo limitato. Porta
+    l’input reso dal template, i passi precedenti indicizzati per id, lo stato
+    e la correlazione dell’esecuzione, una chiave che resta stabile fra i
+    nuovi tentativi di questo passo, e gli id di traccia e di span dello span
+    del passo che il daemon ha aperto. Un corpo che registra span propri
+    attraverso il contesto del passo li mette sotto quello span, così la
+    chiamata al modello dentro un passo atterra nella traccia dell’esecuzione
+    alla profondità giusta.
+  </p>
+  <p>
+    Un lease per cui il worker smette di mandare heartbeat scade. Il daemon
+    segna il tentativo come orfano e, dopo una finestra di recupero, lo rimette
+    in coda sotto <code>at_least_once</code> oppure lo fa fallire sotto
+    <code>at_most_once</code>. Un worker che torna da una pausa e scrive su un
+    lease già ripreso non viene ignorato: gli viene detto.
+  </p>
+
+  <h2>I quattro rifiuti</h2>
+  <p>
+    Una chiamata di un worker che il daemon non può accettare è rifiutata con
+    un 409 che porta uno di quattro motivi. Sono un insieme chiuso, e il worker
+    di ogni SDK gestisce ciascuno per nome, perché un worker che li riduce a un
+    solo ramo abbandona passi che ha già finito o riferisce un fallimento al
+    posto di un successo.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Motivo</th><th>Significato</th><th>Che cosa fa il worker</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>already_applied</code></td>
+        <td>Un complete o un fail precedente di questo stesso lease è arrivato e la sua risposta è andata persa.</td>
+        <td>Lo tratta come un successo e non scrive altro.</td>
+      </tr>
+      <tr>
+        <td><code>fenced</code></td>
+        <td>Esiste un tentativo più recente, oppure un altro lease ha chiuso questo.</td>
+        <td>Abbandona il lavoro e non scrive più niente per questo lease. Un heartbeat respinto dal fencing annulla anche, attraverso il contesto, il corpo in esecuzione.</td>
+      </tr>
+      <tr>
+        <td><code>run_terminal</code></td>
+        <td>L’esecuzione è finita, perché è arrivata in fondo, è fallita, è scaduta o è stata annullata.</td>
+        <td>Si ferma, e smette di prendere in carico lavoro per quell’esecuzione.</td>
+      </tr>
+      <tr>
+        <td><code>not_started</code></td>
+        <td>Un complete o un fail è arrivato per un tentativo <code>at_most_once</code> il cui <code>started</code> non è mai arrivato.</td>
+        <td>Lo segnala in modo evidente come un difetto del worker. I worker degli SDK non lo sanno produrre; uno scritto a mano sì.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Il corpo</h2>
+  <p>
+    Un corpo riceve un contesto, il suo input reso dal template e i passi
+    precedenti. Il contesto è il posto dove riferisce quello che il daemon deve
+    tenere: una modifica allo stato dell’esecuzione, fusa al momento del
+    <code>complete</code> con le chiavi di primo livello che sostituiscono; i
+    token che ha speso, che il daemon valorizza con lo stesso listino con cui
+    valorizza gli span; e un segnale di annullamento che scatta quando il lease
+    è perso o l’esecuzione finisce, così un corpo che lo passa alle proprie
+    operazioni di I/O si ferma quando deve. I token si sommano da soli: uno span
+    che il corpo registra attraverso il contesto, e ogni span sottostante,
+    aggiunge il proprio consumo a quello del passo quando finisce, così un
+    corpo che registra le sue chiamate al modello come span non somma mai a
+    mano, e <code>set_usage</code> è l’override esplicito per un corpo che non
+    ne registra nessuna.
+  </p>
+  <p>
+    Un corpo finisce restituendo il suo output oppure sollevando un errore.
+    Solleva l’errore ritentabile dell’SDK per avere un nuovo tentativo dentro il
+    budget del passo; solleva il fallimento tipizzato del passo per nominare
+    qualunque altra classe; qualsiasi altra cosa è fatale. Il messaggio va al
+    daemon e compare nel diario. Lo stack trace no.
+  </p>
+  <p>
+    Un lease per una definizione, una versione o un passo che il worker non
+    tiene fallisce con <code>unservable</code> e il corpo non gira mai. Il
+    tentativo torna in coda per un worker che invece lo tiene, senza consumare
+    il budget dei nuovi tentativi, ed è questo che lascia girare fianco a fianco
+    due versioni di un worker durante un deploy.
+  </p>
+
+  <h2>Scalare in orizzontale</h2>
+  <p>
+    Fai girare quanti worker vuoi, tutti collegati a un solo daemon. Ognuno
+    prende in carico fino al limite della propria concorrenza, il daemon consegna
+    ogni tentativo a uno solo di loro, e il fencing fa sì che un lease che in
+    qualche modo due worker tengono insieme si risolva in un solo vincitore.
+    L’id di un worker è registrato su ogni tentativo che ha preso, quindi il
+    diario dice quale processo ha eseguito un passo. Dai un nome a ogni
+    processo, oppure lascia che l’SDK lo ricavi dall’host.
+  </p>
+  <p>
+    Una presa in carico è un long poll, quindi una flotta ferma costa al daemon
+    una richiesta aperta per worker e nessun traffico. Mentre aspetta, una
+    presa in carico cerca lavoro quando parte un’esecuzione, finisce un passo,
+    scatta una scadenza o un evento riprende un’attesa, e altrimenti al
+    massimo due volte al secondo. Una flotta al lavoro è
+    limitata dalla concorrenza dei worker stessi, e un corpo che dura un’ora
+    costa un heartbeat ogni dieci secondi e nient’altro.
+  </p>
+
+  <h2>Le chiavi</h2>
+  <p>
+    Le chiamate del worker vogliono l’ambito <code>worker</code>; avviare,
+    segnalare e annullare esecuzioni vogliono <code>execute</code>. Entrambi
+    ricadono sulle chiavi di scrittura quando nessuno li imposta, e una chiave
+    admin li tiene tutti e due. Un worker che serve soltanto passi non ha bisogno
+    di una chiave capace di avviare un’esecuzione, e un webhook che pubblica
+    soltanto eventi non ha bisogno di una chiave capace di prenderne in carico
+    una. Per le opzioni, vedi
+    <a href={link('/docs/configuration')} class="link">Configurazione</a>.
+  </p>
+  <p>
+    Le chiamate del worker non vengono registrate nel registro di audit, anche
+    se un lease porta l’input del passo e gli output dei passi precedenti. Sono
+    un ciclo di una macchina che prende in carico molte volte al minuto, e una
+    riga per ogni presa in carico seppellirebbe le letture fatte da una
+    persona. Rileggere un’esecuzione attraverso gli endpoint delle esecuzioni
+    viene registrato; vedi
+    <a href={link('/docs/security')} class="link">Sicurezza</a>.
+  </p>
+
+  <h2>Poi</h2>
+  <ul>
+    <li>
+      Avviare e seguire un’esecuzione, e rispondere a un’attesa:
+      <a href={link('/docs/runs')} class="link">Esecuzioni</a>.
+    </li>
+    <li>
+      La definizione che il worker serve:
+      <a href={link('/docs/workflows')} class="link">Workflow</a>.
+    </li>
+    <li>
+      Ogni endpoint del protocollo dei worker, generato dalla specifica:
+      <a href={`${link('/docs/reference/api')}#workers`} class="link">API HTTP, Workers</a>.
+    </li>
+  </ul>
+</Doc>

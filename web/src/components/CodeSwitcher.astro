@@ -1,0 +1,206 @@
+---
+/**
+ * A code sample in several languages.
+ *
+ * The reader's choice is remembered for the whole site, not just this block, so
+ * a Python user who switches once reads Python everywhere afterwards. That is
+ * the difference between a tab strip and a language preference.
+ *
+ * Without JavaScript, every language is present in the markup and the first is
+ * shown. Nothing here is gated on a script running.
+ */
+import { Code } from 'astro:components'
+import { panelTheme } from '@/lib/shiki-theme'
+import { snippetSet } from '@/lib/snippets'
+import type { LanguageId } from '@/lib/site'
+
+interface Props {
+  /** Region marker to read from the example programs. */
+  region?: string
+  /** Or pass code directly, for samples that are not from an example program. */
+  samples?: { lang: LanguageId; label: string; shiki: string; code: string }[]
+  /** Restrict to a subset of languages. */
+  only?: readonly LanguageId[]
+  /** A short engraved caption on the block's rail. */
+  title?: string
+  class?: string
+}
+
+const { region, example = 'quickstart', samples: given, only, title, class: className = '' } = Astro.props
+const samples = given ?? snippetSet(region!, only, example)
+const id = `cs-${Math.random().toString(36).slice(2, 9)}`
+---
+
+<div class={`panel-raised overflow-hidden ${className}`} data-code-switcher>
+  {/* The caption sits above the controls, in a different treatment. When it
+      shared the tabs' row and the tabs' costume it read as a fourth tab and
+      invited a click it could not answer. */}
+  {title && (
+    <p class="border-b border-scribe-2 bg-panel-1 px-3.5 pb-1.5 pt-2 text-[0.75rem] text-ink-3">
+      {title}
+    </p>
+  )}
+
+  {/* Tabs wrap. Six languages do not fit one strip at every width, and the
+      previous single scrolling row hid three of them behind an invisible
+      overflow: the reader could not switch to a language they could not see. */}
+  <div class="flex items-stretch border-b border-scribe-2 bg-panel-1">
+    <div class="flex min-w-0 flex-1 flex-wrap items-stretch" role="tablist" aria-label="Language">
+      {
+        samples.map((s, i) => (
+          <button
+            type="button"
+            role="tab"
+            data-lang={s.lang}
+            id={`${id}-tab-${s.lang}`}
+            aria-controls={`${id}-panel-${s.lang}`}
+            aria-selected={i === 0 ? 'true' : 'false'}
+            tabindex={i === 0 ? 0 : -1}
+            class="shrink-0 border-b border-l border-scribe-2 px-3.5 py-2.5 text-[0.8125rem] text-ink-3 transition-colors first:border-l-0 hover:text-ink-2 aria-selected:bg-panel-2 aria-selected:font-medium aria-selected:text-ink"
+          >
+            {s.label}
+          </button>
+        ))
+      }
+    </div>
+    <button
+      type="button"
+      data-copy
+      class="shrink-0 self-start border-l border-scribe-2 px-3.5 py-2.5 text-[0.8125rem] text-ink-3 transition-colors hover:text-ink"
+      >Copy</button
+    >
+  </div>
+
+  {/* The well is painted on the panel, not on the scroll container: the
+      container carries the right-edge fade as a mask, and a mask on the
+      element that also paints the surface would fade the surface too. */}
+  {
+    samples.map((s, i) => (
+      <div
+        role="tabpanel"
+        id={`${id}-panel-${s.lang}`}
+        aria-labelledby={`${id}-tab-${s.lang}`}
+        data-panel={s.lang}
+        class="bg-well"
+        hidden={i !== 0}
+      >
+        <div class="mcpd-code scroll-x scroll-fade max-h-[28rem] overflow-y-auto text-[0.8125rem] leading-[1.65]">
+          <Code code={s.code} lang={s.shiki as any} theme={panelTheme as any} />
+        </div>
+      </div>
+    ))
+  }
+</div>
+
+<style is:global>
+  /* Shiki emits its own <pre>; strip its background so the recessed well shows
+     through, and set the data face for every code block on the site. */
+  [data-code-switcher] pre.astro-code {
+    background: transparent !important;
+    margin: 0;
+    /* The padding belongs on the scrolled element, not on the scroll
+       container: `padding-right` on an `overflow-x` box is not honoured by
+       content that scrolls past it, which sliced every long line hard against
+       the panel edge. `inline-block` plus `min-width: 100%` keeps short lines
+       filling the well. */
+    display: inline-block;
+    min-width: 100%;
+    padding: 1rem;
+    font-family: var(--font-data);
+  }
+  [data-code-switcher] pre.astro-code code {
+    font-family: var(--font-data);
+  }
+</style>
+
+<script>
+  const KEY = 'mcpd:lang'
+
+  function applyLanguage(lang: string) {
+    document.querySelectorAll<HTMLElement>('[data-code-switcher]').forEach((block) => {
+      const tabs = block.querySelectorAll<HTMLButtonElement>('[data-lang]')
+      // A block that does not offer the chosen language keeps what it has,
+      // rather than going blank.
+      if (![...tabs].some((t) => t.dataset.lang === lang)) return
+
+      tabs.forEach((t) => {
+        const on = t.dataset.lang === lang
+        t.setAttribute('aria-selected', String(on))
+        t.tabIndex = on ? 0 : -1
+      })
+      block.querySelectorAll<HTMLElement>('[data-panel]').forEach((p) => {
+        p.hidden = p.dataset.panel !== lang
+      })
+    })
+  }
+
+  function remember(lang: string) {
+    try {
+      localStorage.setItem(KEY, lang)
+    } catch {
+      /* Private browsing. The choice still applies to this page view. */
+    }
+  }
+
+  document.addEventListener('click', (e) => {
+    const tab = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-lang]')
+    if (tab?.dataset.lang) {
+      applyLanguage(tab.dataset.lang)
+      remember(tab.dataset.lang)
+      return
+    }
+
+    const copy = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-copy]')
+    if (copy) {
+      const block = copy.closest('[data-code-switcher]')
+      const visible = block?.querySelector<HTMLElement>('[data-panel]:not([hidden]) code')
+      if (!visible) return
+      navigator.clipboard
+        .writeText(visible.innerText)
+        .then(() => {
+          copy.textContent = 'Copied'
+          setTimeout(() => (copy.textContent = 'Copy'), 1400)
+        })
+        .catch(() => {
+          // Clipboard access can be refused. Say so rather than silently
+          // doing nothing and leaving the reader to wonder.
+          copy.textContent = 'Press ⌘C'
+          setTimeout(() => (copy.textContent = 'Copy'), 2000)
+        })
+    }
+  })
+
+  // Arrow-key movement between tabs, which a tablist is expected to support.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return
+    const tab = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-lang]')
+    if (!tab) return
+    const tabs = [...tab.parentElement!.querySelectorAll<HTMLButtonElement>('[data-lang]')]
+    const next = tabs[(tabs.indexOf(tab) + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length]
+    next.focus()
+    applyLanguage(next.dataset.lang!)
+    remember(next.dataset.lang!)
+  })
+
+  // Drop the fade once a block is scrolled to its end, and never show it on a
+  // block that does not overflow at all.
+  function markScrollEnds(root: ParentNode = document) {
+    root.querySelectorAll<HTMLElement>('.scroll-fade').forEach((el) => {
+      const atEnd = el.scrollLeft + el.clientWidth >= el.scrollWidth - 2
+      el.dataset.atEnd = String(atEnd)
+    })
+  }
+  document.addEventListener('scroll', (e) => {
+    const el = e.target as HTMLElement
+    if (el?.classList?.contains('scroll-fade')) markScrollEnds(el.parentNode ?? document)
+  }, true)
+  addEventListener('resize', () => markScrollEnds(), { passive: true })
+  markScrollEnds()
+
+  try {
+    const saved = localStorage.getItem(KEY)
+    if (saved) applyLanguage(saved)
+  } catch {
+    /* No stored preference is available; the first language stays selected. */
+  }
+</script>

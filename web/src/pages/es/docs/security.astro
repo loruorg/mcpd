@@ -1,0 +1,616 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Seguridad"
+  description="Qué almacena un mcpd desplegado, qué sale de la máquina y con qué ajuste, cómo funcionan claves, ámbitos y tenencia por proyecto, los límites de la ocultación y los controles que mcpd no tiene."
+  lede="Una página para responder a una revisión. Qué se guarda, qué se envía a otro sitio, quién puede leerlo y los controles que mcpd no tiene."
+  og="docs"
+>
+  <p>
+    Todo lo que sigue está tomado del propio código del daemon y de
+    <code>spec/mcpd.spec.json</code>, que es a partir de lo que se genera la
+    API. Donde un control no existe, esta página lo dice en lugar de dejarte el
+    hueco para que lo descubras en un cuestionario.
+  </p>
+
+  <h2>Qué almacena mcpd</h2>
+  <p>
+    mcpd almacena el texto de las conversaciones de tu agente. Ese es su
+    propósito, y una revisión debería partir de ahí. Un span de tipo
+    <code>model_generation</code> lleva <code>input</code> y
+    <code>output</code>: el prompt exacto que se envió al modelo y el texto
+    exacto que volvió. Para la mayoría de los usuarios, ese es el dato más
+    sensible que tienen.
+  </p>
+  <p>En las seis señales, los campos de texto libre que se almacenan son:</p>
+  <table>
+    <thead>
+      <tr><th>Señal</th><th>Contenido que guarda</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Spans</td>
+        <td><code>input</code>, <code>output</code>, <code>attributes</code>, <code>metadata</code> y el mensaje de error</td>
+      </tr>
+      <tr><td>Logs</td><td>el mensaje y los <code>fields</code> estructurados</td></tr>
+      <tr><td>Métricas</td><td><code>labels</code></td></tr>
+      <tr><td>Puntuaciones</td><td><code>reason</code> y <code>metadata</code></td></tr>
+      <tr><td>Feedback</td><td>el <code>comment</code> de texto libre y <code>metadata</code></td></tr>
+      <tr><td>Notas de aspecto</td><td>la frase, en <code>text</code></td></tr>
+    </tbody>
+  </table>
+  <p>
+    Junto al payload, cada señal lleva campos de correlación que atan una
+    ejecución al resto de tu sistema: proyecto, entorno, nombre y versión del
+    servicio, sesión, hilo, usuario, recurso, ejecución, solicitud, experimento
+    y entrega. A <code>user_id</code> se le aplica un hash al entrar, salvo que
+    desactives la ocultación. Los demás se almacenan tal como llegan, así que
+    trata cualquiera de ellos como un campo por el que se puede identificar a
+    una persona si pones una identidad dentro.
+  </p>
+  <p>
+    Los recuentos de tokens y una cifra de costo se calculan en la ingesta y se
+    almacenan con la ejecución. Nada sobre la llamada al modelo se consulta a un
+    proveedor.
+  </p>
+
+  <h3>Dónde se escribe</h3>
+  <p>
+    Un solo backend, elegido al arrancar. El que viene por defecto es un
+    archivo SQLite embebido en <code>./mcpd.db</code>, indicado con
+    <code>--data</code>. El índice de texto completo vive en el mismo archivo,
+    así que el almacén es un archivo que respaldar y un archivo que proteger.
+    Con <code>--postgres-url</code> o <code>--clickhouse-url</code> los datos
+    van a una base de datos que operas tú.
+  </p>
+  <p>
+    Las ejecuciones duraderas, cuando están activadas, viven en un segundo
+    archivo SQLite al lado del primero, sea cual sea el almacén de trazas.
+    Guarda la entrada, el estado, la salida y la correlación de cada
+    ejecución, y la entrada, la salida y el error de cada paso, exactamente
+    como se enviaron: sin ocultar, con <code>user_id</code> sin hash, porque un
+    paso posterior los vuelve a leer y un valor reescrito cambiaría lo que hace
+    la ejecución. Los spans que una ejecución escribe en el almacén de trazas
+    se ocultan como cualquier otro. Protege el archivo de ejecuciones como
+    proteges el almacén de trazas, o más. La retención y la supresión por
+    sujeto llegan las dos a él, para las ejecuciones que han terminado;
+    consulta
+    <a href={`${urlFor('/docs/runs', locale)}#storage`} class="link">Ejecuciones</a>.
+  </p>
+  <p>
+    mcpd no cifra lo que escribe. El cifrado en reposo es tarea del volumen en
+    el almacén embebido y de la base de datos en los otros dos.
+  </p>
+
+  <h2>Qué sale de la máquina</h2>
+  <p>
+    Con la configuración por defecto, nada. El daemon hace solicitudes
+    salientes en exactamente cuatro sitios, y todas están apagadas hasta que las
+    configures. No hay comprobación de actualizaciones, ni informes de uso, ni
+    telemetría de ningún tipo.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Destino</th><th>Qué se envía</th><th>Apagado salvo que</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Backend de almacenamiento</td>
+        <td>Todo lo que mcpd almacena, por tu propia conexión.</td>
+        <td>Configures <code>--postgres-url</code> o <code>--clickhouse-url</code>. El almacén por defecto es un archivo local y no necesita red en absoluto.</td>
+      </tr>
+      <tr>
+        <td>Reenvío</td>
+        <td>
+          Cada span almacenado, reemitido como OTLP JSON a
+          <code>&#123;endpoint&#125;/v1/traces</code>. Esto incluye el payload:
+          <code>input</code> y <code>output</code> salen como los atributos
+          <code>input.value</code> y <code>output.value</code>, cada uno
+          limitado a 32 KiB. Los valores ya ocultados siguen ocultados, y un
+          <code>user_id</code> con hash se reenvía como el hash.
+        </td>
+        <td>Configures <code>--forward-endpoint</code>, o un bloque <code>forward</code> en el archivo de configuración.</td>
+      </tr>
+      <tr>
+        <td>Webhooks de monitores y objetivos</td>
+        <td>
+          Un cuerpo JSON fijo: el id y el nombre del monitor o del objetivo, el
+          proyecto, la condición, qué vigila, el umbral, la lectura, el número
+          de muestras, un detalle de una línea y una marca de tiempo. No lleva
+          ningún texto de prompt ni de respuesta.
+        </td>
+        <td>Un monitor o un objetivo del archivo de configuración nombra un <code>webhook</code>.</td>
+      </tr>
+      <tr>
+        <td>Modelo juez</td>
+        <td>
+          El criterio, más la pregunta de la ejecución y su respuesta, cada una
+          truncada a 4,000 caracteres, enviadas por POST a
+          <code>&#123;endpoint&#125;/chat/completions</code>. Es la única ruta
+          que envía texto de prompt y de respuesta almacenado a un proveedor de
+          modelos.
+        </td>
+        <td>Un bloque <code>judge</code> en el archivo de configuración nombra un endpoint, un modelo y al menos un criterio, y quien llama pide ese evaluador por su nombre.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    La interfaz que el binario sirve en <code>/</code> está compilada dentro de
+    él. Sus fuentes, estilos y scripts vienen del mismo origen, y no hace
+    ninguna solicitud a terceros.
+  </p>
+
+  <h2>Claves y ámbitos</h2>
+  <p>
+    La autenticación son claves de API. No hay cuenta, ni sesión, ni inicio de
+    sesión. Una clave se presenta como <code>Authorization: Bearer …</code> o en
+    la cabecera <code>X-Mcpd-Key</code>, y ambos lados se pasan por SHA-256
+    antes de compararse, de modo que ni la longitud de la clave configurada ni
+    la posición del primer carácter equivocado se deducen del tiempo de
+    respuesta.
+  </p>
+  <p>Hay seis ámbitos, en orden del alcance que conceden:</p>
+  <table>
+    <thead>
+      <tr><th>Ámbito</th><th>Qué permite</th><th>Por qué es un ámbito aparte</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ingest</code></td>
+        <td>Escribir señales. No leer nada.</td>
+        <td>Esta clave vive en cada contenedor que emite un span, incluidos los que ejecutan código de terceros. No debe abrir además todos los prompts almacenados.</td>
+      </tr>
+      <tr>
+        <td><code>read</code></td>
+        <td>Leer las señales almacenadas.</td>
+        <td>Leer es donde están los prompts.</td>
+      </tr>
+      <tr>
+        <td><code>write</code></td>
+        <td>Cambiar datos almacenados: puntuaciones, feedback, datasets, experimentos y acuses de recibo.</td>
+        <td>Varios de esos manejadores leen un payload de paso. Capturar una ejecución de producción en un dataset lee el input y el output de esa ejecución, que es más que emitir un span.</td>
+      </tr>
+      <tr>
+        <td><code>execute</code></td>
+        <td>Arrancar, cancelar y señalizar ejecuciones, y publicarles eventos.</td>
+        <td>Arrancar una ejecución gasta dinero y llega a tus sistemas. Una clave que puede registrar una puntuación no debe poder además lanzar trabajo.</td>
+      </tr>
+      <tr>
+        <td><code>worker</code></td>
+        <td>Reclamar pasos e informar de lo que les pasó.</td>
+        <td>Es la clave que vive en el proceso que ejecuta los cuerpos de los pasos. Una reclamación devuelve el input del paso y el output de cada paso anterior, así que lee payloads, y no debe poder además arrancar ejecuciones ni cambiar datos almacenados.</td>
+      </tr>
+      <tr>
+        <td><code>admin</code></td>
+        <td>Destruir datos y leer el registro de auditoría.</td>
+        <td>Borrar no es leer.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Qué ámbito toma cada endpoint se declara endpoint por endpoint en la
+    especificación y se publica en la referencia generada de la
+    <a href={urlFor('/docs/reference/api', locale)} class="link">API HTTP</a>,
+    así que hay una sola respuesta a «qué necesita este endpoint» en lugar de
+    una por documento.
+  </p>
+
+  <h3>La lista de reserva, y qué significa para una clave que ya tienes</h3>
+  <p>
+    Una lista <code>write</code> sin definir recae en la lista
+    <code>ingest</code>, y una lista <code>admin</code> sin definir recae en la
+    lista <code>read</code>. Las listas <code>execute</code> y
+    <code>worker</code> sin definir recaen en la lista <code>write</code>, y
+    por tanto en la lista <code>ingest</code> cuando esa tampoco está definida.
+    Eso es lo que impide que una actualización revoque el acceso en todos los
+    despliegues configurados antes de que existieran los ámbitos más
+    estrechos. Una clave de administración vale además para
+    <code>execute</code> y <code>worker</code>, para que un operador pueda
+    conducir una ejecución a mano. Juntas, estas reglas significan que, en un
+    daemon que solo tiene una clave de ingesta y una clave de lectura:
+  </p>
+  <ul>
+    <li>la clave de ingesta también adjunta puntuaciones y feedback, arranca ejecuciones y reclama pasos, y</li>
+    <li>la clave de lectura también borra trazas y, a través de la reserva de administración, arranca ejecuciones y reclama pasos.</li>
+  </ul>
+  <p>
+    Así que una clave de lectura es una clave de borrado hasta que definas
+    <code>--admin-key</code>, y las dos claves llegan a la superficie de
+    ejecuciones hasta que definas <code>--execute-key</code>,
+    <code>--worker-key</code> y <code>--admin-key</code>. Reparte las claves
+    sabiéndolo. Nada se estrecha solo. Cada ámbito tiene su opción,
+    <code>--ingest-key</code>, <code>--read-key</code>,
+    <code>--write-key</code>, <code>--admin-key</code>,
+    <code>--execute-key</code> y <code>--worker-key</code>, y cada una toma una
+    lista; todas se definen además por proyecto en el archivo de configuración.
+  </p>
+
+  <h3>Sin claves, todos los ámbitos están abiertos</h3>
+  <p>
+    Ese valor por defecto es deliberado: una primera ejecución en un portátil
+    no debe necesitar una credencial. Es también lo más peligroso de una
+    instancia expuesta, así que, cuando el daemon se enlaza a una dirección que
+    no es de loopback, registra al arrancar un aviso por cada superficie
+    abierta a quien no debería alcanzarla. Cada aviso nombra la superficie y
+    las opciones que la cierran. Ejecuta <code>mcpd config</code> antes de
+    exponer un puerto: imprime la configuración a la que se resuelve una
+    invocación y termina. Lleva una línea por ámbito, y nombra la lista en la
+    que ha recaído un ámbito, de modo que
+    <code>admin auth      key required (read keys)</code> te dice que las claves
+    de lectura todavía pueden borrar.
+    <a href={urlFor('/deploy', locale)} class="link">Docker y Kubernetes</a>
+    muestra la salida.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="cerrado antes de ser accesible"
+    command={'mcpd --ingest-key "$INGEST" --read-key "$READ"'}
+    primaryLabel="Opciones"
+    secondary={[
+      { label: 'Los seis ámbitos', command: 'mcpd --ingest-key "$I" --read-key "$R" --write-key "$W" --execute-key "$E" --worker-key "$K" --admin-key "$A"' },
+      { label: 'Como entorno', command: 'MCPD_INGEST_KEYS=… MCPD_READ_KEYS=… mcpd' },
+      { label: 'Comprueba primero', command: 'mcpd config' },
+    ]}
+  />
+
+  <h3>Un proyecto es una frontera de tenencia</h3>
+  <p>
+    Una clave configurada en el nivel superior concede todos los proyectos. Una
+    clave listada en cambio bajo un proyecto con nombre en el bloque
+    <code>projects</code> del archivo de configuración concede ese proyecto y
+    ningún otro, y cada proyecto tiene su propia lista por ámbito. Una misma
+    clave puede aparecer en varios proyectos, que es como un equipo de
+    plataforma tiene una clave que abarca lo que opera sin tener el servidor
+    entero.
+  </p>
+  <p>En la ruta de escritura la comprobación es por señal, no por solicitud:</p>
+  <ul>
+    <li>
+      Un lote puede nombrar varios proyectos. Las señales que nombran un
+      proyecto al que la clave no llega se descartan y se informan en la
+      respuesta como rechazadas, con el motivo, así que una flota apuntando al
+      proyecto equivocado se descubre desde la respuesta que ya lee. El resto
+      del lote se almacena.
+    </li>
+  </ul>
+  <p>
+    En la ruta de lectura, cada endpoint que nombra un proyecto lo comprueba
+    contra los permisos de la clave: trazas, spans, logs, métricas,
+    puntuaciones, feedback, analíticas, datasets, experimentos y el registro de
+    auditoría. Los elementos de un dataset se direccionan por el id del dataset,
+    y el daemon busca qué proyecto es dueño de ese dataset y comprueba la clave
+    contra él, de modo que una clave que no puede abrir el proyecto no puede
+    leer los casos capturados de él. Un id que no existe se rechaza igual que
+    uno al que la clave no llega, así que el endpoint no sirve para averiguar
+    qué ids existen. Tres endpoints no toman proyecto y son accesibles para cualquier clave
+    que tenga el ámbito de lectura, sean cuales sean los proyectos a los que
+    está limitada: la lista de proyectos, el catálogo de evaluadores y el
+    conjunto de capacidades del almacenamiento
+    (<code>GET /v1/api/capabilities</code>). La lista de proyectos se filtra
+    por los permisos de la clave, así que una clave limitada a un proyecto solo
+    ve los proyectos a los que llega. En una instancia compartida, los nombres
+    de proyecto suelen ser nombres de equipos o de clientes. El estado de los
+    monitores y el estado de los objetivos estuvieron en esa lista hasta que se
+    filtraron por el alcance de proyecto de la clave, que es lo que siempre
+    debieron hacer: un monitor nombra el proyecto que vigila y lleva el webhook
+    al que envía.
+    La API solo nombra el host de ese webhook, porque la URL de un webhook suele ser su propia credencial.
+  </p>
+
+  <h3>Un rechazo dice cuál de los dos problemas es</h3>
+  <p>
+    Una clave ausente o no reconocida es un 401, y una clave reconocida que este
+    endpoint o este proyecto no admite es un 403. La división es operativa: un
+    401 te manda a buscar una errata en una credencial, un 403 te dice que la
+    credencial es correcta y los permisos no.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="cuatro rechazos"
+    lines={[
+      { cmd: 'curl -sw "%{http_code} " "$MCPD/v1/api/traces?project=acme"' },
+      { out: '401  this endpoint needs an API key; send it as `Authorization: Bearer <key>`', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $TYPO"' },
+      { out: '401  that key is not one this daemon knows', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $INGEST"' },
+      { out: '403  that key is not valid for reading', tone: 'warn' },
+      { cmd: 'curl … -H "authorization: Bearer $BILLING_READ"' },
+      { out: '403  that key does not reach the project "acme"', tone: 'warn' },
+    ]}
+  />
+
+  <p>
+    Ese último mensaje es el mismo exista el proyecto o no. Confirmar qué
+    nombres de proyecto son reales es una fuga pequeña, y en un daemon
+    compartido esos nombres son los nombres de tus clientes.
+  </p>
+
+  <h3>El registro de auditoría</h3>
+  <p>
+    Devolver un payload almacenado fuera de mcpd queda anotado, y también cada
+    borrado, así que la pregunta «quién leyó esta ejecución» tiene respuesta.
+    Una fila lleva cuándo, qué clave, qué acción, qué proyecto, qué traza o
+    dataset nombró y si la solicitud se sirvió o se rechazó.
+    <code>GET /v1/api/audit</code> lo lee de vuelta, lo más reciente primero, y
+    toma el ámbito <code>admin</code>.
+  </p>
+  <p>
+    Se anotan dieciocho acciones: <code>get_trace</code>, <code>list_spans</code>,
+    <code>list_logs</code>, <code>list_feedback</code>,
+    <code>list_dataset_items</code>, <code>capture_into_dataset</code>,
+    <code>read_trace_aspect_notes</code>, <code>get_theme</code>, <code>get_theme_flow</code>, <code>list_theme_history</code>, <code>list_theme_examples</code>,
+    <code>delete_trace</code>, <code>erase_subject</code>, y cinco sobre
+    ejecuciones duraderas: <code>list_runs</code>, <code>get_run</code>,
+    <code>list_run_events</code>, <code>get_step_cause</code> y
+    <code>cancel_run</code>. La frontera es el payload, no la solicitud. Listar
+    trazas devuelve una proyección de nombres, tiempos, recuentos de tokens y
+    costo sin ningún prompt ni respuesta dentro, así que no queda anotado;
+    abrir una de esas trazas sí, porque ahí está el texto. Listar ejecuciones
+    duraderas sí queda anotado, porque cada ejecución de la lista lleva su
+    entrada, su salida y su estado tal como se enviaron. Una lectura rechazada
+    de una ejecución se anota bajo el proyecto dueño de la ejecución.
+  </p>
+  <p>
+    Las llamadas de worker no se anotan: reclamar un paso, declarar que ha
+    empezado, el heartbeat, complete y fail. Un lease sí lleva la entrada del
+    paso y las salidas de los pasos anteriores, pero el bucle del worker
+    reclama muchas veces por minuto, y una fila por reclamación enterraría las
+    lecturas que hizo una persona. Trata la clave <code>worker</code> como una
+    clave que lee todos los payloads de las ejecuciones que sirve. Arrancar una
+    ejecución tampoco se anota; volver a enviar una clave de idempotencia ya
+    en uso responde con la ejecución que esa clave arrancó, así que trata la
+    clave <code>execute</code> como una clave que puede leer las ejecuciones
+    que arranca.
+  </p>
+  <p>Cinco propiedades que un revisor debería conocer:</p>
+  <ul>
+    <li>
+      <strong>La clave nunca se escribe.</strong> El principal es un hash
+      SHA-256 truncado de la clave, que distingue una clave de otra sin guardar
+      un verificador para ella. Una solicitud sin clave en un daemon abierto se
+      anota como <code>anonymous</code>.
+    </li>
+    <li>
+      <strong>La persona viene de tu ingress, o de ningún sitio.</strong> mcpd
+      no tiene cuentas de usuario, así que por sí sola una fila atribuye una
+      acción a una clave y no a una persona. El campo <code>subject</code> lleva
+      una identidad cuando <code>--trusted-identity-header</code> y
+      <code>--trusted-proxy-cidr</code> están ambos definidos, y está vacío en
+      caso contrario, que es lo que hay por defecto. mcpd nunca establece esa
+      identidad por sí mismo; anota lo que afirmó una dirección que tú
+      nombraste.
+    </li>
+    <li>
+      <strong>Un rechazo también queda anotado.</strong> La fila se escribe
+      antes de devolver el 403, porque un intento rechazado sobre el proyecto de
+      otro equipo es exactamente la fila para la que existe un registro de
+      auditoría. Leer el registro no queda anotado: crecería sin que jamás se
+      leyera un payload, y la fila no diría nada que quien tiene la clave de
+      administración no sepa ya.
+    </li>
+    <li>
+      <strong>Anota qué clave y, opcionalmente, quién.</strong> La clave se
+      guarda como un hash truncado, nunca la clave en sí, así que el registro no
+      es un sitio donde se acumulen credenciales. Eso responde a «una clave de
+      administración borró esto» y no a «qué persona lo hizo», porque mcpd no
+      tiene proveedor de identidad. Si quieres la segunda
+      respuesta, dale la cabecera que tu ingress ya envía y las direcciones
+      autorizadas a enviarla:
+      <code>--trusted-identity-header x-forwarded-user</code> con
+      <code>--trusted-proxy-cidr 10.42.0.0/16</code>. Hacen falta las dos
+      mitades. Una cabecera es una cadena que puede enviar cualquiera que
+      alcance el puerto, así que mcpd la lee solo desde una dirección que tú
+      nombraste; una solicitud desde cualquier otro sitio se sirve con
+      normalidad y su fila no lleva subject, que es la respuesta honesta en
+      lugar de una suposición. Sin ninguna de las dos opciones definida, nunca
+      se anota un subject, y eso es lo que hay por defecto.
+    </li>
+    <li>
+      <strong>La retención no lo recorta.</strong> La pasada de retención
+      elimina spans, logs, métricas, trazas, puntuaciones, feedback, notas de
+      aspecto y ejecuciones duraderas terminadas. Deja el registro de
+      auditoría, porque un registro que caducara junto con los datos que
+      describe no podría decir quién leyó los datos borrados.
+    </li>
+    <li>
+      <strong>Nunca hace fallar la solicitud que describe.</strong> Una fila que
+      no se puede escribir se reporta en los logs y se cuenta como
+      <code>mcpd_audit_write_failures_total</code> en <code>/metrics</code>, y
+      la lectura devuelve igual. Un registro de auditoría capaz de tumbar la
+      ruta de lectura es un riesgo peor que el que evita, así que vigila ese
+      contador en lugar de confiar en que las solicitudes fallen.
+    </li>
+  </ul>
+
+  <h3>Qué no cubre ninguna clave</h3>
+  <ul>
+    <li>
+      <strong>La interfaz.</strong> El marcado en <code>/</code> se sirve a
+      cualquiera que alcance el puerto. Los datos que hay detrás no: cada
+      solicitud que hace pasa por la API de consulta y se topa con las mismas
+      claves. No hay pantalla de inicio de sesión en el daemon.
+    </li>
+    <li>
+      <strong>Las sondas y <code>/metrics</code>.</strong> Sin autenticar a
+      propósito, porque un kubelet y un recolector de métricas no pueden llevar
+      una clave. Informan del estado, la versión, el tiempo en marcha, el nombre
+      del backend de almacenamiento y sus contadores, nunca payloads.
+    </li>
+    <li>
+      <strong>El origen.</strong> La API de consulta y las sondas responden con
+      <code>Access-Control-Allow-Origin: *</code>, así que una página de
+      navegador en cualquier origen puede llamarlas. mcpd no usa cookies ni
+      credenciales ambientales, así que esa página todavía tiene que tener una
+      clave: una política de origen permisiva no se la entrega.
+    </li>
+  </ul>
+
+  <h2>Qué hace la ocultación, y qué no puede hacer</h2>
+  <p>
+    La ocultación está activada por defecto y corre antes de la escritura, como etapa tres
+    del pipeline de entrada. Un valor que una regla capta nunca llega a la base
+    de datos, que es una garantía distinta de la de un valor borrado después, y
+    la diferencia es la que pregunta un auditor. Lo que no puede hacer es evitar
+    que los bytes salgan a la red: ya la han cruzado cuando corre la regla. Para
+    eso, los SDK llevan <code>MCPD_CAPTURE_PAYLOADS=false</code>, que descarta
+    <code>input</code> y <code>output</code> antes de encolar un span y deja
+    todo lo demás.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <p>
+    Una regla es un conjunto de subcadenas en minúscula y un modo. Una clave
+    coincide cuando su nombre, en minúscula, contiene una de ellas. Los valores
+    coincidentes se enmascaran, se enmascaran en parte, se pasan por un hash con
+    clave o se descartan. Cuando una clave coincidente contiene un objeto, todo
+    lo que hay bajo ella se oculta también, se llamen como se llamen las claves
+    hijas, y un secreto enviado como número JSON se trata igual que uno enviado
+    como cadena. La tabla completa de reglas está en
+    <a href={urlFor('/docs/privacy', locale)} class="link">Ocultación y retención</a>.
+  </p>
+  <p>
+    Ahora el límite, que una revisión va a preguntar y que ninguna configuración
+    quita. <strong>Las reglas coinciden con nombres de campo, no con la forma de
+    un valor.</strong> Una clave de API que un usuario pegó en mitad de una
+    frase, y que llega en un campo llamado <code>content</code> o
+    <code>question</code>, no la capta nada del pipeline. El nombre del campo es
+    inocente, así que el valor se almacena entero.
+  </p>
+  <p>Por eso la ocultación detiene una cosa concreta:</p>
+  <ul>
+    <li>Detiene la captura estructurada de credenciales e identificadores, cuando una credencial llega en un campo que se llama como lo que es.</li>
+    <li>No analiza texto libre, y no es un clasificador de contenido.</li>
+    <li>No detecta un secreto por su forma ni por su entropía.</li>
+    <li>No toca el nombre de un span ni el mensaje de un registro de log. Esos son identificadores que sirven para agrupar y no payloads, y reescribirlos rompería la agrupación. No construyas el nombre de un span con el correo de un cliente.</li>
+    <li>No toca el almacén de ejecuciones. Los payloads de una ejecución duradera son su estado de trabajo y se guardan tal como se enviaron; solo se ocultan los spans que una ejecución escribe en el almacén de trazas.</li>
+  </ul>
+  <p>
+    Un control sí trabaja sobre la forma, y es detección a posteriori en lugar
+    de prevención: el evaluador integrado <code>no_leaked_secret</code> baja la
+    nota de una ejecución cuya <em>respuesta</em> lleva un token con aspecto de
+    credencial, por prefijo conocido o por una tirada larga alfanumérica con
+    mayúsculas y minúsculas. Puntúa una ejecución que ya está almacenada. No
+    quita nada, no lee el prompt, y solo corre cuando lo pides. Tómalo como una
+    forma de enterarte de que esto ha pasado, no como una segunda línea de
+    ocultación.
+  </p>
+  <p>
+    Dos límites se aplican haya coincidido una regla o no. Toda cadena de más de
+    128 KiB se trunca en una frontera de carácter con una marca, y el recorrido
+    se detiene a una profundidad de 32. Ambos existen para que un documento
+    desbocado no pueda decidir el tamaño de tu base de datos ni clavar una CPU.
+  </p>
+  <p>
+    <code>--no-redact</code> apaga el pipeline entero, lo que solo tiene sentido
+    cuando algo aguas arriba ya oculta. Donde la ocultación aplica un hash a un
+    identificador, define <code>--redact-key</code>: la clave integrada es una
+    constante en código publicado, y los identificadores vienen de espacios
+    pequeños, así que un hash sin clave se recupera probando candidatos.
+  </p>
+
+  <h2>Retención y supresión</h2>
+  <p>
+    <code>--retention-days</code> borra las señales más viejas que ese número
+    de días. Omítela y no se borra nunca nada, que es el valor por defecto
+    correcto: una herramienta que descartara en silencio las trazas del mes
+    pasado se descubriría en el peor momento.
+  </p>
+  <p>
+    La pasada corre en un temporizador horario dentro del daemon, nunca dentro
+    de la solicitud de un usuario. Cubre cada proyecto nombrado en el bloque
+    <code>projects</code>, cada uno con su propio <code>retention_days</code>
+    donde lo define y con la cifra global donde no, más el proyecto por
+    defecto. Un proyecto sin ventana en ningún sitio no se recorta en
+    absoluto.
+  </p>
+  <p>
+    Para una solicitud sobre una persona,
+    <code>DELETE /v1/api/subjects/{'{user_id}'}?project=…</code> elimina todas
+    las ejecuciones anotadas contra esa persona en el proyecto, con los spans,
+    logs, métricas, puntuaciones y feedback adjuntos, y responde con un recuento
+    por señal. Al identificador se le aplica un hash con la misma clave antes de
+    compararlo, así que la solicitud funciona contra identificadores con hash
+    sin que tú tengas que aplicar ninguno, y la respuesta dice cuántos
+    identificadores almacenados estaban en una forma que la solicitud no pudo
+    comparar. Para eliminar una ejecución en lugar de una persona,
+    <code>DELETE /v1/api/traces/{'{trace_id}'}</code> la elimina junto con todo
+    lo adjunto en una sola transacción. Ambas toman el ámbito
+    <code>admin</code> y ambas quedan en el registro de auditoría.
+    <a href={urlFor('/docs/privacy', locale)} class="link">Ocultación y retención</a>
+    recorre la solicitud de supresión y lo que puede y no puede prometer.
+  </p>
+
+  <h2>Qué no hace mcpd</h2>
+  <p>
+    Nada de lo siguiente existe en esta compilación. Se enumera porque una
+    revisión que lo descubre más tarde es un desenlace peor que una revisión que
+    lo lee aquí.
+  </p>
+  <table>
+    <thead>
+      <tr><th>No está en mcpd</th><th>Qué hacer en su lugar</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Terminación TLS.</strong> mcpd habla HTTP en claro. Los prompts y las completions cruzan ese enlace enteros.</td>
+        <td>Termina TLS en tu ingress o en tu malla de servicios, y mantén el puerto del daemon fuera de cualquier red no confiable.</td>
+      </tr>
+      <tr>
+        <td><strong>SSO.</strong> Sin integración con proveedores de identidad, sin OIDC, sin SAML, sin pantalla de inicio de sesión.</td>
+        <td>Pon la interfaz detrás del proxy de identidad que ya operas. La identidad de una persona es la que establezca ese proxy.</td>
+      </tr>
+      <tr>
+        <td><strong>SCIM.</strong> Sin aprovisionamiento de usuarios ni de grupos, porque mcpd no tiene el concepto de cuenta de usuario.</td>
+        <td>Aprovisiona en el proxy. Dentro de mcpd la unidad es una clave, añadida a una lista o quitada de ella.</td>
+      </tr>
+      <tr>
+        <td><strong>Roles más allá de los seis ámbitos.</strong> La autorización es un ámbito y una lista de proyectos. No hay rol por endpoint ni grupo.</td>
+        <td>Separa por clave y por proyecto. Si una distinción importa, hazla un proyecto.</td>
+      </tr>
+      <tr>
+        <td><strong>Establecer quién es una persona.</strong> El registro de auditoría puede anotar un subject, pero mcpd nunca averigua quién es quien llama. Anota lo que afirmó tu ingress, y solo desde una dirección que tú nombraste.</td>
+        <td>Define <code>--trusted-identity-header</code> y <code>--trusted-proxy-cidr</code> para que la cabecera que tu proxy ya envía llegue a la fila de auditoría. Sin ellas una fila atribuye una acción a una clave, y emitir una clave por equipo estrecha el hash.</td>
+      </tr>
+      <tr>
+        <td><strong>Ciclo de vida de las claves.</strong> Las claves son listas leídas al arrancar. No hay caducidad, ni calendario de rotación, ni cuota por clave. El techo que sí existe es por proyecto: <code>--quota-per-minute</code> limita cuántas señales puede almacenar un proyecto en un minuto, sea cual sea la clave que las envió.</td>
+        <td>Configura varias claves, una por equipo o por flota, para que revocar una sea una edición y un reinicio en lugar de un redespliegue de todo lo que emite un span. Haz que una flota sea su propio proyecto si necesita su propio techo.</td>
+      </tr>
+      <tr>
+        <td><strong>Cifrado en reposo.</strong> mcpd escribe archivos en claro o filas en claro.</td>
+        <td>Cifra el volumen, o usa una base de datos que lo haga.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Informar de algo</h2>
+  <p>
+    Las vulnerabilidades sospechadas van a <strong>hi@mcpd.sh</strong> con
+    "Security" en el asunto, no a una incidencia pública. El
+    <code>SECURITY.md</code> del repositorio indica el alcance y qué contiene un
+    buen informe. Una instancia sin autenticar que alguien decidió exponer es
+    un valor por defecto documentado, no un hallazgo. Cualquier cosa que pase
+    una clave que <em>sí</em> estaba configurada, que pase una regla de
+    ocultación configurada, o que cruce una frontera de proyecto, sí lo es.
+  </p>
+
+  <h2>A continuación</h2>
+  <ul>
+    <li>La tabla de reglas, los cuatro modos y el hash con clave: <a href={urlFor('/docs/privacy', locale)} class="link">Ocultación y retención</a>.</li>
+    <li>Qué definir antes de que un puerto sea accesible: <a href={urlFor('/deploy', locale)} class="link">Docker y Kubernetes</a>.</li>
+    <li>Cada opción y variable de entorno: <a href={urlFor('/docs/configuration', locale)} class="link">Configuración</a>.</li>
+    <li>Alcanzar una instancia desplegada desde código o desde un agente: <a href={urlFor('/docs/integrating', locale)} class="link">Integración</a>.</li>
+  </ul>
+</Doc>

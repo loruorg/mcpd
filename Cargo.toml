@@ -1,0 +1,79 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mcpd-core",
+    "crates/mcpd-store",
+    "crates/mcpd-runs",
+    "crates/mcpd-server",
+    "crates/mcpd",
+    "crates/mcpd-sdk",
+]
+# The conformance probe is deliberately NOT a member. It exists to be run by
+# tests/e2e/run.mjs against a live daemon, and building it on every `cargo test`
+# would slow the ordinary loop for no gain.
+exclude = ["tests/e2e/probes/rust"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/mcpd/mcpd"
+homepage = "https://mcpd.sh"
+authors = ["mcpd contributors"]
+
+[workspace.dependencies]
+mcpd-core  = { path = "crates/mcpd-core",  version = "0.1.0" }
+mcpd-store = { path = "crates/mcpd-store", version = "0.1.0" }
+mcpd-runs  = { path = "crates/mcpd-runs",  version = "0.1.0" }
+mcpd-server = { path = "crates/mcpd-server", version = "0.1.0" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = { version = "0.3", features = ["serde", "serde-well-known", "formatting", "parsing", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+rand = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-time-0_3"] }
+deadpool-postgres = "0.14"
+# TLS to Postgres. `aws_lc_rs` because it is the provider the rest of the build
+# already uses through reqwest; naming it here keeps a second one out.
+tokio-postgres-rustls = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+webpki-roots = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "gzip"] }
+
+# Password hashing is built to be slow, and unoptimised it is many times
+# slower, which made the account tests crawl. Optimising the two crates that do
+# the work changes nothing else about a debug build.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+# Unwind, not abort. With abort, a panic anywhere, in one request handler or
+# one tick of a background loop, stopped the whole daemon, and the code that
+# answers a panicking request with a 500 and keeps a loop running could never
+# run in a shipped binary. Neither could the stores' recovery from a lock that
+# a panicking holder poisoned. A daemon serving many tenants must lose one
+# request, not every connection at once.
+panic = "unwind"
+
+# A small, fast build for the single-binary story. `cargo build --profile dist`
+[profile.dist]
+inherits = "release"
+lto = "fat"
+# Stated again rather than inherited, because this is the profile the
+# Dockerfile ships, and the reason above is the reason it must not abort.
+panic = "unwind"

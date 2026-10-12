@@ -1,0 +1,314 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+/* İç bağlantılar İngilizce route olarak yazılır ve burada yerelleştirilir.
+   Türkçesi henüz yazılmamış bir route, arkasında hiçbir şey olmayan bir Türkçe
+   adrese değil, İngilizce sayfaya gider. */
+const code = localeOf(Astro.url.pathname)
+const url = (route: string) =>
+  urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+---
+
+<Doc
+  title="Kavramlar"
+  description="mcpd'nin kullandığı sözcükler: trace'ler ve span'ler, span türleri, kök ve olay span'leri, altı sinyal, ilişkilendirme ve üretimden parçaya kadar model hiyerarşisi."
+  lede="Veri modelinin tamamını bir avuç sözcük taşır. Belgelerin geri kalanı bunları bildiğinizi varsayar; bu sayfa her birini tanımlar ve ne işe yaradığını söyler."
+  og="docs"
+>
+  <h2>Span</h2>
+  <p>
+    Span, tek bir iş birimidir. Bir adı, bir türü, bir başlangıç zamanı,
+    çoğunlukla bir bitiş zamanı ve bir durumu vardır. Neyin girdiğini, neyin
+    çıktığını, kaç token kullandığını, ne kadara mal olduğunu ve başarısız
+    olduysa hatayı taşıyabilir.
+  </p>
+  <p>
+    Adı düşük kardinaliteli tutun. <code>search_docs</code> bir addır;
+    <code>search_docs(query=hello)</code> ise birbirine yapıştırılmış bir ad ile
+    bir değerdir ve iki çalıştırmanız olur olmaz ada göre gruplamayı işe yaramaz
+    hâle getirir.
+  </p>
+
+  <h2>Trace</h2>
+  <p>
+    Trace, tek bir çalıştırmadan gelen bütün span'lerdir; onları 128 bitlik bir
+    trace kimliği birleştirir. Trace'in içinde ağacın biçimini
+    <code>parent_span_id</code> verir: bir model adımının içinde yapılan araç
+    çağrısı o adımın çocuğudur, dolayısıyla ekrandaki iç içelik gerçekte olan iç
+    içeliktir.
+  </p>
+  <p>
+    Kimlikler OpenTelemetry biçimindedir: bir trace için 32, bir span için 16 küçük
+    harfli onaltılık karakter. Bu bir süs değildir. Web katmanınızda başlayıp
+    ajanınızda biten bir trace'in ikisi boyunca tek bir trace kalmasını sağlayan da,
+    mcpd'nin telemetrinizi zaten okuyan başka her şeyin yanında durabilmesini
+    sağlayan da budur.
+  </p>
+  <p>
+    Üstü yabancı bir izleme sisteminden gelen bir span, üst kimliğini bunun yerine
+    <code>external_parent_span_id</code> alanında taşır. mcpd bu değeri
+    ilişkilendirme için saklar ama ağacını asla ondan kurmaz: mcpd'ye hiç
+    ulaşmamış bir span'i adlandıran bir üst kimlik, bütün alt ağacı hiçbir şeyin
+    altına asardı.
+  </p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>
+    mcpd her trace'in bir izdüşümünü de saklar: span sayısı, hata sayısı, toplam
+    token, toplam maliyet, kaç model çağrısı ve kaç araç çağrısı olduğu. Bu
+    satır her yazmada artırılmaz, span'lerden yeniden hesaplanır; çünkü span'ler
+    sırasız gelir, yeniden denenir ve yerinde güncellenir. Bir sayaç bu üçünün de
+    altında kayar ve listede gözle görülür biçimde yanlış olan bir span sayısı,
+    okuyanın sayfadaki başka her sayıya duyduğu güveni kırar.
+  </p>
+
+  <h2>Kök span'ler ve olay span'leri</h2>
+  <p>
+    Kök span, trace'in içinde üstü olmayan span'dir. Normalde bir
+    <code>agent_run</code> ya da <code>workflow_run</code> span'idir; trace adını,
+    etiketlerini ve ilişkilendirmesini oradan alır. Etiketler yalnızca kökte
+    anlamlıdır, orada çalıştırmanın tamamını etiketler.
+  </p>
+  <p>
+    Olay span'i bir süre değil, zamanda bir noktadır; bu yüzden bitişi ve süresi
+    yoktur. Akışla gelen bir parça olağan örnektir. Bu ayrım eksik bir bitiş
+    zamanından çıkarılmaz, ayrıca saklanır; çünkü “bunun hiç bitişi olmadı” ile
+    “bu henüz bitmedi” farklı olgulardır ve yalnızca biri sorundur.
+  </p>
+  <p>
+    Bir trace, kökü bittiğinde ve açık span kalmadığında tamamlanmış olur. O ana
+    kadar gizlenmez; elde olan en iyi adla listede durur. Hiç bitmemiş
+    çalıştırma, çoğu zaman bakmaya geldiğiniz çalıştırmadır.
+  </p>
+
+  <h2>Span türü</h2>
+  <p>
+    Tür, bir işlemin ne <em>olduğunu</em> söyler. Span'in nasıl çizileceğine,
+    üzerinde hangi özniteliklerin anlam taşıdığına ve maliyet muhasebesinin ona
+    bakıp bakmayacağına karar verir. mcpd, aileler hâlinde 33 tür tanımlar:
+  </p>
+  <div class="scroll-x">
+    <table>
+    <thead>
+      <tr><th>Aile</th><th>Türler</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Ajan</td>
+        <td><code>agent_run</code></td>
+      </tr>
+      <tr>
+        <td>Model</td>
+        <td>
+          <code>model_generation</code>, <code>model_step</code>,
+          <code>model_inference</code>, <code>model_chunk</code>
+        </td>
+      </tr>
+      <tr>
+        <td>Araçlar</td>
+        <td>
+          <code>tool_call</code>, <code>client_tool_call</code>,
+          <code>provider_tool_call</code>, <code>mcp_tool_call</code>
+        </td>
+      </tr>
+      <tr>
+        <td>İş akışı</td>
+        <td>
+          <code>workflow_run</code>, <code>workflow_step</code>,
+          <code>workflow_conditional</code>, <code>workflow_parallel</code>,
+          <code>workflow_loop</code> ve gerisi
+        </td>
+      </tr>
+      <tr>
+        <td>Getirme</td>
+        <td>
+          <code>rag_ingestion</code>, <code>rag_embedding</code>,
+          <code>rag_vector_operation</code>, <code>rag_action</code>,
+          <code>retrieval</code>, <code>memory_operation</code>,
+          <code>graph_action</code>
+        </td>
+      </tr>
+      <tr>
+        <td>Değerlendirme</td>
+        <td>
+          <code>scorer_run</code>, <code>scorer_step</code>,
+          <code>guardrail</code>, <code>processor_run</code>
+        </td>
+      </tr>
+      <tr>
+        <td>Diğer</td>
+        <td>
+          <code>mapping</code>, <code>skill_resolution</code>,
+          <code>workspace_action</code>, <code>http_request</code>,
+          <code>generic</code>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    Dört tür token faturalandırır: <code>model_generation</code>,
+    <code>model_step</code>, <code>model_inference</code> ve
+    <code>rag_embedding</code>. Maliyet muhasebesinin okuduğu span'ler bunlardır.
+    <code>generic</code> her zaman geçerlidir ve asla çıkarımla atanmaz; böylece
+    mcpd'nin sınıflandıramadığı bir span tahmin edilmek yerine dürüstçe
+    etiketlenir.
+    <a href={url('/docs/reference/data-model')} class="link">Veri modeli</a>, her
+    türü ne anlama geldiğiyle birlikte listeler.
+  </p>
+
+  <h2>Model hiyerarşisi</h2>
+  <p>
+    Bu türlerden dördü iç içe geçer ve bu iç içelik modeldeki en yararlı şeydir:
+  </p>
+  <ul>
+    <li>
+      <code>model_generation</code>, mantıksal tek bir üretimdir: ilk istekten
+      son yanıta kadar her şey.
+    </li>
+    <li>
+      <code>model_step</code>, onun içindeki tek bir adımdır. İki kez araç
+      çağıran bir üretimin üç adımı olur.
+    </li>
+    <li>
+      <code>model_inference</code>, yalnızca sağlayıcıya gidiş dönüştür; içinde
+      işlemci de araç yürütmesi de yoktur.
+    </li>
+    <li>
+      <code>model_chunk</code>, akışla gelen tek bir parçadır ve olay olarak
+      kaydedilir.
+    </li>
+  </ul>
+  <p>
+    Tek yerine dört katmanın nedeni, “model çağrısı yavaştı” cümlesinin
+    söylendiği hâliyle neredeyse hiç doğru olmamasıdır. İşin içine araçlar
+    girdiğinde kodunuzdan yapılan tek bir çağrı tek bir HTTP gidiş dönüşü
+    değildir: bir istek, bir araç, bir istek daha, bir guardrail, bir istek
+    daha. Bunu tek bir span'e indirirseniz, altı saniyeyi kendi yeniden deneme
+    döngünüzde geçiren bir çalıştırma, altı saniyeyi sağlayıcıyı beklemekle
+    geçirenden ayırt edilemez. Çıkarımı adımdan, adımı üretimden ayırmak farkı
+    okunur kılar; ilk parça olayı da size ilk token'a kadar geçen süreyi verir.
+  </p>
+  <p>
+    Token kullanımını <strong>bir kez</strong>, sağlayıcı çağrısını yapan span'de
+    kaydedin. Trace izdüşümü, girdi ve çıktı token'larını trace'teki her span üzerinden
+    toplar; aynı sayıları hem bir üretime hem de onun her adımına iliştirirseniz
+    ekrandaki token toplamı da maliyet de ikiye katlanır. Hiyerarşi zamanlama
+    içindir; token'lar, sağlayıcıyla gerçekte konuşan katmana aittir.
+  </p>
+
+  <h2>Altı sinyal</h2>
+  <p>
+    Span'ler, mcpd'nin sakladığı altı şeyden biridir. Loglar, bir çalıştırmanın
+    ürettiği satırlardır. Metrikler; sayaç, gösterge ya da histogram biçiminde
+    sayısal gözlemlerdir. Puanlar, bir span'in ya da bir trace'in makine
+    değerlendirmesidir. Geri bildirim ise insanın değerlendirmesidir. Yön
+    notu, bitmiş bir çalıştırma hakkında yazılmış tek cümledir. Çoğunu bir model
+    yazar. <code>outcome</code> notlarını ise daemon, çalıştırmanın durumundan ve
+    elinde zaten bulunan diğer bilgilerden yazar.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <p>
+    Altısı da ait oldukları trace kimliğini, çoğu ayrıca span kimliğini taşır ve
+    hiçbir şey yazılmadan önce altısı da aynı maskeleme hattından geçer. Bir sır, bir log
+    satırından da tıpkı bir prompt'tan sızdığı kadar iyi sızar.
+  </p>
+  <p>
+    Bir puan her zaman ölçeğini bildirir: değeri ile arasında durduğu en küçük
+    ve en büyük değer. Her SDK ikisini de çağrı yerinde ister; çünkü ölçeği
+    iliştirilmemiş çıplak bir 0.7, aynı puanlayıcının geçen haftaki çıktısı
+    dahil hiçbir şeyle karşılaştırılamaz.
+  </p>
+  <p>
+    Geri bildirim, puanlardan ayrı bir yerde tutulur ve onlarla asla ortalanmaz.
+    Beş biçimde gelir: <code>thumbs</code>, <code>rating</code>,
+    <code>correction</code>, <code>tag</code> ve <code>comment</code>. Beşinin en
+    değerlisi düzeltmedir, çünkü doğru yanıtı taşıyan tek sinyal odur.
+  </p>
+
+  <h2>İlişkilendirme</h2>
+  <p>
+    İlişkilendirme, bir sinyalin ait olduğu bağlamdır. Bir yığın çalıştırma ile
+    dilimleyebileceğiniz bir küme arasındaki fark budur.
+  </p>
+  <div class="scroll-x">
+    <table>
+    <thead>
+      <tr><th>Alan</th><th>Ne tutar</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>project</code></td><td>Kiracılık anahtarı. Her sinyal tam olarak birine aittir.</td></tr>
+      <tr><td><code>environment</code></td><td>Nerede çalıştığı; örneğin production ya da staging.</td></tr>
+      <tr><td><code>service_name</code></td><td>Sinyali üreten servis.</td></tr>
+      <tr><td><code>service_version</code></td><td>Servisin sürümü; böylece bir regresyon bir sürüme bağlanabilir.</td></tr>
+      <tr><td><code>session_id</code></td><td>Kullanıcıya dönük oturum. Birçok trace'i tek bir konuşmada toplar.</td></tr>
+      <tr><td><code>thread_id</code></td><td>O oturumun içindeki bir konu dizisi.</td></tr>
+      <tr><td><code>user_id</code></td><td>Çalıştırmanın kendisi için yapıldığı son kullanıcı.</td></tr>
+      <tr><td><code>resource_id</code></td><td>Kendi uygulamanızın içindeki bir kiracı ya da çalışma alanı.</td></tr>
+      <tr><td><code>run_id</code></td><td>Bu çalıştırma için sizin kendi tanımlayıcınız.</td></tr>
+      <tr><td><code>request_id</code></td><td>İşe yol açan gelen istek.</td></tr>
+      <tr><td><code>experiment_id</code></td><td>Çalıştırmayı bir deney ürettiyse doldurulur.</td></tr>
+      <tr><td><code>release</code></td><td>Bir sürüm adı ya da bir git sha değeri.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    Zorunlu tek alan <code>project</code> alanıdır. Gönderen bir proje adı
+    vermediğinde daemon sinyali <code>--project</code> varsayılanının altına
+    yazar; böylece hiçbir şey ait olacak bir yeri olmadan saklanmaz.
+  </p>
+  <p>
+    Gereksiz göründüğünde bile <code>session_id</code> alanını doldurun. Bir
+    ajan çalıştırması bir trace'tir, ama şikâyet neredeyse her zaman bir konuşma
+    hakkındadır; oturum kimliği olmadan on bir ayrı trace'i kişinin gerçekte
+    yaşadığı alışverişe geri çevirecek hiçbir şey yoktur.
+  </p>
+  <p>
+    Trace listesi <code>environment</code>, <code>session_id</code>,
+    <code>thread_id</code> ve <code>user_id</code> alanlarına doğrudan filtre
+    uygular; yanında durum, tür, ad, etiketler, model, zaman aralığı, en küçük
+    süre, en küçük maliyet ve puan da vardır.
+    <a href={url('/docs/searching')} class="link">Çalıştırma bulma</a>
+    hepsini bir araya getirir.
+  </p>
+
+  <h2>Bağlar</h2>
+  <p>
+    Bir span'in tek bir üstü ve istediğiniz kadar bağı olur. Bir bağ, başka bir
+    span'i ya da başka bir trace'i gösterir ve nedenini söyler:
+    <code>follows_from</code>, <code>retry_of</code>, <code>replay_of</code> ya
+    da siz ne ad verirseniz.
+  </p>
+  <p>
+    Bağlar, üstlük ilişkisi çoktan teke toplanmayı anlatamadığı için vardır.
+    Yirmi isteğin yol açtığı bir toplu işin yirmi bağı ve bir üstü olur. Bunu
+    ağaca zorlamak ya on dokuz kopya alt ağaç uydururdu ya da nedenlerin on
+    dokuzunu atardı.
+  </p>
+
+  <h2>Sırada</h2>
+  <ul>
+    <li>
+      Her varlık ve her alan eksiksiz:
+      <a href={url('/docs/reference/data-model')} class="link">Veri modeli</a>.
+    </li>
+    <li>
+      Bu sözcüklerin kodda nasıl göründüğü:
+      <a href={url('/docs/sdks/typescript')} class="link">SDK'lar</a>.
+    </li>
+    <li>
+      Span'ler OTLP olarak geldiğinde mcpd'nin neleri çıkardığı:
+      <a href={url('/docs/opentelemetry')} class="link">OpenTelemetry</a>.
+    </li>
+    <li>
+      Sözcükleri bir sorguya çevirmek:
+      <a href={url('/docs/searching')} class="link">Çalıştırma bulma</a>.
+    </li>
+  </ul>
+</Doc>

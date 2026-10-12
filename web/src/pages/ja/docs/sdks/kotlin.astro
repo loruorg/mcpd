@@ -1,0 +1,386 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+const install = `dependencies {
+    implementation("dev.mcpd:mcpd-kotlin:0.1.0")
+}`
+
+const scoped = `// ブロックの値がそのまま span の値になるので、計装のためにまわりのコードを
+// 組み替える必要はない。
+val answer = mcpd.span("retrieve_context", SpanKind.RETRIEVAL) { span ->
+    span.setInput(query)
+    val docs = index.search(query)
+    span.setOutput(docs.map { it.id })
+    span.setAttribute("retrieval.hits", docs.size)
+    docs
+}`
+
+const manual = `val run = mcpd.trace("nightly_reindex", SpanKind.WORKFLOW_RUN, tags = listOf("batch"))
+try {
+    reindex()
+    run.end()
+} catch (e: Exception) {
+    run.setError(e)
+    run.end()
+}`
+
+const nesting = `mcpd.span("support_agent", SpanKind.AGENT_RUN) { run ->
+    // draft には何も渡していない。何段 suspend を下っても、コルーチン
+    // コンテキストから実行を見つける。
+    run.setOutput(draft(question))
+}
+
+suspend fun draft(question: String): String =
+    mcpd.span("draft_answer", SpanKind.MODEL_GENERATION) { generation ->
+        generation.setInput(question)
+        "..."
+    }`
+
+const propagation = `// 送信側: ヘッダーを次のサービスに渡す。
+request.header("traceparent", span.traceparent())
+
+// 受信側: 新しいトレースを始めず、そのトレースを続ける。
+mcpd.span("checkout", traceparent = headers["traceparent"]) { span ->
+    charge(span)
+}`
+
+const payload = `generation.setModel("gpt-4o", provider = "openai")
+generation.setUsage(inputTokens = 1_180, outputTokens = 96)
+
+// setError はすでに持っている throwable を取るので、メッセージ、クラス、
+// スタックはすべてそこから取れる。
+tool.setError(e, retryable = true)
+
+// あるいはメッセージを直接。どちらにしてもメッセージは必須。
+tool.setError("the shipping service returned 503")`
+
+const surface = `// プロンプトと補完はプロセスの中に留める。スパンは所要時間、ステータス、
+// 使用量、モデル、相関、エラーをそのまま持つ。
+val quiet = Mcpd(McpdConfig(capturePayloads = false))
+quiet.span("draft_answer", input = question, capturePayloads = true) { }  // これだけは残す
+
+// 別のトレーサーがすでに終了させたスパン。渡されたままキューに入り、親の
+// 付け替えも、時刻の打ち直しも、サンプリングのやり直しもしない。形式の壊れた
+// id は捨てられて数えられるだけで、例外にはならない。
+mcpd.record(finishedSpan)
+
+// サーバーなしで、記録された内容を確かめる。
+val recorder = RecordingSink()
+val local = Mcpd(McpdConfig(sink = recorder))
+local.span("support_agent") { run -> run.setUsage(inputTokens = 12, outputTokens = 3) }
+local.flush()
+check(recorder.spans.single().usage?.inputTokens == 12L)
+
+// queued, dropped, capacity, exported, failed, rejected.
+val stats = local.stats()`
+
+const shutdown = `// JVM のサービス: 終了時にシャットダウンする。
+Runtime.getRuntime().addShutdownHook(Thread { mcpd.close() })
+
+// 短命なワーカー: use を使えば、閉じ括弧でシャットダウンされる。
+Mcpd(McpdConfig(project = "batch")).use { mcpd ->
+    mcpd.span("reindex") { run -> reindex(run) }
+}`
+---
+
+<Doc
+  title="Kotlin"
+  description="Kotlin 向けの mcpd SDK。アクティブなスパンはコルーチンコンテキストに入り、構造化並行性とキャンセルを正しく扱い、計装は例外を投げません。"
+  lede="コルーチンが前提です。アクティブなスパンはコルーチンコンテキストに入り、キャンセルは失敗ではなくキャンセルとして記録され、ここから例外がエージェントに飛ぶことはありません。"
+  og="docs"
+>
+  <h2>インストール</h2>
+  <p>
+    Kotlin 2.4 でビルドされ、JVM 17 以降で動きます。依存は kotlinx の coroutines
+    と serialization だけです。HTTP は JDK 自身のクライアントを使うので、
+    HTTP について既に方針のあるサービスに、何かを足すことはありません。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="build.gradle.kts"
+    samples={[{ lang: 'kotlin', label: 'Gradle', shiki: 'kotlin', code: install }]}
+  />
+
+  <h2>クライアントの構築</h2>
+  <p>
+    インスタンスは 1 プロセスに 1 つです。<code>McpdConfig</code> のどの
+    フィールドも、既定値として環境変数を読み、コードからも設定できます。
+    同じコードを書き換えずに開発環境でも本番環境でも動かせます。引数なしの
+    <code>Mcpd()</code> は、ローカルの mcpd に対して動きます。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="init" title="接続" />
+
+  <p>コードが環境変数より優先され、環境変数が既定値より優先されます。</p>
+
+  <table>
+    <thead>
+      <tr><th>フィールド</th><th>環境変数</th><th>既定値</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>apiKey</code></td><td><code>MCPD_API_KEY</code></td><td>なし</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>なし</td></tr>
+      <tr><td><code>serviceName</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>なし</td></tr>
+      <tr><td><code>serviceVersion</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>なし</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capturePayloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>logLevel</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+      <tr><td><code>batchSize</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flushInterval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2s</code></td></tr>
+      <tr><td><code>maxQueue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10s</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>enabled = false</code> にすると、記録の呼び出しはすべて何もしなくなり
+    ますが、返るスパンは有効なままです。テスト対象のコードに触れずに、テストの
+    あいだ mcpd を止められます。読み出しは、それでもサーバーに届きます。クエリは
+    呼び出し側が待っているものであり、空の答えを返すのは嘘になるからです。
+  </p>
+
+  <h2>実行の記録</h2>
+  <p>
+    <code>span</code> が Kotlin らしい書き方です。スパンを終了し、ブロックが呼ぶ
+    すべての処理に対してそれをアクティブなスパンにし、ブロックが返した値を
+    そのまま返します。ブロックが例外を投げた場合は、その例外を持つ
+    <code>error</code> のスパンが残り、例外はそのまま再送出されます。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="スコープ付きの書き方"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: scoped }]}
+  />
+
+  <p>
+    キャンセルされたブロックは別扱いで、記録も変わります。呼び出し側やタイムアウトに
+    よって打ち切られたコルーチンは、スパンを <code>error</code> ではなく
+    <code>cancelled</code> として終了します。意図して打ち切ったことは処理の失敗
+    ではないので、トレースの一覧で失敗のように見えてはいけないからです。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="trace" title="実行の記録" />
+
+  <p>ブロックの形が合わないときは、スパンの開始と終了を自分で書きます。</p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="ブロックを使わない場合"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: manual }]}
+  />
+
+  <h2>コンテキスト</h2>
+  <p>
+    アクティブなスパンはコルーチンコンテキストの要素なので、スレッドではなく
+    コルーチンに付いていきます。何層か下の suspend 関数でも、呼び出し側から
+    渡されずに正しい親の子を開けますし、同じディスパッチャーで動く 2 つの実行が
+    互いのスパンを見ることもありません。読むには <code>mcpd.currentSpan()</code>、
+    そのヘッダーを取るには <code>mcpd.traceparent()</code> を使います。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="入れ子"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: nesting }]}
+  />
+
+  <p>
+    サービスの間では、コンテキストは W3C の <code>traceparent</code> ヘッダーで
+    運ばれます。ヘッダーはサンプリングの判断も一緒に運ぶので、トレースが半分だけ
+    記録されることはありません。形式の壊れたヘッダーは、それを運んできた
+    リクエストを失敗させるのではなく、新しいトレースを始めます。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="サービス境界をまたぐ"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: propagation }]}
+  />
+
+  <h2>モデル、使用量、エラー</h2>
+  <p>
+    mcpd は取り込み時にトークン数をコストに変えるので、トレースに出る数字は実際に
+    請求された数字になります。エラーを記録すると、同時にスパンのステータスも
+    <code>error</code> になり、メッセージは必ず入ります。「何かが失敗した」では、
+    打つ手が決まりません。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="スパンが持つもの"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: payload }]}
+  />
+
+  <p>
+    そのほかは <code>setInput</code>、<code>setOutput</code>、
+    <code>setMetadata</code>、<code>setAttribute</code>、
+    <code>setAttributes</code>、<code>setTags</code>、
+    <code>setCorrelation</code>、<code>addLink</code> と、明示的に子を作る
+    <code>child</code>、時点を記録する <code>event</code> です。どれもどの
+    スレッドから呼んでも安全で、例外を投げるものはありません。別のトレーサーの
+    ツリーに属するスパンは、<code>externalParentSpanId</code> でそれを指します。
+    これは相関のために運ばれるだけで、mcpd 自身のツリーの中で親として使われる
+    ことはありません。
+  </p>
+
+  <h2>ペイロード、シンク、完了済みスパン</h2>
+  <p>
+    <code>capturePayloads = false</code> にすると、<code>input</code> と
+    <code>output</code> はプロセスの中に留まります。レコードがキューに入る前に
+    捨てられるので、フラッシュで機密が外に出ることはありません。個々のスパンは、
+    自分の分だけこれを上書きできます。エクスポーターは、すべてのバッチを
+    <code>Sink</code> に渡します。既定は HTTP トランスポート、テスト用に
+    バッチをメモリに保持する <code>RecordingSink</code>、シグナル 1 件につき
+    JSON を 1 行書く <code>ConsoleSink</code> があります。例外を投げるシンクは
+    バッチの失敗として 1 間隔につき 1 回報告されるだけで、呼び出し側に例外が
+    届くことはありません。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="取得、記録、検証"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: surface }]}
+  />
+
+  <h2>永続実行</h2>
+  <p>
+    同じクライアントがデーモンの永続実行も扱います。<code>Workflow</code> が定義を
+    組み立て、ステップの本体を suspend するラムダとして保持します。
+    <code>Worker</code> がそれを登録し、リースをロングポーリングで受け取って
+    1 件ずつコルーチンの上で処理します。<code>startRun</code>、
+    <code>watchRun</code>、<code>publishEvent</code> などはクライアントの拡張関数で、
+    実行の API を 1 対 1 で写しています。本体は <code>RetryableException</code> を
+    投げるとステップの予算の範囲でリトライされ、<code>StepContext</code> を通して
+    自分のステップの下にスパンを記録します。このコンテキストから開いたスパンは、
+    終了するたびに使用量をステップの使用量に足し込むので、モデルの呼び出しを
+    記録している本体がトークンを手で合計することはありません。
+    <code>setUsage</code> は、スパンが合計した値を上書きします。
+    <code>Worker</code> は <code>onError</code> のほかに 4 つのフック
+    （<code>onLease</code>、<code>onStepStart</code>、<code>onStepEnd</code>、
+    <code>onConflict</code>）を任意で取り、<code>stats()</code> は取得数、実行中の
+    本体数、完了数、クラス別の失敗数、理由別の競合数、処理できなかったリース数を
+    返します。
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} example="workflow" region="workflow" title="ワークフロー" />
+  <p>
+    それぞれの構成要素の働き、リースのプロトコル、実行の API は
+    <a href={linkTo('/docs/workflows')} class="link">ワークフロー</a>、
+    <a href={linkTo('/docs/workers')} class="link">ワーカー</a>、
+    <a href={linkTo('/docs/runs')} class="link">実行</a>のページにあります。
+  </p>
+
+  <h2>スコアとフィードバック</h2>
+  <p>
+    <code>min</code> と <code>max</code> は必須のパラメーターです。7 は 10 点満点
+    なら優秀で、100 点満点なら低い点です。スケールの宣言がない数値は、何とも
+    比べられません。フィードバックは人の判断であり、スコアとは別に保たれます。
+    2 つは別の問いに答えるものなので、まとめて平均してはいけません。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="score" title="スコアとフィードバック" />
+
+  <p>
+    ログとメトリクスはアクティブなスパンに付くので、チャート上のスパイクから、
+    それを起こした実行を開けます。
+  </p>
+
+  <h2>フラッシュとシャットダウン</h2>
+  <p>
+    記録は、上限のあるメモリ上のキューに追加して戻ります。バッチにまとめ、圧縮して
+    送るのはワーカーのコルーチンです。<code>flush()</code> はキューにあるものを
+    送って待ちます。<code>shutdown()</code> はワーカーを止め、残っているものを
+    送ります。2 回呼んでも問題ありません。最後のエクスポートはキャンセル不能で
+    動きます。シャットダウンにたどり着くのは、たいていキャンセル中の
+    <code>finally</code> からであり、最後のバッチこそが、なぜこのプロセスが消える
+    のかを説明するものだからです。
+  </p>
+  <p>
+    <code>Mcpd</code> は <code>AutoCloseable</code> なので、<code>use</code> でも
+    シャットダウンフックでも構いません。どちらも呼ばないサーバーレス関数や短命な
+    ワーカーは、最後のバッチを失います。ハンドラーが戻った瞬間に、ランタイムが
+    スケジューリングを止めるからです。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="シャットダウン"
+    samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: shutdown }]}
+  />
+
+  <h2>返ってくるもの</h2>
+  <p>
+    読み出しのメソッドは HTTP API を 1 対 1 で写したもので、生成された型を返します。
+    例外を投げるのはこれらのメソッドだけで、投げるのは <code>McpdException</code>
+    です。待っているクエリは、飲み込んでよいものではありません。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="実行の読み出し"
+    lines={[
+      { cmd: 'gradle run' },
+      { out: '> Task :run' },
+      { out: 'support_agent: 4 spans, ok', tone: 'ok' },
+      { out: '  agent_run support_agent 79ms' },
+      { out: '  model_generation plan_answer 41ms' },
+      { out: '  tool_call lookup_order 16ms' },
+      { out: '  tool_call estimate_delivery 11ms shipping service returned 503 for order 41', tone: 'warn' },
+    ]}
+  />
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="query" title="検索と分析" />
+
+  <h2>保証されること</h2>
+  <ul>
+    <li>
+      計装は例外を投げません。エクスポートの失敗、到達できないサーバー、
+      シリアライズできない値は、<code>java.util.logging</code> を通して 30 秒に
+      多くても 1 回報告され、あとは飲み込まれます。可観測性が、観測している相手を
+      落としてはいけません。
+    </li>
+    <li>
+      記録はブロックしないので、サービスのレイテンシが、mcpd の速さや、mcpd が
+      動いているかどうかに左右されることはありません。
+    </li>
+    <li>
+      メモリには上限があります。キューが保持するシグナルは <code>maxQueue</code>
+      件で、それを超えると古いものから捨てられ、数えられます。その数は
+      <code>droppedSignals</code> と <code>stats()</code> で読めます。上限のない
+      バッファは、ネットワーク障害をメモリ不足による強制終了に変えてしまいます。
+    </li>
+    <li>
+      サンプリングの判断はルートで一度だけ行われ、以降は引き継がれます。
+    </li>
+    <li>
+      スパンは開始時と終了時の 2 回エクスポートされるので、途中でクラッシュした
+      実行も見えます。開始のレコードが送られる前にスパンが終了した場合は、その
+      レコードがその場で更新され、送られるのは 1 件だけです。
+    </li>
+    <li>
+      バッチは 1 KiB を超えると gzip で圧縮され、リトライしても変わらない冪等キーを
+      持ちます。サーバーが保存したあとにタイムアウトしたリクエストが、二重に数え
+      られることはありません。
+    </li>
+    <li>
+      所要時間は単調増加のクロックで測るので、NTP による時刻の飛びで負の値になる
+      ことはありません。
+    </li>
+  </ul>
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">実行を探す</a>に、フィルターの
+    全体があります。<a href={linkTo('/docs/reference/data-model')} class="link">データモデル</a>
+    には、これらの型が持つすべてのフィールドが並んでいます。
+  </p>
+</Doc>

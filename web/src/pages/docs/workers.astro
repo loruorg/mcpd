@@ -1,0 +1,200 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import LeaseProtocol from '@/components/LeaseProtocol.astro'
+import { exampleLanguages } from '@/lib/snippets'
+
+const langs = exampleLanguages('workflow')
+---
+
+<Doc
+  title="Workers"
+  description="How a worker serves the steps of a durable run: registering definitions, claiming leases, heartbeats, complete and fail, the four 409 reasons, at_most_once, scaling out, and the worker key scope."
+  lede="A worker is your own process, serving step bodies to the daemon. This page is the protocol it speaks, and why each call is there."
+  og="docs"
+>
+  <h2>What a worker is</h2>
+  <p>
+    A worker holds the bodies of the claimable steps and asks the daemon for
+    work. It runs where your code runs, with your imports, your connection pool
+    and your credentials, and the daemon never sees any of them. The daemon
+    hands it a lease with the rendered input and the prior steps; the worker
+    runs the body and reports how it went. That is the whole relationship.
+  </p>
+  <p>
+    Every SDK ships one. It registers the workflows it holds, long-polls for
+    leases, heartbeats while a body runs, and answers every refusal by its
+    reason. The example below is the same program as the one on the
+    <a href="/docs/workflows" class="link">Workflows</a> page; this is the part
+    that serves it.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" example="workflow" region="worker" only={langs} title="serve the bodies" />
+
+  <h2>The protocol</h2>
+  <p>
+    Five calls, and a worker that speaks them can be written against the HTTP
+    API without an SDK. Every SDK's worker is a client of these and nothing
+    more.
+  </p>
+
+  <LeaseProtocol class="not-prose my-8" />
+
+  <table>
+    <thead>
+      <tr><th>Call</th><th>What it does</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>POST /v1/api/workers/register</code></td>
+        <td>Announces the worker and stores the definitions it holds. The answer carries <code>lease_ttl_ms</code> and <code>heartbeat_ms</code>, the two numbers the rest of the protocol runs on.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/claim</code></td>
+        <td>Offers up to <code>max</code> runnable steps, holding the request open for up to <code>wait_ms</code> when there are none. The daemon holds a claim for at most four fifths of its request timeout, 24 seconds at the default, and answers at once when it stops, so a claim can come back empty before <code>wait_ms</code>: claim again. A claim may be limited to one run, which is how a script drives its own run to the end.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/{'{lease}'}/started</code></td>
+        <td>Declares that the body is running. Before the body, always: it is what tells the daemon the difference between offered and running.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/{'{lease}'}/heartbeat</code></td>
+        <td>Extends the lease. The only evidence the daemon has that a worker is alive.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/{'{lease}'}/complete</code>, <code>/fail</code></td>
+        <td>Finishes the step: the output, a patch to the run's state and the usage the daemon prices; or an error with the class that decides whether it is retried.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Leases</h2>
+  <p>
+    A lease is one attempt, held by one worker, for a bounded time. It carries
+    the rendered input, the prior steps keyed by id, the run's state and
+    correlation, a key that is stable across retries of this step, and the
+    trace and span ids of the step span the daemon opened. A body that records
+    its own spans through the step context puts them under that span, so the
+    model call inside a step lands in the run's trace at the right depth.
+  </p>
+  <p>
+    A lease the worker stops heartbeating expires. The daemon marks the attempt
+    orphaned and, after a reclaim window, requeues it under
+    <code>at_least_once</code> or fails it under <code>at_most_once</code>. A
+    worker that comes back from a pause and posts against a reclaimed lease is
+    not ignored: it is told.
+  </p>
+
+  <h2>The four refusals</h2>
+  <p>
+    A worker call the daemon cannot accept is refused with a 409 carrying one
+    of four reasons. They are closed, and every SDK's worker handles each one
+    by name, because a worker that collapses them into one branch abandons
+    steps it has already finished or reports a failure for a success.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Reason</th><th>Meaning</th><th>What the worker does</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>already_applied</code></td>
+        <td>This lease's own earlier complete or fail landed and its reply was lost.</td>
+        <td>Treats it as success and posts nothing more.</td>
+      </tr>
+      <tr>
+        <td><code>fenced</code></td>
+        <td>A later attempt exists, or another lease ended this one.</td>
+        <td>Abandons the work and posts nothing more for this lease. A fenced heartbeat also cancels the running body through its context.</td>
+      </tr>
+      <tr>
+        <td><code>run_terminal</code></td>
+        <td>The run has ended, by finishing, failing, timing out or being cancelled.</td>
+        <td>Stops, and stops claiming for that run.</td>
+      </tr>
+      <tr>
+        <td><code>not_started</code></td>
+        <td>A complete or fail arrived for an <code>at_most_once</code> attempt whose <code>started</code> never did.</td>
+        <td>Reports it loudly as a bug in the worker. The SDK workers cannot produce it; a hand-written one can.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>The body</h2>
+  <p>
+    A body receives a context, its rendered input and the prior steps. The
+    context is where it reports what the daemon should keep: a patch to the
+    run's state, merged on <code>complete</code> with top-level keys replacing;
+    the tokens it spent, which the daemon prices with the same book it prices
+    spans with; and a cancellation signal that fires when the lease is lost or
+    the run ends, so a body that hands it to its own I/O stops when it should.
+    The tokens add themselves up: a span the body records through the context,
+    and every span under it, adds its usage to the step's when it ends, so a
+    body that records its model calls as spans never sums by hand, and
+    <code>set_usage</code> is the explicit override for one that records none.
+  </p>
+  <p>
+    A body ends by returning its output or by raising. Raise the SDK's
+    retryable error to be retried within the step's budget; raise a typed step
+    failure to name any other class; anything else is fatal. The message is
+    sent to the daemon and shown in the journal. A stack trace is not.
+  </p>
+  <p>
+    A lease for a definition, a version or a step the worker does not hold is
+    failed <code>unservable</code> and the body never runs. The attempt goes
+    back to the queue for a worker that does hold it, without spending the
+    retry budget, which is what lets two versions of a worker run side by side
+    through a deploy.
+  </p>
+
+  <h2>Scaling out</h2>
+  <p>
+    Run as many workers as you like against one daemon. Each claims up to its
+    own concurrency, the daemon hands every attempt to exactly one of them,
+    and the fence makes a lease that two workers somehow both hold resolve to
+    one winner. A worker's id is recorded on every attempt it took, so the
+    journal says which process ran a step. Give each process a name, or let
+    the SDK derive one from the host.
+  </p>
+  <p>
+    A claim is a long poll, so an idle fleet costs the daemon one open request
+    per worker and no traffic. While it waits, a claim looks for work when a
+    run starts, a step ends, a deadline fires or an event resumes a wait, and
+    at most twice a second otherwise. A busy one is bounded by the workers' own
+    concurrency, and a body that takes an hour costs one heartbeat every ten
+    seconds and nothing else.
+  </p>
+
+  <h2>Keys</h2>
+  <p>
+    The worker calls take the <code>worker</code> scope; starting, signalling
+    and cancelling runs take <code>execute</code>. Both fall back to the write
+    keys when they are unset, and an admin key holds both. A worker that only
+    serves steps needs no key that can start a run, and a webhook that only
+    publishes events needs no key that can claim one. See
+    <a href="/docs/configuration" class="link">Configuration</a> for the flags.
+  </p>
+  <p>
+    The worker calls are not recorded in the audit log, although a lease
+    carries the step's input and the prior steps' outputs. They are a machine
+    loop that claims many times a minute, and a row per claim would bury the
+    reads a person made. Reading a run back through the run endpoints is
+    recorded; see <a href="/docs/security" class="link">Security</a>.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>
+      Starting and following a run, and answering a wait:
+      <a href="/docs/runs" class="link">Runs</a>.
+    </li>
+    <li>
+      The definition the worker serves:
+      <a href="/docs/workflows" class="link">Workflows</a>.
+    </li>
+    <li>
+      Every endpoint of the worker protocol, generated from the specification:
+      <a href="/docs/reference/api#workers" class="link">HTTP API, Workers</a>.
+    </li>
+  </ul>
+</Doc>

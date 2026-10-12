@@ -1,0 +1,156 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+---
+
+<Doc
+  title="Forwarding"
+  description="Copy every stored span on to another OTLP endpoint, so mcpd is one hop in a telemetry pipeline rather than a place data goes to be trapped. Local storage always happens first."
+  lede="mcpd speaks OTLP in both directions. Nothing that arrives is stuck here."
+  og="docs"
+>
+  <h2>One protocol out, not eleven exporters</h2>
+  <p>
+    mcpd receives OTLP, and it can emit OTLP. That single property replaces most
+    of what a set of per-vendor exporters does: Langfuse, Datadog, Honeycomb,
+    Grafana, and every other destination worth naming accept OTLP over HTTP.
+    Forwarding is therefore one implementation rather than eleven, and it cannot
+    fall behind a vendor's SDK release.
+  </p>
+  <p>
+    It also means adopting mcpd is reversible. Point it at whatever you were
+    using before, run both for a fortnight, and decide with the data in front of
+    you rather than on a migration you cannot undo.
+  </p>
+
+  <h2>Turning it on</h2>
+
+  <Command
+    class="not-prose my-6"
+    title="store locally and copy onward"
+    command="mcpd serve --forward-endpoint https://otlp.example.com"
+  />
+
+  <p>
+    The path is appended, so give the base URL and not
+    <code>/v1/traces</code>. For a destination that needs credentials, add
+    headers:
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="with an authorization header"
+    command={`mcpd serve \\
+  --forward-endpoint https://otlp.example.com \\
+  --forward-header 'Authorization: Bearer $TOKEN'`}
+  />
+
+  <p>
+    The same settings live under <code>forward</code> in the config file, where
+    <code>batch_size</code> and <code>enabled</code> are also available. A flag
+    beats the file, so one instance can be pointed elsewhere without editing a
+    shared ConfigMap.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "forward": {
+    "endpoint": "https://otlp.example.com",
+    "headers": [["Authorization", "Bearer sk-..."]],
+    "batch_size": 256,
+    "enabled": true
+  }
+}`}</code></pre>
+
+  {/* The diagram belongs here, not at the top. It draws the intake ending at
+      Store, and this section is about what happens after Store, so the two read
+      as one sequence rather than as a picture that stops where the subject
+      begins. */}
+  <PipelineDiagram class="not-prose my-8" />
+
+  <h2>Local storage happens first</h2>
+  <p>
+    A span is written to mcpd's own store before anything is forwarded, and the
+    forward runs on its own task afterwards. Two consequences, both deliberate.
+  </p>
+  <p>
+    A slow destination never adds its latency to the request that produced the
+    span. Your agent does not wait on someone else's collector.
+  </p>
+  <p>
+    A destination that is down never turns into a rejected ingest. mcpd keeps
+    working and retries the forward on its own task. The alternative, where
+    another company's outage means your telemetry is not kept at all, is the
+    exact failure this design exists to avoid.
+  </p>
+  <p>
+    Each batch gets three attempts. A 429, a 5xx or a failed connection is
+    retried after 250 ms, and the wait doubles after each attempt. A
+    <code>Retry-After</code> given in seconds replaces the wait, up to 30
+    seconds. Any other 4xx is final on the first answer, because the batch will
+    stay malformed for that destination. When the daemon is stopping, it makes
+    the remaining attempts at once. A batch that is refused for good, or is
+    still undelivered after its last attempt, is logged, and its spans are added
+    to <code>mcpd_forward_dropped_spans_total</code>, so you can see how much of
+    the copy is missing.
+  </p>
+  <p>
+    A destination that accepts a connection and never answers cannot take the
+    daemon's memory either. At most 64 ingest requests' copies wait on the
+    destination at once. While that many are waiting, a new copy is dropped at
+    once and counted in <code>mcpd_forward_dropped_spans_total</code>, and the
+    local write is unaffected.
+  </p>
+  <p>
+    There is no durable outbound queue. A batch waits in memory while it is
+    retried, and when the forwarding queue is full, a new batch is dropped and
+    its spans are counted in the same metric. A durable queue is a different
+    product, and a silent one that falls hours behind is worse than a visible
+    gap. If you need guaranteed delivery, put a real collector between mcpd and
+    the destination and let it do the job it was built for.
+  </p>
+
+  <h2>Redaction applies to what leaves</h2>
+  <p>
+    Forwarding happens after the intake pipeline, which redacts in place before
+    anything is written. Whatever mcpd was told to hide never reaches the next
+    hop either. A rule that protected your storage but not your egress would not
+    be a privacy control.
+  </p>
+
+  <h2>What gets forwarded</h2>
+  <p>
+    Spans. Logs, metrics, scores, feedback and aspect notes stay in mcpd,
+    because the destinations people forward to are tracing backends and would
+    drop the rest or mangle it into attributes.
+  </p>
+  <p>
+    Spans are grouped by service into <code>resourceSpans</code>, the shape a
+    receiver expects, rather than one resource per span, which is valid and
+    makes every downstream regroup it.
+  </p>
+
+  <h2>mcpd forwarding to mcpd</h2>
+  <p>
+    Because both ends speak the same protocol, a local mcpd can forward to a
+    shared one. Developers keep a fast store on their own machine with full
+    payloads, and the team's instance gets the same runs with its own retention
+    and its own redaction rules applied on arrival.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>
+      Pointing an existing OpenTelemetry setup at mcpd:
+      <a href="/docs/opentelemetry" class="link">OpenTelemetry</a>.
+    </li>
+    <li>
+      What is removed before a span is stored or sent:
+      <a href="/docs/privacy" class="link">Redaction and retention</a>.
+    </li>
+    <li>
+      Every flag and file setting:
+      <a href="/docs/configuration" class="link">Configuration</a>.
+    </li>
+  </ul>
+</Doc>

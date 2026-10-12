@@ -1,0 +1,143 @@
+---
+title: "Datasets"
+description: "The datasets endpoints of the mcpd HTTP API."
+order: 10
+generated: true
+---
+
+<!-- GENERATED FILE. DO NOT EDIT.  Produced from spec/mcpd.spec.json by tools/codegen. Edit the spec and run `make gen`. `make check` fails if this file drifts. -->
+
+
+## List datasets
+
+<div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/datasets</code></div>
+
+Every dataset in the project, with its case count.
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Which project to read. |
+
+**Response:** `Dataset`
+
+**Authentication:** an API key with `read` scope.
+
+---
+
+## Create a dataset
+
+<div class="endpoint"><span class="method method--post">POST</span><code>/v1/api/datasets</code></div>
+
+A dataset is a named set of cases to run a version of an agent against. Leave `dataset_id` empty and mcpd assigns one.
+
+**Request body:** `Dataset`
+
+**Response:** `Dataset`
+
+**Authentication:** an API key with `write` scope.
+
+---
+
+## List the cases in a dataset
+
+<div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/datasets/{dataset_id}/items</code></div>
+
+The cases themselves, each with its input, its expected answer when it has one, and the run it was captured from.
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `dataset_id` | `string` | Which dataset. |
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `limit` | `u32` | `500` | Page size. |
+
+**Response:** `DatasetItem`
+
+**Authentication:** an API key with `read` scope.
+
+---
+
+## Add cases to a dataset
+
+<div class="endpoint"><span class="method method--post">POST</span><code>/v1/api/datasets/{dataset_id}/items</code></div>
+
+Adds cases written by hand or exported from somewhere else. Leave each `item_id` empty and mcpd assigns one.
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `dataset_id` | `string` | Which dataset. |
+
+**Request body:** `DatasetItem`
+
+**Response:** `ItemsAdded`
+
+**Authentication:** an API key with `write` scope.
+
+---
+
+## Capture production runs as cases
+
+<div class="endpoint"><span class="method method--post">POST</span><code>/v1/api/datasets/{dataset_id}/capture</code></div>
+
+Turns runs that already happened into permanent cases. This is what datasets are for: the run that went wrong in production on Tuesday becomes a regression test that every later version has to pass, and it keeps its trace id, so the case always points back at the run it came from.
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `dataset_id` | `string` | The dataset to add to. |
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Which project the runs are in. |
+
+**Request body:** `CaptureRequest`
+
+**Response:** `CaptureResult`
+
+**Authentication:** an API key with `write` scope.
+
+---
+
+## List experiments
+
+<div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/experiments</code></div>
+
+Every recorded run of a dataset against a version of an agent.
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Which project to read. |
+
+**Response:** `Experiment`
+
+**Authentication:** an API key with `read` scope.
+
+---
+
+## Record an experiment
+
+<div class="endpoint"><span class="method method--post">POST</span><code>/v1/api/experiments</code></div>
+
+Registers a run of a dataset so its scores can be compared against another version later. Scores recorded with this experiment's id are what `compare` reads.
+
+**Request body:** `Experiment`
+
+**Response:** `Experiment`
+
+**Authentication:** an API key with `write` scope.
+
+---

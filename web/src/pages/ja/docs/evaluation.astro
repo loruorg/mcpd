@@ -1,0 +1,281 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="スコアとフィードバック"
+  description="mcpd が機械評価と人の判断をどう記録するか、両者を別々に保存する理由、そしてスコアラーが低く付けた実行を見つけるクエリ。"
+  lede="スコアは機械が考えたことです。フィードバックは人が考えたことです。mcpd は両者を別のシグナルとして保ち、一方を他方に平均で溶かし込むことはありません。"
+  og="docs"
+>
+  <h2>1 つの数値ではなく、2 つのシグナル</h2>
+  <p>
+    <strong>スコア</strong>は機械による評価です。ジャッジモデル、正規表現、
+    ユニットテストなど、実行について数値を出せるものすべてが含まれます。
+    <strong>フィードバック</strong>のレコードは人の判断です。あなたの製品で押された
+    低評価、レビュアーの採点、訂正された回答などです。
+  </p>
+  <p>
+    どちらも <code>trace_id</code> または <code>span_id</code> に紐づき、
+    どちらもそれ自体が 1 つのシグナルとして届き、どちらも専用のテーブルに保存されます。
+    両者が合成されることはありません。関連性に 0.9 を付けたジャッジと、
+    低評価を押した利用者は、どちらも正しいことを述べています。そして両者の食い違いこそ、
+    その実行について最も役に立つ情報です。平均を取れば、まさにその食い違いが消え、
+    誰も手を打てない数値だけが残ります。
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>スコアは自分の尺度を宣言します</h2>
+  <p>
+    <code>min</code> と <code>max</code> はスコアの一部です。これがなければ値は解釈できません。
+    0.86 は 0 から 1 の尺度なら良い結果、0 から 5 の尺度なら悪い結果、
+    低いほど良い距離ならまた別の意味になります。半年後、同じプロジェクトにスコアラーが
+    2 つあれば、どちらの尺度なのか誰にも分かりません。仕様は既定値を 0 と 1 としていますが、
+    既定値が事故で受け入れられることのないよう、どの SDK も呼び出し側での指定を必須にしています。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>フィールド</th><th>何のためのものか</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>scorer_id</code></td>
+        <td>これを出したスコアラー。たとえば <code>answer_relevance</code>。必須です。</td>
+      </tr>
+      <tr>
+        <td><code>scorer_version</code></td>
+        <td>スコアを比べられる相手は、同じバージョンから出たスコアだけです。ジャッジのプロンプトを変えたなら、それは古いものの続きではなく新しいスコアラーです。</td>
+      </tr>
+      <tr>
+        <td><code>value</code></td>
+        <td>数値そのもの。</td>
+      </tr>
+      <tr>
+        <td><code>min</code>、<code>max</code></td>
+        <td>その数値が乗る、宣言された尺度。</td>
+      </tr>
+      <tr>
+        <td><code>label</code></td>
+        <td>スコアラーが数値と併せてカテゴリ的な結果も出す場合の、その結果。</td>
+      </tr>
+      <tr>
+        <td><code>reason</code></td>
+        <td>理由。ジャッジモデルならその説明であり、スコアを魔法ではなく議論できるものにしている部分です。</td>
+      </tr>
+      <tr>
+        <td><code>source</code></td>
+        <td>live、offline、experiment、manual のいずれか。</td>
+      </tr>
+      <tr>
+        <td><code>score_trace_id</code></td>
+        <td>スコアリングの実行そのもののトレース。疑わしいスコアも、他の実行と同じように開いて読めます。</td>
+      </tr>
+      <tr>
+        <td><code>cost</code></td>
+        <td>そのスコアを出すのにかかった費用。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>スコアを 1 つ記録する</h2>
+  <p>
+    SDK のヘルパーはスパンと同じやり方でスコアをキューに入れます。そのため呼び出しは
+    ブロックせず、例外も投げません。<code>traceId</code> を渡さなければ、
+    アクティブなスパンのトレースに紐づきます。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="score" title="スコアとフィードバック" />
+
+  <p>
+    HTTP では <code>POST /v1/api/scores</code> にあたり、本体として
+    <code>Score</code> を受け取ります。スコアは対象とする
+    <code>trace_id</code> か <code>span_id</code> を必ず指定しなければなりません。
+    何にも紐づかないスコアは、二度と見つからない場所に保存する代わりに 400 で拒否されます。
+    <code>score_id</code> を空文字列で送れば、サーバーが生成します。
+  </p>
+
+  <h2>スコアがどこから来たか</h2>
+  <p>
+    <code>source</code> が <code>scorer_id</code> と別になっているのは、
+    同じスコアラーが複数の文脈で動き、その文脈どうしは比べられないからです。
+    先週のトラフィックを今日のジャッジで採点し直しても、品質が上がった証拠にはなりません。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>出所</th><th>意味</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>live</code></td><td>トレースされた実行が起きたその場で、オンラインで出されたもの。</td></tr>
+      <tr><td><code>offline</code></td><td>保存済みのトレースを後から採点して出されたもの。</td></tr>
+      <tr><td><code>experiment</code></td><td>データセットに対する実験の実行で出されたもの。</td></tr>
+      <tr><td><code>manual</code></td><td>API または画面から人が入力したもの。</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    SDK 経由で書かれたスコアの既定値は <code>live</code> です。
+    残りの 3 つは自分で設定してください。
+  </p>
+
+  <h2>スコアリングには費用がかかるので、記録します</h2>
+  <p>
+    ジャッジによる評価は、たいていもう一度モデルを呼ぶことです。本番の実行すべてを
+    大きなジャッジで採点すると、トラフィックを処理するより高くつくことがあり、
+    その請求は気づくのが遅れがちです。そのため <code>Score</code> は、
+    スパンと同じ形の <code>cost</code> を持ちます。通貨、入力と出力の内訳、
+    そしてその金額を出した価格表が入ります。HTTP API またはネイティブの取り込み
+    バッチでスコアを書くときに設定してください。
+  </p>
+  <p>
+    <code>score_trace_id</code> は同じ考えのもう半分です。スコアリングの実行そのものを
+    トレースすれば、その id がスコアに載ります。何もかも低く付け始めたジャッジを開いて読み、
+    壊れていることを示せます。
+  </p>
+
+  <h2>人によるフィードバック</h2>
+  <p>
+    フィードバックはあなたの製品から書き込みます。その人が実際に押したコントロールから
+    呼び出せば、反応のもとになった回答を出したまさにそのトレースに判断が届きます。
+    <code>kind</code> が <code>value</code> の形を決めます。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>種別</th><th><code>value</code></th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>thumbs</code></td><td><code>up</code> または <code>down</code>。</td></tr>
+      <tr><td><code>rating</code></td><td>数値。尺度は書き込む側が宣言します。</td></tr>
+      <tr><td><code>correction</code></td><td>正しい回答を、テキストで。</td></tr>
+      <tr><td><code>tag</code></td><td>決められた集合から選んだラベル。</td></tr>
+      <tr><td><code>comment</code></td><td>スコアを伴わない自由記述。</td></tr>
+    </tbody>
+  </table>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="あなたの製品からの低評価"
+    samples={[
+      {
+        lang: 'typescript',
+        label: 'TypeScript',
+        shiki: 'typescript',
+        code: `// traceId なし。アクティブなスパンのトレースに紐づきます。
+mcpd.feedback({
+  kind: 'thumbs',
+  value: 'down',
+  comment: 'Named the wrong depot.',
+  authorKind: 'end_user',
+})`,
+      },
+      {
+        lang: 'curl',
+        label: 'cURL',
+        shiki: 'bash',
+        code: `curl -s -X POST "$MCPD/v1/api/feedback" \\
+  -H 'content-type: application/json' \\
+  -d "{
+    \\"feedback_id\\": \\"\\",
+    \\"trace_id\\": \\"$TRACE\\",
+    \\"kind\\": \\"thumbs\\",
+    \\"value\\": \\"down\\",
+    \\"comment\\": \\"Named the wrong depot.\\",
+    \\"author_kind\\": \\"end_user\\",
+    \\"timestamp\\": \\"$NOW\\",
+    \\"correlation\\": { \\"project\\": \\"default\\" }
+  }"`,
+      },
+    ]}
+  />
+
+  <p>
+    秘匿化はキー名で照合され、判断に添えた <code>metadata</code> にも適用されます。
+    <code>author_id</code> は送られたまま保存されるので、メールアドレスではなく
+    仮名の id を送ってください。
+    <a href={urlFor('/docs/privacy', locale)} class="link">マスキングと保持</a>を参照してください。
+  </p>
+
+  <h2>悪い回答を見つけるクエリ</h2>
+  <p>
+    スコアはこのためにあります。<code>has_score</code> でスコアラーを指定し、
+    <code>score_below</code> で基準を決めると、トレース一覧はそのスコアラーが
+    基準より下に付けた実行を返します。比較は厳密なので、
+    <code>score_below=0.5</code> はちょうど 0.5 だった実行を除きます。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" region="query" title="スコアの低かった実行を探す" />
+
+  <p>
+    <code>score_below</code> が意味を持つのは <code>has_score</code> が隣にあるときだけです。
+    スコアラーを指定しない基準は、何に対する基準でもありません。どちらも
+    <code>GET /v1/api/traces</code> のパラメーターなので、そこにある他のすべての
+    フィルターと組み合わせられます。特定のモデルによる、本番の、直近 1 日の悪い回答は、
+    リクエスト 1 つです。
+  </p>
+
+  <h2>読み出す</h2>
+  <p>
+    <code>GET /v1/api/scores</code> は機械評価を一覧します。<code>scorer_id</code>、
+    <code>source</code>、<code>trace_id</code>、<code>experiment_id</code>、
+    <code>min_value</code>、<code>max_value</code> と時間範囲で絞り込め、
+    カーソルでページを送れます。<code>source</code> は <code>live</code>、
+    <code>offline</code>、<code>experiment</code>、<code>manual</code> を取ります。
+    これが、人の手で入力されたものを除いてジャッジ自身のスコアだけを読み出す方法です。
+    <code>GET /v1/api/feedback</code> は <code>trace_id</code> を取り、
+    その実行に対する判断を返します。実行を指定せずにプロジェクトのフィードバックを
+    一覧することは、このビルドでは実装されていません。エンドポイントもそう答えます。
+    <code>trace_id</code> がなければ、そのパラメーター名を挙げて 400 で拒否します。
+    以前は空のリストを返しており、それでは誰も何も判断していないように読めていました。
+  </p>
+  <p>
+    スコア一覧は <code>order</code> を取りません。新しい順に固定で、そのカーソルは
+    一方向にしか比較しません。実行一覧とスパン一覧は取るので、ここでは黙って受け取って
+    捨てるのではなく、名前を挙げて拒否します。同じことが、いくつかの SDK クライアントが
+    フィードバックのクエリに設定させてしまう <code>kind</code>、<code>from</code>、
+    <code>to</code>、<code>cursor</code> のフィルターにも当てはまります。
+    4 つとも一度も適用されたことがなく、現在は 4 つとも拒否されます。
+  </p>
+  <p>
+    実行とそれに紐づくものを一度に読むには、追加分を名前で指定してください。
+    <code>GET /v1/api/traces/{'{trace_id}'}?include=scores,feedback</code>、
+    ログも欲しいなら <code>include=all</code> です。
+  </p>
+
+  <h2>トレース一覧が持つもの、持たないもの</h2>
+  <p>
+    保存された各トレースは、結合が要らないように 2 つのロールアップを持ちます。
+    1 つは<em>スコアラーごと</em>の平均値です。<code>answer_relevance</code> の中での平均と、
+    <code>groundedness</code> の中での平均は別のものです。もう 1 つは<em>種別ごと</em>の
+    フィードバックの件数です。thumbs が 3 件、correction が 1 件、というように。
+    平均ではなく件数なのは、thumbs-up と correction の平均が量として成り立たないからです。
+  </p>
+  <p>
+    全体的な品質スコアはありませんし、これから作ることもありません。ジャッジモデルと
+    正規表現と利用者の低評価を 1 つにまとめた数値は、単位を持たず、反論のしようもない数値です。
+    mcpd は部品を見せ、判断はあなたに任せます。
+  </p>
+
+  <h2>次に</h2>
+  <ul>
+    <li>
+      他に絞り込めるものすべて：
+      <a href={urlFor('/docs/searching', locale)} class="link">実行を探す</a>。
+    </li>
+    <li>
+      費用の数値が何でできているか：
+      <a href={urlFor('/docs/cost', locale)} class="link">コスト集計</a>。
+    </li>
+    <li>
+      保存される前に author id に何が起きるか：
+      <a href={urlFor('/docs/privacy', locale)} class="link">マスキングと保持</a>。
+    </li>
+  </ul>
+</Doc>

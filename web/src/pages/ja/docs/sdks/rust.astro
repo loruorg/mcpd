@@ -1,0 +1,359 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+
+const guard = `let run = mcpd.trace("support agent");
+{
+    let step = run.child_of("retrieve", SpanKind::Retrieval);
+    step.set_input("order 5512");
+    // このステップが何をするにせよ、スパンは閉じ括弧で終了する。途中の return
+    // でも、? でも、パニックでも終了する。
+}
+run.end();`
+
+const taskLocal = `// スパンを開いても、それがカレントにはならない。カレントにするのは scope()。
+let run = mcpd.trace("support agent");
+run.scope(async {
+    lookup(&mcpd).await;
+})
+.await;
+run.end();
+
+async fn lookup(mcpd: &Mcpd) {
+    // この関数に親は渡していない。それでも実行の下に入れ子になる。task-local が
+    // 親を運んでいるから。
+    let step = mcpd.span("lookup_order", SpanKind::ToolCall);
+    step.set_output(serde_json::json!({ "status": "shipped" }));
+}`
+
+const propagation = `// 送信側: ヘッダーをリクエストに付ける。
+let header = span.traceparent();
+
+// 受信側: 新しいトレースを始めず、呼び出し側のトレースを続ける。ヘッダーがない、
+// または形式が壊れている場合は、失敗させずに新しいトレースを始める。
+let run = mcpd.trace_from("charge card", inbound_header, SpanKind::AgentRun);`
+
+const payload = `generation.set_model("claude-sonnet-4", "anthropic");
+generation.set_usage(TokenUsage {
+    input_tokens: Some(412),
+    output_tokens: Some(96),
+    ..TokenUsage::default()
+});
+// あるいは、内訳が要らないときは:
+generation.set_tokens(412, 96);
+
+// メッセージは必須。「何かが失敗した」では手の打ちようがない。
+tool.set_error("sms gateway timed out after 5s");
+
+// あるいは、すでに持っているエラーを記録する。メッセージと種類はそこから読む。
+tool.record_error(&err);`
+
+const shutdown = `#[tokio::main]
+async fn main() {
+    let mcpd = Mcpd::new();
+
+    // ... 実行の中身 ...
+
+    // これを無視するのは妥当な既定の振る舞い。可観測性の失敗は、アプリケーション
+    // の失敗ではない。ログに出すなら 1 行で済む。
+    if let Err(e) = mcpd.shutdown().await {
+        eprintln!("mcpd could not export: {e}");
+    }
+}`
+---
+
+<Doc
+  title="Rust"
+  description="Rust 向けの mcpd SDK。ドロップ時に終了する RAII のスパンガード、コンテキストを運ぶ tokio の task-local、そしてエラーを返さずパニックもしない計装。"
+  lede="スパンはドロップされたときに終了するガードなので、途中の return やエラーで開いたままになることはありません。コンテキストは tokio の task-local が運びます。"
+  og="docs"
+>
+  <h2>インストール</h2>
+  <p>
+    SDK はバックグラウンドの tokio タスクでエクスポートするので、ランタイムが
+    あることを前提にしています。ランタイムがなくても動きますが、その場合は
+    <code>flush()</code> を呼ぶまで何も送られません。同期的なツールにはこれが
+    正しい動きですが、長く動き続けるサービスが求めるものではありません。
+  </p>
+
+  <Command
+    command="cargo add mcpd-sdk"
+    primaryLabel="SDK"
+    secondary={[{ label: 'クレートにランタイムがない場合', command: 'cargo add tokio --features macros,rt-multi-thread' }]}
+  />
+
+  <h2>クライアントの構築</h2>
+  <p>
+    クライアントは 1 プロセスに 1 つです。<code>Mcpd::new()</code> は環境変数を
+    読み、何も設定しなくてもローカルの mcpd に接続します。構築が失敗することは
+    ありません。mcpd が使えない設定はクライアントを無効にし、その理由をログに
+    出します。可観測性の呼び出しは、プログラムがエラー処理を強いられるもので
+    あってはならないからです。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="init" title="接続" />
+
+  <p><code>Config::from_env()</code> のあとにビルダーで設定したものが、環境変数より優先されます。</p>
+
+  <table>
+    <thead>
+      <tr><th>フィールド</th><th>環境変数</th><th>既定値</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>endpoint</code></td><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td></tr>
+      <tr><td><code>api_key</code></td><td><code>MCPD_API_KEY</code></td><td>なし</td></tr>
+      <tr><td><code>project</code></td><td><code>MCPD_PROJECT</code></td><td><code>default</code></td></tr>
+      <tr><td><code>environment</code></td><td><code>MCPD_ENVIRONMENT</code></td><td>なし</td></tr>
+      <tr><td><code>service_name</code></td><td><code>MCPD_SERVICE_NAME</code></td><td>なし</td></tr>
+      <tr><td><code>service_version</code></td><td><code>MCPD_SERVICE_VERSION</code></td><td>なし</td></tr>
+      <tr><td><code>sample</code></td><td><code>MCPD_SAMPLE</code></td><td><code>1.0</code></td></tr>
+      <tr><td><code>batch_size</code></td><td><code>MCPD_BATCH_SIZE</code></td><td><code>128</code></td></tr>
+      <tr><td><code>flush_interval</code></td><td><code>MCPD_FLUSH_INTERVAL_MS</code></td><td><code>2s</code></td></tr>
+      <tr><td><code>max_queue</code></td><td><code>MCPD_MAX_QUEUE</code></td><td><code>8192</code></td></tr>
+      <tr><td><code>timeout</code></td><td><code>MCPD_TIMEOUT_MS</code></td><td><code>10s</code></td></tr>
+      <tr><td><code>enabled</code></td><td><code>MCPD_ENABLED</code></td><td><code>true</code></td></tr>
+      <tr><td><code>capture_payloads</code></td><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td></tr>
+      <tr><td><code>log_level</code></td><td><code>MCPD_LOG_LEVEL</code></td><td><code>debug</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    解釈できない設定は警告とともに読み飛ばされ、既定値が使われます。デプロイ先の
+    環境変数のタイプミスで、プログラムが止まってはいけないからです。
+    <code>enabled = false</code> にすると、どの呼び出しも何もしなくなりますが、
+    返るオブジェクトは有効なままです。id の形は正しく、<code>traceparent</code> の
+    伝播も続くので、テスト対象のコードに触れずに mcpd を止められます。
+  </p>
+
+  <h2>実行の記録</h2>
+  <p>
+    <code>Span</code> は RAII のガードです。ドロップされた時点で終了します。これが
+    Rust でのスコープ付きの書き方で、ブロック、スコープ、関数の終わりが区切りに
+    なります。<code>end()</code> を自分で呼んでも同じです。ガードになっているのは、
+    途中の return やパニックでスパンが開いたまま、終わらないまま残らないように
+    するためです。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="スパンはガード"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: guard }]}
+  />
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="trace" title="実行の記録" />
+
+  <h2>コンテキスト</h2>
+  <p>
+    プロセスの中では、コンテキストは tokio の task-local で運ばれます。スパンを
+    持っているだけでは、それがカレントにはなりません。<code>Span::scope</code> は
+    future に対して、<code>Span::sync_scope</code> はクロージャに対して
+    task-local を設定します。どちらの中でも <code>Mcpd::span</code> は進行中の
+    実行につながるので、何層か下のヘルパー関数でも、親を渡されずに正しく入れ子に
+    なります。親をすでに持っている場合は、<code>Span::child_of</code> が明示的な
+    書き方です。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="task-local"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: taskLocal }]}
+  />
+
+  <p>
+    プロセスの間では、コンテキストは W3C の <code>traceparent</code> ヘッダーで
+    運ばれます。サンプリングのフラグも一緒に運ばれるので、そのトレースを残すか
+    どうかについて、トレースの前半と後半が食い違うことはありません。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="サービス境界をまたぐ"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: propagation }]}
+  />
+
+  <h2>モデル、使用量、エラー</h2>
+  <p>
+    mcpd は取り込み時にトークン数から料金を計算するので、トレースに出るコストは
+    実際に請求されたコストになります。エラーを記録すると、同時にスパンのステータスも
+    <code>error</code> になるので、この 2 つが食い違うことはありません。メッセージは
+    省略できる引数ではなく、必須の引数です。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="スパンが持つもの"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: payload }]}
+  />
+
+  <p>
+    そのほかのセッターは <code>set_input</code>、<code>set_output</code>、
+    <code>set_attributes</code>、<code>set_metadata</code>、
+    <code>set_tags</code>、<code>set_entity</code>、<code>set_session</code>、
+    <code>set_user</code>、<code>set_status</code>、
+    <code>set_error_detail</code> です。どれも <code>&amp;self</code> を取るので、
+    スパンは借用できる場所ならどこからでも埋められます。
+  </p>
+
+  <h2>ペイロード、シンク、完了済みスパン</h2>
+  <p>
+    <code>Config::with_capture_payloads(false)</code> にすると、プロンプトと補完
+    はプロセスの中に留まります。スパンは所要時間、ステータス、使用量、モデル、
+    相関、エラーを持ったままで、<code>input</code> と
+    <code>output</code> はキューに入る前に捨てられます。個々のスパンは
+    <code>span.capture_payloads(..)</code> でクライアントの設定を上書きでき、
+    有効にも無効にもできます。
+  </p>
+  <p>
+    エクスポーターは、すべてのバッチをクライアントのシンクに渡します。既定は
+    HTTP トランスポートです。<code>Config::with_sink</code> には
+    <code>RecordingSink</code> を渡せます。これはバッチをメモリに保持するので、
+    テストはサーバーなしで記録された内容を検証できます。<code>ConsoleSink</code> を
+    渡せば、シグナル 1 件につき JSON が 1 行出力されます。失敗したシンクは
+    エクスポートの失敗として 1 間隔につき 1 回報告されるだけで、例外にはなりません。
+    <code>mcpd.stats()</code> は <code>queued</code>、<code>dropped</code>、
+    <code>capacity</code>、<code>exported</code>、<code>failed</code>、
+    <code>rejected</code> を返します。
+  </p>
+  <p>
+    <code>mcpd.record(span)</code> は、すでに終了したスパンを、id、親、開始時刻、
+    終了時刻ごと、アダプターやインポートが持っているままキューに入れます。親を
+    付け替えたり、時刻を打ち直したり、サンプリングをやり直したりはしません。形式の
+    壊れたレコードは捨てられ、<code>rejected</code> に数えられます。
+    <code>span.set_external_parent</code> は、mcpd 以外のトレーシングシステムの
+    親を、相関のためだけに運びます。
+  </p>
+
+  <h2>永続実行</h2>
+  <p>
+    同じクライアントがデーモンの永続実行も扱います。<code>Workflow::new</code> が
+    定義を組み立て、ステップの本体を非同期クロージャとして保持します。
+    <code>Worker</code> がそれを登録し、リースをロングポーリングで受け取って
+    1 件ずつタスクの上で処理します。<code>start_run</code>、
+    <code>watch_run</code>、<code>publish_event</code> なども、実行の API を
+    1 対 1 で写しています。本体が <code>StepFailure::retryable</code> を返すと
+    ステップの予算の範囲でリトライされ、<code>StepContext</code> を通して自分の
+    ステップの下にスパンを記録します。そうして開いたスパンと、その下に入れ子に
+    なったすべてのスパンは、終了時に使用量をステップに足し込みます。デーモンは
+    トレースに出ているとおりに料金を計算し、本体がトークンを手で合計する必要は
+    ありません。<code>set_usage</code> は、それを明示的に上書きします。ビルダーの
+    <code>on_lease</code>、<code>on_step_start</code>、<code>on_step_end</code>、
+    <code>on_conflict</code> の各フックと <code>worker.stats()</code> によって、
+    ワーカーの中の様子が見えます。
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['rust']} example="workflow" region="workflow" title="ワークフロー" />
+  <p>
+    それぞれの構成要素の働き、リースのプロトコル、実行の API は
+    <a href={linkTo('/docs/workflows')} class="link">ワークフロー</a>、
+    <a href={linkTo('/docs/workers')} class="link">ワーカー</a>、
+    <a href={linkTo('/docs/runs')} class="link">実行</a>のページにあります。
+  </p>
+
+  <h2>スコアとフィードバック</h2>
+  <p>
+    <code>Scale</code> は省略できる引数ではなく、必須の引数です。範囲の宣言がない
+    0.9 という数値は何とも比べられませんし、誰かがチャートを見ている時点では、
+    それが何を意味していたのかを聞くには遅すぎます。よく使うのは
+    <code>Scale::UNIT</code>、0.0 から 1.0 です。フィードバックは人の判断であり、
+    スコアとは別に保たれます。2 つは別の問いに答えるものなので、まとめて平均しては
+    いけません。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="score" title="スコアとフィードバック" />
+
+  <h2>フラッシュとシャットダウン</h2>
+  <p>
+    記録はメモリ上のキューに追加して戻ります。<code>flush()</code> はキューにある
+    ものを送り、<code>shutdown()</code> はフラッシュしてワーカーを止めます。2 回
+    呼んでも問題ありません。どちらも await でき、最後のエクスポートの失敗を返すので、
+    ログに出せます。
+  </p>
+  <p>
+    短命なプロセスでは、どちらかを必ず呼んでください。シャットダウンせずに終了した
+    バイナリは、スパンをメモリに残したまま終わります。サーバーレス関数では、
+    ハンドラーが戻った瞬間にランタイムがプロセスを凍結するので、バックグラウンドの
+    タスクに次の順番は回ってきません。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="シャットダウン"
+    samples={[{ lang: 'rust', label: 'Rust', shiki: 'rust', code: shutdown }]}
+  />
+
+  <p>
+    フラッシュの失敗で失われたシグナルが、キューに戻されることはありません。
+    トランスポートはすでにリトライしており、失敗のたびに自分でキューを埋め直す作りは、
+    障害をメモリ不足による強制終了に変えてしまいます。
+  </p>
+
+  <h2>保証されること</h2>
+  <p>
+    デーモンを止めた状態でも、この例は最後まで走り、できなかったことを出力して、
+    終了コード 0 で終わります。
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="デーモンが動いていない場合"
+    lines={[
+      { cmd: 'cargo run -p mcpd-sdk --example quickstart' },
+      { out: '    Finished `dev` profile [unoptimized + debuginfo]' },
+      { out: '     Running `target/debug/examples/quickstart`' },
+      { out: 'mcpd could not export: export failed: mcpd could not be reached', tone: 'warn' },
+      { out: 'could not read the trace back: mcpd could not be reached', tone: 'warn' },
+      { cmd: 'echo $?' },
+      { out: '0', tone: 'ok' },
+    ]}
+  />
+
+  <ul>
+    <li>
+      計装の呼び出しは、エラーを返すこともパニックすることもありません。mcpd に
+      到達できない、シリアライズに失敗した、キューがいっぱいだといったことは、
+      <code>tracing</code> を通してフラッシュ間隔ごとに多くても 1 回ログに出て、
+      飲み込まれます。可観測性が、観測している相手を落としてはいけません。
+    </li>
+    <li>
+      記録がブロックすることはありません。エクスポートはバックグラウンドの tokio
+      タスクで行われるので、エージェントのレイテンシが、mcpd の速さや、mcpd が
+      動いているかどうかに左右されることはありません。
+    </li>
+    <li>
+      キューの上限は <code>max_queue</code> です。いっぱいになると古いシグナルから
+      捨てられ、<code>mcpd.stats().dropped</code> がその数を数えます。古いものを
+      捨てるほうが、メモリ不足による強制終了よりは小さな失敗です。
+    </li>
+    <li>
+      1.0 未満のサンプリングは、乱数ではなくトレース id から決まります。そのため、
+      いくつのプロセスが動いていても、同じトレースについてはどれも同じ判断をし、
+      サービスの境界をまたぐトレースが半分だけ記録されることはありません。
+    </li>
+    <li>
+      スパンは開始時にエクスポートされ、終了時に更新されるので、途中でクラッシュ
+      した実行も読めます。
+    </li>
+  </ul>
+
+  <h2>読み出し</h2>
+  <p>
+    読み出しも同じクライアントで行います。各メソッドは HTTP エンドポイント 1 つに
+    対応し、生成された型を返します。その型は仕様から <code>mcpd-core</code> を経て
+    作られ、<code>mcpd_sdk::model</code> として再エクスポートされています。
+    読み出しは <code>Result</code> を返します。await して答えの得られないクエリは、
+    知らせるべきことだからです。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="query" title="検索と分析" />
+
+  <p>
+    <a href={linkTo('/docs/searching')} class="link">実行を探す</a>に、フィルターの
+    全体があります。<a href={linkTo('/docs/reference/data-model')} class="link">データモデル</a>
+    には、これらの型が持つすべてのフィールドが並んでいます。
+  </p>
+</Doc>

@@ -1,0 +1,135 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Waterfall from '@/components/Waterfall.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+/* English routes, rebuilt for this locale. */
+const code = localeOf(Astro.url.pathname)
+const to = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="概念"
+  description="mcpd 使用的词汇：trace 与 span、span 类型、根 span 与事件 span、六种信号、关联，以及从 generation 到 chunk 的模型层级。"
+  lede="整个数据模型由少数几个词撑起来。文档其余部分默认你已经认识它们，所以这一页逐个定义，并说明每个词是做什么用的。"
+  og="docs"
+>
+  <h2>Span</h2>
+  <p>一个 span 是一个工作单元。它有名称、类型、开始时间、通常还有结束时间，以及一个状态。它可以带上进去了什么、出来了什么、用掉多少 token、花了多少钱，以及失败时的错误。</p>
+  <p>名称要保持低基数。<code>search_docs</code> 是一个名称；<code>search_docs(query=hello)</code> 是名称和取值粘在一起，只要有两次运行，按名称分组就没用了。</p>
+
+  <h2>Trace</h2>
+  <p>一条 trace 是一次运行的全部 span，由一个 128 位的 trace id 串起来。在 trace 内部，<code>parent_span_id</code> 决定树的形状：在一个模型步骤里发出的工具调用，是那个步骤的子节点，所以屏幕上的嵌套就是真实发生过的嵌套。</p>
+  <p>id 是 OpenTelemetry 的形状，trace 是 32 个小写十六进制字符，span 是 16 个。这不是装饰。正是它让一条从 Web 层开始、在智能体里结束的 trace 在两边仍然是同一条，也正是它让 mcpd 能和已经在读你遥测数据的其他东西并存。</p>
+  <p>如果一个 span 的父节点来自外部的追踪系统，它改用 <code>external_parent_span_id</code> 携带。mcpd 保留这个值用于关联，但绝不用它来建树，因为一个指向 mcpd 从未收到过的 span 的父 id，会让整棵子树挂在空处。</p>
+
+  <Waterfall class="not-prose my-8" />
+
+  <p>mcpd 还为每条 trace 存一份投影：span 数、错误数、token 总量、总成本、模型调用次数和工具调用次数。这一行在每次写入时都从 span 重新算出来，而不是累加，因为 span 会乱序到达、会被重试，也会被就地更新。计数器在这三种情况下都会漂移，而列表里一个明显不对的 span 数，会让读者不再相信这一页上的其他任何数字。</p>
+
+  <h2>根 span 与事件 span</h2>
+  <p>根 span 是在这条 trace 里没有父节点的那个 span。它通常是一个 <code>agent_run</code> 或 <code>workflow_run</code>，trace 的名称、标签和关联都从它来。标签只在根上有意义，在那里它们标注的是整次运行。</p>
+  <p>事件 span 是一个时间点而不是一段时长，所以它没有结束时间，也没有持续时间。流式返回的分片是最常见的例子。这个区分是存下来的，而不是从缺失的结束时间推断出来的，因为“它本来就没有结束”和“它还没有结束”是两个不同的事实，其中只有一个是问题。</p>
+  <p>当一条 trace 的根已经结束、并且没有 span 还开着时，它就完整了。在那之前它照样出现在列表里，用当下能拿到的最好名称，而不是等它结束才显示。那次永远没有完成的运行，往往正是你要看的那一次。</p>
+
+  <h2>Span 类型</h2>
+  <p>类型说明一个操作<em>是</em>什么。它决定这个 span 怎么画、哪些属性在它上面有意义，以及成本核算会不会看它。mcpd 定义了 33 种类型，分成几个家族：</p>
+  <div class="scroll-x">
+    <table>
+    <thead>
+      <tr><th>家族</th><th>类型</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>智能体</td>
+        <td><code>agent_run</code></td>
+      </tr>
+      <tr>
+        <td>模型</td>
+        <td><code>model_generation</code>、<code>model_step</code>、<code>model_inference</code>、<code>model_chunk</code></td>
+      </tr>
+      <tr>
+        <td>工具</td>
+        <td><code>tool_call</code>、<code>client_tool_call</code>、<code>provider_tool_call</code>、<code>mcp_tool_call</code></td>
+      </tr>
+      <tr>
+        <td>工作流</td>
+        <td><code>workflow_run</code>、<code>workflow_step</code>、<code>workflow_conditional</code>、<code>workflow_parallel</code>、<code>workflow_loop</code>，以及其余几种</td>
+      </tr>
+      <tr>
+        <td>检索</td>
+        <td><code>rag_ingestion</code>、<code>rag_embedding</code>、<code>rag_vector_operation</code>、<code>rag_action</code>、<code>retrieval</code>、<code>memory_operation</code>、<code>graph_action</code></td>
+      </tr>
+      <tr>
+        <td>评估</td>
+        <td><code>scorer_run</code>、<code>scorer_step</code>、<code>guardrail</code>、<code>processor_run</code></td>
+      </tr>
+      <tr>
+        <td>其他</td>
+        <td><code>mapping</code>、<code>skill_resolution</code>、<code>workspace_action</code>、<code>http_request</code>、<code>generic</code></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p>有四种类型计 token：<code>model_generation</code>、<code>model_step</code>、<code>model_inference</code> 和 <code>rag_embedding</code>。成本核算读的就是这些 span。<code>generic</code> 永远合法，也永远不会被推断出来，所以 mcpd 分不出类别的 span 会被如实标注，而不是靠猜。<a href={to('/docs/reference/data-model')} class="link">数据模型</a>一页列出了每一种类型及其含义。</p>
+
+  <h2>模型层级</h2>
+  <p>其中四种类型互相嵌套，而这个嵌套是整个模型里最有用的部分：</p>
+  <ul>
+    <li><code>model_generation</code> 是一次逻辑上的生成：从第一个请求到最终回答的全部内容。</li>
+    <li><code>model_step</code> 是其中的一个步骤。一次调用了两回工具的生成，有三个步骤。</li>
+    <li><code>model_inference</code> 只是与供应商的一次往返，里面不含处理器，也不含工具执行。</li>
+    <li><code>model_chunk</code> 是流式返回的一个分片，作为事件记录。</li>
+  </ul>
+  <p>分成四层而不是一层，是因为“模型调用很慢”这句话按字面几乎从来都不成立。一旦牵扯到工具，你代码里的一次调用就不是一次 HTTP 往返：它是一个请求、一个工具、又一个请求、一道护栏、再一个请求。把这些压进一个 span，一次在你自己的重试循环里耗掉六秒的运行，就和一次等供应商等了六秒的运行长得一模一样。把 inference、step 和 generation 分开，才让这个差别读得出来，而第一个分片事件给你的是首个 token 的时间。</p>
+  <p>token 用量只记<strong>一次</strong>，记在真正发出供应商调用的那个 span 上。trace 投影会把这条 trace 里每个 span 的输入和输出 token 加起来，所以同一份计数既挂在一个 generation 上、又挂在它的每个 step 上，屏幕上的 token 总量和成本都会翻倍。层级是用来看时间的；token 属于真正和供应商说过话的那一层。</p>
+
+  <h2>六种信号</h2>
+  <p>span 是 mcpd 存的六类东西之一。日志是一次运行输出的行。指标是数值观测，形式为计数器、量表或直方图。评分是机器对一个 span 或一条 trace 的评估。反馈是人的评估。方面注释是一次运行结束后写下的、关于它的一句话。大多数由模型写。<code>outcome</code> 注释由守护进程根据运行的状态和它已经掌握的其他事实写下。</p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <p>六种信号都带着它们所属的 trace id，多数还带着 span id，而且写入任何东西之前，六种都会经过同一条脱敏流水线。一条日志泄露密钥的本事，和一条提示词一样大。</p>
+  <p>评分总要声明自己的量程：取值，以及它所处的最小值和最大值。每个 SDK 都在调用处要求这两个值，因为一个不带量程的 0.7 没法和任何东西比较，包括同一个评分器上周的输出。</p>
+  <p>反馈和评分分开存放，也从不与它们平均。它有五种形态：<code>thumbs</code>、<code>rating</code>、<code>correction</code>、<code>tag</code> 和 <code>comment</code>。<code>correction</code> 是五种里最有价值的，因为它是唯一带着正确答案的信号。</p>
+
+  <h2>关联</h2>
+  <p>关联是一个信号所属的上下文。它决定了你手上是一堆运行，还是一组可以切分的数据。</p>
+  <div class="scroll-x">
+    <table>
+    <thead>
+      <tr><th>字段</th><th>它装的是什么</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>project</code></td><td>租户键。每个信号都恰好属于一个。</td></tr>
+      <tr><td><code>environment</code></td><td>它在哪里运行，例如 production 或 staging。</td></tr>
+      <tr><td><code>service_name</code></td><td>发出它的服务。</td></tr>
+      <tr><td><code>service_version</code></td><td>该服务的版本，这样一次回归可以定位到某个发布。</td></tr>
+      <tr><td><code>session_id</code></td><td>面向用户的会话。把多条 trace 归成一次对话。</td></tr>
+      <tr><td><code>thread_id</code></td><td>该会话内部的一个线程。</td></tr>
+      <tr><td><code>user_id</code></td><td>这次运行所服务的最终用户。</td></tr>
+      <tr><td><code>resource_id</code></td><td>你自己应用内部的租户或工作区。</td></tr>
+      <tr><td><code>run_id</code></td><td>你自己给这次运行起的标识。</td></tr>
+      <tr><td><code>request_id</code></td><td>引发这份工作的入站请求。</td></tr>
+      <tr><td><code>experiment_id</code></td><td>当这次运行由一次实验产生时设置。</td></tr>
+      <tr><td><code>release</code></td><td>一个发布名称或一个 git sha。</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><code>project</code> 是唯一必填的字段。发送方没有指定时，守护进程会把这个信号归到它的 <code>--project</code> 默认值下，所以不会有任何东西存下来却无处归属。</p>
+  <p>即使看起来多余，也请设置 <code>session_id</code>。一次智能体运行是一条 trace，但投诉几乎总是关于一次对话的，而没有 session id，就没有什么能把十一条分开的 trace 还原成那个人真正经历的那次交流。</p>
+  <p>trace 列表可以直接按 <code>environment</code>、<code>session_id</code>、<code>thread_id</code> 和 <code>user_id</code> 过滤，同时还有状态、类型、名称、标签、模型、时间范围、最小时长、最低成本和评分。<a href={to('/docs/searching')} class="link">查找一次运行</a>一页把它们组合到了一起。</p>
+
+  <h2>链接</h2>
+  <p>一个 span 有一个父节点，和任意数量的链接。一个链接指向另一个 span 或另一条 trace，并说明为什么：<code>follows_from</code>、<code>retry_of</code>、<code>replay_of</code>，或者你自己起的名字。</p>
+  <p>链接之所以存在，是因为父子关系表达不了扇入。一个由二十个请求引发的批处理任务，有二十个链接和一个父节点。硬把它塞进树里，要么凭空造出十九棵重复的子树，要么丢掉十九个起因。</p>
+
+  <h2>接下来</h2>
+  <ul>
+    <li>每个实体和字段的完整说明：<a href={to('/docs/reference/data-model')} class="link">数据模型</a>。</li>
+    <li>这些词在代码里长什么样：<a href={to('/docs/sdks/typescript')} class="link">SDK</a>。</li>
+    <li>当这些 span 以 OTLP 到达时 mcpd 会推断什么：<a href={to('/docs/opentelemetry')} class="link">OpenTelemetry</a>。</li>
+    <li>把这套词汇变成一次查询：<a href={to('/docs/searching')} class="link">查找一次运行</a>。</li>
+  </ul>
+</Doc>

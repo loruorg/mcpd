@@ -1,0 +1,244 @@
+---
+/**
+ * The HTTP API reference.
+ *
+ * One page for the whole API rather than eight, because the questions people
+ * arrive with ("which endpoint takes a cursor", "what needs a read key") are
+ * answered by scanning, and scanning across eight pages is not scanning.
+ *
+ * Every section below is a generated entry of the `reference` collection,
+ * emitted by tools/codegen from spec/mcpd.spec.json. This file supplies the
+ * frame and the contents table, and nothing about the endpoints themselves.
+ */
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import PipelineDiagram from '@/components/PipelineDiagram.astro'
+import { getCollection, render } from 'astro:content'
+import spec from '@/generated/spec-index.json'
+import { capitalise, localeOf } from '@/lib/i18n'
+
+/* The two case decisions on this page, which go opposite ways.
+   `capitalise(spell(...))` in the opening paragraph is DISPLAY text, so it
+   folds in the reader's language: a Turkish sentence opening on `i` has to
+   begin `İ` and not `I`, and the helper reads a whole code point where the
+   `/^./` it replaced would have split a surrogate pair.
+   `r.method.toLowerCase()` in the contents table is LOCALE-INVARIANT, because
+   it builds the CSS class `method--get`. Turkish folding there would emit a
+   class name no stylesheet matches. */
+const code = localeOf(Astro.url.pathname)
+
+const files = (await getCollection('reference'))
+  .filter((e) => e.id.startsWith('api-'))
+  .sort((a, b) => a.data.order - b.data.order)
+
+/* The contents table needs each operation's method and path, which the markdown
+   does not expose, and its anchor, which only the renderer knows. Both lists
+   come from the same spec in the same order, so they are zipped rather than
+   matched by slugifying a summary and hoping. A mismatch means the generated
+   files are stale, and failing the build is the correct response to that. */
+/* The breakdown in the opening paragraph is counted from the same index, so a
+   spec that gains an endpoint cannot leave this sentence adding up to the wrong
+   total. The tags are the spec's own grouping: Ingest accepts signals,
+   Operations answers a probe or a scrape, and everything else reads, judges or
+   deletes what was stored. */
+const byTag = (tag: string) => spec.endpoints.filter((e) => e.tag === tag).length
+const ingestCount = byTag('Ingest')
+const operationsCount = byTag('Operations')
+const restCount = spec.counts.endpoints - ingestCount - operationsCount
+/* Spelled out, as prose counts are, up to ninety-nine; a count past that is a
+   different document. */
+const spell = (n: number): string => {
+  const small = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+    'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen',
+    'eighteen', 'nineteen']
+  const tens = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety']
+  if (n < 20) return small[n]!
+  if (n < 100) return n % 10 ? `${tens[Math.floor(n / 10)]}-${small[n % 10]}` : tens[Math.floor(n / 10)]!
+  return String(n)
+}
+
+const sections = await Promise.all(
+  files.map(async (entry) => {
+    const { Content, headings } = await render(entry)
+    const anchors = headings.filter((h) => h.depth === 2)
+    const endpoints = spec.endpoints.filter((e) => e.tag === entry.data.title)
+    if (anchors.length !== endpoints.length) {
+      throw new Error(
+        `reference/${entry.id}: ${anchors.length} headings against ${endpoints.length} ` +
+          'endpoints in the spec index. Run `make gen`.',
+      )
+    }
+    return {
+      slug: entry.id.replace(/^api-/, ''),
+      title: entry.data.title,
+      Content,
+      rows: endpoints.map((e, i) => ({ ...e, anchor: anchors[i]!.slug })),
+    }
+  }),
+)
+---
+
+<Doc
+  title="HTTP API"
+  description="Every endpoint in spec/mcpd.spec.json: ingest, traces, spans, logs, metrics, evaluation, analytics and operations, with parameters, response types and required scope."
+  lede="The whole HTTP surface on one page. Generated from the specification the server routes are built from, so an endpoint documented here is an endpoint that exists."
+  og="docs"
+>
+  <div class="not-prose well max-w-[68ch] px-4 py-3.5">
+    <p class="legend text-ink-3">Generated file</p>
+    <p class="mt-1.5 max-w-[62ch] text-[0.875rem] leading-relaxed text-ink-2">
+      Every endpoint section on this page is produced by
+      <span class="data text-ink">tools/codegen</span> from
+      <span class="data text-ink">spec/mcpd.spec.json</span>. Do not edit it by
+      hand. Change the spec, run <span class="data text-ink">make gen</span>, and
+      the server, the SDKs, the OpenAPI document and this page all move together.
+      <span class="data text-ink">make check</span> fails the build when any of
+      them drift apart.
+    </p>
+  </div>
+
+  <p>
+    There are {spec.counts.endpoints} endpoints under specification
+    {spec.specVersion}. {capitalise(spell(ingestCount), code)} of
+    them accept signals, {spell(operationsCount)} answer a Kubernetes probe or a
+    Prometheus scrape, and the other {spell(restCount)} read back what was
+    stored, attach a judgement to it, or delete it. If you would rather generate
+    a client than read this, <span class="data">spec/openapi.json</span> is
+    emitted from the same file.
+  </p>
+
+  <h2>Before the endpoints</h2>
+  <p>
+    Four things are true of the API as a whole, so they are stated here once
+    rather than repeated under every endpoint below.
+  </p>
+
+  <h3>Address</h3>
+  <p>
+    There is no hosted API and no base URL to look up. The API is served by your
+    own daemon on whatever address it listens on, which is
+    <span class="data">0.0.0.0:4317</span> unless you set
+    <span class="data">--listen</span>. The operator interface is served from the
+    same port, so the address in your browser is the address your client uses.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="a read against a local daemon"
+    command="curl -s 'http://localhost:4317/v1/api/traces?project=default&limit=5'"
+  />
+
+  <h3>Keys and scope</h3>
+  <p>
+    Present a key as <span class="data">Authorization: Bearer &lt;key&gt;</span>,
+    or as the <span class="data">x-mcpd-key</span> header if a proxy has taken
+    the first one. There are six scopes, and each endpoint below names the one
+    it takes. <span class="data">ingest</span> writes signals and reads nothing.
+    <span class="data">read</span> reads stored signals, which is where the
+    prompts are. <span class="data">write</span> changes stored data: scores,
+    feedback, datasets, experiments and acknowledgements.
+    <span class="data">execute</span> starts, cancels and signals runs.
+    <span class="data">worker</span> claims steps and reports what happened to
+    them. <span class="data">admin</span> deletes, and reads the audit log. Handing a
+    fleet of agents a key that can also read back every stored prompt is the
+    mistake the split exists to prevent.
+  </p>
+  <p>
+    Configure them with <span class="data">--ingest-key</span>,
+    <span class="data">--read-key</span>, <span class="data">--write-key</span>,
+    <span class="data">--admin-key</span>,
+    <span class="data">--execute-key</span> and
+    <span class="data">--worker-key</span>. Four of them fall back: an unset
+    write list accepts the ingest keys, an unset admin list accepts the read
+    keys, and unset execute and worker lists accept the write keys, so a
+    deployment configured before the narrower scopes existed keeps the reach it
+    had. With no keys set at all, every scope is open: that is what
+    makes the first run take five minutes, and it is also why the daemon warns
+    at startup when it is listening on anything other than loopback with a
+    scope open. <a href="/docs/security" class="link">Security</a> has the
+    full table.
+  </p>
+
+  <h3>Failures</h3>
+  <p>
+    Every non-2xx response is JSON with the same three fields: a stable
+    <span class="data">error</span> code to branch on, a
+    <span class="data">message</span> written for whoever has to fix it, and
+    <span class="data">field</span> when one parameter is at fault. A response
+    that only says 500 costs the reader an hour, so nothing here returns one
+    without saying what happened.
+  </p>
+
+  <h3>Paging</h3>
+  <p>
+    Lists page by cursor, never by offset. A response carries
+    <span class="data">next_cursor</span> until the last page, and you pass it
+    back as <span class="data">cursor</span>. Offsets skip and repeat rows when
+    new traces arrive between two requests, which on an ingest path that is
+    always writing is most of the time. Cursors are opaque: read them, do not
+    build them.
+  </p>
+
+  <h2>What a write goes through</h2>
+  <p>
+    The four ingest endpoints differ only in what they decode. After that they
+    share one pipeline, and its order is the part worth knowing: redaction runs
+    before storage, not as a cleanup job afterwards. A value a rule matches is
+    never written down, so there is no window in which it existed on disk and no
+    job that has to find it again.
+  </p>
+
+  <PipelineDiagram class="not-prose my-8" />
+
+  <h2>The endpoints</h2>
+  <p>
+    Grouped as the specification groups them. A method takes its colour from
+    what the request does to your data: a read is nominal, a write asks for
+    attention, a delete destroys.
+  </p>
+
+  {/* Two columns of the panel's own surface, divided by scribed rules rather
+      than laid on a dark grid. Eleven groups on a `gap-px` grid left the
+      twelfth cell showing the dark backing through it. */}
+  <nav class="not-prose reference-index panel my-6 overflow-hidden" aria-label="API contents">
+    <div class="grid sm:grid-cols-2">
+      {
+        sections.map((s) => (
+          <div class="border-t border-scribe-2 bg-panel-2 px-4 py-4 first:border-t-0 sm:nth-[2]:border-t-0 sm:even:border-l">
+            <a href={`#${s.slug}`} class="legend text-ink transition-colors hover:text-amber">
+              {s.title}
+            </a>
+            <ul class="mt-2.5 flex flex-col gap-2">
+              {s.rows.map((r) => (
+                <li>
+                  <a href={`#${r.anchor}`} class="group flex items-baseline gap-2.5">
+                    <span class={`method method--${r.method.toLowerCase()} w-[3.4rem] shrink-0`}>
+                      {r.method}
+                    </span>
+                    <span class="min-w-0">
+                      <span class="data block break-all text-[0.8125rem] text-ink transition-colors group-hover:text-amber">
+                        {r.path}
+                      </span>
+                      <span class="block text-[0.8125rem] leading-snug text-ink-3">{r.summary}</span>
+                    </span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))
+      }
+    </div>
+  </nav>
+
+  {
+    sections.map(({ Content, ...s }) => (
+      <section id={s.slug} class="reference-section">
+        <h2>{s.title}</h2>
+        <div class="reference reference--api">
+          <Content />
+        </div>
+      </section>
+    ))
+  }
+</Doc>

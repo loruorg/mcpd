@@ -1,0 +1,224 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="Elixir"
+  description="Elixir를 위한 mcpd SDK. GenServer 워커, 프로세스 딕셔너리로 조립되는 스팬 트리, 그리고 의존성이 하나도 없습니다. OTP에 이미 JSON 코덱과 HTTP 클라이언트가 있기 때문입니다."
+  lede="워커는 GenServer가, 컨텍스트는 프로세스가 맡고, 의존성 트리에는 아무것도 더하지 않습니다."
+  og="docs"
+>
+  <h2>설치</h2>
+  <p>
+    <code>mix.exs</code>에 추가하십시오. 딸려 오는 것은 없습니다.
+  </p>
+
+  <pre><code class="language-elixir">{`defp deps do
+  [{:mcpd, "~> 0.1"}]
+end`}</code></pre>
+
+  <p>
+    그것이 의존성 목록의 전부이고, 그렇게 한 것은 의도입니다. OTP 27에는 JSON
+    코덱(<code>:json</code>)과 HTTP 클라이언트(<code>:inets</code>)가 들어 있으므로,
+    시스템을 지켜보는 것이 일인 라이브러리가 그 시스템의 빌드를 바꾸는 이유가 될
+    필요는 없습니다. 나머지 다섯 SDK도 각자의 언어에서 같은 약속을 합니다.
+  </p>
+
+  <h2>클라이언트 만들기</h2>
+  <p>
+    모든 옵션은 자기 환경 변수로 물러나고, 코드가 이깁니다. 인자가 없는
+    <code>Mcpd.start_link()</code>는 로컬 데몬과 대화합니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="init" title="연결" />
+
+  <p>
+    감독 트리에 넣으면 다른 워커와 똑같이 동작합니다.
+  </p>
+
+  <pre><code class="language-elixir">{`children = [
+  {Mcpd, project: "support-desk", environment: "production"}
+]
+
+Supervisor.start_link(children, strategy: :one_for_one)`}</code></pre>
+
+  <h2>실행 기록하기</h2>
+  <p>
+    <code>span</code>은 매크로입니다. 그래서 실행은 블록이고, 그 값은 블록의 값입니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="trace" title="실행 기록하기" />
+
+  <p>
+    매크로는 호출하기 전에 require 해야 합니다. 여기서 고른 것이 아니라 언어의
+    규칙입니다. <code>use Mcpd</code>가 그 일을 대신해 줍니다.
+  </p>
+
+  <pre><code class="language-elixir">{`defmodule MyAgent do
+  use Mcpd
+
+  def answer(mcpd, question) do
+    Mcpd.span mcpd, "agent", kind: :agent_run, input: question do
+      do_the_work(question)
+    end
+  end
+end`}</code></pre>
+
+  <p>
+    본문이 블록이 아니라 이미 함수라면 대신 <code>Mcpd.with_span/4</code>를
+    호출하십시오. 매크로만 뺀 같은 것입니다.
+  </p>
+
+  <h2>트리는 스스로 조립됩니다</h2>
+  <p>
+    활성 스팬은 프로세스 딕셔너리에 삽니다. 이것은 지름길이 아니라 Elixir에서만큼은 옳은
+    저장소입니다. 여기서는 프로세스가 동시성의 단위이므로, 같은 시각에 처리되는 두 요청이
+    서로의 스팬을 볼 수 없고, 트리를 하나로 묶어 두기 위해 무언가를 모든 함수에 꿰어
+    넘길 필요도 없습니다.
+  </p>
+  <p>
+    세 번 호출을 타고 내려간 곳에서 시작한 자식도 스스로 부모를 찾습니다.
+  </p>
+
+  <pre><code class="language-elixir">{`Mcpd.span mcpd, "agent", kind: :agent_run do
+  plan(mcpd)          # opens a child of "agent" without being told
+end
+
+defp plan(mcpd) do
+  Mcpd.span mcpd, "plan_answer", kind: :model_generation, model: "gpt-4o" do
+    call_the_model()
+  end
+end`}</code></pre>
+
+  <p>
+    알아 둘 만한 결과가 하나 있습니다. <code>Task.async</code> 안에서 연 스팬은 새
+    트레이스를 시작합니다. 그것이 다른 프로세스이기 때문입니다. 트레이스를 건네주려면
+    <code>Mcpd.traceparent/0</code>과 <code>Mcpd.continue/2</code>를 쓰십시오. HTTP
+    경계를 넘을 때 쓰는 것과 같은 짝입니다.
+  </p>
+
+  <SignalFlow class="not-prose my-8" />
+
+  <h2>아무것도 막지 않고, 아무것도 예외를 일으키지 않습니다</h2>
+  <p>
+    스팬을 기록하는 것은 워커에 메시지를 보내고 돌아오는 일입니다. 네트워크는 그 워커에서
+    일어나므로, 에이전트의 지연 시간이 mcpd가 빠른지, 살아 있는지, 아예 돌고 있기는
+    한지에 달리는 일이 없습니다.
+  </p>
+  <p>
+    블록 안에서 일어난 예외는 스팬에 오류로 기록된 다음 바뀌지 않은 채로 다시
+    일어납니다. mcpd가 할 일은 무슨 일이 있었는지 보는 것이지, 그것에 대해 코드가
+    무엇을 할지 정하는 것이 아닙니다.
+  </p>
+  <p>
+    큐에는 상한이 있고, 가득 차면 가장 오래된 시그널부터 버립니다. 그 방향은 골라서 정한
+    것입니다. 데몬에 닿지 않을 때 지금 무슨 일이 벌어지고 있는지 말해 주는 것은 가장 새로운
+    시그널이고, 데몬이 돌아왔을 때 누군가 보고 싶어 할 것도 그것이기 때문입니다.
+    <code>Mcpd.stats/1</code>은 클라이언트가 무엇을 했는지 답합니다.
+    <code>queued</code>, <code>dropped</code>, <code>capacity</code>,
+    <code>exported</code>, <code>failed</code>, <code>rejected</code>입니다.
+  </p>
+
+  <p>
+    <code>log_level:</code>, 또는 <code>MCPD_LOG_LEVEL</code>은
+    <code>Mcpd.log/4</code> 아래에 바닥을 놓습니다. 기본값은 전부를 남기는
+    <code>debug</code>입니다. 바닥 아래에 있는 줄은 레코드를 만들기 전에 버리므로, 운영
+    배포에 남아 있는 디버그 한 줄이 치르는 비용은 비교 한 번입니다. 이 바닥은 로그에만
+    해당합니다. 스팬, 메트릭, 점수, 피드백은 영향을 받지 않습니다.
+  </p>
+
+  <h2>페이로드를 프로세스 안에 두기</h2>
+  <p>
+    <code>capture_payloads: false</code>, 또는
+    <code>MCPD_CAPTURE_PAYLOADS=false</code>는 프롬프트와 컴플리션을 있던 자리에 그대로
+    둡니다. 스팬은 여전히 시각과 상태와 사용량과 모델과 상관 정보와 오류를 싣고 나가고,
+    <code>input:</code>과 <code>output:</code>과 블록이 담은 값은 큐에 닿기 전에
+    버려집니다. 그래서 민감한 것은 큐에 들어가지도 않고, 플러시를 타고 나가지도 않습니다.
+    스팬 하나는 <code>capture_payloads: true</code>로 자기 몫만 달리 정할 수 있습니다.
+  </p>
+
+  <h2>기록한 것을 검증하기</h2>
+  <p>
+    싱크는 비워 낸 배치가 가는 곳입니다. 기본값은 HTTP 전송 계층입니다.
+    <code>Mcpd.Sink.Recorder</code>는 모든 배치를 메모리에 들고 있어서, 테스트가 데몬
+    없이 계측이 기록한 스팬과 로그와 메트릭과 점수와 피드백을 다시 읽습니다.
+    <code>Mcpd.Sink.Console</code>은 시그널마다 JSON 한 줄을 stderr로 출력합니다. 직접
+    만든 싱크는 <code>Mcpd.Sink</code>를 구현합니다. 예외를 일으키는 싱크는 실패한
+    배치이고, 세어서 보고할 뿐 호출자에게 올라오지 않습니다.
+  </p>
+  <p>
+    <code>Mcpd.record/3</code>은 이미 끝난 스팬을 준 그대로 큐에 넣습니다. 자기 id와
+    부모와 시작과 끝을 그대로 두고, 부모를 다시 매기지도, 시각을 다시 매기지도, 샘플링을
+    다시 결정하지도 않습니다. 다른 트레이싱 시스템의 어댑터나 일괄 가져오기가 들고 있는
+    것이 바로 그것입니다. id가 OpenTelemetry 형태가 아닌 레코드는 거절하고 세며, 예외를
+    일으키지 않습니다. 어느 스팬에서든 <code>external_parent_span_id:</code>는 mcpd가
+    아닌 트레이싱 시스템의 부모를 상관 정보로만 실어 나릅니다.
+  </p>
+
+  <h2>지속성 실행</h2>
+  <p>
+    같은 클라이언트가 데몬의 지속성 실행도 다룹니다. <code>Mcpd.Workflow</code>는 정의를
+    만들고 단계 본문을 인자 셋짜리 함수로 들고 있습니다. <code>Mcpd.StepWorker</code>는
+    그 정의를 등록하고, 리스를 롱 폴링으로 기다렸다가 각각을 자기 프로세스 하나에서
+    처리합니다. <code>Mcpd.start_run/3</code>, <code>Mcpd.watch_run/3</code>,
+    <code>Mcpd.publish_event/4</code>와 나머지는 실행 표면을 하나씩 그대로 옮겨 놓은
+    것입니다. 본문은 단계의 예산 안에서 다시 시도되도록 <code>class: :retryable</code>을
+    붙인 <code>Mcpd.StepException</code>을 일으키고,
+    <code>Mcpd.StepContext.span/4</code>를 통해 자기 단계 아래에 스팬을 기록합니다.
+    본문이 닫는 모든 스팬은 자기 사용량을 그 단계의 사용량에 더하고, 마지막으로 본 모델이
+    이깁니다. 그래서 데몬은 트레이스가 보여 주는 그대로 값을 매깁니다.
+    <code>set_usage/2</code>가 명시적인 덮어쓰기입니다. 워커에는 <code>on_error</code>
+    옆에 <code>on_lease</code>, <code>on_step_start</code>, <code>on_step_end</code>,
+    <code>on_conflict</code>가 있고, <code>StepWorker.stats/1</code>은 확보한 것, 완료한
+    것, 분류별 실패, 사유별 포기를 셉니다.
+  </p>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} example="workflow" region="workflow" title="워크플로 하나" />
+  <p>
+    각 구성 요소가 무엇을 하는지, 리스 프로토콜, 실행 API는
+    <a href={linkTo('/docs/workflows')} class="link">워크플로</a>,
+    <a href={linkTo('/docs/workers')} class="link">워커</a>,
+    <a href={linkTo('/docs/runs')} class="link">실행</a>에 있습니다.
+  </p>
+
+  <h2>점수와 피드백</h2>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="score" title="점수와 피드백" />
+
+  <h2>다시 읽기</h2>
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="query" title="실행 읽기" />
+
+  <h2>짧게 사는 프로세스는 플러시해야 합니다</h2>
+  <p>
+    빨리 끝나는 스크립트나 태스크는 아직 보내지 않은 것을 잃습니다.
+    <code>Mcpd.shutdown/1</code>은 플러시하고 워커를 멈추며, 두 번 호출해도 안전합니다.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="로컬 데몬을 상대로 예제 돌리기"
+    command={`mcpd serve --data ./mcpd.db
+elixir examples/elixir/quickstart.exs`}
+  />
+
+  <h2>다음</h2>
+  <ul>
+    <li>
+      이 SDK가 나머지 다섯과 함께 지키는 모든 동작:
+      <a href="https://github.com/mcpd/mcpd/blob/main/sdks/SDK-CONTRACT.md" class="link">SDK 계약</a>.
+    </li>
+    <li>
+      스팬이 싣는 것:
+      <a href={linkTo('/docs/reference/data-model')} class="link">데이터 모델</a>.
+    </li>
+    <li>
+      그 뒤에 원하는 실행을 찾기:
+      <a href={linkTo('/docs/searching')} class="link">실행 찾기</a>.
+    </li>
+  </ul>
+</Doc>

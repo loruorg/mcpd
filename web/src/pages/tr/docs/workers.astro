@@ -1,0 +1,210 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import LeaseProtocol from '@/components/LeaseProtocol.astro'
+import { exampleLanguages } from '@/lib/snippets'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const langs = exampleLanguages('workflow')
+const loc = localeOf(Astro.url.pathname)
+const link = (route: string) => urlFor(route, loc)
+---
+
+<Doc
+  title="Worker'lar"
+  description="Bir worker kalıcı bir çalıştırmanın adımlarını nasıl sunar: tanım kaydı, lease alma, heartbeat, complete ve fail, dört 409 sebebi, at_most_once, yatay büyüme ve worker anahtar kapsamı."
+  lede="Bir worker sizin kendi sürecinizdir ve adım gövdelerini daemon'a sunar. Bu sayfa, onun konuştuğu protokolü ve her çağrının neden orada olduğunu anlatır."
+  og="docs"
+>
+  <h2>Worker nedir</h2>
+  <p>
+    Bir worker, talep edilebilir adımların gövdelerini tutar ve daemon'dan iş
+    ister. Kodunuzun çalıştığı yerde, sizin import'larınız, bağlantı havuzunuz ve
+    kimlik bilgilerinizle çalışır; daemon bunların hiçbirini görmez. Daemon ona
+    işlenmiş girdiyi ve önceki adımları taşıyan bir lease verir; worker gövdeyi
+    çalıştırır ve nasıl gittiğini bildirir. İlişkinin tamamı budur.
+  </p>
+  <p>
+    Her SDK'nın kendi worker'ı vardır. Tuttuğu iş akışlarını kaydeder, lease
+    için uzun yoklama yapar, bir gövde çalışırken heartbeat gönderir ve her
+    reddi sebebine göre yanıtlar. Aşağıdaki örnek,
+    <a href={link('/docs/workflows')} class="link">İş akışları</a> sayfasındakiyle
+    aynı programdır; burası onu sunan kısmıdır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" example="workflow" region="worker" only={langs} title="gövdeleri sunma" />
+
+  <h2>Protokol</h2>
+  <p>
+    Beş çağrı; bunları konuşan bir worker, SDK olmadan doğrudan HTTP API'ye karşı
+    yazılabilir. Her SDK'nın worker'ı bunların bir istemcisidir, fazlası değil.
+  </p>
+
+  <LeaseProtocol class="not-prose my-8" />
+
+  <table>
+    <thead>
+      <tr><th>Çağrı</th><th>Ne yaptığı</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>POST /v1/api/workers/register</code></td>
+        <td>Worker'ı duyurur ve tuttuğu tanımları saklar. Yanıt, protokolün geri kalanının üzerinde döndüğü iki sayıyı, <code>lease_ttl_ms</code> ve <code>heartbeat_ms</code> değerlerini taşır.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/claim</code></td>
+        <td>Çalıştırılabilir adımlardan en çok <code>max</code> tanesini sunar, hiç yoksa isteği <code>wait_ms</code> kadar açık tutar. Daemon bir talebi en çok istek zaman aşımının beşte dördü kadar, varsayılanda 24 saniye, tutar ve durduğunda hemen yanıt verir; bu yüzden bir talep <code>wait_ms</code> dolmadan boş dönebilir: yeniden talep edin. Bir talep tek bir çalıştırmayla sınırlanabilir; bir betiğin kendi çalıştırmasını sonuna kadar yürütmesi böyle olur.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/{'{lease}'}/started</code></td>
+        <td>Gövdenin çalıştığını bildirir. Her zaman gövdeden önce: daemon'a sunulmuş ile çalışıyor arasındaki farkı söyleyen budur.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/{'{lease}'}/heartbeat</code></td>
+        <td>Lease'i uzatır. Daemon'un bir worker'ın hayatta olduğuna dair elindeki tek kanıt.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/api/steps/{'{lease}'}/complete</code>, <code>/fail</code></td>
+        <td>Adımı bitirir: çıktı, çalıştırmanın durum verisine bir yama ve daemon'un fiyatladığı kullanım; ya da yeniden denenip denenmeyeceğine karar veren sınıfıyla bir hata.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Lease'ler</h2>
+  <p>
+    Bir lease, tek bir worker'ın sınırlı bir süre boyunca tuttuğu tek bir
+    denemedir. İşlenmiş girdiyi, kimliğine göre anahtarlanmış önceki adımları,
+    çalıştırmanın durum verisini ve ilişkilendirmesini, bu adımın yeniden
+    denemeleri boyunca sabit kalan bir anahtarı ve daemon'un açtığı adım
+    span'inin trace ve span kimliklerini taşır. Kendi span'lerini adım bağlamı
+    üzerinden kaydeden bir gövde onları o span'in altına koyar, böylece bir adımın
+    içindeki model çağrısı çalıştırmanın trace'ine doğru derinlikte iner.
+  </p>
+  <p>
+    Worker'ın heartbeat göndermeyi bıraktığı bir lease sona erer. Daemon denemeyi
+    sahipsiz olarak işaretler ve bir geri alma penceresinden sonra
+    <code>at_least_once</code> altında kuyruğa geri koyar,
+    <code>at_most_once</code> altında ise başarısız sayar. Bir duraklamadan dönüp
+    geri alınmış bir lease'e gönderim yapan worker yok sayılmaz: kendisine
+    söylenir.
+  </p>
+
+  <h2>Dört ret</h2>
+  <p>
+    Daemon'un kabul edemediği bir worker çağrısı, dört sebepten birini taşıyan bir
+    409 ile reddedilir. Bu küme kapalıdır ve her SDK'nın worker'ı her sebebi
+    adıyla ele alır; çünkü hepsini tek bir dala indiren bir worker, bitirdiği
+    adımları terk eder ya da bir başarıyı başarısızlık olarak bildirir.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Sebep</th><th>Anlamı</th><th>Worker'ın yaptığı</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>already_applied</code></td>
+        <td>Bu lease'in kendi önceki complete ya da fail çağrısı ulaşmış, yanıtı kaybolmuştur.</td>
+        <td>Başarı sayar ve başka bir şey göndermez.</td>
+      </tr>
+      <tr>
+        <td><code>fenced</code></td>
+        <td>Daha yeni bir deneme vardır, ya da başka bir lease bunu sonlandırmıştır.</td>
+        <td>İşi bırakır ve bu lease için başka bir şey göndermez. Fence'e takılan bir heartbeat, çalışan gövdeyi de bağlamı üzerinden iptal eder.</td>
+      </tr>
+      <tr>
+        <td><code>run_terminal</code></td>
+        <td>Çalıştırma; biterek, başarısız olarak, zaman aşımına uğrayarak ya da iptal edilerek sona ermiştir.</td>
+        <td>Durur ve o çalıştırma için talepte bulunmayı bırakır.</td>
+      </tr>
+      <tr>
+        <td><code>not_started</code></td>
+        <td><code>started</code> çağrısı hiç gelmemiş bir <code>at_most_once</code> denemesi için complete ya da fail gelmiştir.</td>
+        <td>Bunu worker'daki bir hata olarak açıkça bildirir. SDK worker'ları bunu üretemez; elle yazılmış bir worker üretebilir.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Gövde</h2>
+  <p>
+    Bir gövde; bir bağlam, işlenmiş girdisi ve önceki adımları alır. Daemon'un
+    neyi saklaması gerektiğini bildirdiği yer bağlamdır: <code>complete</code>
+    sırasında birleştirilen ve üst düzey anahtarları değiştiren, çalıştırmanın
+    durum verisine bir yama; harcadığı ve daemon'un span'lerle aynı kitaptan
+    fiyatladığı token'lar; ve lease kaybedildiğinde ya da çalıştırma sona
+    erdiğinde tetiklenen bir iptal sinyali, böylece bu sinyali kendi I/O'suna
+    veren bir gövde durması gerektiğinde durur. Token'lar kendiliğinden toplanır:
+    gövdenin bağlam üzerinden kaydettiği bir span ve onun altındaki her span,
+    bittiğinde kullanımını adımınkine ekler; yani model çağrılarını span olarak
+    kaydeden bir gövde elle toplama yapmaz, <code>set_usage</code> da hiç
+    kaydetmeyen bir gövde için açık geçersiz kılmadır.
+  </p>
+  <p>
+    Bir gövde ya çıktısını döndürerek ya da hata fırlatarak biter. Adımın bütçesi
+    içinde yeniden denenmek için SDK'nın yeniden denenebilir hatasını fırlatın;
+    başka bir sınıfı adlandırmak için türü belli bir adım hatası fırlatın; geri
+    kalan her şey ölümcüldür. Mesaj daemon'a gönderilir ve günlükte gösterilir.
+    Yığın izi gösterilmez.
+  </p>
+  <p>
+    Worker'ın tutmadığı bir tanım, sürüm ya da adım için gelen bir lease
+    <code>unservable</code> ile başarısız sayılır ve gövde hiç çalışmaz. Deneme,
+    yeniden deneme bütçesini harcamadan, onu tutan bir worker için kuyruğa geri
+    döner; bir dağıtım boyunca bir worker'ın iki sürümünün yan yana çalışmasını
+    sağlayan da budur.
+  </p>
+
+  <h2>Yatay büyüme</h2>
+  <p>
+    Tek bir daemon'a karşı istediğiniz kadar worker çalıştırın. Her biri kendi
+    eşzamanlılığı kadar talep eder, daemon her denemeyi tam olarak birine verir
+    ve bir şekilde iki worker'ın birden tuttuğu bir lease, fence sayesinde tek bir
+    kazananla sonuçlanır. Bir worker'ın kimliği aldığı her denemeye yazılır,
+    böylece günlük bir adımı hangi sürecin çalıştırdığını söyler. Her sürece bir
+    ad verin, ya da SDK'nın adı makineden türetmesine bırakın.
+  </p>
+  <p>
+    Bir talep uzun yoklamadır, yani boştaki bir filonun daemon'a maliyeti worker
+    başına bir açık istektir, trafik değil. Beklerken bir talep; bir çalıştırma
+    başladığında, bir adım bittiğinde, bir süre sonu tetiklendiğinde ya da bir
+    olay bir beklemeyi devam ettirdiğinde iş arar, bunların dışında da saniyede
+    en çok iki kez. Meşgul bir filo worker'ların kendi eşzamanlılığıyla
+    sınırlıdır ve bir saat süren bir gövdenin maliyeti on saniyede bir
+    heartbeat'tir, başka bir şey değil.
+  </p>
+
+  <h2>Anahtarlar</h2>
+  <p>
+    Worker çağrıları <code>worker</code> kapsamını ister; çalıştırma başlatmak,
+    sinyal göndermek ve iptal etmek <code>execute</code> kapsamını ister. İkisi de
+    tanımlı değilken yazma anahtarları kullanılır ve bir admin anahtarı ikisini
+    de içerir. Yalnızca adım sunan bir worker'ın çalıştırma başlatabilen bir
+    anahtara ihtiyacı yoktur; yalnızca olay yayımlayan bir webhook'un da adım talep
+    edebilen bir anahtara ihtiyacı yoktur. Seçenekler için
+    <a href={link('/docs/configuration')} class="link">Yapılandırma</a> sayfasına
+    bakın.
+  </p>
+  <p>
+    Worker çağrıları denetim günlüğüne kaydedilmez, oysa bir lease adımın
+    girdisini ve önceki adımların çıktılarını taşır. Bunlar dakikada birçok kez
+    talep eden bir makine döngüsüdür ve talep başına bir satır, bir kişinin
+    yaptığı okumaları gömerdi. Bir çalıştırmayı çalıştırma endpoint'leri
+    üzerinden geri okumak kaydedilir;
+    <a href={link('/docs/security')} class="link">Güvenlik</a> sayfasına bakın.
+  </p>
+
+  <h2>Sonraki</h2>
+  <ul>
+    <li>
+      Bir çalıştırmayı başlatmak, izlemek ve bir beklemeyi yanıtlamak:
+      <a href={link('/docs/runs')} class="link">Çalıştırmalar</a>.
+    </li>
+    <li>
+      Worker'ın sunduğu tanım:
+      <a href={link('/docs/workflows')} class="link">İş akışları</a>.
+    </li>
+    <li>
+      Belirtimden üretilen, worker protokolünün her endpoint'i:
+      <a href={`${link('/docs/reference/api')}#workers`} class="link">HTTP API, Workers</a>.
+    </li>
+  </ul>
+</Doc>
