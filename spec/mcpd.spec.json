@@ -1029,6 +1029,61 @@
           "doc": "Claim steps and report their outcome. The key that lives in the process running step bodies."
         }
       ]
+    },
+    "OrgRole": {
+      "doc": "What a member may do in an organisation. Each role maps onto the six key scopes on every project the organisation owns, unless a project role says otherwise.",
+      "values": [
+        {
+          "name": "owner",
+          "doc": "Every scope on every project, and everything an admin may do. Only an owner may add or remove an owner, change quotas or delete the organisation."
+        },
+        {
+          "name": "admin",
+          "doc": "Every scope on every project. Invites and removes members below owner, sets roles, creates and deletes projects, and manages SSO, SCIM and every key in the organisation."
+        },
+        {
+          "name": "member",
+          "doc": "The `ingest`, `read`, `write`, `execute` and `worker` scopes. Everything but `admin`: a member cannot delete data or read the audit log."
+        },
+        {
+          "name": "viewer",
+          "doc": "The `read` scope only."
+        }
+      ]
+    },
+    "ProjectRole": {
+      "doc": "A role on one project that replaces a member's organisation role there. Owners and admins keep their reach on every project whatever a project role says.",
+      "values": [
+        {
+          "name": "none",
+          "doc": "No access to this project."
+        },
+        {
+          "name": "viewer",
+          "doc": "The `read` scope on this project."
+        },
+        {
+          "name": "member",
+          "doc": "Every scope but `admin` on this project."
+        },
+        {
+          "name": "admin",
+          "doc": "Every scope on this project. It does not let the member manage the organisation."
+        }
+      ]
+    },
+    "SsoProvider": {
+      "doc": "How an organisation's members log in with single sign-on.",
+      "values": [
+        {
+          "name": "oidc",
+          "doc": "Any OpenID Connect provider, such as Google, Microsoft Entra ID, Okta or Auth0, found through its issuer's discovery document. Authorization code flow with PKCE, state and nonce."
+        },
+        {
+          "name": "github",
+          "doc": "GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub user id and the email is the primary verified address GitHub reports."
+        }
+      ]
     }
   },
   "types": {
@@ -1859,6 +1914,16 @@
           "name": "signup",
           "type": "bool?",
           "doc": "True when this daemon offers open sign-up: anyone may create an account at `POST /v1/api/account/signup` and log in at `POST /v1/api/account/login`. Absent when it does not, which is the default. The interface reads this to decide whether to show its sign-up and log-in screens."
+        },
+        {
+          "name": "accounts",
+          "type": "bool?",
+          "doc": "True when this daemon has accounts, with or without open sign-up. Absent when it does not. The interface reads this to show its log-in screen."
+        },
+        {
+          "name": "sso",
+          "type": "bool?",
+          "doc": "True when at least one organisation on this daemon logs in with single sign-on, so the log-in screen offers it. Absent otherwise."
         }
       ]
     },
@@ -3818,6 +3883,11 @@
           "name": "password",
           "type": "string",
           "doc": "At least 10 characters and at most 1024 bytes. Stored only as an argon2id hash."
+        },
+        {
+          "name": "totp_code",
+          "type": "string?",
+          "doc": "The six-digit code from an authenticator app, or one of the recovery codes, when the account has two-step log-in on. Ignored by sign-up."
         }
       ]
     },
@@ -3827,7 +3897,7 @@
         {
           "name": "token",
           "type": "string",
-          "doc": "The session token. It grants every scope on the account's own project and nothing else. It is shown once: the daemon keeps only its SHA-256 digest."
+          "doc": "The session token. It is shown once: the daemon keeps only its SHA-256 digest."
         },
         {
           "name": "expires_at",
@@ -3841,8 +3911,13 @@
         },
         {
           "name": "project",
-          "type": "string",
-          "doc": "The account's project. Every signal an account key writes lands here, and every read is limited to it."
+          "type": "string?",
+          "doc": "The project reads go to when they name none. The account's own project, or the first project of the organisation a single sign-on session is limited to. Absent when the session reaches no project yet."
+        },
+        {
+          "name": "org_id",
+          "type": "string?",
+          "doc": "Set when the session came from an organisation's single sign-on. The session then reaches that organisation's projects only."
         }
       ]
     },
@@ -3856,13 +3931,33 @@
         },
         {
           "name": "project",
-          "type": "string",
-          "doc": "The account's project, which is the only project its session and its keys reach."
+          "type": "string?",
+          "doc": "The project created with the account at sign-up. Absent for an account that was invited, or created by single sign-on or SCIM."
         },
         {
           "name": "created_at",
           "type": "timestamp",
           "doc": "When the account was created."
+        },
+        {
+          "name": "email_verified",
+          "type": "bool",
+          "doc": "Whether the address has been confirmed by a link sent to it."
+        },
+        {
+          "name": "totp_enabled",
+          "type": "bool",
+          "doc": "Whether two-step log-in is on."
+        },
+        {
+          "name": "has_password",
+          "type": "bool",
+          "doc": "Whether the account can log in with a password. False for an account created by single sign-on or SCIM that has never set one."
+        },
+        {
+          "name": "managed_by",
+          "type": "string?",
+          "doc": "The organisation that created this account through single sign-on or SCIM. That organisation can deactivate it."
         }
       ]
     },
@@ -3880,6 +3975,11 @@
           "doc": "What the key may do."
         },
         {
+          "name": "project",
+          "type": "string",
+          "doc": "The one project the key reaches."
+        },
+        {
           "name": "name",
           "type": "string?",
           "doc": "The label given when the key was created."
@@ -3893,6 +3993,11 @@
           "name": "created_at",
           "type": "timestamp",
           "doc": "When the key was created."
+        },
+        {
+          "name": "created_by",
+          "type": "string?",
+          "doc": "The email of the account that created the key. Set in an organisation's key list, so an admin can see whose key it is."
         }
       ]
     },
@@ -3908,6 +4013,11 @@
           "name": "name",
           "type": "string?",
           "doc": "A label for the key, such as the service that will hold it. At most 100 characters."
+        },
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "The project the key reaches. Defaults to the account's own project. Your role on the project must allow the scope."
         }
       ]
     },
@@ -3923,6 +4033,821 @@
           "name": "secret",
           "type": "string",
           "doc": "The key itself. Send it as `Authorization: Bearer <secret>`. Copy it now: the daemon keeps only its SHA-256 digest and cannot show it again."
+        }
+      ]
+    },
+    "AccountNotice": {
+      "doc": "A plain answer that changes nothing you can read back, such as \"check your email\".",
+      "fields": [
+        {
+          "name": "message",
+          "type": "string",
+          "doc": "What happened, and what to do next."
+        }
+      ]
+    },
+    "TokenRequest": {
+      "doc": "A one-time token from a link the daemon sent by email.",
+      "fields": [
+        {
+          "name": "token",
+          "type": "string",
+          "doc": "The token, as it appears in the link."
+        }
+      ]
+    },
+    "PasswordForgotRequest": {
+      "doc": "A request for a password reset link.",
+      "fields": [
+        {
+          "name": "email",
+          "type": "string",
+          "doc": "The address to send the link to. The answer is the same whether or not an account uses it."
+        }
+      ]
+    },
+    "PasswordResetRequest": {
+      "doc": "A new password, with the token from a reset link.",
+      "fields": [
+        {
+          "name": "token",
+          "type": "string",
+          "doc": "The token from the reset link. It works once, for one hour."
+        },
+        {
+          "name": "password",
+          "type": "string",
+          "doc": "The new password. At least 10 characters and at most 1024 bytes."
+        },
+        {
+          "name": "totp_code",
+          "type": "string?",
+          "doc": "A code from the authenticator app, or a recovery code, when the account has two-step log-in on. A reset proves the address, not the second factor."
+        }
+      ]
+    },
+    "PasswordChangeRequest": {
+      "doc": "A new password for the logged-in account.",
+      "fields": [
+        {
+          "name": "current_password",
+          "type": "string?",
+          "doc": "The password in use now. Required when the account has one."
+        },
+        {
+          "name": "new_password",
+          "type": "string",
+          "doc": "The new password. At least 10 characters and at most 1024 bytes."
+        }
+      ]
+    },
+    "EmailChangeRequest": {
+      "doc": "A new email address for the logged-in account.",
+      "fields": [
+        {
+          "name": "email",
+          "type": "string",
+          "doc": "The new address. A link is sent to it, and the change happens when the link is opened."
+        },
+        {
+          "name": "password",
+          "type": "string?",
+          "doc": "The account's password. Required when the account has one."
+        }
+      ]
+    },
+    "AccountDeleteRequest": {
+      "doc": "Confirmation for deleting the logged-in account.",
+      "fields": [
+        {
+          "name": "password",
+          "type": "string?",
+          "doc": "The account's password. Required when the account has one."
+        },
+        {
+          "name": "totp_code",
+          "type": "string?",
+          "doc": "A code from the authenticator app. Required when two-step log-in is on."
+        }
+      ]
+    },
+    "AccountDeletion": {
+      "doc": "What deleting an account removed.",
+      "fields": [
+        {
+          "name": "orgs_deleted",
+          "type": "u32",
+          "doc": "Organisations that had this account as their only member, deleted with it."
+        },
+        {
+          "name": "projects_erased",
+          "type": "string[]",
+          "doc": "Projects whose stored signals and runs were erased, because their organisation was deleted."
+        }
+      ]
+    },
+    "SessionInfo": {
+      "doc": "One live session of the logged-in account. The token is not part of it.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The session's identifier, for ending it. Not a secret."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When the session started."
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp",
+          "doc": "When it stops working."
+        },
+        {
+          "name": "current",
+          "type": "bool",
+          "doc": "True for the session this request carries."
+        },
+        {
+          "name": "via",
+          "type": "string",
+          "doc": "How it started: `password`, `sso`, `invite`, `verify` or `reset`."
+        },
+        {
+          "name": "org_id",
+          "type": "string?",
+          "doc": "The organisation a single sign-on session is limited to."
+        },
+        {
+          "name": "user_agent",
+          "type": "string?",
+          "doc": "The browser or client that started it, as it described itself."
+        },
+        {
+          "name": "address",
+          "type": "string?",
+          "doc": "The client address that started it."
+        }
+      ]
+    },
+    "TotpSetup": {
+      "doc": "A new authenticator secret, not yet in use. Confirm it with a code to turn two-step log-in on.",
+      "fields": [
+        {
+          "name": "secret",
+          "type": "string",
+          "doc": "The secret in base32, for typing into an authenticator app."
+        },
+        {
+          "name": "otpauth_uri",
+          "type": "string",
+          "doc": "The same secret as an `otpauth://` URI."
+        },
+        {
+          "name": "qr_svg",
+          "type": "string",
+          "doc": "The URI as a QR code, an SVG document."
+        }
+      ]
+    },
+    "TotpCodeRequest": {
+      "doc": "A code from an authenticator app.",
+      "fields": [
+        {
+          "name": "code",
+          "type": "string",
+          "doc": "The six-digit code."
+        }
+      ]
+    },
+    "TotpEnabled": {
+      "doc": "Two-step log-in is on.",
+      "fields": [
+        {
+          "name": "recovery_codes",
+          "type": "string[]",
+          "doc": "Ten single-use codes that stand in for the authenticator app. They are shown once: the daemon keeps only their digests."
+        }
+      ]
+    },
+    "TotpDisableRequest": {
+      "doc": "Confirmation for turning two-step log-in off.",
+      "fields": [
+        {
+          "name": "password",
+          "type": "string?",
+          "doc": "The account's password. Required when the account has one."
+        },
+        {
+          "name": "code",
+          "type": "string",
+          "doc": "A code from the authenticator app, or a recovery code."
+        }
+      ]
+    },
+    "Org": {
+      "doc": "An organisation: the owner of projects, members and single sign-on settings.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The organisation's identifier."
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "Its display name."
+        },
+        {
+          "name": "role",
+          "type": "OrgRole",
+          "doc": "Your role in it."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When it was created."
+        },
+        {
+          "name": "quota_per_minute",
+          "type": "u32?",
+          "doc": "The most signals all its projects together may store per minute. Absent means no ceiling."
+        },
+        {
+          "name": "retention_days",
+          "type": "u32?",
+          "doc": "How long its projects keep data, in days. Absent means forever."
+        },
+        {
+          "name": "members",
+          "type": "u32",
+          "doc": "How many members it has."
+        },
+        {
+          "name": "projects",
+          "type": "u32",
+          "doc": "How many projects it owns."
+        },
+        {
+          "name": "managed_by_config",
+          "type": "bool",
+          "doc": "True when the daemon's configuration file declares this organisation. Its single sign-on settings are then read from that file and cannot be changed here."
+        }
+      ]
+    },
+    "CreateOrgRequest": {
+      "doc": "A new organisation.",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "Its display name, at most 100 characters."
+        }
+      ]
+    },
+    "UpdateOrgRequest": {
+      "doc": "Changes to an organisation. A field left out keeps its value.",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string?",
+          "doc": "A new display name, at most 100 characters."
+        },
+        {
+          "name": "quota_per_minute",
+          "type": "u32?",
+          "doc": "A ceiling on signals per minute across all the organisation's projects, at most the daemon's own ceiling. 0 restores the daemon's default. Owner only."
+        },
+        {
+          "name": "retention_days",
+          "type": "u32?",
+          "doc": "How long to keep data, in days, at most the daemon's own window. 0 restores the daemon's default. Owner only."
+        }
+      ]
+    },
+    "OrgDeletion": {
+      "doc": "What deleting an organisation removed.",
+      "fields": [
+        {
+          "name": "projects_erased",
+          "type": "string[]",
+          "doc": "Projects whose stored signals and runs were erased."
+        }
+      ]
+    },
+    "ProjectRoleGrant": {
+      "doc": "A role on one project.",
+      "fields": [
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "The project."
+        },
+        {
+          "name": "role",
+          "type": "ProjectRole",
+          "doc": "The role there."
+        }
+      ]
+    },
+    "OrgMember": {
+      "doc": "One member of an organisation.",
+      "fields": [
+        {
+          "name": "account_id",
+          "type": "string",
+          "doc": "The member's account."
+        },
+        {
+          "name": "email",
+          "type": "string",
+          "doc": "The member's email address."
+        },
+        {
+          "name": "role",
+          "type": "OrgRole",
+          "doc": "The member's role."
+        },
+        {
+          "name": "via",
+          "type": "string",
+          "doc": "How they joined: `created`, `invite`, `sso`, `scim` or `config`."
+        },
+        {
+          "name": "joined_at",
+          "type": "timestamp",
+          "doc": "When they joined."
+        },
+        {
+          "name": "project_roles",
+          "type": "ProjectRoleGrant[]",
+          "doc": "Roles on single projects that replace the organisation role there."
+        },
+        {
+          "name": "managed",
+          "type": "bool",
+          "doc": "True when this organisation created the account through single sign-on or SCIM."
+        },
+        {
+          "name": "totp_enabled",
+          "type": "bool",
+          "doc": "Whether the member has two-step log-in on."
+        }
+      ]
+    },
+    "UpdateMemberRequest": {
+      "doc": "A new role for a member.",
+      "fields": [
+        {
+          "name": "role",
+          "type": "OrgRole",
+          "doc": "The role. Only an owner may grant or remove `owner`, and the last owner cannot be demoted."
+        }
+      ]
+    },
+    "SetProjectRoleRequest": {
+      "doc": "A role for a member on one project.",
+      "fields": [
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "A project the organisation owns."
+        },
+        {
+          "name": "role",
+          "type": "ProjectRole?",
+          "doc": "The role there. Absent removes the project role, so the organisation role applies again."
+        }
+      ]
+    },
+    "OrgInvite": {
+      "doc": "An invitation not yet accepted. The token is not part of it.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The invitation's identifier, for revoking it."
+        },
+        {
+          "name": "email",
+          "type": "string",
+          "doc": "The address it was sent to."
+        },
+        {
+          "name": "role",
+          "type": "OrgRole",
+          "doc": "The role it grants."
+        },
+        {
+          "name": "project_roles",
+          "type": "ProjectRoleGrant[]",
+          "doc": "Project roles it grants as well."
+        },
+        {
+          "name": "invited_by",
+          "type": "string?",
+          "doc": "The email of the member who sent it. Absent when the configuration file or SCIM sent it."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When it was sent."
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp",
+          "doc": "When it stops working."
+        }
+      ]
+    },
+    "CreateInviteRequest": {
+      "doc": "An invitation to an organisation.",
+      "fields": [
+        {
+          "name": "email",
+          "type": "string",
+          "doc": "Who to invite. The link is sent to this address."
+        },
+        {
+          "name": "role",
+          "type": "OrgRole",
+          "doc": "The role to grant. Only an owner may invite an owner."
+        },
+        {
+          "name": "project_roles",
+          "type": "ProjectRoleGrant[]?",
+          "doc": "Project roles to grant as well."
+        }
+      ]
+    },
+    "InviteLookup": {
+      "doc": "What an invitation offers, read with its token before accepting it.",
+      "fields": [
+        {
+          "name": "org_name",
+          "type": "string",
+          "doc": "The organisation."
+        },
+        {
+          "name": "email",
+          "type": "string",
+          "doc": "The address it was sent to. Accepting it joins the account with this address."
+        },
+        {
+          "name": "role",
+          "type": "OrgRole",
+          "doc": "The role it grants."
+        },
+        {
+          "name": "account_exists",
+          "type": "bool",
+          "doc": "Whether an account with this address exists. If it does, log in as it to accept; if not, accepting creates it."
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp",
+          "doc": "When it stops working."
+        }
+      ]
+    },
+    "InviteAcceptRequest": {
+      "doc": "Acceptance of an invitation.",
+      "fields": [
+        {
+          "name": "token",
+          "type": "string",
+          "doc": "The token from the invitation link."
+        },
+        {
+          "name": "password",
+          "type": "string?",
+          "doc": "A password for the new account, when no account uses the invited address. Ignored otherwise."
+        }
+      ]
+    },
+    "InviteAccepted": {
+      "doc": "An accepted invitation.",
+      "fields": [
+        {
+          "name": "org",
+          "type": "Org",
+          "doc": "The organisation joined."
+        },
+        {
+          "name": "session",
+          "type": "AccountSession?",
+          "doc": "A session for the account accepting created. Absent when an existing account accepted with its own session."
+        }
+      ]
+    },
+    "OrgProject": {
+      "doc": "A project an organisation owns.",
+      "fields": [
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "The project name. Random, so nobody can choose one that already holds somebody else's data."
+        },
+        {
+          "name": "label",
+          "type": "string?",
+          "doc": "A display label."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When it was created or attached."
+        }
+      ]
+    },
+    "CreateProjectRequest": {
+      "doc": "A new project in an organisation.",
+      "fields": [
+        {
+          "name": "label",
+          "type": "string?",
+          "doc": "A display label, at most 100 characters."
+        }
+      ]
+    },
+    "OrgUsage": {
+      "doc": "How much an organisation is using, against its ceilings. Counted since the daemon started.",
+      "fields": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation."
+        },
+        {
+          "name": "quota_per_minute",
+          "type": "u32?",
+          "doc": "Its ceiling on signals per minute, when it has one."
+        },
+        {
+          "name": "admitted_this_minute",
+          "type": "u64",
+          "doc": "Signals stored in the current one-minute window."
+        },
+        {
+          "name": "admitted_total",
+          "type": "u64",
+          "doc": "Signals stored since the daemon started."
+        },
+        {
+          "name": "refused_total",
+          "type": "u64",
+          "doc": "Signals refused for the ceiling since the daemon started."
+        },
+        {
+          "name": "retention_days",
+          "type": "u32?",
+          "doc": "How long its projects keep data, in days."
+        },
+        {
+          "name": "members",
+          "type": "u32",
+          "doc": "Members."
+        },
+        {
+          "name": "projects",
+          "type": "u32",
+          "doc": "Projects."
+        },
+        {
+          "name": "keys",
+          "type": "u32",
+          "doc": "API keys on its projects."
+        },
+        {
+          "name": "since",
+          "type": "timestamp",
+          "doc": "When counting started."
+        }
+      ]
+    },
+    "SsoConfig": {
+      "doc": "An organisation's single sign-on settings. The client secret is not part of it.",
+      "fields": [
+        {
+          "name": "provider",
+          "type": "SsoProvider",
+          "doc": "The kind of provider."
+        },
+        {
+          "name": "issuer",
+          "type": "string?",
+          "doc": "The OpenID Connect issuer URL. Absent for GitHub."
+        },
+        {
+          "name": "client_id",
+          "type": "string",
+          "doc": "The client id registered with the provider."
+        },
+        {
+          "name": "has_client_secret",
+          "type": "bool",
+          "doc": "Whether a client secret is stored."
+        },
+        {
+          "name": "domains",
+          "type": "string[]",
+          "doc": "Email domains this organisation claims. Single sign-on creates accounts only for these domains, and \"Log in with SSO\" finds the organisation by them."
+        },
+        {
+          "name": "enforced",
+          "type": "bool",
+          "doc": "When true, members whose email is in a claimed domain cannot log in with a password."
+        },
+        {
+          "name": "default_role",
+          "type": "OrgRole",
+          "doc": "The role given to a member single sign-on creates, when no group maps to a role. Never `owner`."
+        },
+        {
+          "name": "groups_claim",
+          "type": "string?",
+          "doc": "The ID token claim that lists the member's groups, mapped to roles by the group roles."
+        },
+        {
+          "name": "redirect_url",
+          "type": "string",
+          "doc": "The redirect URL to register with the provider."
+        },
+        {
+          "name": "managed_by_config",
+          "type": "bool",
+          "doc": "True when these settings come from the configuration file."
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "doc": "When they were last changed."
+        }
+      ]
+    },
+    "PutSsoConfigRequest": {
+      "doc": "New single sign-on settings for an organisation.",
+      "fields": [
+        {
+          "name": "provider",
+          "type": "SsoProvider",
+          "doc": "The kind of provider."
+        },
+        {
+          "name": "issuer",
+          "type": "string?",
+          "doc": "The OpenID Connect issuer URL, such as `https://accounts.google.com`. Required for `oidc`. Must be `https`."
+        },
+        {
+          "name": "client_id",
+          "type": "string",
+          "doc": "The client id registered with the provider."
+        },
+        {
+          "name": "client_secret",
+          "type": "string?",
+          "doc": "The client secret. Left out, the stored one is kept."
+        },
+        {
+          "name": "domains",
+          "type": "string[]",
+          "doc": "Email domains to claim. You can claim the domain of your own verified address. A domain belongs to one organisation."
+        },
+        {
+          "name": "enforced",
+          "type": "bool",
+          "doc": "Refuse password log-in for members in the claimed domains. Turning it on ends their password sessions."
+        },
+        {
+          "name": "default_role",
+          "type": "OrgRole",
+          "doc": "The role for a member single sign-on creates. `admin`, `member` or `viewer`."
+        },
+        {
+          "name": "groups_claim",
+          "type": "string?",
+          "doc": "The ID token claim that lists groups, such as `groups`."
+        }
+      ]
+    },
+    "GroupRole": {
+      "doc": "A group from the identity provider, and the role its members get.",
+      "fields": [
+        {
+          "name": "group",
+          "type": "string",
+          "doc": "The group name, as single sign-on or SCIM sends it. Compared without regard to case."
+        },
+        {
+          "name": "role",
+          "type": "OrgRole",
+          "doc": "The role. Never `owner`."
+        }
+      ]
+    },
+    "ScimTokenInfo": {
+      "doc": "Whether an organisation has a SCIM token. The token is not part of it.",
+      "fields": [
+        {
+          "name": "configured",
+          "type": "bool",
+          "doc": "Whether a token exists."
+        },
+        {
+          "name": "prefix",
+          "type": "string?",
+          "doc": "The first characters of the token."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp?",
+          "doc": "When it was created."
+        },
+        {
+          "name": "base_url",
+          "type": "string",
+          "doc": "The SCIM base URL to give your identity provider."
+        }
+      ]
+    },
+    "CreatedScimToken": {
+      "doc": "A new SCIM token. This is the only time it is shown, and it replaces any earlier token.",
+      "fields": [
+        {
+          "name": "token",
+          "type": "string",
+          "doc": "The bearer token for your identity provider. The daemon keeps only its SHA-256 digest."
+        },
+        {
+          "name": "prefix",
+          "type": "string",
+          "doc": "Its first characters."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When it was created."
+        },
+        {
+          "name": "base_url",
+          "type": "string",
+          "doc": "The SCIM base URL to give your identity provider."
+        }
+      ]
+    },
+    "SsoStartRequest": {
+      "doc": "Where to start single sign-on. Give one of the two.",
+      "fields": [
+        {
+          "name": "email",
+          "type": "string?",
+          "doc": "Your email address. Its domain finds the organisation."
+        },
+        {
+          "name": "org_id",
+          "type": "string?",
+          "doc": "The organisation, when you know it."
+        }
+      ]
+    },
+    "SsoStart": {
+      "doc": "Where to send the browser for single sign-on.",
+      "fields": [
+        {
+          "name": "authorize_url",
+          "type": "string",
+          "doc": "The provider's authorization URL, with state, nonce and the PKCE challenge in it."
+        },
+        {
+          "name": "binding",
+          "type": "string",
+          "doc": "A secret to keep in this browser and send back with the callback. It ties the callback to the browser that started it, so a link from somebody else cannot log you in as them."
+        },
+        {
+          "name": "org_name",
+          "type": "string",
+          "doc": "The organisation."
+        }
+      ]
+    },
+    "SsoCallbackRequest": {
+      "doc": "What the provider sent back to the redirect URL.",
+      "fields": [
+        {
+          "name": "state",
+          "type": "string",
+          "doc": "The `state` parameter."
+        },
+        {
+          "name": "code",
+          "type": "string",
+          "doc": "The `code` parameter."
+        },
+        {
+          "name": "binding",
+          "type": "string",
+          "doc": "The binding from the start of the flow."
         }
       ]
     }
@@ -7519,12 +8444,12 @@
       "method": "POST",
       "path": "/v1/api/account/signup",
       "summary": "Create an account",
-      "doc": "Creates an account and a new project that belongs to it, and logs it in. The project has a random name, and no other account or key can reach it. The email is checked for shape only; there is no verification mail. Limited per client address: a client that signs up too often is answered with 429 and a `Retry-After` header. Answers 404 when the daemon was not started with `--signup`.",
+      "doc": "Starts an account. The answer is the same whether or not the email already has an account, so it does not say which addresses are in use. A link is sent to the address: for a new account it confirms the address and logs in; for an address already in use it says so and offers a password reset. The account and its project are created now, and the session comes from opening the link. Limited per client address: a client that signs up too often is answered with 429 and a `Retry-After` header. Answers 404 when the daemon was not started with `--signup`, and 503 when it has no way to send mail.",
       "request": {
         "type": "AccountCredentials"
       },
       "response": {
-        "type": "AccountSession"
+        "type": "AccountNotice"
       },
       "responses": {
         "400": {
@@ -7533,11 +8458,11 @@
         "404": {
           "doc": "This daemon does not offer sign-up."
         },
-        "409": {
-          "doc": "An account with this email already exists. Log in instead."
-        },
         "429": {
           "doc": "Too many sign-ups from this address. Wait for the number of seconds in `Retry-After`."
+        },
+        "503": {
+          "doc": "This daemon has no mail server, so it cannot send the link. The operator sets `--smtp-host`."
         }
       },
       "auth": "none"
@@ -7548,7 +8473,7 @@
       "method": "POST",
       "path": "/v1/api/account/login",
       "summary": "Log in",
-      "doc": "Starts a session for an account. A wrong password and an unknown email get the same 401 with the same message, so the answer does not say which emails have accounts. Limited per client address and per email. Answers 404 when the daemon was not started with `--signup`.",
+      "doc": "Starts a session for an account. A wrong password and an unknown email get the same 401 with the same message, so the answer does not say which emails have accounts. With the right password, an account with two-step log-in on and no `totp_code` gets 401 with the code `totp_required`; an address not yet confirmed gets 403 and a new link; and a member of an organisation that enforces single sign-on gets 403 with the code `sso_required`. Limited per client address and per email. Answers 404 when the daemon has no accounts.",
       "request": {
         "type": "AccountCredentials"
       },
@@ -7558,6 +8483,9 @@
       "responses": {
         "401": {
           "doc": "The email and password do not match an account."
+        },
+        "403": {
+          "doc": "The password is right, and the address is not confirmed yet or the organisation requires single sign-on."
         },
         "404": {
           "doc": "This daemon does not offer accounts."
@@ -7574,7 +8502,7 @@
       "method": "POST",
       "path": "/v1/api/account/logout",
       "summary": "Log out",
-      "doc": "Ends the session whose token the request carries. The account's API keys keep working. The body is empty. Answers 404 when the daemon was not started with `--signup`.",
+      "doc": "Ends the session whose token the request carries. The account's API keys keep working. The body is empty. Answers 404 when the daemon has no accounts.",
       "response": {
         "type": "DeleteResult"
       },
@@ -7586,7 +8514,7 @@
       "method": "GET",
       "path": "/v1/api/account",
       "summary": "Read the logged-in account",
-      "doc": "The email and the project of the account whose session the request carries. Answers 404 when the daemon was not started with `--signup`.",
+      "doc": "The account whose session the request carries. Answers 404 when the daemon has no accounts.",
       "response": {
         "type": "Account"
       },
@@ -7598,7 +8526,7 @@
       "method": "GET",
       "path": "/v1/api/account/keys",
       "summary": "List the account's API keys",
-      "doc": "Every API key the account holds, newest first. No secret is returned: the daemon keeps only digests. Answers 404 when the daemon was not started with `--signup`.",
+      "doc": "Every API key the account holds, on every project, newest first. No secret is returned: the daemon keeps only digests. Answers 404 when the daemon has no accounts.",
       "response": {
         "type": "AccountKey[]"
       },
@@ -7610,7 +8538,7 @@
       "method": "POST",
       "path": "/v1/api/account/keys",
       "summary": "Create an API key",
-      "doc": "Creates an API key with one scope on the account's project. The secret is in this response and nowhere else. A key reaches the account's project only: a signal it writes that names another project is stored in the account's project instead. An account holds at most 50 keys. Answers 404 when the daemon was not started with `--signup`.",
+      "doc": "Creates an API key with one scope on one project: the account's own project, or a project of an organisation it belongs to. Your role there must allow the scope, and the key stops working if your role stops allowing it. The secret is in this response and nowhere else. A signal the key writes that names another project is stored in the key's project instead. An account holds at most 50 keys. Answers 404 when the daemon has no accounts.",
       "request": {
         "type": "CreateAccountKeyRequest"
       },
@@ -7620,6 +8548,9 @@
       "responses": {
         "400": {
           "doc": "The scope is not one of the six, the name is too long, or the account already holds 50 keys."
+        },
+        "403": {
+          "doc": "Your role on that project does not allow the scope."
         }
       },
       "auth": "session"
@@ -7630,7 +8561,7 @@
       "method": "DELETE",
       "path": "/v1/api/account/keys/{key_id}",
       "summary": "Revoke an API key",
-      "doc": "Revokes one of the account's API keys. It stops working at once. Answers 404 when the daemon was not started with `--signup`.",
+      "doc": "Revokes one of the account's API keys. It stops working at once. Answers 404 when the daemon has no accounts.",
       "params": [
         {
           "name": "key_id",
@@ -7647,6 +8578,1265 @@
         }
       },
       "auth": "session"
+    },
+    {
+      "tag": "Accounts",
+      "id": "verify_email",
+      "method": "POST",
+      "path": "/v1/api/account/verify",
+      "summary": "Confirm an email address",
+      "doc": "Confirms the address with the token from the sign-up link, and logs in. The token works once, for 24 hours. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "TokenRequest"
+      },
+      "response": {
+        "type": "AccountSession"
+      },
+      "responses": {
+        "400": {
+          "doc": "The token is unknown, used or expired."
+        }
+      },
+      "auth": "none"
+    },
+    {
+      "tag": "Accounts",
+      "id": "forgot_password",
+      "method": "POST",
+      "path": "/v1/api/account/password/forgot",
+      "summary": "Ask for a password reset",
+      "doc": "Sends a reset link to the address when an account uses it. The answer is the same either way. Limited per client address and per email. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "PasswordForgotRequest"
+      },
+      "response": {
+        "type": "AccountNotice"
+      },
+      "responses": {
+        "503": {
+          "doc": "This daemon has no mail server."
+        }
+      },
+      "auth": "none"
+    },
+    {
+      "tag": "Accounts",
+      "id": "reset_password",
+      "method": "POST",
+      "path": "/v1/api/account/password/reset",
+      "summary": "Reset a password",
+      "doc": "Sets a new password with the token from a reset link, ends every other session, confirms the address and logs in. The token works once, for one hour. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "PasswordResetRequest"
+      },
+      "response": {
+        "type": "AccountSession"
+      },
+      "responses": {
+        "400": {
+          "doc": "The token is unknown, used or expired, or the password is too short."
+        },
+        "401": {
+          "doc": "The account has two-step log-in on and the code is missing or wrong. The code is `totp_required`, and the link still works."
+        }
+      },
+      "auth": "none"
+    },
+    {
+      "tag": "Accounts",
+      "id": "change_password",
+      "method": "POST",
+      "path": "/v1/api/account/password",
+      "summary": "Change the password",
+      "doc": "Sets a new password and ends every other session of the account. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "PasswordChangeRequest"
+      },
+      "response": {
+        "type": "AccountNotice"
+      },
+      "responses": {
+        "403": {
+          "doc": "The current password is wrong."
+        }
+      },
+      "auth": "session"
+    },
+    {
+      "tag": "Accounts",
+      "id": "change_email",
+      "method": "POST",
+      "path": "/v1/api/account/email",
+      "summary": "Change the email address",
+      "doc": "Sends a confirmation link to the new address, and a notice to the old one. The address changes when the link is opened. The answer is the same whether or not the new address is in use. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "EmailChangeRequest"
+      },
+      "response": {
+        "type": "AccountNotice"
+      },
+      "responses": {
+        "403": {
+          "doc": "The password is wrong."
+        },
+        "503": {
+          "doc": "This daemon has no mail server."
+        }
+      },
+      "auth": "session"
+    },
+    {
+      "tag": "Accounts",
+      "id": "confirm_email",
+      "method": "POST",
+      "path": "/v1/api/account/email/confirm",
+      "summary": "Confirm a new email address",
+      "doc": "Changes the address with the token from the confirmation link. The token works once, for 24 hours. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "TokenRequest"
+      },
+      "response": {
+        "type": "Account"
+      },
+      "responses": {
+        "400": {
+          "doc": "The token is unknown, used or expired."
+        },
+        "409": {
+          "doc": "Another account took the address in the meantime."
+        }
+      },
+      "auth": "none"
+    },
+    {
+      "tag": "Accounts",
+      "id": "delete_account",
+      "method": "POST",
+      "path": "/v1/api/account/delete",
+      "summary": "Delete the account",
+      "doc": "Deletes the account, its keys and its sessions. Each organisation it is the only member of is deleted too, and the stored signals and runs of that organisation's projects are erased. Refused while the account is the only owner of an organisation that has other members: make another member an owner first. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "AccountDeleteRequest"
+      },
+      "response": {
+        "type": "AccountDeletion"
+      },
+      "responses": {
+        "403": {
+          "doc": "The password or the code is wrong."
+        },
+        "409": {
+          "doc": "The account is the only owner of an organisation with other members."
+        }
+      },
+      "auth": "session"
+    },
+    {
+      "tag": "Accounts",
+      "id": "list_sessions",
+      "method": "GET",
+      "path": "/v1/api/account/sessions",
+      "summary": "List sessions",
+      "doc": "Every live session of the account, newest first. Answers 404 when the daemon has no accounts.",
+      "response": {
+        "type": "SessionInfo[]"
+      },
+      "auth": "session"
+    },
+    {
+      "tag": "Accounts",
+      "id": "revoke_session",
+      "method": "DELETE",
+      "path": "/v1/api/account/sessions/{session_id}",
+      "summary": "End a session",
+      "doc": "Ends one session of the account. It stops working at once. Answers 404 when the daemon has no accounts.",
+      "params": [
+        {
+          "name": "session_id",
+          "type": "string",
+          "doc": "The session's `id`, as listed."
+        }
+      ],
+      "response": {
+        "type": "DeleteResult"
+      },
+      "responses": {
+        "404": {
+          "doc": "The account has no session with that id."
+        }
+      },
+      "auth": "session"
+    },
+    {
+      "tag": "Accounts",
+      "id": "totp_setup",
+      "method": "POST",
+      "path": "/v1/api/account/totp/setup",
+      "summary": "Start two-step log-in",
+      "doc": "Makes a new authenticator secret. Two-step log-in is not on until a code from it is confirmed with `POST /v1/api/account/totp/enable`. Answers 404 when the daemon has no accounts.",
+      "response": {
+        "type": "TotpSetup"
+      },
+      "responses": {
+        "409": {
+          "doc": "Two-step log-in is already on."
+        }
+      },
+      "auth": "session"
+    },
+    {
+      "tag": "Accounts",
+      "id": "totp_enable",
+      "method": "POST",
+      "path": "/v1/api/account/totp/enable",
+      "summary": "Turn two-step log-in on",
+      "doc": "Confirms the secret from setup with a code from the app, turns two-step log-in on and returns ten recovery codes. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "TotpCodeRequest"
+      },
+      "response": {
+        "type": "TotpEnabled"
+      },
+      "responses": {
+        "403": {
+          "doc": "The code is wrong."
+        },
+        "409": {
+          "doc": "There is no secret waiting to be confirmed, or two-step log-in is already on."
+        }
+      },
+      "auth": "session"
+    },
+    {
+      "tag": "Accounts",
+      "id": "totp_disable",
+      "method": "POST",
+      "path": "/v1/api/account/totp/disable",
+      "summary": "Turn two-step log-in off",
+      "doc": "Turns two-step log-in off and drops the recovery codes. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "TotpDisableRequest"
+      },
+      "response": {
+        "type": "AccountNotice"
+      },
+      "responses": {
+        "403": {
+          "doc": "The password or the code is wrong."
+        }
+      },
+      "auth": "session"
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "list_orgs",
+      "method": "GET",
+      "path": "/v1/api/orgs",
+      "summary": "List your organisations",
+      "doc": "Every organisation the account belongs to, with its role in each. A single sign-on session lists only the organisation it is limited to. Answers 404 when the daemon has no accounts.",
+      "response": {
+        "type": "Org[]"
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "create_org",
+      "method": "POST",
+      "path": "/v1/api/orgs",
+      "summary": "Create an organisation",
+      "doc": "Creates an organisation with one project, and makes you its owner. With `--signup` any account may create one; without it, only when the configuration file allows it. An account belongs to at most 20 organisations. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "CreateOrgRequest"
+      },
+      "response": {
+        "type": "Org"
+      },
+      "responses": {
+        "403": {
+          "doc": "This daemon does not let accounts create organisations, or the account belongs to 20 already."
+        }
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "get_org",
+      "method": "GET",
+      "path": "/v1/api/orgs/{org_id}",
+      "summary": "Read an organisation",
+      "doc": "Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "response": {
+        "type": "Org"
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "update_org",
+      "method": "PATCH",
+      "path": "/v1/api/orgs/{org_id}",
+      "summary": "Change an organisation",
+      "doc": "Renames an organisation, or sets its ceiling and retention within the daemon's limits. Admin to rename, owner for the rest. Audited as `org_update`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "request": {
+        "type": "UpdateOrgRequest"
+      },
+      "response": {
+        "type": "Org"
+      },
+      "responses": {
+        "403": {
+          "doc": "Your role does not allow the change."
+        }
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "delete_org",
+      "method": "DELETE",
+      "path": "/v1/api/orgs/{org_id}",
+      "summary": "Delete an organisation",
+      "doc": "Deletes an organisation, its members' access, its keys, its invitations and its single sign-on and SCIM settings, and erases the stored signals and runs of every project it owns. Owner only. Audited as `org_delete`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "response": {
+        "type": "OrgDeletion"
+      },
+      "responses": {
+        "403": {
+          "doc": "Only an owner may delete the organisation."
+        },
+        "409": {
+          "doc": "The organisation is declared in the configuration file, or one of its projects is an account's own project."
+        }
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "list_members",
+      "method": "GET",
+      "path": "/v1/api/orgs/{org_id}/members",
+      "summary": "List members",
+      "doc": "Every member, with their roles. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "response": {
+        "type": "OrgMember[]"
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "update_member",
+      "method": "PATCH",
+      "path": "/v1/api/orgs/{org_id}/members/{account_id}",
+      "summary": "Change a member's role",
+      "doc": "Sets a member's organisation role. Admin, and owner to grant or remove `owner`. The last owner cannot be demoted. Keys the member made that the new role no longer allows stop working. Audited as `member_role`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        },
+        {
+          "name": "account_id",
+          "type": "string",
+          "doc": "The member's `account_id`."
+        }
+      ],
+      "request": {
+        "type": "UpdateMemberRequest"
+      },
+      "response": {
+        "type": "OrgMember"
+      },
+      "responses": {
+        "403": {
+          "doc": "Your role does not allow the change."
+        },
+        "409": {
+          "doc": "This would leave the organisation with no owner."
+        }
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "remove_member",
+      "method": "DELETE",
+      "path": "/v1/api/orgs/{org_id}/members/{account_id}",
+      "summary": "Remove a member",
+      "doc": "Removes a member, or yourself. Their keys on the organisation's projects are revoked and their single sign-on sessions for it end. Admin to remove others; owner to remove an owner. The last owner cannot leave. Audited as `member_remove`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        },
+        {
+          "name": "account_id",
+          "type": "string",
+          "doc": "The member's `account_id`."
+        }
+      ],
+      "response": {
+        "type": "DeleteResult"
+      },
+      "responses": {
+        "403": {
+          "doc": "Your role does not allow it."
+        },
+        "409": {
+          "doc": "This would leave the organisation with no owner."
+        }
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "set_project_role",
+      "method": "POST",
+      "path": "/v1/api/orgs/{org_id}/members/{account_id}/project-roles",
+      "summary": "Set a project role",
+      "doc": "Sets or clears a member's role on one project. Admin. Audited as `member_project_role`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        },
+        {
+          "name": "account_id",
+          "type": "string",
+          "doc": "The member's `account_id`."
+        }
+      ],
+      "request": {
+        "type": "SetProjectRoleRequest"
+      },
+      "response": {
+        "type": "OrgMember"
+      },
+      "responses": {
+        "403": {
+          "doc": "Your role does not allow it."
+        }
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "list_invites",
+      "method": "GET",
+      "path": "/v1/api/orgs/{org_id}/invites",
+      "summary": "List invitations",
+      "doc": "Every invitation not yet accepted or expired. Admin. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "response": {
+        "type": "OrgInvite[]"
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "create_invite",
+      "method": "POST",
+      "path": "/v1/api/orgs/{org_id}/invites",
+      "summary": "Invite a member",
+      "doc": "Sends an invitation link to an address. It works once, for seven days. Admin, and owner to invite an owner. Audited as `member_invite`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "request": {
+        "type": "CreateInviteRequest"
+      },
+      "response": {
+        "type": "OrgInvite"
+      },
+      "responses": {
+        "403": {
+          "doc": "Your role does not allow it."
+        },
+        "409": {
+          "doc": "That address is already a member."
+        },
+        "503": {
+          "doc": "This daemon has no mail server."
+        }
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "revoke_invite",
+      "method": "DELETE",
+      "path": "/v1/api/orgs/{org_id}/invites/{invite_id}",
+      "summary": "Revoke an invitation",
+      "doc": "Revokes an invitation. Admin. Audited as `invite_revoke`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        },
+        {
+          "name": "invite_id",
+          "type": "string",
+          "doc": "The invitation's `id`."
+        }
+      ],
+      "response": {
+        "type": "DeleteResult"
+      }
+    },
+    {
+      "tag": "Organisations",
+      "id": "lookup_invite",
+      "method": "POST",
+      "path": "/v1/api/invites/lookup",
+      "summary": "Read an invitation",
+      "doc": "What an invitation offers, from the token in its link. Limited per client address. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "TokenRequest"
+      },
+      "response": {
+        "type": "InviteLookup"
+      },
+      "responses": {
+        "400": {
+          "doc": "The token is unknown, used or expired."
+        }
+      },
+      "auth": "none"
+    },
+    {
+      "tag": "Organisations",
+      "id": "accept_invite",
+      "method": "POST",
+      "path": "/v1/api/invites/accept",
+      "summary": "Accept an invitation",
+      "doc": "Joins the organisation. When an account uses the invited address, send that account's session token with the request. When none does, send a password: the account is created with the address confirmed, and logged in. Audited as `invite_accept`. Limited per client address. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "InviteAcceptRequest"
+      },
+      "response": {
+        "type": "InviteAccepted"
+      },
+      "responses": {
+        "400": {
+          "doc": "The token is unknown, used or expired, or a password is needed and missing."
+        },
+        "401": {
+          "doc": "An account uses the invited address, and the request carries no session for it."
+        }
+      },
+      "auth": "none"
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "list_org_projects",
+      "method": "GET",
+      "path": "/v1/api/orgs/{org_id}/projects",
+      "summary": "List projects",
+      "doc": "The projects the organisation owns that you can reach. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "response": {
+        "type": "OrgProject[]"
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "create_org_project",
+      "method": "POST",
+      "path": "/v1/api/orgs/{org_id}/projects",
+      "summary": "Create a project",
+      "doc": "Creates a project with a random name in the organisation. Admin. An organisation owns at most 100 projects. Audited as `project_create`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "request": {
+        "type": "CreateProjectRequest"
+      },
+      "response": {
+        "type": "OrgProject"
+      },
+      "responses": {
+        "403": {
+          "doc": "Your role does not allow it, or the organisation owns 100 projects already."
+        }
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "delete_org_project",
+      "method": "DELETE",
+      "path": "/v1/api/orgs/{org_id}/projects/{project}",
+      "summary": "Delete a project",
+      "doc": "Deletes a project, revokes its keys, and erases its stored signals and runs. Admin. Audited as `project_delete`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        },
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "The project name."
+        }
+      ],
+      "response": {
+        "type": "OrgDeletion"
+      },
+      "responses": {
+        "403": {
+          "doc": "Your role does not allow it."
+        },
+        "409": {
+          "doc": "The project is an account's own project, or the organisation's last."
+        }
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "list_org_keys",
+      "method": "GET",
+      "path": "/v1/api/orgs/{org_id}/keys",
+      "summary": "List the organisation's keys",
+      "doc": "Every API key on the organisation's projects, whoever made it. Admin. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "response": {
+        "type": "AccountKey[]"
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "revoke_org_key",
+      "method": "DELETE",
+      "path": "/v1/api/orgs/{org_id}/keys/{key_id}",
+      "summary": "Revoke a key in the organisation",
+      "doc": "Revokes any key on the organisation's projects. Admin. Audited as `org_key_revoke`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        },
+        {
+          "name": "key_id",
+          "type": "string",
+          "doc": "The key's `id`."
+        }
+      ],
+      "response": {
+        "type": "DeleteResult"
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "get_org_usage",
+      "method": "GET",
+      "path": "/v1/api/orgs/{org_id}/usage",
+      "summary": "Read usage",
+      "doc": "Signals stored and refused against the organisation's ceiling. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "response": {
+        "type": "OrgUsage"
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "list_org_audit",
+      "method": "GET",
+      "path": "/v1/api/orgs/{org_id}/audit",
+      "summary": "Read the organisation's audit log",
+      "doc": "Membership, role, project, single sign-on and SCIM changes, newest first, at most 500. Admin. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "response": {
+        "type": "AuditEvent[]"
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "get_group_roles",
+      "method": "GET",
+      "path": "/v1/api/orgs/{org_id}/group-roles",
+      "summary": "Read group roles",
+      "doc": "How identity provider groups map onto roles. Admin. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "response": {
+        "type": "GroupRole[]"
+      }
+    },
+    {
+      "tag": "Organisations",
+      "auth": "session",
+      "id": "put_group_roles",
+      "method": "PUT",
+      "path": "/v1/api/orgs/{org_id}/group-roles",
+      "summary": "Set group roles",
+      "doc": "Replaces the group mapping. A member single sign-on or SCIM manages gets the highest role among their groups, or the default role when none maps. Owners keep their role. Admin. Audited as `group_roles_update`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "request": {
+        "type": "GroupRole[]"
+      },
+      "response": {
+        "type": "GroupRole[]"
+      },
+      "responses": {
+        "400": {
+          "doc": "A group maps to `owner`, or a group appears twice."
+        }
+      }
+    },
+    {
+      "tag": "SSO",
+      "auth": "session",
+      "id": "get_sso",
+      "method": "GET",
+      "path": "/v1/api/orgs/{org_id}/sso",
+      "summary": "Read SSO settings",
+      "doc": "The organisation's single sign-on settings, without the client secret. Admin. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "response": {
+        "type": "SsoConfig"
+      },
+      "responses": {
+        "404": {
+          "doc": "No settings are stored, or the organisation is not one you belong to."
+        }
+      }
+    },
+    {
+      "tag": "SSO",
+      "auth": "session",
+      "id": "put_sso",
+      "method": "PUT",
+      "path": "/v1/api/orgs/{org_id}/sso",
+      "summary": "Set SSO settings",
+      "doc": "Stores single sign-on settings. For `oidc` the issuer's discovery document is fetched and checked before anything is stored. Admin. Audited as `sso_update`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "request": {
+        "type": "PutSsoConfigRequest"
+      },
+      "response": {
+        "type": "SsoConfig"
+      },
+      "responses": {
+        "400": {
+          "doc": "A setting is invalid, or the discovery document could not be read."
+        },
+        "403": {
+          "doc": "Your role does not allow it, or a domain is not yours to claim."
+        },
+        "409": {
+          "doc": "Another organisation claims a domain, or the settings come from the configuration file."
+        }
+      }
+    },
+    {
+      "tag": "SSO",
+      "auth": "session",
+      "id": "delete_sso",
+      "method": "DELETE",
+      "path": "/v1/api/orgs/{org_id}/sso",
+      "summary": "Remove SSO settings",
+      "doc": "Removes single sign-on and releases the claimed domains. Admin. Audited as `sso_delete`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "response": {
+        "type": "DeleteResult"
+      }
+    },
+    {
+      "tag": "SSO",
+      "auth": "session",
+      "id": "get_scim_token",
+      "method": "GET",
+      "path": "/v1/api/orgs/{org_id}/scim-token",
+      "summary": "Read the SCIM token status",
+      "doc": "Whether a SCIM token exists, and the base URL. Admin. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "response": {
+        "type": "ScimTokenInfo"
+      }
+    },
+    {
+      "tag": "SSO",
+      "auth": "session",
+      "id": "create_scim_token",
+      "method": "POST",
+      "path": "/v1/api/orgs/{org_id}/scim-token",
+      "summary": "Create a SCIM token",
+      "doc": "Creates a SCIM bearer token and revokes any earlier one. Admin. Audited as `scim_token_rotate`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "response": {
+        "type": "CreatedScimToken"
+      }
+    },
+    {
+      "tag": "SSO",
+      "auth": "session",
+      "id": "revoke_scim_token",
+      "method": "DELETE",
+      "path": "/v1/api/orgs/{org_id}/scim-token",
+      "summary": "Revoke the SCIM token",
+      "doc": "Revokes the SCIM token. Admin. Audited as `scim_token_revoke`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+      "params": [
+        {
+          "name": "org_id",
+          "type": "string",
+          "doc": "The organisation's `id`."
+        }
+      ],
+      "response": {
+        "type": "DeleteResult"
+      }
+    },
+    {
+      "tag": "SSO",
+      "id": "sso_start",
+      "method": "POST",
+      "path": "/v1/api/sso/start",
+      "summary": "Start single sign-on",
+      "doc": "Finds the organisation by email domain or id and returns the provider URL to send the browser to. State, nonce and PKCE verifier are kept by the daemon for ten minutes. Limited per client address. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "SsoStartRequest"
+      },
+      "response": {
+        "type": "SsoStart"
+      },
+      "responses": {
+        "400": {
+          "doc": "No organisation logs in with single sign-on for that domain or id."
+        }
+      },
+      "auth": "none"
+    },
+    {
+      "tag": "SSO",
+      "id": "sso_callback",
+      "method": "POST",
+      "path": "/v1/api/sso/callback",
+      "summary": "Finish single sign-on",
+      "doc": "Exchanges the code, checks the ID token's signature, issuer, audience, expiry and nonce, and logs in. A member is found by their identity at the provider; a new one is created only for an address in a claimed domain, and an existing account that is not a member is never taken over. The session reaches this organisation's projects only and lasts 24 hours. Audited as `sso_login`. Limited per client address. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "SsoCallbackRequest"
+      },
+      "response": {
+        "type": "AccountSession"
+      },
+      "responses": {
+        "400": {
+          "doc": "The state is unknown or expired, the binding does not match, or the provider refused the code."
+        },
+        "403": {
+          "doc": "The provider's answer does not identify a member this organisation may log in."
+        }
+      },
+      "auth": "none"
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_service_provider_config",
+      "method": "GET",
+      "path": "/scim/v2/ServiceProviderConfig",
+      "summary": "Read the SCIM service provider configuration",
+      "doc": "What this SCIM service supports: PATCH and filtering on, bulk, sort, ETags and password change off. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts."
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_schemas",
+      "method": "GET",
+      "path": "/scim/v2/Schemas",
+      "summary": "List SCIM schemas",
+      "doc": "The User and Group schemas. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts."
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_resource_types",
+      "method": "GET",
+      "path": "/scim/v2/ResourceTypes",
+      "summary": "List SCIM resource types",
+      "doc": "User and Group. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts."
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_list_users",
+      "method": "GET",
+      "path": "/scim/v2/Users",
+      "summary": "List users",
+      "doc": "The organisation's provisioned users. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+      "query": [
+        {
+          "name": "filter",
+          "type": "string?",
+          "doc": "A SCIM filter. `eq` on `userName`, `externalId`, `emails.value` or `displayName`, and `and` between them."
+        },
+        {
+          "name": "count",
+          "type": "u32?",
+          "doc": "Most resources per page, at most 200. `startIndex` gives the first, from 1."
+        }
+      ]
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_create_user",
+      "method": "POST",
+      "path": "/scim/v2/Users",
+      "summary": "Provision a user",
+      "doc": "Provisions a user. An address in a claimed domain with no account gets one, managed by the organisation. An address with an account becomes a member when that account accepts the invitation sent to it. Roles come from groups. Audited as `scim_user_create`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "json"
+      },
+      "responses": {
+        "409": {
+          "doc": "A user with that `userName` is already provisioned."
+        }
+      }
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_get_user",
+      "method": "GET",
+      "path": "/scim/v2/Users/{id}",
+      "summary": "Read a user",
+      "doc": "The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The resource's `id`."
+        }
+      ]
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_replace_user",
+      "method": "PUT",
+      "path": "/scim/v2/Users/{id}",
+      "summary": "Replace a user",
+      "doc": "Replaces a user. `active: false` deprovisions: the membership ends, the account's sessions and keys for the organisation end, and an account the organisation manages is deactivated. Audited as `scim_user_update`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The resource's `id`."
+        }
+      ],
+      "request": {
+        "type": "json"
+      }
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_patch_user",
+      "method": "PATCH",
+      "path": "/scim/v2/Users/{id}",
+      "summary": "Change a user",
+      "doc": "Applies PATCH operations to a user, with the same deprovisioning rule as replace. Audited as `scim_user_update`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The resource's `id`."
+        }
+      ],
+      "request": {
+        "type": "json"
+      }
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_delete_user",
+      "method": "DELETE",
+      "path": "/scim/v2/Users/{id}",
+      "summary": "Delete a user",
+      "doc": "Deprovisions a user and forgets them. An account the organisation manages is deleted. Answers 204. Audited as `scim_user_delete`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The resource's `id`."
+        }
+      ]
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_list_groups",
+      "method": "GET",
+      "path": "/scim/v2/Groups",
+      "summary": "List groups",
+      "doc": "The organisation's provisioned groups. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+      "query": [
+        {
+          "name": "filter",
+          "type": "string?",
+          "doc": "A SCIM filter. `eq` on `userName`, `externalId`, `emails.value` or `displayName`, and `and` between them."
+        },
+        {
+          "name": "count",
+          "type": "u32?",
+          "doc": "Most resources per page, at most 200. `startIndex` gives the first, from 1."
+        }
+      ]
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_create_group",
+      "method": "POST",
+      "path": "/scim/v2/Groups",
+      "summary": "Provision a group",
+      "doc": "Provisions a group. Its members get the role the group maps to. Audited as `scim_group_create`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+      "request": {
+        "type": "json"
+      },
+      "responses": {
+        "409": {
+          "doc": "A group with that `displayName` is already provisioned."
+        }
+      }
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_get_group",
+      "method": "GET",
+      "path": "/scim/v2/Groups/{id}",
+      "summary": "Read a group",
+      "doc": "The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The resource's `id`."
+        }
+      ]
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_replace_group",
+      "method": "PUT",
+      "path": "/scim/v2/Groups/{id}",
+      "summary": "Replace a group",
+      "doc": "Replaces a group and its members, and recomputes their roles. Audited as `scim_group_update`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The resource's `id`."
+        }
+      ],
+      "request": {
+        "type": "json"
+      }
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_patch_group",
+      "method": "PATCH",
+      "path": "/scim/v2/Groups/{id}",
+      "summary": "Change a group",
+      "doc": "Adds or removes members, or renames the group, and recomputes roles. Audited as `scim_group_update`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The resource's `id`."
+        }
+      ],
+      "request": {
+        "type": "json"
+      }
+    },
+    {
+      "tag": "SCIM",
+      "auth": "scim",
+      "response": {
+        "type": "json"
+      },
+      "id": "scim_delete_group",
+      "method": "DELETE",
+      "path": "/scim/v2/Groups/{id}",
+      "summary": "Delete a group",
+      "doc": "Deletes a group and recomputes its members' roles. Answers 204. Audited as `scim_group_delete`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The resource's `id`."
+        }
+      ]
     }
   ]
 }

@@ -179,6 +179,8 @@ async fn health_decodes_the_servers_own_shape() {
         storage: Some("sqlite".to_owned()),
         detail: None,
         signup: None,
+        accounts: None,
+        sso: None,
     })
     .unwrap();
     let server = FakeMcpd::scripted(vec![Reply::Body(200, body)]).await;

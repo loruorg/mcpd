@@ -1445,6 +1445,101 @@ func (v KeyScope) Valid() bool {
 	return false
 }
 
+// What a member may do in an organisation. Each role maps onto the six key scopes on
+// every project the organisation owns, unless a project role says otherwise.
+type OrgRole string
+
+const (
+	// Every scope on every project, and everything an admin may do. Only an owner may add
+	// or remove an owner, change quotas or delete the organisation.
+	OrgRoleOwner OrgRole = "owner"
+	// Every scope on every project. Invites and removes members below owner, sets roles,
+	// creates and deletes projects, and manages SSO, SCIM and every key in the
+	// organisation.
+	OrgRoleAdmin OrgRole = "admin"
+	// The `ingest`, `read`, `write`, `execute` and `worker` scopes. Everything but
+	// `admin`: a member cannot delete data or read the audit log.
+	OrgRoleMember OrgRole = "member"
+	// The `read` scope only.
+	OrgRoleViewer OrgRole = "viewer"
+)
+
+// AllOrgRoles lists every OrgRole value, in declaration order.
+var AllOrgRoles = []OrgRole{OrgRoleOwner, OrgRoleAdmin, OrgRoleMember, OrgRoleViewer}
+
+// String returns the wire representation.
+func (v OrgRole) String() string { return string(v) }
+
+// Valid reports whether v is a value this version of the spec defines.
+func (v OrgRole) Valid() bool {
+	for _, c := range AllOrgRoles {
+		if c == v {
+			return true
+		}
+	}
+	return false
+}
+
+// A role on one project that replaces a member's organisation role there. Owners and
+// admins keep their reach on every project whatever a project role says.
+type ProjectRole string
+
+const (
+	// No access to this project.
+	ProjectRoleNone ProjectRole = "none"
+	// The `read` scope on this project.
+	ProjectRoleViewer ProjectRole = "viewer"
+	// Every scope but `admin` on this project.
+	ProjectRoleMember ProjectRole = "member"
+	// Every scope on this project. It does not let the member manage the organisation.
+	ProjectRoleAdmin ProjectRole = "admin"
+)
+
+// AllProjectRoles lists every ProjectRole value, in declaration order.
+var AllProjectRoles = []ProjectRole{ProjectRoleNone, ProjectRoleViewer, ProjectRoleMember, ProjectRoleAdmin}
+
+// String returns the wire representation.
+func (v ProjectRole) String() string { return string(v) }
+
+// Valid reports whether v is a value this version of the spec defines.
+func (v ProjectRole) Valid() bool {
+	for _, c := range AllProjectRoles {
+		if c == v {
+			return true
+		}
+	}
+	return false
+}
+
+// How an organisation's members log in with single sign-on.
+type SsoProvider string
+
+const (
+	// Any OpenID Connect provider, such as Google, Microsoft Entra ID, Okta or Auth0,
+	// found through its issuer's discovery document. Authorization code flow with PKCE,
+	// state and nonce.
+	SsoProviderOidc SsoProvider = "oidc"
+	// GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub
+	// user id and the email is the primary verified address GitHub reports.
+	SsoProviderGithub SsoProvider = "github"
+)
+
+// AllSsoProviders lists every SsoProvider value, in declaration order.
+var AllSsoProviders = []SsoProvider{SsoProviderOidc, SsoProviderGithub}
+
+// String returns the wire representation.
+func (v SsoProvider) String() string { return string(v) }
+
+// Valid reports whether v is a value this version of the spec defines.
+func (v SsoProvider) Valid() bool {
+	for _, c := range AllSsoProviders {
+		if c == v {
+			return true
+		}
+	}
+	return false
+}
+
 // Input tokens broken down by how the provider billed them. Every field is optional;
 // absent means the provider did not report it, which is different from zero.
 type InputTokenDetails struct {
@@ -1901,6 +1996,12 @@ type HealthStatus struct {
 	// does not, which is the default. The interface reads this to decide whether to show
 	// its sign-up and log-in screens.
 	Signup *bool `json:"signup,omitempty"`
+	// True when this daemon has accounts, with or without open sign-up. Absent when it
+	// does not. The interface reads this to show its log-in screen.
+	Accounts *bool `json:"accounts,omitempty"`
+	// True when at least one organisation on this daemon logs in with single sign-on, so
+	// the log-in screen offers it. Absent otherwise.
+	Sso *bool `json:"sso,omitempty"`
 }
 
 // One scorer mcpd can run, as described to a caller.
@@ -3103,30 +3204,47 @@ type AccountCredentials struct {
 	Email string `json:"email"`
 	// At least 10 characters and at most 1024 bytes. Stored only as an argon2id hash.
 	Password string `json:"password"`
+	// The six-digit code from an authenticator app, or one of the recovery codes, when the
+	// account has two-step log-in on. Ignored by sign-up.
+	TotpCode *string `json:"totp_code,omitempty"`
 }
 
 // A logged-in session. Send `token` as `Authorization: Bearer <token>`.
 type AccountSession struct {
-	// The session token. It grants every scope on the account's own project and nothing
-	// else. It is shown once: the daemon keeps only its SHA-256 digest.
+	// The session token. It is shown once: the daemon keeps only its SHA-256 digest.
 	Token string `json:"token"`
 	// When the session stops working. Log in again after this.
 	ExpiresAt time.Time `json:"expires_at"`
 	// The account's email address, as stored.
 	Email string `json:"email"`
-	// The account's project. Every signal an account key writes lands here, and every read
-	// is limited to it.
-	Project string `json:"project"`
+	// The project reads go to when they name none. The account's own project, or the first
+	// project of the organisation a single sign-on session is limited to. Absent when the
+	// session reaches no project yet.
+	Project *string `json:"project,omitempty"`
+	// Set when the session came from an organisation's single sign-on. The session then
+	// reaches that organisation's projects only.
+	OrgID *string `json:"org_id,omitempty"`
 }
 
 // The account a session belongs to.
 type Account struct {
 	// The account's email address, as stored.
 	Email string `json:"email"`
-	// The account's project, which is the only project its session and its keys reach.
-	Project string `json:"project"`
+	// The project created with the account at sign-up. Absent for an account that was
+	// invited, or created by single sign-on or SCIM.
+	Project *string `json:"project,omitempty"`
 	// When the account was created.
 	CreatedAt time.Time `json:"created_at"`
+	// Whether the address has been confirmed by a link sent to it.
+	EmailVerified bool `json:"email_verified"`
+	// Whether two-step log-in is on.
+	TotpEnabled bool `json:"totp_enabled"`
+	// Whether the account can log in with a password. False for an account created by
+	// single sign-on or SCIM that has never set one.
+	HasPassword bool `json:"has_password"`
+	// The organisation that created this account through single sign-on or SCIM. That
+	// organisation can deactivate it.
+	ManagedBy *string `json:"managed_by,omitempty"`
 }
 
 // One API key an account holds. The secret is not part of it: the daemon keeps only a
@@ -3136,6 +3254,8 @@ type AccountKey struct {
 	ID string `json:"id"`
 	// What the key may do.
 	Scope KeyScope `json:"scope"`
+	// The one project the key reaches.
+	Project string `json:"project"`
 	// The label given when the key was created.
 	Name *string `json:"name,omitempty"`
 	// The first characters of the secret, so you can tell which key a process holds
@@ -3143,6 +3263,9 @@ type AccountKey struct {
 	Prefix string `json:"prefix"`
 	// When the key was created.
 	CreatedAt time.Time `json:"created_at"`
+	// The email of the account that created the key. Set in an organisation's key list, so
+	// an admin can see whose key it is.
+	CreatedBy *string `json:"created_by,omitempty"`
 }
 
 // A request for a new API key.
@@ -3151,6 +3274,9 @@ type CreateAccountKeyRequest struct {
 	Scope KeyScope `json:"scope"`
 	// A label for the key, such as the service that will hold it. At most 100 characters.
 	Name *string `json:"name,omitempty"`
+	// The project the key reaches. Defaults to the account's own project. Your role on the
+	// project must allow the scope.
+	Project *string `json:"project,omitempty"`
 }
 
 // A new API key, with its secret. This is the only time the secret is shown.
@@ -3160,6 +3286,434 @@ type CreatedAccountKey struct {
 	// The key itself. Send it as `Authorization: Bearer <secret>`. Copy it now: the daemon
 	// keeps only its SHA-256 digest and cannot show it again.
 	Secret string `json:"secret"`
+}
+
+// A plain answer that changes nothing you can read back, such as "check your email".
+type AccountNotice struct {
+	// What happened, and what to do next.
+	Message string `json:"message"`
+}
+
+// A one-time token from a link the daemon sent by email.
+type TokenRequest struct {
+	// The token, as it appears in the link.
+	Token string `json:"token"`
+}
+
+// A request for a password reset link.
+type PasswordForgotRequest struct {
+	// The address to send the link to. The answer is the same whether or not an account
+	// uses it.
+	Email string `json:"email"`
+}
+
+// A new password, with the token from a reset link.
+type PasswordResetRequest struct {
+	// The token from the reset link. It works once, for one hour.
+	Token string `json:"token"`
+	// The new password. At least 10 characters and at most 1024 bytes.
+	Password string `json:"password"`
+	// A code from the authenticator app, or a recovery code, when the account has two-step
+	// log-in on. A reset proves the address, not the second factor.
+	TotpCode *string `json:"totp_code,omitempty"`
+}
+
+// A new password for the logged-in account.
+type PasswordChangeRequest struct {
+	// The password in use now. Required when the account has one.
+	CurrentPassword *string `json:"current_password,omitempty"`
+	// The new password. At least 10 characters and at most 1024 bytes.
+	NewPassword string `json:"new_password"`
+}
+
+// A new email address for the logged-in account.
+type EmailChangeRequest struct {
+	// The new address. A link is sent to it, and the change happens when the link is
+	// opened.
+	Email string `json:"email"`
+	// The account's password. Required when the account has one.
+	Password *string `json:"password,omitempty"`
+}
+
+// Confirmation for deleting the logged-in account.
+type AccountDeleteRequest struct {
+	// The account's password. Required when the account has one.
+	Password *string `json:"password,omitempty"`
+	// A code from the authenticator app. Required when two-step log-in is on.
+	TotpCode *string `json:"totp_code,omitempty"`
+}
+
+// What deleting an account removed.
+type AccountDeletion struct {
+	// Organisations that had this account as their only member, deleted with it.
+	OrgsDeleted uint32 `json:"orgs_deleted"`
+	// Projects whose stored signals and runs were erased, because their organisation was
+	// deleted.
+	ProjectsErased []string `json:"projects_erased"`
+}
+
+// One live session of the logged-in account. The token is not part of it.
+type SessionInfo struct {
+	// The session's identifier, for ending it. Not a secret.
+	ID string `json:"id"`
+	// When the session started.
+	CreatedAt time.Time `json:"created_at"`
+	// When it stops working.
+	ExpiresAt time.Time `json:"expires_at"`
+	// True for the session this request carries.
+	Current bool `json:"current"`
+	// How it started: `password`, `sso`, `invite`, `verify` or `reset`.
+	Via string `json:"via"`
+	// The organisation a single sign-on session is limited to.
+	OrgID *string `json:"org_id,omitempty"`
+	// The browser or client that started it, as it described itself.
+	UserAgent *string `json:"user_agent,omitempty"`
+	// The client address that started it.
+	Address *string `json:"address,omitempty"`
+}
+
+// A new authenticator secret, not yet in use. Confirm it with a code to turn two-step
+// log-in on.
+type TotpSetup struct {
+	// The secret in base32, for typing into an authenticator app.
+	Secret string `json:"secret"`
+	// The same secret as an `otpauth://` URI.
+	OtpauthUri string `json:"otpauth_uri"`
+	// The URI as a QR code, an SVG document.
+	QrSvg string `json:"qr_svg"`
+}
+
+// A code from an authenticator app.
+type TotpCodeRequest struct {
+	// The six-digit code.
+	Code string `json:"code"`
+}
+
+// Two-step log-in is on.
+type TotpEnabled struct {
+	// Ten single-use codes that stand in for the authenticator app. They are shown once:
+	// the daemon keeps only their digests.
+	RecoveryCodes []string `json:"recovery_codes"`
+}
+
+// Confirmation for turning two-step log-in off.
+type TotpDisableRequest struct {
+	// The account's password. Required when the account has one.
+	Password *string `json:"password,omitempty"`
+	// A code from the authenticator app, or a recovery code.
+	Code string `json:"code"`
+}
+
+// An organisation: the owner of projects, members and single sign-on settings.
+type Org struct {
+	// The organisation's identifier.
+	ID string `json:"id"`
+	// Its display name.
+	Name string `json:"name"`
+	// Your role in it.
+	Role OrgRole `json:"role"`
+	// When it was created.
+	CreatedAt time.Time `json:"created_at"`
+	// The most signals all its projects together may store per minute. Absent means no
+	// ceiling.
+	QuotaPerMinute *uint32 `json:"quota_per_minute,omitempty"`
+	// How long its projects keep data, in days. Absent means forever.
+	RetentionDays *uint32 `json:"retention_days,omitempty"`
+	// How many members it has.
+	Members uint32 `json:"members"`
+	// How many projects it owns.
+	Projects uint32 `json:"projects"`
+	// True when the daemon's configuration file declares this organisation. Its single
+	// sign-on settings are then read from that file and cannot be changed here.
+	ManagedByConfig bool `json:"managed_by_config"`
+}
+
+// A new organisation.
+type CreateOrgRequest struct {
+	// Its display name, at most 100 characters.
+	Name string `json:"name"`
+}
+
+// Changes to an organisation. A field left out keeps its value.
+type UpdateOrgRequest struct {
+	// A new display name, at most 100 characters.
+	Name *string `json:"name,omitempty"`
+	// A ceiling on signals per minute across all the organisation's projects, at most the
+	// daemon's own ceiling. 0 restores the daemon's default. Owner only.
+	QuotaPerMinute *uint32 `json:"quota_per_minute,omitempty"`
+	// How long to keep data, in days, at most the daemon's own window. 0 restores the
+	// daemon's default. Owner only.
+	RetentionDays *uint32 `json:"retention_days,omitempty"`
+}
+
+// What deleting an organisation removed.
+type OrgDeletion struct {
+	// Projects whose stored signals and runs were erased.
+	ProjectsErased []string `json:"projects_erased"`
+}
+
+// A role on one project.
+type ProjectRoleGrant struct {
+	// The project.
+	Project string `json:"project"`
+	// The role there.
+	Role ProjectRole `json:"role"`
+}
+
+// One member of an organisation.
+type OrgMember struct {
+	// The member's account.
+	AccountID string `json:"account_id"`
+	// The member's email address.
+	Email string `json:"email"`
+	// The member's role.
+	Role OrgRole `json:"role"`
+	// How they joined: `created`, `invite`, `sso`, `scim` or `config`.
+	Via string `json:"via"`
+	// When they joined.
+	JoinedAt time.Time `json:"joined_at"`
+	// Roles on single projects that replace the organisation role there.
+	ProjectRoles []ProjectRoleGrant `json:"project_roles"`
+	// True when this organisation created the account through single sign-on or SCIM.
+	Managed bool `json:"managed"`
+	// Whether the member has two-step log-in on.
+	TotpEnabled bool `json:"totp_enabled"`
+}
+
+// A new role for a member.
+type UpdateMemberRequest struct {
+	// The role. Only an owner may grant or remove `owner`, and the last owner cannot be
+	// demoted.
+	Role OrgRole `json:"role"`
+}
+
+// A role for a member on one project.
+type SetProjectRoleRequest struct {
+	// A project the organisation owns.
+	Project string `json:"project"`
+	// The role there. Absent removes the project role, so the organisation role applies
+	// again.
+	Role *ProjectRole `json:"role,omitempty"`
+}
+
+// An invitation not yet accepted. The token is not part of it.
+type OrgInvite struct {
+	// The invitation's identifier, for revoking it.
+	ID string `json:"id"`
+	// The address it was sent to.
+	Email string `json:"email"`
+	// The role it grants.
+	Role OrgRole `json:"role"`
+	// Project roles it grants as well.
+	ProjectRoles []ProjectRoleGrant `json:"project_roles"`
+	// The email of the member who sent it. Absent when the configuration file or SCIM sent
+	// it.
+	InvitedBy *string `json:"invited_by,omitempty"`
+	// When it was sent.
+	CreatedAt time.Time `json:"created_at"`
+	// When it stops working.
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// An invitation to an organisation.
+type CreateInviteRequest struct {
+	// Who to invite. The link is sent to this address.
+	Email string `json:"email"`
+	// The role to grant. Only an owner may invite an owner.
+	Role OrgRole `json:"role"`
+	// Project roles to grant as well.
+	ProjectRoles []ProjectRoleGrant `json:"project_roles,omitempty"`
+}
+
+// What an invitation offers, read with its token before accepting it.
+type InviteLookup struct {
+	// The organisation.
+	OrgName string `json:"org_name"`
+	// The address it was sent to. Accepting it joins the account with this address.
+	Email string `json:"email"`
+	// The role it grants.
+	Role OrgRole `json:"role"`
+	// Whether an account with this address exists. If it does, log in as it to accept; if
+	// not, accepting creates it.
+	AccountExists bool `json:"account_exists"`
+	// When it stops working.
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// Acceptance of an invitation.
+type InviteAcceptRequest struct {
+	// The token from the invitation link.
+	Token string `json:"token"`
+	// A password for the new account, when no account uses the invited address. Ignored
+	// otherwise.
+	Password *string `json:"password,omitempty"`
+}
+
+// An accepted invitation.
+type InviteAccepted struct {
+	// The organisation joined.
+	Org Org `json:"org"`
+	// A session for the account accepting created. Absent when an existing account
+	// accepted with its own session.
+	Session *AccountSession `json:"session,omitempty"`
+}
+
+// A project an organisation owns.
+type OrgProject struct {
+	// The project name. Random, so nobody can choose one that already holds somebody
+	// else's data.
+	Project string `json:"project"`
+	// A display label.
+	Label *string `json:"label,omitempty"`
+	// When it was created or attached.
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// A new project in an organisation.
+type CreateProjectRequest struct {
+	// A display label, at most 100 characters.
+	Label *string `json:"label,omitempty"`
+}
+
+// How much an organisation is using, against its ceilings. Counted since the daemon
+// started.
+type OrgUsage struct {
+	// The organisation.
+	OrgID string `json:"org_id"`
+	// Its ceiling on signals per minute, when it has one.
+	QuotaPerMinute *uint32 `json:"quota_per_minute,omitempty"`
+	// Signals stored in the current one-minute window.
+	AdmittedThisMinute uint64 `json:"admitted_this_minute"`
+	// Signals stored since the daemon started.
+	AdmittedTotal uint64 `json:"admitted_total"`
+	// Signals refused for the ceiling since the daemon started.
+	RefusedTotal uint64 `json:"refused_total"`
+	// How long its projects keep data, in days.
+	RetentionDays *uint32 `json:"retention_days,omitempty"`
+	// Members.
+	Members uint32 `json:"members"`
+	// Projects.
+	Projects uint32 `json:"projects"`
+	// API keys on its projects.
+	Keys uint32 `json:"keys"`
+	// When counting started.
+	Since time.Time `json:"since"`
+}
+
+// An organisation's single sign-on settings. The client secret is not part of it.
+type SsoConfig struct {
+	// The kind of provider.
+	Provider SsoProvider `json:"provider"`
+	// The OpenID Connect issuer URL. Absent for GitHub.
+	Issuer *string `json:"issuer,omitempty"`
+	// The client id registered with the provider.
+	ClientID string `json:"client_id"`
+	// Whether a client secret is stored.
+	HasClientSecret bool `json:"has_client_secret"`
+	// Email domains this organisation claims. Single sign-on creates accounts only for
+	// these domains, and "Log in with SSO" finds the organisation by them.
+	Domains []string `json:"domains"`
+	// When true, members whose email is in a claimed domain cannot log in with a password.
+	Enforced bool `json:"enforced"`
+	// The role given to a member single sign-on creates, when no group maps to a role.
+	// Never `owner`.
+	DefaultRole OrgRole `json:"default_role"`
+	// The ID token claim that lists the member's groups, mapped to roles by the group
+	// roles.
+	GroupsClaim *string `json:"groups_claim,omitempty"`
+	// The redirect URL to register with the provider.
+	RedirectURL string `json:"redirect_url"`
+	// True when these settings come from the configuration file.
+	ManagedByConfig bool `json:"managed_by_config"`
+	// When they were last changed.
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// New single sign-on settings for an organisation.
+type PutSsoConfigRequest struct {
+	// The kind of provider.
+	Provider SsoProvider `json:"provider"`
+	// The OpenID Connect issuer URL, such as `https://accounts.google.com`. Required for
+	// `oidc`. Must be `https`.
+	Issuer *string `json:"issuer,omitempty"`
+	// The client id registered with the provider.
+	ClientID string `json:"client_id"`
+	// The client secret. Left out, the stored one is kept.
+	ClientSecret *string `json:"client_secret,omitempty"`
+	// Email domains to claim. You can claim the domain of your own verified address. A
+	// domain belongs to one organisation.
+	Domains []string `json:"domains"`
+	// Refuse password log-in for members in the claimed domains. Turning it on ends their
+	// password sessions.
+	Enforced bool `json:"enforced"`
+	// The role for a member single sign-on creates. `admin`, `member` or `viewer`.
+	DefaultRole OrgRole `json:"default_role"`
+	// The ID token claim that lists groups, such as `groups`.
+	GroupsClaim *string `json:"groups_claim,omitempty"`
+}
+
+// A group from the identity provider, and the role its members get.
+type GroupRole struct {
+	// The group name, as single sign-on or SCIM sends it. Compared without regard to case.
+	Group string `json:"group"`
+	// The role. Never `owner`.
+	Role OrgRole `json:"role"`
+}
+
+// Whether an organisation has a SCIM token. The token is not part of it.
+type ScimTokenInfo struct {
+	// Whether a token exists.
+	Configured bool `json:"configured"`
+	// The first characters of the token.
+	Prefix *string `json:"prefix,omitempty"`
+	// When it was created.
+	CreatedAt *time.Time `json:"created_at,omitempty"`
+	// The SCIM base URL to give your identity provider.
+	BaseURL string `json:"base_url"`
+}
+
+// A new SCIM token. This is the only time it is shown, and it replaces any earlier
+// token.
+type CreatedScimToken struct {
+	// The bearer token for your identity provider. The daemon keeps only its SHA-256
+	// digest.
+	Token string `json:"token"`
+	// Its first characters.
+	Prefix string `json:"prefix"`
+	// When it was created.
+	CreatedAt time.Time `json:"created_at"`
+	// The SCIM base URL to give your identity provider.
+	BaseURL string `json:"base_url"`
+}
+
+// Where to start single sign-on. Give one of the two.
+type SsoStartRequest struct {
+	// Your email address. Its domain finds the organisation.
+	Email *string `json:"email,omitempty"`
+	// The organisation, when you know it.
+	OrgID *string `json:"org_id,omitempty"`
+}
+
+// Where to send the browser for single sign-on.
+type SsoStart struct {
+	// The provider's authorization URL, with state, nonce and the PKCE challenge in it.
+	AuthorizeURL string `json:"authorize_url"`
+	// A secret to keep in this browser and send back with the callback. It ties the
+	// callback to the browser that started it, so a link from somebody else cannot log you
+	// in as them.
+	Binding string `json:"binding"`
+	// The organisation.
+	OrgName string `json:"org_name"`
+}
+
+// What the provider sent back to the redirect URL.
+type SsoCallbackRequest struct {
+	// The `state` parameter.
+	State string `json:"state"`
+	// The `code` parameter.
+	Code string `json:"code"`
+	// The binding from the start of the flow.
+	Binding string `json:"binding"`
 }
 
 // One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback

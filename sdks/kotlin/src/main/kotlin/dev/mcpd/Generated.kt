@@ -1290,6 +1290,88 @@ enum class KeyScope(val wire: String) {
 }
 
 /**
+ * What a member may do in an organisation. Each role maps onto the six key scopes
+ * on every project the organisation owns, unless a project role says otherwise.
+ */
+@Serializable
+enum class OrgRole(val wire: String) {
+    /**
+     * Every scope on every project, and everything an admin may do. Only an owner may
+     * add or remove an owner, change quotas or delete the organisation.
+     */
+    @SerialName("owner") OWNER("owner"),
+    /**
+     * Every scope on every project. Invites and removes members below owner, sets
+     * roles, creates and deletes projects, and manages SSO, SCIM and every key in the
+     * organisation.
+     */
+    @SerialName("admin") ADMIN("admin"),
+    /**
+     * The `ingest`, `read`, `write`, `execute` and `worker` scopes. Everything but
+     * `admin`: a member cannot delete data or read the audit log.
+     */
+    @SerialName("member") MEMBER("member"),
+    /** The `read` scope only. */
+    @SerialName("viewer") VIEWER("viewer"),
+    ;
+
+    override fun toString(): String = wire
+
+    companion object {
+        /** Parse a wire value, or null when this version of the spec does not define it. */
+        fun fromWire(s: String): OrgRole? = entries.firstOrNull { it.wire == s }
+    }
+}
+
+/**
+ * A role on one project that replaces a member's organisation role there. Owners
+ * and admins keep their reach on every project whatever a project role says.
+ */
+@Serializable
+enum class ProjectRole(val wire: String) {
+    /** No access to this project. */
+    @SerialName("none") NONE("none"),
+    /** The `read` scope on this project. */
+    @SerialName("viewer") VIEWER("viewer"),
+    /** Every scope but `admin` on this project. */
+    @SerialName("member") MEMBER("member"),
+    /** Every scope on this project. It does not let the member manage the organisation. */
+    @SerialName("admin") ADMIN("admin"),
+    ;
+
+    override fun toString(): String = wire
+
+    companion object {
+        /** Parse a wire value, or null when this version of the spec does not define it. */
+        fun fromWire(s: String): ProjectRole? = entries.firstOrNull { it.wire == s }
+    }
+}
+
+/** How an organisation's members log in with single sign-on. */
+@Serializable
+enum class SsoProvider(val wire: String) {
+    /**
+     * Any OpenID Connect provider, such as Google, Microsoft Entra ID, Okta or Auth0,
+     * found through its issuer's discovery document. Authorization code flow with
+     * PKCE, state and nonce.
+     */
+    @SerialName("oidc") OIDC("oidc"),
+    /**
+     * GitHub, through an OAuth app. GitHub issues no ID token, so the member is the
+     * GitHub user id and the email is the primary verified address GitHub reports.
+     */
+    @SerialName("github") GITHUB("github"),
+    ;
+
+    override fun toString(): String = wire
+
+    companion object {
+        /** Parse a wire value, or null when this version of the spec does not define it. */
+        fun fromWire(s: String): SsoProvider? = entries.firstOrNull { it.wire == s }
+    }
+}
+
+/**
  * Input tokens broken down by how the provider billed them. Every field is
  * optional; absent means the provider did not report it, which is different from
  * zero.
@@ -1828,7 +1910,17 @@ data class HealthStatus(
      * it does not, which is the default. The interface reads this to decide whether to
      * show its sign-up and log-in screens.
      */
-    @SerialName("signup") val signup: Boolean? = null
+    @SerialName("signup") val signup: Boolean? = null,
+    /**
+     * True when this daemon has accounts, with or without open sign-up. Absent when it
+     * does not. The interface reads this to show its log-in screen.
+     */
+    @SerialName("accounts") val accounts: Boolean? = null,
+    /**
+     * True when at least one organisation on this daemon logs in with single sign-on,
+     * so the log-in screen offers it. Absent otherwise.
+     */
+    @SerialName("sso") val sso: Boolean? = null
 ) {
 }
 
@@ -3443,27 +3535,35 @@ data class AccountCredentials(
      */
     @SerialName("email") val email: String,
     /** At least 10 characters and at most 1024 bytes. Stored only as an argon2id hash. */
-    @SerialName("password") val password: String
+    @SerialName("password") val password: String,
+    /**
+     * The six-digit code from an authenticator app, or one of the recovery codes, when
+     * the account has two-step log-in on. Ignored by sign-up.
+     */
+    @SerialName("totp_code") val totpCode: String? = null
 ) {
 }
 
 /** A logged-in session. Send `token` as `Authorization: Bearer <token>`. */
 @Serializable
 data class AccountSession(
-    /**
-     * The session token. It grants every scope on the account's own project and
-     * nothing else. It is shown once: the daemon keeps only its SHA-256 digest.
-     */
+    /** The session token. It is shown once: the daemon keeps only its SHA-256 digest. */
     @SerialName("token") val token: String,
     /** When the session stops working. Log in again after this. */
     @SerialName("expires_at") val expiresAt: Instant,
     /** The account's email address, as stored. */
     @SerialName("email") val email: String,
     /**
-     * The account's project. Every signal an account key writes lands here, and every
-     * read is limited to it.
+     * The project reads go to when they name none. The account's own project, or the
+     * first project of the organisation a single sign-on session is limited to. Absent
+     * when the session reaches no project yet.
      */
-    @SerialName("project") val project: String
+    @SerialName("project") val project: String? = null,
+    /**
+     * Set when the session came from an organisation's single sign-on. The session
+     * then reaches that organisation's projects only.
+     */
+    @SerialName("org_id") val orgId: String? = null
 ) {
 }
 
@@ -3472,10 +3572,27 @@ data class AccountSession(
 data class Account(
     /** The account's email address, as stored. */
     @SerialName("email") val email: String,
-    /** The account's project, which is the only project its session and its keys reach. */
-    @SerialName("project") val project: String,
     /** When the account was created. */
-    @SerialName("created_at") val createdAt: Instant
+    @SerialName("created_at") val createdAt: Instant,
+    /** Whether the address has been confirmed by a link sent to it. */
+    @SerialName("email_verified") val emailVerified: Boolean,
+    /** Whether two-step log-in is on. */
+    @SerialName("totp_enabled") val totpEnabled: Boolean,
+    /**
+     * Whether the account can log in with a password. False for an account created by
+     * single sign-on or SCIM that has never set one.
+     */
+    @SerialName("has_password") val hasPassword: Boolean,
+    /**
+     * The project created with the account at sign-up. Absent for an account that was
+     * invited, or created by single sign-on or SCIM.
+     */
+    @SerialName("project") val project: String? = null,
+    /**
+     * The organisation that created this account through single sign-on or SCIM. That
+     * organisation can deactivate it.
+     */
+    @SerialName("managed_by") val managedBy: String? = null
 ) {
 }
 
@@ -3489,6 +3606,8 @@ data class AccountKey(
     @SerialName("id") val id: String,
     /** What the key may do. */
     @SerialName("scope") val scope: KeyScope,
+    /** The one project the key reaches. */
+    @SerialName("project") val project: String,
     /**
      * The first characters of the secret, so you can tell which key a process holds
      * without the daemon storing the secret.
@@ -3497,7 +3616,12 @@ data class AccountKey(
     /** When the key was created. */
     @SerialName("created_at") val createdAt: Instant,
     /** The label given when the key was created. */
-    @SerialName("name") val name: String? = null
+    @SerialName("name") val name: String? = null,
+    /**
+     * The email of the account that created the key. Set in an organisation's key
+     * list, so an admin can see whose key it is.
+     */
+    @SerialName("created_by") val createdBy: String? = null
 ) {
 }
 
@@ -3510,7 +3634,12 @@ data class CreateAccountKeyRequest(
      * A label for the key, such as the service that will hold it. At most 100
      * characters.
      */
-    @SerialName("name") val name: String? = null
+    @SerialName("name") val name: String? = null,
+    /**
+     * The project the key reaches. Defaults to the account's own project. Your role on
+     * the project must allow the scope.
+     */
+    @SerialName("project") val project: String? = null
 ) {
 }
 
@@ -3524,6 +3653,574 @@ data class CreatedAccountKey(
      * daemon keeps only its SHA-256 digest and cannot show it again.
      */
     @SerialName("secret") val secret: String
+) {
+}
+
+/**
+ * A plain answer that changes nothing you can read back, such as "check your
+ * email".
+ */
+@Serializable
+data class AccountNotice(
+    /** What happened, and what to do next. */
+    @SerialName("message") val message: String
+) {
+}
+
+/** A one-time token from a link the daemon sent by email. */
+@Serializable
+data class TokenRequest(
+    /** The token, as it appears in the link. */
+    @SerialName("token") val token: String
+) {
+}
+
+/** A request for a password reset link. */
+@Serializable
+data class PasswordForgotRequest(
+    /**
+     * The address to send the link to. The answer is the same whether or not an
+     * account uses it.
+     */
+    @SerialName("email") val email: String
+) {
+}
+
+/** A new password, with the token from a reset link. */
+@Serializable
+data class PasswordResetRequest(
+    /** The token from the reset link. It works once, for one hour. */
+    @SerialName("token") val token: String,
+    /** The new password. At least 10 characters and at most 1024 bytes. */
+    @SerialName("password") val password: String,
+    /**
+     * A code from the authenticator app, or a recovery code, when the account has
+     * two-step log-in on. A reset proves the address, not the second factor.
+     */
+    @SerialName("totp_code") val totpCode: String? = null
+) {
+}
+
+/** A new password for the logged-in account. */
+@Serializable
+data class PasswordChangeRequest(
+    /** The new password. At least 10 characters and at most 1024 bytes. */
+    @SerialName("new_password") val newPassword: String,
+    /** The password in use now. Required when the account has one. */
+    @SerialName("current_password") val currentPassword: String? = null
+) {
+}
+
+/** A new email address for the logged-in account. */
+@Serializable
+data class EmailChangeRequest(
+    /**
+     * The new address. A link is sent to it, and the change happens when the link is
+     * opened.
+     */
+    @SerialName("email") val email: String,
+    /** The account's password. Required when the account has one. */
+    @SerialName("password") val password: String? = null
+) {
+}
+
+/** Confirmation for deleting the logged-in account. */
+@Serializable
+data class AccountDeleteRequest(
+    /** The account's password. Required when the account has one. */
+    @SerialName("password") val password: String? = null,
+    /** A code from the authenticator app. Required when two-step log-in is on. */
+    @SerialName("totp_code") val totpCode: String? = null
+) {
+}
+
+/** What deleting an account removed. */
+@Serializable
+data class AccountDeletion(
+    /** Organisations that had this account as their only member, deleted with it. */
+    @SerialName("orgs_deleted") val orgsDeleted: Int,
+    /**
+     * Projects whose stored signals and runs were erased, because their organisation
+     * was deleted.
+     */
+    @SerialName("projects_erased") val projectsErased: List<String>
+) {
+}
+
+/** One live session of the logged-in account. The token is not part of it. */
+@Serializable
+data class SessionInfo(
+    /** The session's identifier, for ending it. Not a secret. */
+    @SerialName("id") val id: String,
+    /** When the session started. */
+    @SerialName("created_at") val createdAt: Instant,
+    /** When it stops working. */
+    @SerialName("expires_at") val expiresAt: Instant,
+    /** True for the session this request carries. */
+    @SerialName("current") val current: Boolean,
+    /** How it started: `password`, `sso`, `invite`, `verify` or `reset`. */
+    @SerialName("via") val via: String,
+    /** The organisation a single sign-on session is limited to. */
+    @SerialName("org_id") val orgId: String? = null,
+    /** The browser or client that started it, as it described itself. */
+    @SerialName("user_agent") val userAgent: String? = null,
+    /** The client address that started it. */
+    @SerialName("address") val address: String? = null
+) {
+}
+
+/**
+ * A new authenticator secret, not yet in use. Confirm it with a code to turn
+ * two-step log-in on.
+ */
+@Serializable
+data class TotpSetup(
+    /** The secret in base32, for typing into an authenticator app. */
+    @SerialName("secret") val secret: String,
+    /** The same secret as an `otpauth://` URI. */
+    @SerialName("otpauth_uri") val otpauthUri: String,
+    /** The URI as a QR code, an SVG document. */
+    @SerialName("qr_svg") val qrSvg: String
+) {
+}
+
+/** A code from an authenticator app. */
+@Serializable
+data class TotpCodeRequest(
+    /** The six-digit code. */
+    @SerialName("code") val code: String
+) {
+}
+
+/** Two-step log-in is on. */
+@Serializable
+data class TotpEnabled(
+    /**
+     * Ten single-use codes that stand in for the authenticator app. They are shown
+     * once: the daemon keeps only their digests.
+     */
+    @SerialName("recovery_codes") val recoveryCodes: List<String>
+) {
+}
+
+/** Confirmation for turning two-step log-in off. */
+@Serializable
+data class TotpDisableRequest(
+    /** A code from the authenticator app, or a recovery code. */
+    @SerialName("code") val code: String,
+    /** The account's password. Required when the account has one. */
+    @SerialName("password") val password: String? = null
+) {
+}
+
+/** An organisation: the owner of projects, members and single sign-on settings. */
+@Serializable
+data class Org(
+    /** The organisation's identifier. */
+    @SerialName("id") val id: String,
+    /** Its display name. */
+    @SerialName("name") val name: String,
+    /** Your role in it. */
+    @SerialName("role") val role: OrgRole,
+    /** When it was created. */
+    @SerialName("created_at") val createdAt: Instant,
+    /** How many members it has. */
+    @SerialName("members") val members: Int,
+    /** How many projects it owns. */
+    @SerialName("projects") val projects: Int,
+    /**
+     * True when the daemon's configuration file declares this organisation. Its single
+     * sign-on settings are then read from that file and cannot be changed here.
+     */
+    @SerialName("managed_by_config") val managedByConfig: Boolean,
+    /**
+     * The most signals all its projects together may store per minute. Absent means no
+     * ceiling.
+     */
+    @SerialName("quota_per_minute") val quotaPerMinute: Int? = null,
+    /** How long its projects keep data, in days. Absent means forever. */
+    @SerialName("retention_days") val retentionDays: Int? = null
+) {
+}
+
+/** A new organisation. */
+@Serializable
+data class CreateOrgRequest(
+    /** Its display name, at most 100 characters. */
+    @SerialName("name") val name: String
+) {
+}
+
+/** Changes to an organisation. A field left out keeps its value. */
+@Serializable
+data class UpdateOrgRequest(
+    /** A new display name, at most 100 characters. */
+    @SerialName("name") val name: String? = null,
+    /**
+     * A ceiling on signals per minute across all the organisation's projects, at most
+     * the daemon's own ceiling. 0 restores the daemon's default. Owner only.
+     */
+    @SerialName("quota_per_minute") val quotaPerMinute: Int? = null,
+    /**
+     * How long to keep data, in days, at most the daemon's own window. 0 restores the
+     * daemon's default. Owner only.
+     */
+    @SerialName("retention_days") val retentionDays: Int? = null
+) {
+}
+
+/** What deleting an organisation removed. */
+@Serializable
+data class OrgDeletion(
+    /** Projects whose stored signals and runs were erased. */
+    @SerialName("projects_erased") val projectsErased: List<String>
+) {
+}
+
+/** A role on one project. */
+@Serializable
+data class ProjectRoleGrant(
+    /** The project. */
+    @SerialName("project") val project: String,
+    /** The role there. */
+    @SerialName("role") val role: ProjectRole
+) {
+}
+
+/** One member of an organisation. */
+@Serializable
+data class OrgMember(
+    /** The member's account. */
+    @SerialName("account_id") val accountId: String,
+    /** The member's email address. */
+    @SerialName("email") val email: String,
+    /** The member's role. */
+    @SerialName("role") val role: OrgRole,
+    /** How they joined: `created`, `invite`, `sso`, `scim` or `config`. */
+    @SerialName("via") val via: String,
+    /** When they joined. */
+    @SerialName("joined_at") val joinedAt: Instant,
+    /** Roles on single projects that replace the organisation role there. */
+    @SerialName("project_roles") val projectRoles: List<ProjectRoleGrant>,
+    /** True when this organisation created the account through single sign-on or SCIM. */
+    @SerialName("managed") val managed: Boolean,
+    /** Whether the member has two-step log-in on. */
+    @SerialName("totp_enabled") val totpEnabled: Boolean
+) {
+}
+
+/** A new role for a member. */
+@Serializable
+data class UpdateMemberRequest(
+    /**
+     * The role. Only an owner may grant or remove `owner`, and the last owner cannot
+     * be demoted.
+     */
+    @SerialName("role") val role: OrgRole
+) {
+}
+
+/** A role for a member on one project. */
+@Serializable
+data class SetProjectRoleRequest(
+    /** A project the organisation owns. */
+    @SerialName("project") val project: String,
+    /**
+     * The role there. Absent removes the project role, so the organisation role
+     * applies again.
+     */
+    @SerialName("role") val role: ProjectRole? = null
+) {
+}
+
+/** An invitation not yet accepted. The token is not part of it. */
+@Serializable
+data class OrgInvite(
+    /** The invitation's identifier, for revoking it. */
+    @SerialName("id") val id: String,
+    /** The address it was sent to. */
+    @SerialName("email") val email: String,
+    /** The role it grants. */
+    @SerialName("role") val role: OrgRole,
+    /** Project roles it grants as well. */
+    @SerialName("project_roles") val projectRoles: List<ProjectRoleGrant>,
+    /** When it was sent. */
+    @SerialName("created_at") val createdAt: Instant,
+    /** When it stops working. */
+    @SerialName("expires_at") val expiresAt: Instant,
+    /**
+     * The email of the member who sent it. Absent when the configuration file or SCIM
+     * sent it.
+     */
+    @SerialName("invited_by") val invitedBy: String? = null
+) {
+}
+
+/** An invitation to an organisation. */
+@Serializable
+data class CreateInviteRequest(
+    /** Who to invite. The link is sent to this address. */
+    @SerialName("email") val email: String,
+    /** The role to grant. Only an owner may invite an owner. */
+    @SerialName("role") val role: OrgRole,
+    /** Project roles to grant as well. */
+    @SerialName("project_roles") val projectRoles: List<ProjectRoleGrant>? = null
+) {
+}
+
+/** What an invitation offers, read with its token before accepting it. */
+@Serializable
+data class InviteLookup(
+    /** The organisation. */
+    @SerialName("org_name") val orgName: String,
+    /** The address it was sent to. Accepting it joins the account with this address. */
+    @SerialName("email") val email: String,
+    /** The role it grants. */
+    @SerialName("role") val role: OrgRole,
+    /**
+     * Whether an account with this address exists. If it does, log in as it to accept;
+     * if not, accepting creates it.
+     */
+    @SerialName("account_exists") val accountExists: Boolean,
+    /** When it stops working. */
+    @SerialName("expires_at") val expiresAt: Instant
+) {
+}
+
+/** Acceptance of an invitation. */
+@Serializable
+data class InviteAcceptRequest(
+    /** The token from the invitation link. */
+    @SerialName("token") val token: String,
+    /**
+     * A password for the new account, when no account uses the invited address.
+     * Ignored otherwise.
+     */
+    @SerialName("password") val password: String? = null
+) {
+}
+
+/** An accepted invitation. */
+@Serializable
+data class InviteAccepted(
+    /** The organisation joined. */
+    @SerialName("org") val org: Org,
+    /**
+     * A session for the account accepting created. Absent when an existing account
+     * accepted with its own session.
+     */
+    @SerialName("session") val session: AccountSession? = null
+) {
+}
+
+/** A project an organisation owns. */
+@Serializable
+data class OrgProject(
+    /**
+     * The project name. Random, so nobody can choose one that already holds somebody
+     * else's data.
+     */
+    @SerialName("project") val project: String,
+    /** When it was created or attached. */
+    @SerialName("created_at") val createdAt: Instant,
+    /** A display label. */
+    @SerialName("label") val label: String? = null
+) {
+}
+
+/** A new project in an organisation. */
+@Serializable
+data class CreateProjectRequest(
+    /** A display label, at most 100 characters. */
+    @SerialName("label") val label: String? = null
+) {
+}
+
+/**
+ * How much an organisation is using, against its ceilings. Counted since the
+ * daemon started.
+ */
+@Serializable
+data class OrgUsage(
+    /** The organisation. */
+    @SerialName("org_id") val orgId: String,
+    /** Signals stored in the current one-minute window. */
+    @SerialName("admitted_this_minute") val admittedThisMinute: Long,
+    /** Signals stored since the daemon started. */
+    @SerialName("admitted_total") val admittedTotal: Long,
+    /** Signals refused for the ceiling since the daemon started. */
+    @SerialName("refused_total") val refusedTotal: Long,
+    /** Members. */
+    @SerialName("members") val members: Int,
+    /** Projects. */
+    @SerialName("projects") val projects: Int,
+    /** API keys on its projects. */
+    @SerialName("keys") val keys: Int,
+    /** When counting started. */
+    @SerialName("since") val since: Instant,
+    /** Its ceiling on signals per minute, when it has one. */
+    @SerialName("quota_per_minute") val quotaPerMinute: Int? = null,
+    /** How long its projects keep data, in days. */
+    @SerialName("retention_days") val retentionDays: Int? = null
+) {
+}
+
+/** An organisation's single sign-on settings. The client secret is not part of it. */
+@Serializable
+data class SsoConfig(
+    /** The kind of provider. */
+    @SerialName("provider") val provider: SsoProvider,
+    /** The client id registered with the provider. */
+    @SerialName("client_id") val clientId: String,
+    /** Whether a client secret is stored. */
+    @SerialName("has_client_secret") val hasClientSecret: Boolean,
+    /**
+     * Email domains this organisation claims. Single sign-on creates accounts only for
+     * these domains, and "Log in with SSO" finds the organisation by them.
+     */
+    @SerialName("domains") val domains: List<String>,
+    /**
+     * When true, members whose email is in a claimed domain cannot log in with a
+     * password.
+     */
+    @SerialName("enforced") val enforced: Boolean,
+    /**
+     * The role given to a member single sign-on creates, when no group maps to a role.
+     * Never `owner`.
+     */
+    @SerialName("default_role") val defaultRole: OrgRole,
+    /** The redirect URL to register with the provider. */
+    @SerialName("redirect_url") val redirectUrl: String,
+    /** True when these settings come from the configuration file. */
+    @SerialName("managed_by_config") val managedByConfig: Boolean,
+    /** When they were last changed. */
+    @SerialName("updated_at") val updatedAt: Instant,
+    /** The OpenID Connect issuer URL. Absent for GitHub. */
+    @SerialName("issuer") val issuer: String? = null,
+    /**
+     * The ID token claim that lists the member's groups, mapped to roles by the group
+     * roles.
+     */
+    @SerialName("groups_claim") val groupsClaim: String? = null
+) {
+}
+
+/** New single sign-on settings for an organisation. */
+@Serializable
+data class PutSsoConfigRequest(
+    /** The kind of provider. */
+    @SerialName("provider") val provider: SsoProvider,
+    /** The client id registered with the provider. */
+    @SerialName("client_id") val clientId: String,
+    /**
+     * Email domains to claim. You can claim the domain of your own verified address. A
+     * domain belongs to one organisation.
+     */
+    @SerialName("domains") val domains: List<String>,
+    /**
+     * Refuse password log-in for members in the claimed domains. Turning it on ends
+     * their password sessions.
+     */
+    @SerialName("enforced") val enforced: Boolean,
+    /** The role for a member single sign-on creates. `admin`, `member` or `viewer`. */
+    @SerialName("default_role") val defaultRole: OrgRole,
+    /**
+     * The OpenID Connect issuer URL, such as `https://accounts.google.com`. Required
+     * for `oidc`. Must be `https`.
+     */
+    @SerialName("issuer") val issuer: String? = null,
+    /** The client secret. Left out, the stored one is kept. */
+    @SerialName("client_secret") val clientSecret: String? = null,
+    /** The ID token claim that lists groups, such as `groups`. */
+    @SerialName("groups_claim") val groupsClaim: String? = null
+) {
+}
+
+/** A group from the identity provider, and the role its members get. */
+@Serializable
+data class GroupRole(
+    /**
+     * The group name, as single sign-on or SCIM sends it. Compared without regard to
+     * case.
+     */
+    @SerialName("group") val group: String,
+    /** The role. Never `owner`. */
+    @SerialName("role") val role: OrgRole
+) {
+}
+
+/** Whether an organisation has a SCIM token. The token is not part of it. */
+@Serializable
+data class ScimTokenInfo(
+    /** Whether a token exists. */
+    @SerialName("configured") val configured: Boolean,
+    /** The SCIM base URL to give your identity provider. */
+    @SerialName("base_url") val baseUrl: String,
+    /** The first characters of the token. */
+    @SerialName("prefix") val prefix: String? = null,
+    /** When it was created. */
+    @SerialName("created_at") val createdAt: Instant? = null
+) {
+}
+
+/**
+ * A new SCIM token. This is the only time it is shown, and it replaces any earlier
+ * token.
+ */
+@Serializable
+data class CreatedScimToken(
+    /**
+     * The bearer token for your identity provider. The daemon keeps only its SHA-256
+     * digest.
+     */
+    @SerialName("token") val token: String,
+    /** Its first characters. */
+    @SerialName("prefix") val prefix: String,
+    /** When it was created. */
+    @SerialName("created_at") val createdAt: Instant,
+    /** The SCIM base URL to give your identity provider. */
+    @SerialName("base_url") val baseUrl: String
+) {
+}
+
+/** Where to start single sign-on. Give one of the two. */
+@Serializable
+data class SsoStartRequest(
+    /** Your email address. Its domain finds the organisation. */
+    @SerialName("email") val email: String? = null,
+    /** The organisation, when you know it. */
+    @SerialName("org_id") val orgId: String? = null
+) {
+}
+
+/** Where to send the browser for single sign-on. */
+@Serializable
+data class SsoStart(
+    /**
+     * The provider's authorization URL, with state, nonce and the PKCE challenge in
+     * it.
+     */
+    @SerialName("authorize_url") val authorizeUrl: String,
+    /**
+     * A secret to keep in this browser and send back with the callback. It ties the
+     * callback to the browser that started it, so a link from somebody else cannot log
+     * you in as them.
+     */
+    @SerialName("binding") val binding: String,
+    /** The organisation. */
+    @SerialName("org_name") val orgName: String
+) {
+}
+
+/** What the provider sent back to the redirect URL. */
+@Serializable
+data class SsoCallbackRequest(
+    /** The `state` parameter. */
+    @SerialName("state") val state: String,
+    /** The `code` parameter. */
+    @SerialName("code") val code: String,
+    /** The binding from the start of the flow. */
+    @SerialName("binding") val binding: String
 ) {
 }
 

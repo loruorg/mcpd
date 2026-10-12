@@ -2344,6 +2344,151 @@ impl std::fmt::Display for KeyScope {
     }
 }
 
+/// What a member may do in an organisation. Each role maps onto the six key scopes on
+/// every project the organisation owns, unless a project role says otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrgRole {
+    /// Every scope on every project, and everything an admin may do. Only an owner may add
+    /// or remove an owner, change quotas or delete the organisation.
+    Owner,
+    /// Every scope on every project. Invites and removes members below owner, sets roles,
+    /// creates and deletes projects, and manages SSO, SCIM and every key in the
+    /// organisation.
+    Admin,
+    /// The `ingest`, `read`, `write`, `execute` and `worker` scopes. Everything but
+    /// `admin`: a member cannot delete data or read the audit log.
+    Member,
+    /// The `read` scope only.
+    Viewer,
+}
+
+impl OrgRole {
+    /// The wire representation, exactly as it appears in JSON.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Admin => "admin",
+            Self::Member => "member",
+            Self::Viewer => "viewer",
+        }
+    }
+
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[Self::Owner, Self::Admin, Self::Member, Self::Viewer];
+}
+
+impl std::str::FromStr for OrgRole {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "owner" => Ok(Self::Owner),
+            "admin" => Ok(Self::Admin),
+            "member" => Ok(Self::Member),
+            "viewer" => Ok(Self::Viewer),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for OrgRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A role on one project that replaces a member's organisation role there. Owners and
+/// admins keep their reach on every project whatever a project role says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRole {
+    /// No access to this project.
+    None,
+    /// The `read` scope on this project.
+    Viewer,
+    /// Every scope but `admin` on this project.
+    Member,
+    /// Every scope on this project. It does not let the member manage the organisation.
+    Admin,
+}
+
+impl ProjectRole {
+    /// The wire representation, exactly as it appears in JSON.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Viewer => "viewer",
+            Self::Member => "member",
+            Self::Admin => "admin",
+        }
+    }
+
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[Self::None, Self::Viewer, Self::Member, Self::Admin];
+}
+
+impl std::str::FromStr for ProjectRole {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "none" => Ok(Self::None),
+            "viewer" => Ok(Self::Viewer),
+            "member" => Ok(Self::Member),
+            "admin" => Ok(Self::Admin),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for ProjectRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// How an organisation's members log in with single sign-on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SsoProvider {
+    /// Any OpenID Connect provider, such as Google, Microsoft Entra ID, Okta or Auth0,
+    /// found through its issuer's discovery document. Authorization code flow with PKCE,
+    /// state and nonce.
+    Oidc,
+    /// GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub
+    /// user id and the email is the primary verified address GitHub reports.
+    Github,
+}
+
+impl SsoProvider {
+    /// The wire representation, exactly as it appears in JSON.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Oidc => "oidc",
+            Self::Github => "github",
+        }
+    }
+
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[Self::Oidc, Self::Github];
+}
+
+impl std::str::FromStr for SsoProvider {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "oidc" => Ok(Self::Oidc),
+            "github" => Ok(Self::Github),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for SsoProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Input tokens broken down by how the provider billed them. Every field is optional;
 /// absent means the provider did not report it, which is different from zero.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3008,6 +3153,14 @@ pub struct HealthStatus {
     /// its sign-up and log-in screens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signup: Option<bool>,
+    /// True when this daemon has accounts, with or without open sign-up. Absent when it
+    /// does not. The interface reads this to show its log-in screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<bool>,
+    /// True when at least one organisation on this daemon logs in with single sign-on, so
+    /// the log-in screen offers it. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sso: Option<bool>,
 }
 
 /// One scorer mcpd can run, as described to a caller.
@@ -4487,22 +4640,31 @@ pub struct AccountCredentials {
     pub email: String,
     /// At least 10 characters and at most 1024 bytes. Stored only as an argon2id hash.
     pub password: String,
+    /// The six-digit code from an authenticator app, or one of the recovery codes, when the
+    /// account has two-step log-in on. Ignored by sign-up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp_code: Option<String>,
 }
 
 /// A logged-in session. Send `token` as `Authorization: Bearer <token>`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountSession {
-    /// The session token. It grants every scope on the account's own project and nothing
-    /// else. It is shown once: the daemon keeps only its SHA-256 digest.
+    /// The session token. It is shown once: the daemon keeps only its SHA-256 digest.
     pub token: String,
     /// When the session stops working. Log in again after this.
     #[serde(with = "time::serde::rfc3339")]
     pub expires_at: time::OffsetDateTime,
     /// The account's email address, as stored.
     pub email: String,
-    /// The account's project. Every signal an account key writes lands here, and every read
-    /// is limited to it.
-    pub project: String,
+    /// The project reads go to when they name none. The account's own project, or the first
+    /// project of the organisation a single sign-on session is limited to. Absent when the
+    /// session reaches no project yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// Set when the session came from an organisation's single sign-on. The session then
+    /// reaches that organisation's projects only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
 }
 
 /// The account a session belongs to.
@@ -4510,11 +4672,24 @@ pub struct AccountSession {
 pub struct Account {
     /// The account's email address, as stored.
     pub email: String,
-    /// The account's project, which is the only project its session and its keys reach.
-    pub project: String,
+    /// The project created with the account at sign-up. Absent for an account that was
+    /// invited, or created by single sign-on or SCIM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     /// When the account was created.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: time::OffsetDateTime,
+    /// Whether the address has been confirmed by a link sent to it.
+    pub email_verified: bool,
+    /// Whether two-step log-in is on.
+    pub totp_enabled: bool,
+    /// Whether the account can log in with a password. False for an account created by
+    /// single sign-on or SCIM that has never set one.
+    pub has_password: bool,
+    /// The organisation that created this account through single sign-on or SCIM. That
+    /// organisation can deactivate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_by: Option<String>,
 }
 
 /// One API key an account holds. The secret is not part of it: the daemon keeps only a
@@ -4525,6 +4700,8 @@ pub struct AccountKey {
     pub id: String,
     /// What the key may do.
     pub scope: KeyScope,
+    /// The one project the key reaches.
+    pub project: String,
     /// The label given when the key was created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -4534,6 +4711,10 @@ pub struct AccountKey {
     /// When the key was created.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: time::OffsetDateTime,
+    /// The email of the account that created the key. Set in an organisation's key list, so
+    /// an admin can see whose key it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
 }
 
 /// A request for a new API key.
@@ -4544,6 +4725,10 @@ pub struct CreateAccountKeyRequest {
     /// A label for the key, such as the service that will hold it. At most 100 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The project the key reaches. Defaults to the account's own project. Your role on the
+    /// project must allow the scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// A new API key, with its secret. This is the only time the secret is shown.
@@ -4554,6 +4739,558 @@ pub struct CreatedAccountKey {
     /// The key itself. Send it as `Authorization: Bearer <secret>`. Copy it now: the daemon
     /// keeps only its SHA-256 digest and cannot show it again.
     pub secret: String,
+}
+
+/// A plain answer that changes nothing you can read back, such as "check your email".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountNotice {
+    /// What happened, and what to do next.
+    pub message: String,
+}
+
+/// A one-time token from a link the daemon sent by email.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TokenRequest {
+    /// The token, as it appears in the link.
+    pub token: String,
+}
+
+/// A request for a password reset link.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PasswordForgotRequest {
+    /// The address to send the link to. The answer is the same whether or not an account
+    /// uses it.
+    pub email: String,
+}
+
+/// A new password, with the token from a reset link.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PasswordResetRequest {
+    /// The token from the reset link. It works once, for one hour.
+    pub token: String,
+    /// The new password. At least 10 characters and at most 1024 bytes.
+    pub password: String,
+    /// A code from the authenticator app, or a recovery code, when the account has two-step
+    /// log-in on. A reset proves the address, not the second factor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp_code: Option<String>,
+}
+
+/// A new password for the logged-in account.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PasswordChangeRequest {
+    /// The password in use now. Required when the account has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_password: Option<String>,
+    /// The new password. At least 10 characters and at most 1024 bytes.
+    pub new_password: String,
+}
+
+/// A new email address for the logged-in account.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmailChangeRequest {
+    /// The new address. A link is sent to it, and the change happens when the link is
+    /// opened.
+    pub email: String,
+    /// The account's password. Required when the account has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+/// Confirmation for deleting the logged-in account.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountDeleteRequest {
+    /// The account's password. Required when the account has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// A code from the authenticator app. Required when two-step log-in is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp_code: Option<String>,
+}
+
+impl Default for AccountDeleteRequest {
+    fn default() -> Self {
+        Self { password: None, totp_code: None }
+    }
+}
+
+/// What deleting an account removed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountDeletion {
+    /// Organisations that had this account as their only member, deleted with it.
+    pub orgs_deleted: u32,
+    /// Projects whose stored signals and runs were erased, because their organisation was
+    /// deleted.
+    #[serde(default)]
+    pub projects_erased: Vec<String>,
+}
+
+/// One live session of the logged-in account. The token is not part of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    /// The session's identifier, for ending it. Not a secret.
+    pub id: String,
+    /// When the session started.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+    /// When it stops working.
+    #[serde(with = "time::serde::rfc3339")]
+    pub expires_at: time::OffsetDateTime,
+    /// True for the session this request carries.
+    pub current: bool,
+    /// How it started: `password`, `sso`, `invite`, `verify` or `reset`.
+    pub via: String,
+    /// The organisation a single sign-on session is limited to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    /// The browser or client that started it, as it described itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+    /// The client address that started it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+}
+
+/// A new authenticator secret, not yet in use. Confirm it with a code to turn two-step
+/// log-in on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TotpSetup {
+    /// The secret in base32, for typing into an authenticator app.
+    pub secret: String,
+    /// The same secret as an `otpauth://` URI.
+    pub otpauth_uri: String,
+    /// The URI as a QR code, an SVG document.
+    pub qr_svg: String,
+}
+
+/// A code from an authenticator app.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TotpCodeRequest {
+    /// The six-digit code.
+    pub code: String,
+}
+
+/// Two-step log-in is on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TotpEnabled {
+    /// Ten single-use codes that stand in for the authenticator app. They are shown once:
+    /// the daemon keeps only their digests.
+    #[serde(default)]
+    pub recovery_codes: Vec<String>,
+}
+
+impl Default for TotpEnabled {
+    fn default() -> Self {
+        Self { recovery_codes: Vec::new() }
+    }
+}
+
+/// Confirmation for turning two-step log-in off.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TotpDisableRequest {
+    /// The account's password. Required when the account has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// A code from the authenticator app, or a recovery code.
+    pub code: String,
+}
+
+/// An organisation: the owner of projects, members and single sign-on settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Org {
+    /// The organisation's identifier.
+    pub id: String,
+    /// Its display name.
+    pub name: String,
+    /// Your role in it.
+    pub role: OrgRole,
+    /// When it was created.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+    /// The most signals all its projects together may store per minute. Absent means no
+    /// ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_per_minute: Option<u32>,
+    /// How long its projects keep data, in days. Absent means forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<u32>,
+    /// How many members it has.
+    pub members: u32,
+    /// How many projects it owns.
+    pub projects: u32,
+    /// True when the daemon's configuration file declares this organisation. Its single
+    /// sign-on settings are then read from that file and cannot be changed here.
+    pub managed_by_config: bool,
+}
+
+/// A new organisation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateOrgRequest {
+    /// Its display name, at most 100 characters.
+    pub name: String,
+}
+
+/// Changes to an organisation. A field left out keeps its value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateOrgRequest {
+    /// A new display name, at most 100 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A ceiling on signals per minute across all the organisation's projects, at most the
+    /// daemon's own ceiling. 0 restores the daemon's default. Owner only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_per_minute: Option<u32>,
+    /// How long to keep data, in days, at most the daemon's own window. 0 restores the
+    /// daemon's default. Owner only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<u32>,
+}
+
+impl Default for UpdateOrgRequest {
+    fn default() -> Self {
+        Self { name: None, quota_per_minute: None, retention_days: None }
+    }
+}
+
+/// What deleting an organisation removed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrgDeletion {
+    /// Projects whose stored signals and runs were erased.
+    #[serde(default)]
+    pub projects_erased: Vec<String>,
+}
+
+impl Default for OrgDeletion {
+    fn default() -> Self {
+        Self { projects_erased: Vec::new() }
+    }
+}
+
+/// A role on one project.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectRoleGrant {
+    /// The project.
+    pub project: String,
+    /// The role there.
+    pub role: ProjectRole,
+}
+
+/// One member of an organisation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrgMember {
+    /// The member's account.
+    pub account_id: String,
+    /// The member's email address.
+    pub email: String,
+    /// The member's role.
+    pub role: OrgRole,
+    /// How they joined: `created`, `invite`, `sso`, `scim` or `config`.
+    pub via: String,
+    /// When they joined.
+    #[serde(with = "time::serde::rfc3339")]
+    pub joined_at: time::OffsetDateTime,
+    /// Roles on single projects that replace the organisation role there.
+    #[serde(default)]
+    pub project_roles: Vec<ProjectRoleGrant>,
+    /// True when this organisation created the account through single sign-on or SCIM.
+    pub managed: bool,
+    /// Whether the member has two-step log-in on.
+    pub totp_enabled: bool,
+}
+
+/// A new role for a member.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateMemberRequest {
+    /// The role. Only an owner may grant or remove `owner`, and the last owner cannot be
+    /// demoted.
+    pub role: OrgRole,
+}
+
+/// A role for a member on one project.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetProjectRoleRequest {
+    /// A project the organisation owns.
+    pub project: String,
+    /// The role there. Absent removes the project role, so the organisation role applies
+    /// again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<ProjectRole>,
+}
+
+/// An invitation not yet accepted. The token is not part of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrgInvite {
+    /// The invitation's identifier, for revoking it.
+    pub id: String,
+    /// The address it was sent to.
+    pub email: String,
+    /// The role it grants.
+    pub role: OrgRole,
+    /// Project roles it grants as well.
+    #[serde(default)]
+    pub project_roles: Vec<ProjectRoleGrant>,
+    /// The email of the member who sent it. Absent when the configuration file or SCIM sent
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invited_by: Option<String>,
+    /// When it was sent.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+    /// When it stops working.
+    #[serde(with = "time::serde::rfc3339")]
+    pub expires_at: time::OffsetDateTime,
+}
+
+/// An invitation to an organisation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateInviteRequest {
+    /// Who to invite. The link is sent to this address.
+    pub email: String,
+    /// The role to grant. Only an owner may invite an owner.
+    pub role: OrgRole,
+    /// Project roles to grant as well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_roles: Option<Vec<ProjectRoleGrant>>,
+}
+
+/// What an invitation offers, read with its token before accepting it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InviteLookup {
+    /// The organisation.
+    pub org_name: String,
+    /// The address it was sent to. Accepting it joins the account with this address.
+    pub email: String,
+    /// The role it grants.
+    pub role: OrgRole,
+    /// Whether an account with this address exists. If it does, log in as it to accept; if
+    /// not, accepting creates it.
+    pub account_exists: bool,
+    /// When it stops working.
+    #[serde(with = "time::serde::rfc3339")]
+    pub expires_at: time::OffsetDateTime,
+}
+
+/// Acceptance of an invitation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InviteAcceptRequest {
+    /// The token from the invitation link.
+    pub token: String,
+    /// A password for the new account, when no account uses the invited address. Ignored
+    /// otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+/// An accepted invitation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InviteAccepted {
+    /// The organisation joined.
+    pub org: Org,
+    /// A session for the account accepting created. Absent when an existing account
+    /// accepted with its own session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<AccountSession>,
+}
+
+/// A project an organisation owns.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrgProject {
+    /// The project name. Random, so nobody can choose one that already holds somebody
+    /// else's data.
+    pub project: String,
+    /// A display label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// When it was created or attached.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+}
+
+/// A new project in an organisation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateProjectRequest {
+    /// A display label, at most 100 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl Default for CreateProjectRequest {
+    fn default() -> Self {
+        Self { label: None }
+    }
+}
+
+/// How much an organisation is using, against its ceilings. Counted since the daemon
+/// started.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrgUsage {
+    /// The organisation.
+    pub org_id: String,
+    /// Its ceiling on signals per minute, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_per_minute: Option<u32>,
+    /// Signals stored in the current one-minute window.
+    pub admitted_this_minute: u64,
+    /// Signals stored since the daemon started.
+    pub admitted_total: u64,
+    /// Signals refused for the ceiling since the daemon started.
+    pub refused_total: u64,
+    /// How long its projects keep data, in days.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<u32>,
+    /// Members.
+    pub members: u32,
+    /// Projects.
+    pub projects: u32,
+    /// API keys on its projects.
+    pub keys: u32,
+    /// When counting started.
+    #[serde(with = "time::serde::rfc3339")]
+    pub since: time::OffsetDateTime,
+}
+
+/// An organisation's single sign-on settings. The client secret is not part of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SsoConfig {
+    /// The kind of provider.
+    pub provider: SsoProvider,
+    /// The OpenID Connect issuer URL. Absent for GitHub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    /// The client id registered with the provider.
+    pub client_id: String,
+    /// Whether a client secret is stored.
+    pub has_client_secret: bool,
+    /// Email domains this organisation claims. Single sign-on creates accounts only for
+    /// these domains, and "Log in with SSO" finds the organisation by them.
+    #[serde(default)]
+    pub domains: Vec<String>,
+    /// When true, members whose email is in a claimed domain cannot log in with a password.
+    pub enforced: bool,
+    /// The role given to a member single sign-on creates, when no group maps to a role.
+    /// Never `owner`.
+    pub default_role: OrgRole,
+    /// The ID token claim that lists the member's groups, mapped to roles by the group
+    /// roles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups_claim: Option<String>,
+    /// The redirect URL to register with the provider.
+    pub redirect_url: String,
+    /// True when these settings come from the configuration file.
+    pub managed_by_config: bool,
+    /// When they were last changed.
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: time::OffsetDateTime,
+}
+
+/// New single sign-on settings for an organisation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PutSsoConfigRequest {
+    /// The kind of provider.
+    pub provider: SsoProvider,
+    /// The OpenID Connect issuer URL, such as `https://accounts.google.com`. Required for
+    /// `oidc`. Must be `https`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    /// The client id registered with the provider.
+    pub client_id: String,
+    /// The client secret. Left out, the stored one is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// Email domains to claim. You can claim the domain of your own verified address. A
+    /// domain belongs to one organisation.
+    #[serde(default)]
+    pub domains: Vec<String>,
+    /// Refuse password log-in for members in the claimed domains. Turning it on ends their
+    /// password sessions.
+    pub enforced: bool,
+    /// The role for a member single sign-on creates. `admin`, `member` or `viewer`.
+    pub default_role: OrgRole,
+    /// The ID token claim that lists groups, such as `groups`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups_claim: Option<String>,
+}
+
+/// A group from the identity provider, and the role its members get.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupRole {
+    /// The group name, as single sign-on or SCIM sends it. Compared without regard to case.
+    pub group: String,
+    /// The role. Never `owner`.
+    pub role: OrgRole,
+}
+
+/// Whether an organisation has a SCIM token. The token is not part of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScimTokenInfo {
+    /// Whether a token exists.
+    pub configured: bool,
+    /// The first characters of the token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// When it was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub created_at: Option<time::OffsetDateTime>,
+    /// The SCIM base URL to give your identity provider.
+    pub base_url: String,
+}
+
+/// A new SCIM token. This is the only time it is shown, and it replaces any earlier
+/// token.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatedScimToken {
+    /// The bearer token for your identity provider. The daemon keeps only its SHA-256
+    /// digest.
+    pub token: String,
+    /// Its first characters.
+    pub prefix: String,
+    /// When it was created.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+    /// The SCIM base URL to give your identity provider.
+    pub base_url: String,
+}
+
+/// Where to start single sign-on. Give one of the two.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SsoStartRequest {
+    /// Your email address. Its domain finds the organisation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// The organisation, when you know it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+}
+
+impl Default for SsoStartRequest {
+    fn default() -> Self {
+        Self { email: None, org_id: None }
+    }
+}
+
+/// Where to send the browser for single sign-on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SsoStart {
+    /// The provider's authorization URL, with state, nonce and the PKCE challenge in it.
+    pub authorize_url: String,
+    /// A secret to keep in this browser and send back with the callback. It ties the
+    /// callback to the browser that started it, so a link from somebody else cannot log you
+    /// in as them.
+    pub binding: String,
+    /// The organisation.
+    pub org_name: String,
+}
+
+/// What the provider sent back to the redirect URL.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SsoCallbackRequest {
+    /// The `state` parameter.
+    pub state: String,
+    /// The `code` parameter.
+    pub code: String,
+    /// The binding from the start of the flow.
+    pub binding: String,
 }
 
 /// One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback

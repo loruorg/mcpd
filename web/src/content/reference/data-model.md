@@ -491,6 +491,37 @@ What an account API key may do. The same six scopes the daemon's configured keys
 | `execute` | Start, cancel and signal runs, and publish events to them. |
 | `worker` | Claim steps and report their outcome. The key that lives in the process running step bodies. |
 
+### OrgRole
+
+What a member may do in an organisation. Each role maps onto the six key scopes on every project the organisation owns, unless a project role says otherwise.
+
+| Value | Meaning |
+| --- | --- |
+| `owner` | Every scope on every project, and everything an admin may do. Only an owner may add or remove an owner, change quotas or delete the organisation. |
+| `admin` | Every scope on every project. Invites and removes members below owner, sets roles, creates and deletes projects, and manages SSO, SCIM and every key in the organisation. |
+| `member` | The `ingest`, `read`, `write`, `execute` and `worker` scopes. Everything but `admin`: a member cannot delete data or read the audit log. |
+| `viewer` | The `read` scope only. |
+
+### ProjectRole
+
+A role on one project that replaces a member's organisation role there. Owners and admins keep their reach on every project whatever a project role says.
+
+| Value | Meaning |
+| --- | --- |
+| `none` | No access to this project. |
+| `viewer` | The `read` scope on this project. |
+| `member` | Every scope but `admin` on this project. |
+| `admin` | Every scope on this project. It does not let the member manage the organisation. |
+
+### SsoProvider
+
+How an organisation's members log in with single sign-on.
+
+| Value | Meaning |
+| --- | --- |
+| `oidc` | Any OpenID Connect provider, such as Google, Microsoft Entra ID, Okta or Auth0, found through its issuer's discovery document. Authorization code flow with PKCE, state and nonce. |
+| `github` | GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub user id and the email is the primary verified address GitHub reports. |
+
 ## Entities
 
 ### InputTokenDetails
@@ -825,6 +856,8 @@ Whether the server is alive and able to serve.
 | `storage` | `string` | Which storage backend is configured. |
 | `detail` | `string` | What is degraded, when something is. |
 | `signup` | `bool` | True when this daemon offers open sign-up: anyone may create an account at `POST /v1/api/account/signup` and log in at `POST /v1/api/account/login`. Absent when it does not, which is the default. The interface reads this to decide whether to show its sign-up and log-in screens. |
+| `accounts` | `bool` | True when this daemon has accounts, with or without open sign-up. Absent when it does not. The interface reads this to show its log-in screen. |
+| `sso` | `bool` | True when at least one organisation on this daemon logs in with single sign-on, so the log-in screen offers it. Absent otherwise. |
 
 ### ScorerInfo
 
@@ -1615,6 +1648,7 @@ An email address and a password, for sign-up and for log-in.
 | --- | --- | --- |
 | `email` | `string` <span class="req">required</span> | The account's email address. Compared without regard to case, and with surrounding spaces removed. |
 | `password` | `string` <span class="req">required</span> | At least 10 characters and at most 1024 bytes. Stored only as an argon2id hash. |
+| `totp_code` | `string` | The six-digit code from an authenticator app, or one of the recovery codes, when the account has two-step log-in on. Ignored by sign-up. |
 
 ### AccountSession
 
@@ -1622,10 +1656,11 @@ A logged-in session. Send `token` as `Authorization: Bearer <token>`.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `token` | `string` <span class="req">required</span> | The session token. It grants every scope on the account's own project and nothing else. It is shown once: the daemon keeps only its SHA-256 digest. |
+| `token` | `string` <span class="req">required</span> | The session token. It is shown once: the daemon keeps only its SHA-256 digest. |
 | `expires_at` | `timestamp` <span class="req">required</span> | When the session stops working. Log in again after this. |
 | `email` | `string` <span class="req">required</span> | The account's email address, as stored. |
-| `project` | `string` <span class="req">required</span> | The account's project. Every signal an account key writes lands here, and every read is limited to it. |
+| `project` | `string` | The project reads go to when they name none. The account's own project, or the first project of the organisation a single sign-on session is limited to. Absent when the session reaches no project yet. |
+| `org_id` | `string` | Set when the session came from an organisation's single sign-on. The session then reaches that organisation's projects only. |
 
 ### Account
 
@@ -1634,8 +1669,12 @@ The account a session belongs to.
 | Field | Type | Description |
 | --- | --- | --- |
 | `email` | `string` <span class="req">required</span> | The account's email address, as stored. |
-| `project` | `string` <span class="req">required</span> | The account's project, which is the only project its session and its keys reach. |
+| `project` | `string` | The project created with the account at sign-up. Absent for an account that was invited, or created by single sign-on or SCIM. |
 | `created_at` | `timestamp` <span class="req">required</span> | When the account was created. |
+| `email_verified` | `bool` <span class="req">required</span> | Whether the address has been confirmed by a link sent to it. |
+| `totp_enabled` | `bool` <span class="req">required</span> | Whether two-step log-in is on. |
+| `has_password` | `bool` <span class="req">required</span> | Whether the account can log in with a password. False for an account created by single sign-on or SCIM that has never set one. |
+| `managed_by` | `string` | The organisation that created this account through single sign-on or SCIM. That organisation can deactivate it. |
 
 ### AccountKey
 
@@ -1645,9 +1684,11 @@ One API key an account holds. The secret is not part of it: the daemon keeps onl
 | --- | --- | --- |
 | `id` | `string` <span class="req">required</span> | The key's identifier, for revoking it. Not a secret. |
 | `scope` | [`KeyScope`](#keyscope) <span class="req">required</span> | What the key may do. |
+| `project` | `string` <span class="req">required</span> | The one project the key reaches. |
 | `name` | `string` | The label given when the key was created. |
 | `prefix` | `string` <span class="req">required</span> | The first characters of the secret, so you can tell which key a process holds without the daemon storing the secret. |
 | `created_at` | `timestamp` <span class="req">required</span> | When the key was created. |
+| `created_by` | `string` | The email of the account that created the key. Set in an organisation's key list, so an admin can see whose key it is. |
 
 ### CreateAccountKeyRequest
 
@@ -1657,6 +1698,7 @@ A request for a new API key.
 | --- | --- | --- |
 | `scope` | [`KeyScope`](#keyscope) <span class="req">required</span> | What the key may do. One scope per key. |
 | `name` | `string` | A label for the key, such as the service that will hold it. At most 100 characters. |
+| `project` | `string` | The project the key reaches. Defaults to the account's own project. Your role on the project must allow the scope. |
 
 ### CreatedAccountKey
 
@@ -1666,6 +1708,391 @@ A new API key, with its secret. This is the only time the secret is shown.
 | --- | --- | --- |
 | `key` | [`AccountKey`](#accountkey) <span class="req">required</span> | The key as it is listed from now on. |
 | `secret` | `string` <span class="req">required</span> | The key itself. Send it as `Authorization: Bearer <secret>`. Copy it now: the daemon keeps only its SHA-256 digest and cannot show it again. |
+
+### AccountNotice
+
+A plain answer that changes nothing you can read back, such as "check your email".
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `message` | `string` <span class="req">required</span> | What happened, and what to do next. |
+
+### TokenRequest
+
+A one-time token from a link the daemon sent by email.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `token` | `string` <span class="req">required</span> | The token, as it appears in the link. |
+
+### PasswordForgotRequest
+
+A request for a password reset link.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `email` | `string` <span class="req">required</span> | The address to send the link to. The answer is the same whether or not an account uses it. |
+
+### PasswordResetRequest
+
+A new password, with the token from a reset link.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `token` | `string` <span class="req">required</span> | The token from the reset link. It works once, for one hour. |
+| `password` | `string` <span class="req">required</span> | The new password. At least 10 characters and at most 1024 bytes. |
+| `totp_code` | `string` | A code from the authenticator app, or a recovery code, when the account has two-step log-in on. A reset proves the address, not the second factor. |
+
+### PasswordChangeRequest
+
+A new password for the logged-in account.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `current_password` | `string` | The password in use now. Required when the account has one. |
+| `new_password` | `string` <span class="req">required</span> | The new password. At least 10 characters and at most 1024 bytes. |
+
+### EmailChangeRequest
+
+A new email address for the logged-in account.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `email` | `string` <span class="req">required</span> | The new address. A link is sent to it, and the change happens when the link is opened. |
+| `password` | `string` | The account's password. Required when the account has one. |
+
+### AccountDeleteRequest
+
+Confirmation for deleting the logged-in account.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `password` | `string` | The account's password. Required when the account has one. |
+| `totp_code` | `string` | A code from the authenticator app. Required when two-step log-in is on. |
+
+### AccountDeletion
+
+What deleting an account removed.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `orgs_deleted` | `u32` <span class="req">required</span> | Organisations that had this account as their only member, deleted with it. |
+| `projects_erased` | `string`[] <span class="req">required</span> | Projects whose stored signals and runs were erased, because their organisation was deleted. |
+
+### SessionInfo
+
+One live session of the logged-in account. The token is not part of it.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | `string` <span class="req">required</span> | The session's identifier, for ending it. Not a secret. |
+| `created_at` | `timestamp` <span class="req">required</span> | When the session started. |
+| `expires_at` | `timestamp` <span class="req">required</span> | When it stops working. |
+| `current` | `bool` <span class="req">required</span> | True for the session this request carries. |
+| `via` | `string` <span class="req">required</span> | How it started: `password`, `sso`, `invite`, `verify` or `reset`. |
+| `org_id` | `string` | The organisation a single sign-on session is limited to. |
+| `user_agent` | `string` | The browser or client that started it, as it described itself. |
+| `address` | `string` | The client address that started it. |
+
+### TotpSetup
+
+A new authenticator secret, not yet in use. Confirm it with a code to turn two-step log-in on.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `secret` | `string` <span class="req">required</span> | The secret in base32, for typing into an authenticator app. |
+| `otpauth_uri` | `string` <span class="req">required</span> | The same secret as an `otpauth://` URI. |
+| `qr_svg` | `string` <span class="req">required</span> | The URI as a QR code, an SVG document. |
+
+### TotpCodeRequest
+
+A code from an authenticator app.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `code` | `string` <span class="req">required</span> | The six-digit code. |
+
+### TotpEnabled
+
+Two-step log-in is on.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `recovery_codes` | `string`[] <span class="req">required</span> | Ten single-use codes that stand in for the authenticator app. They are shown once: the daemon keeps only their digests. |
+
+### TotpDisableRequest
+
+Confirmation for turning two-step log-in off.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `password` | `string` | The account's password. Required when the account has one. |
+| `code` | `string` <span class="req">required</span> | A code from the authenticator app, or a recovery code. |
+
+### Org
+
+An organisation: the owner of projects, members and single sign-on settings.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | `string` <span class="req">required</span> | The organisation's identifier. |
+| `name` | `string` <span class="req">required</span> | Its display name. |
+| `role` | [`OrgRole`](#orgrole) <span class="req">required</span> | Your role in it. |
+| `created_at` | `timestamp` <span class="req">required</span> | When it was created. |
+| `quota_per_minute` | `u32` | The most signals all its projects together may store per minute. Absent means no ceiling. |
+| `retention_days` | `u32` | How long its projects keep data, in days. Absent means forever. |
+| `members` | `u32` <span class="req">required</span> | How many members it has. |
+| `projects` | `u32` <span class="req">required</span> | How many projects it owns. |
+| `managed_by_config` | `bool` <span class="req">required</span> | True when the daemon's configuration file declares this organisation. Its single sign-on settings are then read from that file and cannot be changed here. |
+
+### CreateOrgRequest
+
+A new organisation.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | `string` <span class="req">required</span> | Its display name, at most 100 characters. |
+
+### UpdateOrgRequest
+
+Changes to an organisation. A field left out keeps its value.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | `string` | A new display name, at most 100 characters. |
+| `quota_per_minute` | `u32` | A ceiling on signals per minute across all the organisation's projects, at most the daemon's own ceiling. 0 restores the daemon's default. Owner only. |
+| `retention_days` | `u32` | How long to keep data, in days, at most the daemon's own window. 0 restores the daemon's default. Owner only. |
+
+### OrgDeletion
+
+What deleting an organisation removed.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `projects_erased` | `string`[] <span class="req">required</span> | Projects whose stored signals and runs were erased. |
+
+### ProjectRoleGrant
+
+A role on one project.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `project` | `string` <span class="req">required</span> | The project. |
+| `role` | [`ProjectRole`](#projectrole) <span class="req">required</span> | The role there. |
+
+### OrgMember
+
+One member of an organisation.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `account_id` | `string` <span class="req">required</span> | The member's account. |
+| `email` | `string` <span class="req">required</span> | The member's email address. |
+| `role` | [`OrgRole`](#orgrole) <span class="req">required</span> | The member's role. |
+| `via` | `string` <span class="req">required</span> | How they joined: `created`, `invite`, `sso`, `scim` or `config`. |
+| `joined_at` | `timestamp` <span class="req">required</span> | When they joined. |
+| `project_roles` | [`ProjectRoleGrant`](#projectrolegrant)[] <span class="req">required</span> | Roles on single projects that replace the organisation role there. |
+| `managed` | `bool` <span class="req">required</span> | True when this organisation created the account through single sign-on or SCIM. |
+| `totp_enabled` | `bool` <span class="req">required</span> | Whether the member has two-step log-in on. |
+
+### UpdateMemberRequest
+
+A new role for a member.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `role` | [`OrgRole`](#orgrole) <span class="req">required</span> | The role. Only an owner may grant or remove `owner`, and the last owner cannot be demoted. |
+
+### SetProjectRoleRequest
+
+A role for a member on one project.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `project` | `string` <span class="req">required</span> | A project the organisation owns. |
+| `role` | [`ProjectRole`](#projectrole) | The role there. Absent removes the project role, so the organisation role applies again. |
+
+### OrgInvite
+
+An invitation not yet accepted. The token is not part of it.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | `string` <span class="req">required</span> | The invitation's identifier, for revoking it. |
+| `email` | `string` <span class="req">required</span> | The address it was sent to. |
+| `role` | [`OrgRole`](#orgrole) <span class="req">required</span> | The role it grants. |
+| `project_roles` | [`ProjectRoleGrant`](#projectrolegrant)[] <span class="req">required</span> | Project roles it grants as well. |
+| `invited_by` | `string` | The email of the member who sent it. Absent when the configuration file or SCIM sent it. |
+| `created_at` | `timestamp` <span class="req">required</span> | When it was sent. |
+| `expires_at` | `timestamp` <span class="req">required</span> | When it stops working. |
+
+### CreateInviteRequest
+
+An invitation to an organisation.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `email` | `string` <span class="req">required</span> | Who to invite. The link is sent to this address. |
+| `role` | [`OrgRole`](#orgrole) <span class="req">required</span> | The role to grant. Only an owner may invite an owner. |
+| `project_roles` | [`ProjectRoleGrant`](#projectrolegrant)[] | Project roles to grant as well. |
+
+### InviteLookup
+
+What an invitation offers, read with its token before accepting it.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `org_name` | `string` <span class="req">required</span> | The organisation. |
+| `email` | `string` <span class="req">required</span> | The address it was sent to. Accepting it joins the account with this address. |
+| `role` | [`OrgRole`](#orgrole) <span class="req">required</span> | The role it grants. |
+| `account_exists` | `bool` <span class="req">required</span> | Whether an account with this address exists. If it does, log in as it to accept; if not, accepting creates it. |
+| `expires_at` | `timestamp` <span class="req">required</span> | When it stops working. |
+
+### InviteAcceptRequest
+
+Acceptance of an invitation.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `token` | `string` <span class="req">required</span> | The token from the invitation link. |
+| `password` | `string` | A password for the new account, when no account uses the invited address. Ignored otherwise. |
+
+### InviteAccepted
+
+An accepted invitation.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `org` | [`Org`](#org) <span class="req">required</span> | The organisation joined. |
+| `session` | [`AccountSession`](#accountsession) | A session for the account accepting created. Absent when an existing account accepted with its own session. |
+
+### OrgProject
+
+A project an organisation owns.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `project` | `string` <span class="req">required</span> | The project name. Random, so nobody can choose one that already holds somebody else's data. |
+| `label` | `string` | A display label. |
+| `created_at` | `timestamp` <span class="req">required</span> | When it was created or attached. |
+
+### CreateProjectRequest
+
+A new project in an organisation.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `label` | `string` | A display label, at most 100 characters. |
+
+### OrgUsage
+
+How much an organisation is using, against its ceilings. Counted since the daemon started.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `org_id` | `string` <span class="req">required</span> | The organisation. |
+| `quota_per_minute` | `u32` | Its ceiling on signals per minute, when it has one. |
+| `admitted_this_minute` | `u64` <span class="req">required</span> | Signals stored in the current one-minute window. |
+| `admitted_total` | `u64` <span class="req">required</span> | Signals stored since the daemon started. |
+| `refused_total` | `u64` <span class="req">required</span> | Signals refused for the ceiling since the daemon started. |
+| `retention_days` | `u32` | How long its projects keep data, in days. |
+| `members` | `u32` <span class="req">required</span> | Members. |
+| `projects` | `u32` <span class="req">required</span> | Projects. |
+| `keys` | `u32` <span class="req">required</span> | API keys on its projects. |
+| `since` | `timestamp` <span class="req">required</span> | When counting started. |
+
+### SsoConfig
+
+An organisation's single sign-on settings. The client secret is not part of it.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `provider` | [`SsoProvider`](#ssoprovider) <span class="req">required</span> | The kind of provider. |
+| `issuer` | `string` | The OpenID Connect issuer URL. Absent for GitHub. |
+| `client_id` | `string` <span class="req">required</span> | The client id registered with the provider. |
+| `has_client_secret` | `bool` <span class="req">required</span> | Whether a client secret is stored. |
+| `domains` | `string`[] <span class="req">required</span> | Email domains this organisation claims. Single sign-on creates accounts only for these domains, and "Log in with SSO" finds the organisation by them. |
+| `enforced` | `bool` <span class="req">required</span> | When true, members whose email is in a claimed domain cannot log in with a password. |
+| `default_role` | [`OrgRole`](#orgrole) <span class="req">required</span> | The role given to a member single sign-on creates, when no group maps to a role. Never `owner`. |
+| `groups_claim` | `string` | The ID token claim that lists the member's groups, mapped to roles by the group roles. |
+| `redirect_url` | `string` <span class="req">required</span> | The redirect URL to register with the provider. |
+| `managed_by_config` | `bool` <span class="req">required</span> | True when these settings come from the configuration file. |
+| `updated_at` | `timestamp` <span class="req">required</span> | When they were last changed. |
+
+### PutSsoConfigRequest
+
+New single sign-on settings for an organisation.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `provider` | [`SsoProvider`](#ssoprovider) <span class="req">required</span> | The kind of provider. |
+| `issuer` | `string` | The OpenID Connect issuer URL, such as `https://accounts.google.com`. Required for `oidc`. Must be `https`. |
+| `client_id` | `string` <span class="req">required</span> | The client id registered with the provider. |
+| `client_secret` | `string` | The client secret. Left out, the stored one is kept. |
+| `domains` | `string`[] <span class="req">required</span> | Email domains to claim. You can claim the domain of your own verified address. A domain belongs to one organisation. |
+| `enforced` | `bool` <span class="req">required</span> | Refuse password log-in for members in the claimed domains. Turning it on ends their password sessions. |
+| `default_role` | [`OrgRole`](#orgrole) <span class="req">required</span> | The role for a member single sign-on creates. `admin`, `member` or `viewer`. |
+| `groups_claim` | `string` | The ID token claim that lists groups, such as `groups`. |
+
+### GroupRole
+
+A group from the identity provider, and the role its members get.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `group` | `string` <span class="req">required</span> | The group name, as single sign-on or SCIM sends it. Compared without regard to case. |
+| `role` | [`OrgRole`](#orgrole) <span class="req">required</span> | The role. Never `owner`. |
+
+### ScimTokenInfo
+
+Whether an organisation has a SCIM token. The token is not part of it.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `configured` | `bool` <span class="req">required</span> | Whether a token exists. |
+| `prefix` | `string` | The first characters of the token. |
+| `created_at` | `timestamp` | When it was created. |
+| `base_url` | `string` <span class="req">required</span> | The SCIM base URL to give your identity provider. |
+
+### CreatedScimToken
+
+A new SCIM token. This is the only time it is shown, and it replaces any earlier token.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `token` | `string` <span class="req">required</span> | The bearer token for your identity provider. The daemon keeps only its SHA-256 digest. |
+| `prefix` | `string` <span class="req">required</span> | Its first characters. |
+| `created_at` | `timestamp` <span class="req">required</span> | When it was created. |
+| `base_url` | `string` <span class="req">required</span> | The SCIM base URL to give your identity provider. |
+
+### SsoStartRequest
+
+Where to start single sign-on. Give one of the two.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `email` | `string` | Your email address. Its domain finds the organisation. |
+| `org_id` | `string` | The organisation, when you know it. |
+
+### SsoStart
+
+Where to send the browser for single sign-on.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `authorize_url` | `string` <span class="req">required</span> | The provider's authorization URL, with state, nonce and the PKCE challenge in it. |
+| `binding` | `string` <span class="req">required</span> | A secret to keep in this browser and send back with the callback. It ties the callback to the browser that started it, so a link from somebody else cannot log you in as them. |
+| `org_name` | `string` <span class="req">required</span> | The organisation. |
+
+### SsoCallbackRequest
+
+What the provider sent back to the redirect URL.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `state` | `string` <span class="req">required</span> | The `state` parameter. |
+| `code` | `string` <span class="req">required</span> | The `code` parameter. |
+| `binding` | `string` <span class="req">required</span> | The binding from the start of the flow. |
 
 ### Span
 
