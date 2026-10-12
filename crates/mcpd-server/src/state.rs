@@ -99,9 +99,9 @@ pub struct ServerConfig {
     pub slos: Vec<crate::monitor::Slo>,
     /// How often the monitors are evaluated, in seconds.
     pub monitor_interval_seconds: u64,
-    /// Where to copy spans on to, when mcpd is one hop in a pipeline rather
-    /// than the destination.
-    pub forward: Option<crate::forward::Forwarder>,
+    /// Where to copy signals on to, when mcpd is one hop in a pipeline rather
+    /// than the destination, and where each destination spools.
+    pub forward: crate::forward::Settings,
     /// The model that grades runs, when judged scoring is turned on. `None`
     /// means judged scorers decline rather than run, which is the right default
     /// for a feature that spends money per run.
@@ -731,7 +731,7 @@ impl Default for ServerConfig {
             // Off. A daemon nobody has configured spawns no analysis timer,
             // takes no connection for it and writes none of its four tables.
             aspects: crate::aspects::AspectSettings::default(),
-            forward: None,
+            forward: crate::forward::Settings::default(),
             judge: None,
             projects: std::collections::BTreeMap::new(),
             trusted_identity: crate::identity::TrustedIdentity::default(),
@@ -988,6 +988,8 @@ pub struct AppState {
     /// `forward::MAX_IN_FLIGHT` for why it is bounded and what happens when
     /// it is full.
     pub forward_slots: Arc<tokio::sync::Semaphore>,
+    /// Every forwarding destination, with its spool and health.
+    pub exporters: Arc<crate::forward::Exporters>,
     /// The durable run store, when this daemon serves runs. `None` answers
     /// every run endpoint with a 503 that says so, which is the state a test
     /// router is in until it is given one.
@@ -1071,6 +1073,7 @@ impl AppState {
         let quotas = config.project_quotas();
         let config_monitors = config.monitors.clone();
         let config_slos = config.slos.clone();
+        let exporters = Arc::new(crate::forward::Exporters::open(&config.forward));
         Self {
             store,
             config,
@@ -1093,6 +1096,7 @@ impl AppState {
             tasks: tokio_util::task::TaskTracker::new(),
             shutdown: tokio_util::sync::CancellationToken::new(),
             forward_slots: Arc::new(tokio::sync::Semaphore::new(crate::forward::MAX_IN_FLIGHT)),
+            exporters,
             runs: None,
             outbox_gate: tokio::sync::Mutex::new(()),
             accounts: None,

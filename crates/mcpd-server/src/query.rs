@@ -1102,7 +1102,7 @@ pub async fn self_metrics(
 ) -> ([(&'static str, &'static str); 1], String) {
     (
         [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
-        state.metrics.render(state.uptime_seconds()),
+        state.metrics.render(state.uptime_seconds()) + &state.exporters.render(),
     )
 }
 

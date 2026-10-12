@@ -30,7 +30,9 @@ pub mod layers;
 pub mod monitor;
 pub mod pipeline;
 pub mod query;
+pub mod relay;
 pub mod runs;
+pub mod spool;
 pub mod state;
 pub mod ui;
 
