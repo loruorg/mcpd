@@ -24,9 +24,10 @@
 //! * The judge is checked as configuration only. Proving a judge answers means
 //!   spending money on a completion, which a diagnostic command must not do
 //!   without being asked.
-//! * The forward endpoint is checked by POSTing an OTLP batch with no spans in
-//!   it. That proves the URL, the network path and the headers, and it writes
-//!   nothing downstream. It does not prove a batch with spans in it is accepted.
+//! * Each forwarding destination is checked by sending it an export with
+//!   nothing in it. That proves the URL, the network path and the credential,
+//!   and it writes nothing downstream. It does not prove a batch with spans in
+//!   it is accepted. What the destination's spool holds is read from disk.
 //! * Free disk space is not checked at all. There is no way to read it from the
 //!   standard library, and this crate does not carry a dependency that can. The
 //!   honest stand-in is under `retention`, which reports how far back each
@@ -148,8 +149,8 @@ const GROUPS: [&str; 12] = [
 /// What `mcpd doctor` checks, and what it is allowed to do while checking.
 #[derive(Debug, Clone, clap::Args)]
 pub struct Args {
-    /// Contact no service other than the store. The forward endpoint is then
-    /// reported as skipped rather than checked.
+    /// Contact no service other than the store. The forwarding destinations
+    /// are then reported as skipped rather than checked.
     ///
     /// The store is still read, and still written unless --read-only is given
     /// too. A remote store is reached over the network like anything else, and
@@ -285,7 +286,7 @@ pub async fn run(
     }
     findings.extend(check_identity(config, listen));
     findings.extend(check_limits(config));
-    findings.extend(check_forwarding(config, probe_forward(config, args).await));
+    findings.extend(check_forwarding(config, &probe_forward(config, args).await));
     findings.extend(check_judge(config));
 
     match &projects {
@@ -2020,103 +2021,205 @@ fn check_retention(
 
 // --------------------------------------------------------------- forwarding --
 
-/// What a probe of the forward endpoint found.
+/// What a probe of one forwarding destination found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Probe {
     /// No probe was attempted, for the reason given.
     Skipped(String),
     /// The endpoint answered with this status.
     Answered(u16),
-    /// The request never completed.
+    /// The request never completed, or was refused with this reason.
     Failed(String),
 }
 
-/// POST an OTLP batch with no spans in it, to prove the URL, the route and the
-/// headers without writing anything downstream.
-async fn probe_forward(config: &ServerConfig, args: &Args) -> Option<Probe> {
-    let f = config.forward.as_ref()?;
-    if !f.enabled {
-        return Some(Probe::Skipped("forwarding is turned off".to_owned()));
+/// Probe every enabled destination, in order, with an export that carries
+/// nothing: it proves the URL, the route and the credential without writing
+/// anything downstream.
+async fn probe_forward(config: &ServerConfig, args: &Args) -> Vec<Probe> {
+    let mut out = Vec::new();
+    for d in config.forward.enabled() {
+        out.push(probe_one(d, args).await);
     }
+    out
+}
+
+async fn probe_one(d: &mcpd_server::forward::Destination, args: &Args) -> Probe {
+    use mcpd_server::forward::{deliver, Protocol};
     if args.offline {
-        return Some(Probe::Skipped("--offline".to_owned()));
+        return Probe::Skipped("--offline".to_owned());
     }
-    if !f.endpoint.starts_with("http://") && !f.endpoint.starts_with("https://") {
-        return Some(Probe::Failed("the endpoint has no http:// or https:// scheme".to_owned()));
+    if let Some(e) = &d.endpoint {
+        if !e.starts_with("http://") && !e.starts_with("https://") && !e.starts_with("${") {
+            return Probe::Failed("the endpoint has no http:// or https:// scheme".to_owned());
+        }
     }
-
-    let client =
-        match reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build() {
-            Ok(c) => c,
-            Err(e) => return Some(Probe::Failed(e.to_string())),
-        };
-    let mut req = client.post(f.traces_url()).json(&serde_json::json!({ "resourceSpans": [] }));
-    for (k, v) in &f.headers {
-        req = req.header(k, v);
-    }
-    match req.send().await {
-        Ok(r) => Some(Probe::Answered(r.status().as_u16())),
-        // Without the URL. The finding prints the endpoint through
-        // `without_credentials`, and the client's error repeats it whole.
-        Err(e) => Some(Probe::Failed(mcpd_server::outbound_error(e))),
-    }
-}
-
-fn check_forwarding(config: &ServerConfig, probe: Option<Probe>) -> Vec<Finding> {
-    let Some(f) = config.forward.as_ref() else {
-        return vec![Finding::skipped("forwarding", ABSENT_FORWARD)];
+    // The message names the field and never its value.
+    let r = match d.resolve() {
+        Ok(r) => r,
+        Err(e) => return Probe::Failed(e),
     };
-    // The endpoint carries a credential when one was written into the URL, and
-    // this string is printed in every finding below.
-    let url = without_credentials(&f.traces_url());
-
-    if !f.enabled {
-        return vec![Finding::warn(
-            "forwarding",
-            format!(
-                "{url} is configured and `forward.enabled` is false, so no span is copied \
-                 on. Set it to true, or remove the `forward` block."
-            ),
-        )];
-    }
-
-    match probe {
-        Some(Probe::Answered(s)) if (200..300).contains(&s) => vec![Finding::ok(
-            "forwarding",
-            format!("{url} answered {s} to an OTLP batch with no spans in it"),
-        )],
-        Some(Probe::Answered(s)) if s == 401 || s == 403 => vec![Finding::fault(
-            "forwarding",
-            format!(
-                "{url} answered {s}. Every forwarded batch is being refused and dropped; \
-                 mcpd keeps its own copy and logs the failure. Check the credentials in \
-                 `forward.headers` in --config-file."
-            ),
-        )],
-        Some(Probe::Answered(s)) => vec![Finding::fault(
-            "forwarding",
-            format!(
-                "{url} answered {s}. Every forwarded batch is being dropped. Check \
-                 `forward.endpoint` in --config-file: it is the base URL, and /v1/traces \
-                 is appended to it."
-            ),
-        )],
-        Some(Probe::Failed(e)) => vec![Finding::fault(
-            "forwarding",
-            format!(
-                "{url} could not be reached: {e}. Every forwarded batch is being dropped. \
-                 Check `forward.endpoint` in --config-file."
-            ),
-        )],
-        Some(Probe::Skipped(why)) => vec![Finding::skipped(
-            "forwarding",
-            format!("{url} is configured and was not contacted ({why})"),
-        )],
-        None => vec![Finding::skipped("forwarding", ABSENT_FORWARD)],
+    let url = r.url(mcpd_server::forward::Signal::Traces);
+    match r.protocol {
+        Protocol::Api => Probe::Skipped(
+            "Helicone's logging API has no request that writes nothing, so it is checked by \
+             the first model call it is sent"
+                .to_owned(),
+        ),
+        Protocol::Grpc => {
+            let client = match reqwest::Client::builder()
+                .http2_prior_knowledge()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => return Probe::Failed(e.to_string()),
+            };
+            match deliver::post_grpc(&client, &url, &r.headers, &[]).await {
+                deliver::Outcome::Delivered => Probe::Answered(200),
+                deliver::Outcome::Retry { why, .. } | deliver::Outcome::Refused { why } => {
+                    Probe::Failed(why)
+                }
+            }
+        }
+        Protocol::Json | Protocol::Protobuf => {
+            let client = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => return Probe::Failed(e.to_string()),
+            };
+            let (ct, body): (&str, Vec<u8>) = if r.protocol == Protocol::Json {
+                ("application/json", br#"{"resourceSpans":[]}"#.to_vec())
+            } else {
+                // An empty ExportTraceServiceRequest is zero bytes of protobuf.
+                ("application/x-protobuf", Vec::new())
+            };
+            let mut req = client.post(url).header("content-type", ct).body(body);
+            for (k, v) in &r.headers {
+                req = req.header(k, v);
+            }
+            match req.send().await {
+                Ok(res) => Probe::Answered(res.status().as_u16()),
+                // Without the URL. The finding prints the endpoint through
+                // `without_credentials`, and the client's error repeats it whole.
+                Err(e) => Probe::Failed(mcpd_server::outbound_error(e)),
+            }
+        }
     }
 }
 
-/// What an absent `forward` block means. Named because two arms report it.
+/// What a destination's spool directory holds, as a clause for its finding,
+/// and whether it deserves a warning of its own.
+fn spool_note(config: &ServerConfig, name: &str) -> (String, Option<String>) {
+    let Some(root) = &config.forward.spool_dir else {
+        return (" Its spool is held in memory.".to_owned(), None);
+    };
+    let dir = root.join(format!("forward-{name}"));
+    match mcpd_server::spool::Spool::inspect(&dir) {
+        Ok(c) => {
+            let mut note = if c.entries == 0 {
+                format!(" Its spool at {} is empty.", dir.display())
+            } else {
+                format!(
+                    " {} batch(es), {} bytes, wait in its spool at {}, the oldest {} old.",
+                    c.entries,
+                    c.bytes,
+                    dir.display(),
+                    human(Duration::seconds(
+                        i64::try_from(c.oldest_age_seconds.unwrap_or(0)).unwrap_or(i64::MAX)
+                    ))
+                )
+            };
+            let mut warn = None;
+            if c.dead > 0 {
+                note.push_str(&format!(" {} refused batch(es) are kept in its dead/.", c.dead));
+                warn = Some(format!(
+                    "{name}: {} batch(es) were refused for good or expired and are kept in {}. \
+                     Read one to see what the destination objected to; nothing retries them.",
+                    c.dead,
+                    dir.join("dead").display()
+                ));
+            }
+            if c.oldest_age_seconds.unwrap_or(0) > 3600 {
+                warn = Some(format!(
+                    "{name}: the oldest batch in its spool has waited {}. The destination is \
+                     not accepting what it is sent; a batch older than a day is given up on.",
+                    human(Duration::seconds(
+                        i64::try_from(c.oldest_age_seconds.unwrap_or(0)).unwrap_or(i64::MAX)
+                    ))
+                ));
+            }
+            (note, warn)
+        }
+        Err(e) => (format!(" Its spool at {} could not be read: {e}.", dir.display()), None),
+    }
+}
+
+fn check_forwarding(config: &ServerConfig, probes: &[Probe]) -> Vec<Finding> {
+    if config.forward.destinations.is_empty() {
+        return vec![Finding::skipped("forwarding", ABSENT_FORWARD)];
+    }
+    let mut out = Vec::new();
+    for d in config.forward.destinations.iter().filter(|d| !d.enabled) {
+        out.push(Finding::warn(
+            "forwarding",
+            format!(
+                "{} ({}) is configured and `enabled` is false, so nothing is copied to it. Set \
+                 it to true, or remove it from the `forward` block.",
+                d.name(),
+                without_credentials(&d.traces_url())
+            ),
+        ));
+    }
+    for (d, probe) in config.forward.enabled().zip(probes) {
+        let name = d.name();
+        // The endpoint carries a credential when one was written into the URL,
+        // and this string is printed in every finding below.
+        let url = without_credentials(&d.traces_url());
+        let who = format!("{name} ({}, {url})", d.vendor.as_str());
+        let (note, warn) = spool_note(config, &name);
+        out.push(match probe {
+            Probe::Answered(s) if (200..300).contains(s) => Finding::ok(
+                "forwarding",
+                format!("{who} answered {s} to an export with nothing in it.{note}"),
+            ),
+            Probe::Answered(s) if *s == 401 || *s == 403 => Finding::fault(
+                "forwarding",
+                format!(
+                    "{who} answered {s}. Every batch is being refused; mcpd keeps its own copy, \
+                     holds the batches in the spool and retries them for up to a day. Check this \
+                     destination's credential (`api_key`, `token` or `headers`) in \
+                     --config-file.{note}"
+                ),
+            ),
+            Probe::Answered(s) => Finding::fault(
+                "forwarding",
+                format!(
+                    "{who} answered {s}. Check this destination's `endpoint` in --config-file: \
+                     it is the base URL, and the signal path is appended to it.{note}"
+                ),
+            ),
+            Probe::Failed(e) => Finding::fault(
+                "forwarding",
+                format!(
+                    "{who} could not be reached: {e}. Batches wait in the spool and are retried \
+                     for up to a day. Check this destination in --config-file.{note}"
+                ),
+            ),
+            Probe::Skipped(why) => Finding::skipped(
+                "forwarding",
+                format!("{who} is configured and was not contacted ({why}).{note}"),
+            ),
+        });
+        if let Some(w) = warn {
+            out.push(Finding::warn("forwarding", w));
+        }
+    }
+    out
+}
+
+/// What an absent `forward` block means.
 const ABSENT_FORWARD: &str = "there is no `forward` block in the configuration, so nothing is \
                               copied on and no endpoint was contacted.";
 
@@ -2818,7 +2921,7 @@ fn human(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcpd_server::forward::Forwarder;
+    use mcpd_server::forward::{Destination, Vendor};
     use mcpd_server::judge::JudgeConfig;
     use mcpd_server::monitor::{Compare, Monitor, Slo};
     use mcpd_server::state::ProjectConfig;
@@ -3605,7 +3708,7 @@ mod tests {
     fn forwarding_that_is_not_configured_is_skipped_rather_than_ok() {
         // Absent is not healthy. A --config-file that names the wrong path
         // makes every one of these blocks absent at once.
-        let f = check_forwarding(&config(), None);
+        let f = check_forwarding(&config(), &[]);
         assert_eq!(f[0].level, Level::Skipped, "{f:?}");
         assert!(says(&f, Level::Skipped, &["no `forward` block"]), "{f:?}");
     }
@@ -3613,26 +3716,22 @@ mod tests {
     #[test]
     fn a_forwarder_configured_and_disabled_warns() {
         let mut c = config();
-        c.forward = Some(Forwarder {
-            endpoint: "https://otlp.example.invalid".to_owned(),
-            headers: vec![],
-            enabled: false,
-            batch_size: 256,
-        });
-        let f = check_forwarding(&c, Some(Probe::Skipped("forwarding is turned off".to_owned())));
-        assert!(says(&f, Level::Warn, &["enabled` is false", "no span is copied on"]), "{f:?}");
+        c.forward.destinations = vec![{
+            let mut d =
+                Destination::new(Vendor::Otlp, Some("https://otlp.example.invalid".to_owned()));
+            d.enabled = false;
+            d
+        }];
+        let f = check_forwarding(&c, &[]);
+        assert!(says(&f, Level::Warn, &["enabled` is false", "nothing is copied"]), "{f:?}");
     }
 
     #[test]
     fn a_forward_endpoint_that_answers_is_ok_and_names_the_url_it_posts_to() {
         let mut c = config();
-        c.forward = Some(Forwarder {
-            endpoint: "https://otlp.example.invalid".to_owned(),
-            headers: vec![],
-            enabled: true,
-            batch_size: 256,
-        });
-        let f = check_forwarding(&c, Some(Probe::Answered(200)));
+        c.forward.destinations =
+            vec![Destination::new(Vendor::Otlp, Some("https://otlp.example.invalid".to_owned()))];
+        let f = check_forwarding(&c, &[Probe::Answered(200)]);
         assert!(
             says(&f, Level::Ok, &["https://otlp.example.invalid/v1/traces", "answered 200"]),
             "{f:?}"
@@ -3642,39 +3741,27 @@ mod tests {
     #[test]
     fn a_refused_forward_batch_is_a_fault_that_names_the_headers() {
         let mut c = config();
-        c.forward = Some(Forwarder {
-            endpoint: "https://otlp.example.invalid".to_owned(),
-            headers: vec![],
-            enabled: true,
-            batch_size: 256,
-        });
-        let f = check_forwarding(&c, Some(Probe::Answered(401)));
-        assert!(says(&f, Level::Fault, &["answered 401", "forward.headers"]), "{f:?}");
+        c.forward.destinations =
+            vec![Destination::new(Vendor::Otlp, Some("https://otlp.example.invalid".to_owned()))];
+        let f = check_forwarding(&c, &[Probe::Answered(401)]);
+        assert!(says(&f, Level::Fault, &["answered 401", "`headers`"]), "{f:?}");
     }
 
     #[test]
     fn an_unreachable_forward_endpoint_is_a_fault() {
         let mut c = config();
-        c.forward = Some(Forwarder {
-            endpoint: "https://otlp.example.invalid".to_owned(),
-            headers: vec![],
-            enabled: true,
-            batch_size: 256,
-        });
-        let f = check_forwarding(&c, Some(Probe::Failed("dns error".to_owned())));
+        c.forward.destinations =
+            vec![Destination::new(Vendor::Otlp, Some("https://otlp.example.invalid".to_owned()))];
+        let f = check_forwarding(&c, &[Probe::Failed("dns error".to_owned())]);
         assert!(says(&f, Level::Fault, &["could not be reached", "dns error"]), "{f:?}");
     }
 
     #[test]
     fn a_forward_endpoint_that_was_not_contacted_is_skipped_and_never_ok() {
         let mut c = config();
-        c.forward = Some(Forwarder {
-            endpoint: "https://otlp.example.invalid".to_owned(),
-            headers: vec![],
-            enabled: true,
-            batch_size: 256,
-        });
-        let f = check_forwarding(&c, Some(Probe::Skipped("--offline".to_owned())));
+        c.forward.destinations =
+            vec![Destination::new(Vendor::Otlp, Some("https://otlp.example.invalid".to_owned()))];
+        let f = check_forwarding(&c, &[Probe::Skipped("--offline".to_owned())]);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].level, Level::Skipped);
     }
@@ -3689,16 +3776,14 @@ mod tests {
             .expect("a free port")
             .port();
         let mut c = config();
-        c.forward = Some(Forwarder {
-            endpoint: format!("http://127.0.0.1:{port}/?api_key=s3cr3t-token"),
-            headers: vec![],
-            enabled: true,
-            batch_size: 256,
-        });
+        c.forward.destinations = vec![Destination::new(
+            Vendor::Otlp,
+            Some(format!("http://127.0.0.1:{port}/?api_key=s3cr3t-token")),
+        )];
         let args = Args { offline: false, read_only: true, window_days: 7 };
         let probe = probe_forward(&c, &args).await;
-        assert!(matches!(probe, Some(Probe::Failed(_))), "{probe:?}");
-        let f = check_forwarding(&c, probe);
+        assert!(matches!(probe.as_slice(), [Probe::Failed(_)]), "{probe:?}");
+        let f = check_forwarding(&c, &probe);
         assert!(says(&f, Level::Fault, &["could not be reached"]), "{f:?}");
         let all: String = f.iter().map(|x| x.message.clone()).collect();
         assert!(!all.contains("s3cr3t-token"), "the token was printed: {all}");
@@ -3707,17 +3792,13 @@ mod tests {
     #[tokio::test]
     async fn an_endpoint_with_no_scheme_never_reaches_the_network() {
         let mut c = config();
-        c.forward = Some(Forwarder {
-            endpoint: "otlp.example.invalid:4318".to_owned(),
-            headers: vec![],
-            enabled: true,
-            batch_size: 256,
-        });
+        c.forward.destinations =
+            vec![Destination::new(Vendor::Otlp, Some("otlp.example.invalid:4318".to_owned()))];
         let args = Args { offline: false, read_only: true, window_days: 7 };
         let probe = probe_forward(&c, &args).await;
         assert_eq!(
             probe,
-            Some(Probe::Failed("the endpoint has no http:// or https:// scheme".to_owned()))
+            vec![Probe::Failed("the endpoint has no http:// or https:// scheme".to_owned())]
         );
     }
 
@@ -4212,12 +4293,10 @@ mod tests {
     #[test]
     fn a_credential_written_into_an_endpoint_is_never_printed() {
         let mut c = config();
-        c.forward = Some(Forwarder {
-            endpoint: "https://otel:s3kr1t@otlp.example.invalid".to_owned(),
-            headers: vec![],
-            enabled: true,
-            batch_size: 256,
-        });
+        c.forward.destinations = vec![Destination::new(
+            Vendor::Otlp,
+            Some("https://otel:s3kr1t@otlp.example.invalid".to_owned()),
+        )];
         c.judge = Some(JudgeConfig {
             endpoint: "https://key:s3kr1t@api.example.invalid/v1".to_owned(),
             model: "a-model".to_owned(),
@@ -4227,7 +4306,7 @@ mod tests {
         });
 
         let mut all = String::new();
-        for f in check_forwarding(&c, Some(Probe::Answered(401))).iter().chain(&check_judge(&c)) {
+        for f in check_forwarding(&c, &[Probe::Answered(401)]).iter().chain(&check_judge(&c)) {
             all.push_str(&f.message);
         }
         assert!(!all.contains("s3kr1t"), "the credential was printed: {all}");
@@ -4796,12 +4875,12 @@ mod tests {
         let mut c = config();
         c.judge = Some(judge_with(&[]));
         c.read_keys = keys(&["short", " spaced-key-that-is-long-enough"]);
-        c.forward = Some(Forwarder {
-            endpoint: "https://otlp.example.invalid".to_owned(),
-            headers: vec![],
-            enabled: false,
-            batch_size: 256,
-        });
+        c.forward.destinations = vec![{
+            let mut d =
+                Destination::new(Vendor::Otlp, Some("https://otlp.example.invalid".to_owned()));
+            d.enabled = false;
+            d
+        }];
         c.monitors = vec![monitor("quality")];
         c.slos = vec![slo("availability")];
         c.retention_days = Some(30);

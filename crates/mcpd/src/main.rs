@@ -197,8 +197,8 @@ struct Cli {
     postgres_url: Option<String>,
 
     /// A JSON file holding the settings that are too structured for a flag:
-    /// `monitors`, `slos`, `monitor_interval_seconds`, `forward` (the endpoint
-    /// and its headers), `judge`, per-project keys, retention, sampling and
+    /// `monitors`, `slos`, `monitor_interval_seconds`, `forward` (one
+    /// destination or a list of them), `judge`, per-project keys, retention, sampling and
     /// ceilings under `projects`, the run store's timings under `runs`,
     /// `max_body_bytes`, `max_batch_signals`, `derived_metrics` and `aspects`.
     ///
@@ -225,6 +225,43 @@ struct Cli {
         global = true
     )]
     forward_headers: Vec<String>,
+
+    /// The vendor preset for that destination: otlp (the default), otlp_grpc,
+    /// langfuse, langsmith, braintrust, arize, phoenix, datadog, honeycomb,
+    /// newrelic, grafana, sentry, weave, laminar, helicone, opik, elastic or
+    /// dynatrace. It sets the signal path, the encoding and the attribute
+    /// conventions; the credential goes in --forward-header. With a vendor that
+    /// has a default endpoint, --forward-endpoint may be left out. Several
+    /// destinations at once go in the config file's `forward` block.
+    #[arg(long, env = "MCPD_FORWARD_VENDOR", global = true)]
+    forward_vendor: Option<String>,
+
+    /// How that destination is sent: json, protobuf or grpc. Defaults to the
+    /// vendor's.
+    #[arg(long, env = "MCPD_FORWARD_PROTOCOL", global = true)]
+    forward_protocol: Option<String>,
+
+    /// Where forwarding and `mcpd relay` keep their spools, one directory per
+    /// destination. Defaults to a `.spool` directory beside --data, or memory
+    /// when --data is `:memory:`. `memory` keeps them in memory.
+    #[arg(long, env = "MCPD_SPOOL_DIR", global = true)]
+    spool_dir: Option<String>,
+
+    /// The most one spool may hold, in bytes. Default 268435456 (256 MiB) for
+    /// each forwarding destination and 1073741824 (1 GiB) for `mcpd relay`.
+    #[arg(long, env = "MCPD_SPOOL_MAX_BYTES", global = true)]
+    spool_max_bytes: Option<u64>,
+
+    /// An upstream daemon `mcpd relay` ships to. Repeat in order of
+    /// preference: the first takes every request while it answers, the next
+    /// when it does not.
+    #[arg(long = "upstream", env = "MCPD_UPSTREAMS", value_delimiter = ',', global = true)]
+    upstreams: Vec<String>,
+
+    /// The key `mcpd relay` presents to its upstreams. Unset, each sender's
+    /// own key is passed on with its request.
+    #[arg(long, env = "MCPD_UPSTREAM_KEY", global = true)]
+    upstream_key: Option<String>,
 
     /// A header your ingress sets to name the person behind a request. Its
     /// value is recorded as the audit log's subject. Unset means no subject is
@@ -288,9 +325,11 @@ struct FileConfig {
     /// How often to evaluate them, in seconds.
     #[serde(default)]
     monitor_interval_seconds: Option<u64>,
-    /// Where to copy spans on to.
+    /// Where to copy signals on to: one destination as an object, or several
+    /// as an array. Read by `forwarding::settings`, which names the entry and
+    /// the field when one is wrong.
     #[serde(default)]
-    forward: Option<mcpd_server::forward::Forwarder>,
+    forward: Option<serde_json::Value>,
     /// The model that grades runs, and what it grades against.
     #[serde(default)]
     judge: Option<mcpd_server::judge::JudgeConfig>,
@@ -557,6 +596,9 @@ enum Command {
     /// Check this deployment and report what is misconfigured. Exits 2 on a
     /// fault, so it can gate a deploy.
     Doctor(doctor::Args),
+    /// Run as an edge collector: accept every ingest door, spool each request
+    /// to disk, and ship it to the daemons --upstream names, in order.
+    Relay,
 }
 
 #[tokio::main]
@@ -630,19 +672,22 @@ async fn main() -> Result<()> {
 
     // A flag beats the file, so a deployment can point one instance somewhere
     // else without editing a shared ConfigMap.
-    let forward = match &cli.forward_endpoint {
-        Some(endpoint) => Some(mcpd_server::forward::Forwarder {
-            endpoint: endpoint.clone(),
+    let forward = forwarding::settings(
+        &forwarding::Flags {
+            endpoint: cli.forward_endpoint.as_deref(),
             headers: cli
                 .forward_headers
                 .iter()
                 .map(|h| forward_header(h))
                 .collect::<Result<_>>()?,
-            enabled: true,
-            batch_size: 256,
-        }),
-        None => file.forward.clone(),
-    };
+            vendor: cli.forward_vendor.as_deref(),
+            protocol: cli.forward_protocol.as_deref(),
+            spool_dir: cli.spool_dir.as_deref(),
+            spool_max_bytes: cli.spool_max_bytes,
+            data: &cli.data,
+        },
+        file.forward.as_ref(),
+    )?;
 
     // Parsed before anything starts. A range mcpd cannot read is a trust list
     // nobody knows the reach of, and carrying on would leave an operator unable
@@ -787,6 +832,18 @@ async fn main() -> Result<()> {
             println!("{line}");
         }
         return Ok(());
+    }
+
+    // A relay opens no store: what it holds is in its spool.
+    if matches!(cli.command, Some(Command::Relay)) {
+        return forwarding::run_relay(
+            &config,
+            &cli.listen,
+            &cli.upstreams,
+            cli.upstream_key.as_deref(),
+            cli.spool_max_bytes,
+        )
+        .await;
     }
 
     // Naming two backends is a configuration mistake, not a preference, and
@@ -950,6 +1007,9 @@ async fn main() -> Result<()> {
     // anything unless the config file switched it on, so this costs nothing by
     // default.
     mcpd_server::aspects::spawn(Arc::clone(&state));
+    // Forwarding's workers, now rather than at the first ingest, so a backlog a
+    // previous process left in the spools is sent without waiting for traffic.
+    mcpd_server::forward::spawn(&state);
 
     if matches!(cli.command, Some(Command::Demo)) {
         let n = demo::seed(
@@ -1538,28 +1598,15 @@ fn config_lines(cli: &Cli, config: &ServerConfig, redact_keys: &[String]) -> Vec
             },
         ),
     );
-    // Header names only. A forward header is how the destination
-    // authenticates, so its value is a credential.
+    row("forwarding", forwarding::config_line(config));
     row(
-        "forwarding",
-        match &config.forward {
-            None => "off".to_owned(),
-            Some(f) if !f.enabled => "off: the forward block sets enabled to false".to_owned(),
-            Some(f) => {
-                let mut line = format!(
-                    "{} ({} spans per request)",
-                    doctor::without_credentials(&f.traces_url()),
-                    f.batch_size
-                );
-                if !f.headers.is_empty() {
-                    line.push_str(&format!(
-                        ", headers {}",
-                        f.headers.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ")
-                    ));
-                }
-                line
-            }
-        },
+        "relay",
+        forwarding::relay_line(
+            &cli.upstreams,
+            cli.upstream_key.as_deref(),
+            config.forward.spool_dir.as_deref(),
+            cli.spool_max_bytes,
+        ),
     );
     out
 }
@@ -1626,6 +1673,7 @@ async fn shutdown_signal() {
 
 mod demo;
 mod doctor;
+mod forwarding;
 mod mcp;
 
 #[cfg(test)]
