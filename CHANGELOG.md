@@ -237,6 +237,26 @@ rather than every commit.
 
 ### Added
 
+- **OTLP over gRPC, on the same port** (wire contract). The trace, logs and
+  metrics collector services are served beside the HTTP doors, so an
+  OpenTelemetry exporter set to `grpc` needs only the daemon's address. The
+  port takes cleartext HTTP/2 beside HTTP/1.1. The key goes in the call's
+  metadata, gzip is read, and every call takes the same road as the matching
+  HTTP door: key check, an account key's project, ceilings, sampling,
+  redaction and resend recognition. Refusals end with the gRPC status an
+  exporter acts on.
+- **Protobuf on `/v1/logs` and `/v1/metrics`.** All three OTLP/HTTP doors now
+  take protobuf as well as JSON, so an unmodified OpenTelemetry SDK sends every
+  signal with no configuration. A protobuf export is answered in protobuf, and
+  `partialSuccess` carries the reason when something was refused.
+- **Zipkin and Jaeger ingest** (wire contract). `POST /api/v2/spans` takes
+  Zipkin v2 spans in JSON or proto3; `POST /api/traces` takes a Jaeger batch in
+  Thrift binary; `jaeger.api_v2.CollectorService/PostSpans` takes the same over
+  gRPC. Services, tags, annotations and logs, span kinds, errors and
+  references map onto mcpd's model, and the semantic conventions in tags are
+  read as on OTLP. A Jaeger reference that is not the parent becomes a span
+  link, so links are kept from every door. A Zipkin or Jaeger reporter needs
+  only its endpoint pointed at the daemon.
 - **Open sign-up, with `--signup`** (wire contract). Anyone may create an
   account with an email and a password. Each account owns one new project and
   mints its own API keys for it, one scope each; nothing it holds reaches

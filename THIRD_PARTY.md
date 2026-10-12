@@ -40,7 +40,7 @@ obligations of both licences do not extend to mcpd's release artefacts.
 That is the project's reading, recorded here so the question has an answer
 on file; it is not legal advice.
 
-## Rust crates (336 crates, 27 licence expressions)
+## Rust crates (339 crates, 27 licence expressions)
 
 Reachable from a workspace member through a normal or build dependency,
 with every Cargo feature on, on every target. A crate that is only used on
@@ -79,7 +79,7 @@ one platform is still listed.
 - rustls 0.23.45 (https://github.com/rustls/rustls)
 - rustls-native-certs 0.8.4 (https://github.com/rustls/rustls-native-certs)
 
-### Apache-2.0 OR MIT (25)
+### Apache-2.0 OR MIT (27)
 
 - atomic-waker 1.1.2 (https://github.com/smol-rs/atomic-waker)
 - autocfg 1.5.1 (https://github.com/cuviper/autocfg)
@@ -94,7 +94,9 @@ one platform is still listed.
 - der 0.7.10 (https://github.com/RustCrypto/formats/tree/master/der)
 - der_derive 0.7.3 (https://github.com/RustCrypto/formats/tree/master/der/derive)
 - equivalent 1.0.2 (https://github.com/indexmap-rs/equivalent)
+- fnv 1.0.7 (https://github.com/servo/rust-fnv)
 - idna_adapter 1.2.2 (https://github.com/hsivonen/idna_adapter)
+- indexmap 2.14.2 (https://github.com/indexmap-rs/indexmap)
 - pin-project-lite 0.2.17 (https://github.com/taiki-e/pin-project-lite)
 - rustc-hash 2.1.3 (https://github.com/rust-lang/rustc-hash)
 - simd_cesu8 1.2.0 (https://github.com/seancroach/simd_cesu8)
@@ -145,7 +147,7 @@ one platform is still listed.
 
 - aws-lc-sys 0.45.0 (https://github.com/aws/aws-lc-rs)
 
-### MIT (64)
+### MIT (65)
 
 - axum 0.8.9 (https://github.com/tokio-rs/axum)
 - axum-core 0.5.6 (https://github.com/tokio-rs/axum)
@@ -159,6 +161,7 @@ one platform is still listed.
 - fluent-uri 0.4.1 (https://github.com/yescallop/fluent-uri-rs)
 - fs_extra 1.3.0 (https://github.com/webdesus/fs_extra)
 - generic-array 0.14.7 (https://github.com/fizyk20/generic-array.git)
+- h2 0.4.20 (https://github.com/hyperium/h2)
 - http-body 1.1.0 (https://github.com/hyperium/http-body)
 - http-body-util 0.1.5 (https://github.com/hyperium/http-body)
 - hyper 1.11.1 (https://github.com/hyperium/hyper)
