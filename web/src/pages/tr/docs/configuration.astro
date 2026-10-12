@@ -219,6 +219,36 @@ volumes:
           <td>yok</td>
         </tr>
         <tr>
+          <td><code>--forward-vendor</code></td>
+          <td><code>MCPD_FORWARD_VENDOR</code></td>
+          <td><code>otlp</code></td>
+        </tr>
+        <tr>
+          <td><code>--forward-protocol</code></td>
+          <td><code>MCPD_FORWARD_PROTOCOL</code></td>
+          <td>sağlayıcının kendi protokolü</td>
+        </tr>
+        <tr>
+          <td><code>--spool-dir</code></td>
+          <td><code>MCPD_SPOOL_DIR</code></td>
+          <td><code>--data</code> yanında bir <code>.spool</code> dizini</td>
+        </tr>
+        <tr>
+          <td><code>--spool-max-bytes</code></td>
+          <td><code>MCPD_SPOOL_MAX_BYTES</code></td>
+          <td>hedef başına <code>268435456</code>, aktarıcı için <code>1073741824</code></td>
+        </tr>
+        <tr>
+          <td><code>--upstream</code></td>
+          <td><code>MCPD_UPSTREAMS</code></td>
+          <td>yok</td>
+        </tr>
+        <tr>
+          <td><code>--upstream-key</code></td>
+          <td><code>MCPD_UPSTREAM_KEY</code></td>
+          <td>ayarlanmamış: her göndericinin anahtarı iletilir</td>
+        </tr>
+        <tr>
           <td>yok</td>
           <td><code>MCPD_LOG</code></td>
           <td><code>mcpd=info,mcpd_server=info,tower_http=warn</code></td>
@@ -701,6 +731,10 @@ volumes:
           <td><code>mcpd doctor</code></td>
           <td>Bu kurulumu notlandırır ve neyin yanlış yapılandırıldığını bildirir. Bir kusurda 2 koduyla çıkar, yani bir dağıtımı durdurabilir. Bakınız <a href={href('/docs/operations')} class="link">İşletme</a></td>
         </tr>
+        <tr>
+          <td><code>mcpd relay</code></td>
+          <td>Kenarda bir collector olarak çalışır: her alım isteğini kabul eder, biriktirir ve <code>--upstream</code> ile adı verilen daemon'lara sırayla gönderir. Hiçbir depo açmaz. Bakınız <a href={href('/docs/relay')} class="link">Aktarıcı ve bölgeler</a></td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -746,6 +780,7 @@ volumes:
       { out: 'objectives      none' },
       { out: 'judge           off' },
       { out: 'forwarding      off' },
+      { out: 'relay           off: no --upstream' },
     ]}
   />
 
@@ -874,13 +909,28 @@ volumes:
       "webhook": "https://hooks.example.com/mcpd"
     }
   ],
-  "forward": {
-    "endpoint": "https://otlp.example.com",
-    "headers": [["Authorization", "Bearer sk-..."]],
-    "batch_size": 256,
-    "enabled": true
-  }
+  "forward": [
+    {
+      "endpoint": "https://otlp.example.com",
+      "headers": [["Authorization", "Bearer sk-..."]],
+      "batch_size": 256,
+      "enabled": true
+    },
+    {
+      "vendor": "langfuse",
+      "public_key": "\${LANGFUSE_PUBLIC_KEY}",
+      "secret_key": "\${LANGFUSE_SECRET_KEY}"
+    }
+  ]
 }`}</code></pre>
+
+  <p>
+    <code>forward</code> tek bir hedefi nesne olarak, birden çok hedefi dizi
+    olarak alır. İçindeki her dize <code>$&#123;ENV_NAME&#125;</code> biçiminde
+    yazılabilir ve başlangıçta ortamdan okunur; ayarlanmamış bir değişken
+    başlatmayı reddeder ve değişkenin adını verir. Her alan
+    <a href={href('/docs/forwarding')} class="link">İletme</a> sayfasındadır.
+  </p>
 
   <h3>Projeler ve onlara erişen anahtarlar</h3>
   <p>
@@ -992,14 +1042,16 @@ volumes:
 
   <h3>--forward-endpoint</h3>
   <p>
-    Saklanan her span'i başka bir OTLP/HTTP ucuna kopyalar. Temel URL'yi verin;
-    sonuna <code>/v1/traces</code> eklenir. Yerel yazma her zaman önce olur, yani
+    mcpd'nin sakladığını başka bir uca kopyalar. Temel URL'yi verin;
+    sonuna <code>/v1/traces</code>, <code>/v1/logs</code> ve
+    <code>/v1/metrics</code> eklenir. Yerel yazma her zaman önce olur, yani
     çalışmayan bir hedef size hiçbir şeye mal olmaz.
   </p>
   <p>
-    Bu seçenek, yapılandırma dosyasındaki <code>forward</code> bloğunu yener;
-    böylece tek bir örnek, ortak bir ConfigMap düzenlenmeden başka bir yere
-    yönlendirilebilir. Bakınız
+    Seçeneklerle verilen bir hedef, yapılandırma dosyasındaki
+    <code>forward</code> bloğunun yerini alır; böylece tek bir örnek, ortak bir
+    ConfigMap düzenlenmeden başka bir yere yönlendirilebilir. Aynı anda birden
+    çok hedef dosyaya yazılır. Bakınız
     <a href={href('/docs/forwarding')} class="link">İletme</a>.
   </p>
 
@@ -1013,6 +1065,49 @@ volumes:
     İki nokta içermeyen bir değer atılmaz; çalışan biçim gösterilerek
     başlangıçta reddedilir. OpenTelemetry tarzı bir <code>key=value</code>
     başlığı burada <code>key: value</code> olarak yazılır.
+  </p>
+
+  <h3>--forward-vendor ve --forward-protocol</h3>
+  <p>
+    <code>--forward-vendor</code>, ucu ve öznitelik kuralları için
+    <code>langfuse</code>, <code>datadog</code> veya <code>honeycomb</code> gibi
+    bir sağlayıcı hazır ayarı seçer. Kimlik bilgisi
+    <code>--forward-header</code> içine yazılır. Varsayılan bir ucu olan bir
+    sağlayıcıda <code>--forward-endpoint</code> verilmeyebilir.
+    <code>--forward-protocol</code> <code>json</code>, <code>protobuf</code>
+    veya <code>grpc</code> olur; varsayılanı sağlayıcının kendi protokolüdür.
+    Her sağlayıcı <a href={href('/docs/forwarding')} class="link">İletme</a>
+    sayfasında listelenir.
+  </p>
+
+  <h3>--spool-dir ve --spool-max-bytes</h3>
+  <p>
+    İletmenin ve <code>mcpd relay</code> komutunun biriktirme alanlarını
+    tuttuğu yer; hedef başına bir dizin. Varsayılanı <code>--data</code>
+    yanında bir <code>.spool</code> dizinidir, örneğin
+    <code>/data/mcpd.spool</code>; <code>--data</code> <code>:memory:</code>
+    olduğunda ise bellektir. <code>memory</code> değeri biriktirme alanlarını
+    bilerek bellekte tutar.
+  </p>
+  <p>
+    <code>--spool-max-bytes</code>, tek bir biriktirme alanının en fazla
+    tutabileceği boyuttur: siz ayarlamadıkça her iletme hedefi için 268435456
+    (256 MiB), aktarıcı için 1073741824 (1 GiB). Yapılandırma dosyasında bir
+    hedefin kendi <code>spool_max_bytes</code> değeri bunu yener.
+  </p>
+
+  <h3>--upstream ve --upstream-key</h3>
+  <p>
+    <code>mcpd relay</code> komutunun gönderdiği daemon'lar, tercih sırasıyla.
+    Seçeneği tekrarlayın ya da <code>MCPD_UPSTREAMS</code> içinde virgülle
+    ayrılmış bir liste verin. Her isteği, bir hatadan sonra soğuma süresinde
+    olmayan ilk üst sunucu alır.
+  </p>
+  <p>
+    <code>--upstream-key</code>, aktarıcının üst sunuculara Bearer belirteci
+    olarak sunduğu anahtardır. Ayarlanmamışsa her göndericinin kendi anahtarı
+    isteğiyle birlikte tutulur ve iletilir. Bakınız
+    <a href={href('/docs/relay')} class="link">Aktarıcı ve bölgeler</a>.
   </p>
 
   <h3>--clickhouse-url</h3>

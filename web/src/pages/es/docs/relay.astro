@@ -1,0 +1,239 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const locale = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Relé y regiones"
+  description="mcpd relay es un colector en el borde: acepta cada solicitud de ingesta, la escribe en un spool antes de responder y la envía a los daemons que nombres, en orden, con conmutación por error y sin contar nada dos veces. Varios relés y réplicas del daemon sobre un almacén compartido forman un despliegue en varias regiones."
+  lede="Un colector junto a tus agentes, y el enlace entre regiones recorrido con reintentos."
+  og="docs"
+>
+  <h2>Qué es un relé</h2>
+  <p>
+    <code>mcpd relay</code> ejecuta el mismo binario como un colector que no
+    almacena nada por sí mismo. Acepta todas las solicitudes HTTP de ingesta que
+    acepta un daemon, escribe cada solicitud en un spool en disco, responde al
+    emisor y después envía la solicitud a los daemons que nombra
+    <code>--upstream</code>. No abre ningún almacén.
+  </p>
+  <p>
+    Ejecuta uno en cada región donde corren tus agentes. Así un emisor habla con
+    un colector a pocos milisegundos, y el enlace entre regiones lo recorre el
+    relé, con reintentos, en lugar de cada agente por su cuenta.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="un relé en el borde con dos upstreams"
+    command={`mcpd relay \\
+  --ingest-key $INGEST_KEY \\
+  --upstream http://mcpd.eu.internal:4317 \\
+  --upstream http://mcpd.us.internal:4317`}
+    primaryLabel="Flags"
+    secondary={[
+      {
+        label: 'Entorno',
+        command: 'MCPD_INGEST_KEYS=$INGEST_KEY MCPD_UPSTREAMS=http://mcpd.eu.internal:4317,http://mcpd.us.internal:4317 mcpd relay',
+      },
+      {
+        label: 'Una clave para el upstream',
+        command: 'mcpd relay --upstream http://mcpd.eu.internal:4317 --upstream-key $UPSTREAM_KEY',
+      },
+    ]}
+  />
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="relé"
+    lines={[
+      { cmd: 'MCPD_UPSTREAMS=http://mcpd.eu.internal:4317,http://mcpd.us.internal:4317 mcpd --data /data/mcpd.db config | grep ^relay' },
+      { out: "relay           2 upstream(s) in order, http://mcpd.eu.internal:4317, http://mcpd.us.internal:4317; each sender's key passed on; spool at /data/mcpd.spool/relay, 1024 MiB" },
+      { cmd: 'curl -s -D - -o /dev/null localhost:4317/v1/ingest -H "content-type: application/json" -d @batch.json | grep -e ^HTTP -e mcpd-relay' },
+      { out: 'HTTP/1.1 202 Accepted', tone: 'ok' },
+      { out: 'mcpd-relay: spooled' },
+      { cmd: 'curl -s localhost:4317/v1/ingest -H "content-type: application/json" -d @batch.json' },
+      { out: '{"accepted":0,"duplicate":0,"rejected":0}' },
+    ]}
+  />
+
+  <h2>Qué responde</h2>
+  <p>
+    Acepta cualquier POST, en cualquier ruta que no sea una sonda. Las rutas
+    OTLP <code>/v1/traces</code>, <code>/v1/logs</code> y
+    <code>/v1/metrics</code> responden 200 con un <code>partialSuccess</code>
+    de OTLP, que es lo que espera un exportador de OpenTelemetry. El resto de
+    rutas responden 202 con la cabecera <code>mcpd-relay: spooled</code> y el
+    cuerpo <code>&#123;"accepted":0,"duplicate":0,"rejected":0&#125;</code>: la
+    solicitud está guardada y se entregará, y los recuentos reales son cosa del
+    upstream, que todavía no la ha visto. Todos los SDK leen cualquier 2xx como
+    éxito.
+  </p>
+  <p>
+    El relé comprueba <code>--ingest-key</code> por sí mismo, antes de escribir
+    nada, y aplica <code>--max-body-bytes</code> y
+    <code>--request-timeout-seconds</code> como lo hace un daemon. La solicitud
+    ya está en el spool, <code>&lt;spool-dir&gt;/relay</code>, antes de enviar
+    la respuesta.
+  </p>
+
+  <h2>Entrega y conmutación por error</h2>
+  <p>
+    Cuatro workers vacían el spool. Cada solicitud va al primer upstream, en el
+    orden de <code>--upstream</code>, que no esté en pausa. Un fallo que admite
+    reintento pone ese upstream en pausa, con espera exponencial y jitter o
+    durante el tiempo que indique su <code>Retry-After</code>, y la solicitud va
+    al siguiente upstream en el acto. Cuando acaba la pausa, se vuelve a probar
+    primero el principal, así que el tráfico vuelve a él por sí solo.
+  </p>
+  <p>
+    Un rechazo definitivo, como un 400, no se envía al siguiente upstream: el
+    siguiente rechazaría los mismos bytes. La solicitud se mueve a
+    <code>dead/</code> dentro del directorio de spool y se cuenta.
+  </p>
+
+  <h3>Sin contar nada dos veces</h3>
+  <p>
+    La entrega es al menos una vez, y un reenvío se almacena una sola vez. Cada
+    solicitud lleva una cabecera <code>Idempotency-Key</code>: la del emisor si
+    mandó una y, si no, <code>relay-</code> seguido de un resumen de la ruta, la
+    codificación del contenido y el cuerpo. Todas las puertas de ingesta del
+    daemon respetan la cabecera, y una clave dentro del cuerpo de un lote nativo
+    tiene prioridad sobre ella. Una solicitud que el relé vuelve a enviar tras
+    agotar el tiempo de espera, o que envía al secundario después de que el
+    principal la aceptara y se perdiera la respuesta, se reconoce y se informa
+    como duplicada.
+  </p>
+
+  <h3>Claves</h3>
+  <p>
+    Con <code>--upstream-key</code>, el relé presenta esa clave a cada upstream
+    como token Bearer. Sin ella, la cabecera <code>Authorization</code> o
+    <code>x-mcpd-key</code> del emisor se guarda con la solicitud en el spool,
+    en un archivo que solo puede leer el usuario del relé, y se pasa tal cual.
+    La segunda forma conserva el proyecto y el ámbito de cada emisor tal como
+    los ve el upstream.
+  </p>
+
+  <h2>Contrapresión y disponibilidad</h2>
+  <p>
+    El spool está limitado por <code>--spool-max-bytes</code>, 1 GiB para el
+    relé salvo que lo cambies. Cuando está lleno, una solicitud se rechaza con
+    un 503 y <code>Retry-After: 5</code>. Todos los SDK y exportadores de
+    OpenTelemetry lo reintentan, así que el emisor conserva los datos en lugar
+    de que el relé los descarte.
+  </p>
+  <p>
+    <code>/healthz</code> responde siempre 200. <code>/readyz</code> responde:
+  </p>
+  <ul>
+    <li>200 <code>ok</code> mientras algún upstream esté alcanzable;</li>
+    <li>
+      200 <code>degraded</code>, con un <code>detail</code>, cuando ningún
+      upstream ha respondido a su <code>/readyz</code> ni aceptado una entrega
+      en los últimos 30 segundos. Los upstreams se sondean cada 5 segundos;
+    </li>
+    <li>
+      503 cuando el spool está lleno, o cuando ningún upstream está alcanzable y
+      el spool está lleno al menos al 80%.
+    </li>
+  </ul>
+  <p>
+    Por eso un balanceador de carga sigue enviando a un relé que está
+    acumulando en el spool, y aparta el tráfico de uno que ya no puede
+    aceptarlo.
+  </p>
+
+  <h3>Métricas del relé</h3>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Métrica</th><th>Tipo</th><th>Significado</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>mcpd_relay_accepted_total</code></td><td>counter</td><td>Solicitudes escritas en el spool</td></tr>
+        <tr><td><code>mcpd_relay_refused_full_total</code></td><td>counter</td><td>Solicitudes rechazadas con un 503 porque el spool estaba lleno</td></tr>
+        <tr><td><code>mcpd_relay_failovers_total</code></td><td>counter</td><td>Solicitudes entregadas a un upstream que no es el primero</td></tr>
+        <tr><td><code>mcpd_relay_dead_letter_total</code></td><td>counter</td><td>Solicitudes que un upstream rechazó de forma definitiva, movidas a <code>dead/</code></td></tr>
+        <tr><td><code>mcpd_relay_spool_entries</code></td><td>gauge</td><td>Solicitudes que esperan en el spool</td></tr>
+        <tr><td><code>mcpd_relay_spool_bytes</code></td><td>gauge</td><td>Bytes que guarda el spool</td></tr>
+        <tr><td><code>mcpd_relay_spool_oldest_seconds</code></td><td>gauge</td><td>Antigüedad de la solicitud en espera más vieja, o 0</td></tr>
+        <tr><td><code>mcpd_relay_delivered_total</code></td><td>counter</td><td>Solicitudes que aceptó un upstream, con las etiquetas <code>upstream</code> y <code>order</code></td></tr>
+        <tr><td><code>mcpd_relay_failed_attempts_total</code></td><td>counter</td><td>Intentos que un upstream no aceptó, con las mismas etiquetas</td></tr>
+        <tr><td><code>mcpd_relay_upstream_up</code></td><td>gauge</td><td>1 cuando el upstream respondió en los últimos 30 segundos, 0 en otro caso</td></tr>
+        <tr><td><code>mcpd_uptime_seconds</code></td><td>gauge</td><td>Segundos desde que arrancó este proceso</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Un <code>mcpd_relay_failovers_total</code> que sube significa que el
+    principal está fallando y el secundario lleva su tráfico.
+    <code>mcpd_relay_spool_oldest_seconds</code> indica cuánto retraso lleva la
+    entrega.
+  </p>
+
+  <h2>Varias regiones</h2>
+  <p>
+    Ejecuta varias réplicas del daemon, en una región o en varias, contra un
+    mismo almacén Postgres o ClickHouse, con las ejecuciones desactivadas: el
+    almacén de ejecuciones es un archivo embebido y pertenece a un solo proceso.
+    El <code>/readyz</code> de cada réplica ya refleja si puede alcanzar el
+    almacén. Pon un relé delante de ellas en cada región, con
+    <code>--upstream</code> nombrando primero el daemon más cercano y en segundo
+    lugar un daemon de otra región.
+  </p>
+  <p>
+    Cuatro ajustes se comportan de otra forma en cuanto hay más de una réplica:
+  </p>
+  <ul>
+    <li>
+      Las claves de idempotencia se guardan en el almacén compartido, así que un
+      reenvío que cae en otra réplica se sigue reconociendo. Postgres registra
+      la clave en la misma transacción que el lote.
+    </li>
+    <li>
+      Los topes de cuota por minuto se cuentan por réplica. Divide el tope que
+      quieres entre el número de réplicas.
+    </li>
+    <li>
+      Los monitores y los objetivos se disparan desde cada réplica que los tiene
+      configurados. Configúralos solo en el archivo de configuración de una
+      réplica.
+    </li>
+    <li>Con el análisis de aspectos pasa lo mismo: configúralo en una sola réplica.</li>
+  </ul>
+
+  <h3>Despliegues de ejemplo</h3>
+  <p>
+    <code>deploy/docker/docker-compose.multi-region.yml</code> arranca
+    Postgres, dos daemons y un relé en una sola máquina, que es la topología
+    completa en una forma que puedes probar.
+  </p>
+  <p>
+    El chart de Helm acepta <code>mode: relay</code>. Tres archivos de valores
+    en <code>deploy/helm/examples/</code> describen una región cada uno:
+    <code>region-core.yaml</code>, <code>region-standby.yaml</code> y
+    <code>region-edge-relay.yaml</code>, este último para una región que solo
+    ejecuta un relé.
+  </p>
+
+  <h2>A continuación</h2>
+  <ul>
+    <li>
+      Copiar datos a otros proveedores:
+      <a href={urlFor('/docs/forwarding', locale)} class="link">Reenvío</a>.
+    </li>
+    <li>
+      Sondas, métricas y almacenes:
+      <a href={urlFor('/docs/operations', locale)} class="link">Operación</a>.
+    </li>
+    <li>
+      Cada flag:
+      <a href={urlFor('/docs/configuration', locale)} class="link">Configuración</a>.
+    </li>
+  </ul>
+</Doc>

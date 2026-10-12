@@ -386,6 +386,16 @@ const TITLES: Record<string, Row> = {
     tr: 'İletme',
     pt: 'Encaminhamento',
   },
+  '/docs/relay': {
+    fr: 'Relais et régions',
+    es: 'Relé y regiones',
+    zh: '中继与多区域',
+    ja: 'リレーとリージョン',
+    ko: '릴레이와 리전',
+    it: 'Relay e regioni',
+    tr: 'Aktarıcı ve bölgeler',
+    pt: 'Relay e regiões',
+  },
   '/docs/security': {
     fr: 'Sécurité',
     es: 'Seguridad',

@@ -6,64 +6,371 @@ import { localeOf, urlFor } from '@/lib/i18n'
 
 const code = localeOf(Astro.url.pathname)
 const linkTo = (route: string) => urlFor(route, code)
+
+const destinations = `{
+  "forward": [
+    {
+      "vendor": "langfuse",
+      "region": "eu",
+      "public_key": "\${LANGFUSE_PUBLIC_KEY}",
+      "secret_key": "\${LANGFUSE_SECRET_KEY}",
+      "filter": { "projects": ["checkout"], "sample": 0.25 },
+      "redact": { "key_contains": ["email"] }
+    },
+    {
+      "name": "honeycomb-prod",
+      "vendor": "honeycomb",
+      "api_key": "\${HONEYCOMB_API_KEY}",
+      "dataset": "agents",
+      "signals": { "traces": true, "logs": true, "metrics": false }
+    },
+    {
+      "name": "collector",
+      "endpoint": "https://otel.internal.example.com:4318",
+      "protocol": "protobuf",
+      "headers": { "Authorization": "Bearer \${COLLECTOR_TOKEN}" },
+      "redact": { "drop_payloads": true }
+    }
+  ]
+}`
 ---
 
 <Doc
   title="전달"
-  description="저장된 모든 스팬을 다른 OTLP 엔드포인트로 복사해, mcpd가 데이터가 갇히는 곳이 아니라 텔레메트리 파이프라인의 한 구간이 되게 합니다. 로컬 저장이 언제나 먼저입니다."
+  description="mcpd가 저장하는 것을 하나 이상의 목적지로 복사합니다. Langfuse, LangSmith, Braintrust, Arize, Phoenix, Datadog, Honeycomb, New Relic, Grafana, Sentry, Weave, Laminar, Helicone, Opik, Elastic, Dynatrace, 또는 어떤 OTLP 수신기든 됩니다. 로컬 저장이 언제나 먼저이고, 사본은 목적지가 받아 갈 때까지 각자의 스풀에서 기다립니다."
   lede="mcpd는 양쪽 방향으로 OTLP를 말합니다. 도착한 것 중 여기에 갇히는 것은 없습니다."
   og="docs"
 >
-  <h2>나가는 프로토콜은 하나, 익스포터 열한 개가 아닙니다</h2>
+  <h2>저장소는 하나, 사본은 필요한 만큼</h2>
   <p>
-    mcpd는 OTLP를 받고, OTLP를 내보낼 수 있습니다. 이 한 가지 성질이 벤더별
-    익스포터 묶음이 하는 일의 대부분을 대신합니다. Langfuse, Datadog, Honeycomb,
-    Grafana를 비롯해 이름을 댈 만한 목적지는 모두 HTTP 위의 OTLP를 받습니다.
-    그래서 전달은 열한 가지가 아니라 한 가지 구현이고, 어느 벤더의 SDK 릴리스에
-    뒤처질 일도 없습니다.
+    mcpd는 OTLP를 받고, OTLP를 보냅니다. 목적지는 설정 파일의 항목 하나입니다.
+    벤더 이름과 자격 증명을 쓰고, 필요하면 필터, 마스킹 규칙, 받을 시그널을
+    덧붙입니다. 각 벤더가 읽는 엔드포인트, 인증 헤더, 속성 이름은 mcpd가 알고
+    있으므로, 여러분은 통합 코드가 아니라 키만 쓰면 됩니다.
   </p>
   <p>
     이것은 mcpd를 도입하는 일이 되돌릴 수 있는 일이라는 뜻이기도 합니다. 전에 쓰던
-    곳으로 전달을 걸어 두고 2주 동안 둘 다 돌린 다음, 되돌릴 수 없는 이전 작업이
-    아니라 눈앞의 데이터를 보고 결정하십시오.
+    곳으로 걸어 두고 2주 동안 둘 다 돌린 다음, 되돌릴 수 없는 이전 작업이 아니라
+    눈앞의 데이터를 보고 결정하십시오.
   </p>
 
   <h2>켜기</h2>
+  <p>
+    OTLP 수신기 하나라면 플래그로 충분합니다. <code>/v1/traces</code>가 아니라
+    기본 URL을 주십시오. 시그널마다 경로가 뒤에 붙습니다.
+  </p>
 
   <Command
     class="not-prose my-6"
     title="로컬에 저장하고 바깥으로도 복사하기"
     command="mcpd serve --forward-endpoint https://otlp.example.com"
+    primaryLabel="OTLP"
+    secondary={[
+      {
+        label: '헤더와 함께',
+        command: "mcpd serve --forward-endpoint https://otlp.example.com --forward-header 'Authorization: Bearer $TOKEN'",
+      },
+      {
+        label: '벤더',
+        command: "mcpd serve --forward-vendor honeycomb --forward-header 'x-honeycomb-team: $HONEYCOMB_API_KEY'",
+      },
+      {
+        label: 'Protobuf',
+        command: 'mcpd serve --forward-endpoint https://otlp.example.com --forward-protocol protobuf',
+      },
+    ]}
   />
 
   <p>
-    경로는 뒤에 붙으므로 <code>/v1/traces</code>가 아니라 기본 URL을 주십시오.
-    자격 증명이 필요한 목적지라면 헤더를 추가합니다.
+    <code>--forward-vendor</code>는 벤더의 엔드포인트와 규칙을 고르고, 자격
+    증명은 <code>--forward-header</code>에 넣습니다. 기본 엔드포인트가 있는
+    벤더라면 <code>--forward-endpoint</code>를 빼도 됩니다.
+    <code>--forward-protocol</code>은 <code>json</code>,
+    <code>protobuf</code>, <code>grpc</code> 중 하나를 받습니다. 플래그로 준
+    목적지는 파일의 <code>forward</code> 블록을 대신하므로, 공유하는 ConfigMap을
+    고치지 않고도 인스턴스 하나만 다른 곳을 가리키게 할 수 있습니다.
   </p>
 
-  <Command
-    class="not-prose my-6"
-    title="authorization 헤더와 함께"
-    command={`mcpd serve \\
-  --forward-endpoint https://otlp.example.com \\
-  --forward-header 'Authorization: Bearer $TOKEN'`}
-  />
+  <h2>여러 목적지</h2>
+  <p>
+    설정 파일의 <code>forward</code> 블록은 목적지 하나를 객체로 받거나, 여러
+    개를 배열로 받습니다. 객체 형태는 이전 릴리스가 읽던 형태이며 지금도
+    동작합니다. 목적지마다 사본, 스풀, 재시도가 따로 있으므로, 느린 벤더가 빠른
+    벤더를 붙잡는 일은 없습니다.
+  </p>
+
+  <pre><code class="language-json">{destinations}</code></pre>
 
   <p>
-    같은 설정이 설정 파일의 <code>forward</code> 아래에도 있으며, 거기에서는
-    <code>batch_size</code>와 <code>enabled</code>도 쓸 수 있습니다. 플래그가
-    파일을 이기므로, 공유하는 ConfigMap을 고치지 않고도 인스턴스 하나만 다른 곳을
-    가리키게 할 수 있습니다.
+    문자열은 어느 것이든 <code>$&#123;ENV_NAME&#125;</code>으로 쓸 수 있습니다.
+    시작할 때 한 번 환경에서 읽습니다. 설정되지 않은 변수가 있으면 시작을
+    거부하고 그 변수 이름을 알려 줍니다. 그래서 시크릿에서 빠진 자격 증명은
+    일주일 뒤에 발견하는 401이 아니라, 배포할 때 보이는 오류가 됩니다.
   </p>
 
-  <pre><code class="language-json">{`{
-  "forward": {
-    "endpoint": "https://otlp.example.com",
-    "headers": [["Authorization", "Bearer sk-..."]],
-    "batch_size": 256,
-    "enabled": true
-  }
-}`}</code></pre>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>필드</th><th>하는 일</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>name</code></td>
+          <td>목적지의 이름입니다. 그 메트릭의 <code>destination</code> 레이블과 스풀 디렉터리 이름으로 쓰입니다. 문자, 숫자, <code>-</code>, <code>_</code>, <code>.</code>를 쓸 수 있습니다. 기본값은 벤더 이름입니다</td>
+        </tr>
+        <tr>
+          <td><code>vendor</code></td>
+          <td>아래 프리셋 중 하나입니다. 기본값은 <code>otlp</code>입니다</td>
+        </tr>
+        <tr>
+          <td><code>endpoint</code></td>
+          <td><code>/v1/traces</code>를 뺀 기본 URL입니다. <code>otlp</code>, <code>otlp_grpc</code>, <code>elastic</code>, <code>dynatrace</code>에는 반드시 있어야 하고, 기본값이 있는 벤더에서는 그 기본값을 대신합니다</td>
+        </tr>
+        <tr>
+          <td><code>protocol</code></td>
+          <td><code>json</code>, <code>protobuf</code>, <code>grpc</code> 중 하나입니다. <code>otlp</code>의 기본값은 JSON, <code>otlp_grpc</code>는 gRPC, 나머지 벤더는 모두 protobuf입니다. Dynatrace는 JSON을 거부합니다</td>
+        </tr>
+        <tr>
+          <td><code>headers</code></td>
+          <td><code>[name, value]</code> 쌍의 목록이나 객체입니다. 프리셋이 설정하는 헤더와 이름이 같은 헤더는 그것을 대신합니다</td>
+        </tr>
+        <tr>
+          <td><code>enabled</code></td>
+          <td><code>false</code>이면 항목은 파일에 남기고 아무것도 보내지 않습니다</td>
+        </tr>
+        <tr>
+          <td><code>batch_size</code></td>
+          <td>요청 하나에 담는 스팬 수입니다. 기본값은 256입니다</td>
+        </tr>
+        <tr>
+          <td><code>conventions</code></td>
+          <td>사본에 쓰는 속성 이름입니다. <code>gen_ai</code>, <code>gen_ai_messages</code>, <code>openinference</code>, <code>langfuse</code>, <code>langsmith</code>, <code>braintrust</code>, <code>laminar</code> 중 하나입니다. 기본값은 벤더 자신의 규칙입니다</td>
+        </tr>
+        <tr>
+          <td><code>region</code></td>
+          <td>벤더의 리전별 엔드포인트를 고릅니다. 아래 표에 나와 있습니다</td>
+        </tr>
+        <tr>
+          <td><code>api_key</code>, <code>token</code>, <code>public_key</code>, <code>secret_key</code>, <code>instance_id</code>, <code>space_id</code></td>
+          <td>자격 증명입니다. 벤더마다 표에 적힌 것을 읽어 자기 헤더로 바꿉니다</td>
+        </tr>
+        <tr>
+          <td><code>project</code>, <code>workspace</code>, <code>dataset</code>, <code>dsn</code></td>
+          <td>사본이 벤더 안의 어디에 들어갈지 정합니다</td>
+        </tr>
+        <tr>
+          <td><code>filter</code></td>
+          <td>이 목적지가 받을 데이터입니다. 아래를 보십시오</td>
+        </tr>
+        <tr>
+          <td><code>redact</code></td>
+          <td>이 목적지의 사본에서 뺄 것입니다. 아래를 보십시오</td>
+        </tr>
+        <tr>
+          <td><code>signals</code></td>
+          <td><code>traces</code>, <code>logs</code>, <code>metrics</code>를 각각 true나 false로 줍니다. 기본값은 벤더가 받는 모든 시그널입니다</td>
+        </tr>
+        <tr>
+          <td><code>spool_max_bytes</code></td>
+          <td>이 목적지의 스풀이 담을 수 있는 최대 크기입니다. 기본값은 <code>--spool-max-bytes</code>입니다</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>벤더</h2>
+  <p>
+    프리셋마다 엔드포인트, 인증, 규칙을 정합니다. 시그널 열은 벤더가 받는
+    것이며, <code>signals</code>로 달리 정하지 않으면 목적지가 보내는 것도
+    이것입니다.
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>벤더</th><th>엔드포인트</th><th>자격 증명과 위치</th><th>시그널</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>otlp</code></td>
+          <td><code>endpoint</code>, 필수</td>
+          <td><code>headers</code>. 어떤 OTLP/HTTP 수신기든 되며, <code>protocol</code>이 <code>protobuf</code>가 아니면 JSON입니다</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>otlp_grpc</code></td>
+          <td><code>endpoint</code>, 필수</td>
+          <td><code>headers</code>. 어떤 OTLP/gRPC 수신기든 되며, <code>/opentelemetry.proto.collector.&lt;signal&gt;.v1.&lt;Service&gt;/Export</code>로 보냅니다</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>langfuse</code></td>
+          <td><code>region</code> <code>eu</code>(기본값)는 <code>https://cloud.langfuse.com/api/public/otel</code>, <code>us</code>는 <code>us.cloud.langfuse.com</code>, <code>hipaa</code>는 <code>hipaa.cloud.langfuse.com</code>입니다. 직접 호스팅하는 <code>endpoint</code>에는 <code>/api/public/otel</code>이 뒤에 붙습니다</td>
+          <td><code>public_key</code>와 <code>secret_key</code>로 만든 Basic 인증. <code>langfuse.*</code> 속성: 관찰 유형, 입력, 출력, 모델, 사용량과 비용 상세, 레벨, 세션, 사용자, 환경, 릴리스, 트레이스 이름, 태그</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>langsmith</code></td>
+          <td><code>https://api.smith.langchain.com/otel</code>. <code>region</code> <code>eu</code>는 <code>eu.api.smith.langchain.com/otel</code>입니다</td>
+          <td><code>api_key</code>는 <code>x-api-key</code>로, <code>project</code>는 <code>Langsmith-Project</code> 헤더로 갑니다. <code>langsmith.span.kind</code>, <code>gen_ai.prompt</code>, <code>gen_ai.completion</code></td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>braintrust</code></td>
+          <td><code>https://api.braintrust.dev/otel</code></td>
+          <td><code>api_key</code>는 Bearer 토큰으로, 필수인 <code>project</code>는 <code>x-bt-parent: project_name:&lt;project&gt;</code>로 갑니다. <code>braintrust.*</code> 속성</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>arize</code></td>
+          <td><code>https://otlp.arize.com</code>. <code>region</code> <code>eu</code>는 <code>https://otlp.eu-west-1a.arize.com</code>입니다</td>
+          <td><code>space_id</code>와 <code>api_key</code> 헤더. 필수인 <code>project</code>는 리소스의 <code>openinference.project.name</code>과 <code>model_id</code>로 갑니다. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>phoenix</code></td>
+          <td><code>endpoint</code>를 정하지 않으면 <code>http://localhost:6006</code></td>
+          <td>선택 사항인 <code>api_key</code>는 Bearer 토큰으로, <code>project</code>는 <code>openinference.project.name</code>으로 갑니다. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>datadog</code></td>
+          <td><code>https://otlp.&lt;site&gt;</code>이며, <code>region</code>이 사이트입니다. <code>datadoghq.com</code>(기본값), <code>us3</code>, <code>us5</code>, <code>eu</code> 또는 <code>datadoghq.eu</code>, <code>ap1</code>, <code>ap2</code>, <code>gov</code></td>
+          <td><code>api_key</code>는 <code>dd-api-key</code>로 가고, LLM Observability를 위해 <code>dd-otlp-source: llmobs</code>가 붙습니다. <code>gen_ai.input.messages</code>와 <code>gen_ai.output.messages</code></td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>honeycomb</code></td>
+          <td><code>https://api.honeycomb.io</code>. <code>region</code> <code>eu</code>는 <code>api.eu1.honeycomb.io</code>입니다</td>
+          <td><code>api_key</code>는 <code>x-honeycomb-team</code>으로, <code>dataset</code>은 <code>x-honeycomb-dataset</code>으로 갑니다</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>newrelic</code></td>
+          <td><code>https://otlp.nr-data.net</code>. <code>region</code> <code>eu</code>는 <code>otlp.eu01.nr-data.net</code>, <code>fedramp</code>는 <code>gov-otlp.nr-data.net</code>입니다</td>
+          <td><code>api_key</code>는 <code>api-key</code>로 갑니다. 문자열 값은 4095바이트에서 잘리고, 잘렸다는 표시가 붙습니다</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>grafana</code></td>
+          <td>OTLP 게이트웨이 URL을 <code>endpoint</code>로 주거나, <code>region</code>을 존으로 정해 <code>https://otlp-gateway-&lt;zone&gt;.grafana.net/otlp</code>를 씁니다</td>
+          <td><code>instance_id</code>와 <code>api_key</code>(또는 <code>token</code>)로 만든 Basic 인증</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>sentry</code></td>
+          <td><code>dsn</code>에서 만듭니다: <code>https://&lt;host&gt;/api/&lt;project&gt;/integration/otlp</code></td>
+          <td>DSN의 키가 <code>x-sentry-auth: sentry sentry_key=&lt;key&gt;</code>로 갑니다</td>
+          <td>traces, logs</td>
+        </tr>
+        <tr>
+          <td><code>weave</code></td>
+          <td><code>https://trace.wandb.ai/otel</code></td>
+          <td>Basic 인증 <code>api:&lt;api_key&gt;</code>. <code>project</code>(<code>entity/project</code>)는 <code>project_id</code> 헤더로 갑니다. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>laminar</code></td>
+          <td><code>https://api.lmnr.ai</code></td>
+          <td><code>api_key</code>는 Bearer 토큰으로 갑니다. <code>lmnr.*</code> 속성</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>helicone</code></td>
+          <td><code>https://api.worker.helicone.ai/custom/v1/log</code>, Helicone의 로깅 API</td>
+          <td><code>api_key</code>는 Bearer 토큰으로 갑니다. 모델 호출마다 요청 하나를 보냅니다. 모델 스팬은 보내고, 다른 스팬은 필터된 것으로 셉니다</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>opik</code></td>
+          <td><code>https://www.comet.com/opik/api/v1/private/otel</code>. 직접 호스팅하는 Opik은 <code>endpoint</code>를 정합니다</td>
+          <td><code>api_key</code>는 <code>Authorization</code>으로, <code>workspace</code>는 <code>Comet-Workspace</code>로, <code>project</code>는 <code>projectName</code>으로 갑니다. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>elastic</code></td>
+          <td><code>endpoint</code>, 필수</td>
+          <td><code>Authorization: ApiKey &lt;api_key&gt;</code> 또는 <code>Bearer &lt;token&gt;</code></td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>dynatrace</code></td>
+          <td>환경 URL을 <code>endpoint</code>로 줍니다. <code>/api/v2/otlp</code>가 뒤에 붙습니다</td>
+          <td><code>Authorization: Api-Token &lt;token&gt;</code>. Protobuf만 됩니다</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>모든 사본에 담기는 것</h2>
+  <p>
+    목적지가 어떤 규칙을 쓰든, 사본에는 <code>gen_ai.*</code> 속성도 담깁니다.
+    작업 이름, 요청 모델, 시스템과 제공자 이름, 입력과 출력 토큰, 대화 id,
+    에이전트와 도구 이름, 요청의 temperature, top_p, max_tokens입니다.
+    <code>session.id</code>와 <code>user.id</code>도 담기며, mcpd가 해시하는
+    경우에는 이미 해시된 값입니다. 그리고 <code>mcpd.*</code> 속성, 즉 스팬 종류,
+    엔티티 이름, 비용, 태그가 담기고, 리소스에는 <code>mcpd.project</code>가
+    붙습니다. 그래서 다른 mcpd로 보낸 사본은 바뀌지 않은 채 같은 프로젝트에
+    들어갑니다.
+  </p>
+  <p>
+    스팬은 링크를 유지하며 링크 종류는 <code>mcpd.link.kind</code>로 남습니다.
+    이벤트도 유지됩니다. 이벤트 스팬은 그 운반 스팬이 같은 배치에 있으면 운반
+    스팬의 OTLP 스팬 이벤트로 돌아갑니다. 로그는 로거를 계측 범위로 삼아
+    보냅니다. 보낸 쪽이 보낸 메트릭 포인트는 전달되며, 카운터는 델타 단조 합계로,
+    게이지와 히스토그램은 그대로 갑니다. mcpd가 스팬에서 끌어낸 포인트는 보내지
+    않습니다. 스팬이 이미 말하는 것을 되풀이할 뿐이고, 목적지가 두 번 세게
+    되기 때문입니다.
+  </p>
+  <p>
+    스팬은 서비스별로 <code>resourceSpans</code>에 묶입니다. 이것이 수신 측이
+    기대하는 모양입니다. 점수, 피드백, 관점 노트는 mcpd에 남습니다.
+  </p>
+
+  <h2>필터</h2>
+  <p>
+    <code>filter</code>는 목적지 하나가 받는 것을 좁힙니다. 목록은 모두 선택
+    사항이며, 빈 목록은 모든 것을 통과시킵니다.
+  </p>
+  <ul>
+    <li><code>projects</code>: 이 프로젝트들만.</li>
+    <li><code>environments</code>: 이 환경들만.</li>
+    <li><code>kinds</code>: 이 스팬 종류들만.</li>
+    <li>
+      <code>sample</code>: 0에서 1 사이의 비율. 트레이스 id로 정하므로 트레이스는
+      통째로 가거나 아예 가지 않고, 트레이스 안의 로그는 트레이스를 따라갑니다.
+    </li>
+  </ul>
+  <p>
+    필터가 막은 것은 <code>mcpd_forward_filtered_total</code>에 집계되므로,
+    목적지가 기대보다 적게 받으면 그 이유가 보입니다.
+  </p>
+
+  <h2>마스킹</h2>
+  <p>
+    전달은 수집 파이프라인 뒤에 일어나고, 그 파이프라인은 무엇이든 기록되기 전에
+    제자리에서 마스킹합니다. mcpd에 감추라고 일러 둔 것은 목적지에도 닿지
+    않습니다.
+  </p>
+  <p>
+    <code>redact</code>는 목적지 하나에 대해 더 나아갑니다. 바뀌는 것은 그
+    목적지의 사본뿐이고, mcpd가 저장하는 것은 절대 바뀌지 않습니다.
+  </p>
+  <ul>
+    <li>
+      <code>drop_payloads: true</code>는 스팬 입력과 출력, 로그 필드를 보내지
+      않습니다. 목적지는 여전히 시간, 모델, 사용량, 비용, 오류를 받습니다.
+    </li>
+    <li>
+      <code>key_contains</code>는 부분 문자열의 목록입니다. 그중 하나를 포함하는
+      키는 값이 <code>[redacted]</code>로 바뀝니다.
+    </li>
+  </ul>
+  <p>
+    그래서 내 저장소에는 페이로드를 온전히 두고, 벤더에는 내용 없이 각 실행의
+    모양만 보낼 수 있습니다.
+  </p>
 
   {/* 다이어그램은 맨 위가 아니라 여기에 있어야 합니다. 다이어그램은 수집 과정이
       Store에서 끝나는 것을 그리고 이 절은 Store 뒤에 일어나는 일을 다루므로, 둘이
@@ -73,75 +380,105 @@ const linkTo = (route: string) => urlFor(route, code)
 
   <h2>로컬 저장이 먼저입니다</h2>
   <p>
-    스팬은 무엇이든 전달되기 전에 mcpd 자신의 저장소에 먼저 기록되고, 전달은 그
-    뒤에 별도의 태스크에서 실행됩니다. 결과는 두 가지이며, 둘 다 의도한
-    것입니다.
-  </p>
-  <p>
-    느린 목적지가 그 스팬을 만들어 낸 요청에 자기 지연 시간을 더하는 일이 결코
-    없습니다. 에이전트가 남의 컬렉터를 기다리지 않습니다.
-  </p>
-  <p>
-    죽어 있는 목적지가 수집 거부로 이어지는 일도 결코 없습니다. mcpd는 계속 일하고,
-    전달은 별도의 태스크에서 재시도됩니다. 다른 회사의 장애가 곧 내 텔레메트리를
-    아예 남기지 못한다는 뜻이 되는 쪽이야말로, 이 설계가 피하려는 바로 그
-    실패입니다.
-  </p>
-  <p>
-    배치마다 세 번 시도합니다. 429, 5xx, 또는 실패한 연결은 250 ms 뒤에 재시도하고,
-    대기 시간은 시도할 때마다 두 배가 됩니다. 초 단위로 준 <code>Retry-After</code>는
-    30초를 넘지 않는 한 그 대기 시간을 대신합니다. 그 밖의 4xx는 첫 응답으로
-    확정됩니다. 그 배치는 그 목적지에서 계속 잘못된 형식일 것이기 때문입니다. 데몬이
-    멈추는 중이면 남은 시도를 곧바로 합니다. 끝내 거부되었거나 마지막 시도 뒤에도
-    전달되지 않은 배치는 로그에 남고, 그 스팬은
-    <code>mcpd_forward_dropped_spans_total</code>에 더해집니다. 그래서 사본이
-    얼마나 빠졌는지 볼 수 있습니다.
-  </p>
-  <p>
-    연결을 받아 놓고 끝내 응답하지 않는 목적지도 데몬의 메모리를 차지할 수 없습니다. 목적지를 동시에 기다릴 수 있는 것은 수집 요청
-    64건의 사본까지입니다. 그만큼 기다리는 동안 새 사본은 즉시 버려지고
-    <code>mcpd_forward_dropped_spans_total</code>에 집계되며, 로컬 쓰기는 영향을 받지 않습니다.
-  </p>
-  <p>
-    지속성 있는 발신 큐는 없습니다. 배치는 재시도되는 동안 메모리에서 기다리고,
-    전달 큐가 가득 차 있으면 새 배치는 버려지며 그 스팬은 같은 메트릭에 셉니다.
-    지속성 있는 큐는 다른 제품이고, 몇 시간씩 조용히 뒤처지는 큐는 눈에 보이는
-    빈틈보다 나쁩니다. 전달을 보장해야 한다면 mcpd와 목적지 사이에 진짜 컬렉터를
-    두고, 그 일을 하도록 만들어진 것에 맡기십시오.
+    배치는 무엇이든 전달되기 전에 mcpd 자신의 저장소에 먼저 기록됩니다. 사본은
+    로컬 쓰기 뒤에 만들어져 목적지마다 스풀로 넘겨집니다. 느린 목적지가 그 스팬을
+    만들어 낸 요청에 자기 지연 시간을 더하는 일이 없고, 죽어 있는 목적지가 수집
+    거부로 이어지는 일도 없습니다.
   </p>
 
-  <h2>마스킹은 밖으로 나가는 것에도 적용됩니다</h2>
+  <h3>스풀</h3>
   <p>
-    전달은 수집 파이프라인 뒤에 일어나고, 그 파이프라인은 무엇이든 기록되기 전에
-    제자리에서 마스킹합니다. mcpd에 감추라고 일러 둔 것은 다음 구간에도 닿지
-    않습니다. 저장소는 보호하면서 밖으로 나가는 것은 보호하지 않는 규칙은 개인정보
-    보호 수단이라고 할 수 없습니다.
+    목적지마다 스풀 디렉터리 <code>&lt;spool-dir&gt;/forward-&lt;name&gt;/</code>이
+    있습니다. 사본은 임시 파일에 쓰이고, 동기화된 뒤 이름을 바꿔 제자리에
+    놓이며, 모드는 0600입니다. 그래서 크래시가 나도 항목은 온전히 남거나 아예
+    남지 않습니다. 스풀 디렉터리의 기본값은 <code>/data/mcpd.spool</code>처럼
+    <code>--data</code> 옆에 있는 <code>.spool</code> 디렉터리이고,
+    <code>--data</code>가 <code>:memory:</code>이면 메모리에 둡니다.
+    <code>--spool-dir memory</code>는 일부러 메모리에 둡니다.
+  </p>
+  <p>
+    스풀의 크기는 <code>spool_max_bytes</code>로 묶이며, 따로 정하지 않으면
+    목적지마다 256 MiB입니다. 가득 차면 새 사본은 버려지고
+    <code>mcpd_forward_spool_full_total</code>에 집계되며, 로컬 쓰기는 영향을
+    받지 않습니다. 디스크에 쌓인 밀린 항목은 재시작 뒤에도 남아 시작할 때
+    보내집니다. 멈출 때는 메모리에 있는 스풀이 마지막으로 한 번 더 시도합니다.
   </p>
 
-  <h2>전달되는 것</h2>
+  <h3>재시도</h3>
   <p>
-    스팬입니다. 로그, 메트릭, 점수, 피드백, 관점 노트는 mcpd에 남습니다.
-    사람들이 전달하는 목적지는 트레이싱 백엔드이고, 나머지는 버리거나 속성으로
-    뭉개 놓을 것이기 때문입니다.
+    목적지마다 워커 두 개가 스풀에 있는 것을 보냅니다. 실패한 전송은 지수 백오프와
+    지터를 두고 재시도합니다. 대기 시간은 0.5초에서 시작해 60초까지 두 배씩
+    늘고, 각 대기 시간은 그 범위의 위쪽 절반에서 무작위로 고릅니다. 초 단위나 HTTP
+    날짜로 준 <code>Retry-After</code>는 300초까지 따릅니다.
   </p>
   <p>
-    스팬은 서비스별로 <code>resourceSpans</code>에 묶입니다. 이것이 수신 측이
-    기대하는 모양입니다. 스팬마다 리소스를 하나씩 두는 것도 규격에는 맞지만, 그러면
-    하류의 모든 곳이 다시 묶어야 합니다.
+    재시도하는 것: 401, 403, 404, 408, 409, 425, 429, 모든 5xx, 전송 오류, 그리고
+    gRPC 코드 <code>CANCELLED</code>, <code>DEADLINE_EXCEEDED</code>,
+    <code>PERMISSION_DENIED</code>, <code>RESOURCE_EXHAUSTED</code>,
+    <code>ABORTED</code>, <code>OUT_OF_RANGE</code>, <code>UNAVAILABLE</code>,
+    <code>DATA_LOSS</code>, <code>UNAUTHENTICATED</code>입니다. 그래서 만료된
+    키나 아직 만들어지는 중인 목적지 때문에 데이터를 잃지 않고 기다립니다.
+  </p>
+  <p>
+    그 밖의 4xx는 확정입니다. 그 배치는 그 목적지에서 계속 잘못된 형식일 것이기
+    때문입니다. 항목은 스풀 디렉터리의 <code>dead/</code>로 옮겨지고, 가장 최근
+    100개가 남으며, 집계됩니다. 하루가 지나도 전달되지 않은 항목도
+    <code>dead/</code>로 옮겨집니다. OTLP/HTTP에서는 1 KiB를 넘는 본문을 gzip으로
+    압축합니다.
+  </p>
+
+  <h2>지켜보기</h2>
+  <p>
+    모든 메트릭에는 <code>destination</code>과 <code>vendor</code> 레이블이
+    붙습니다.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>메트릭</th><th>유형</th><th>의미</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>mcpd_forward_sent_total</code></td><td>counter</td><td>목적지가 받은 항목</td></tr>
+        <tr><td><code>mcpd_forward_failed_attempts_total</code></td><td>counter</td><td>실패해서 재시도할 시도</td></tr>
+        <tr><td><code>mcpd_forward_dead_letter_total</code></td><td>counter</td><td>최종 거부되었거나 하루가 지나 <code>dead/</code>로 옮겨진 항목</td></tr>
+        <tr><td><code>mcpd_forward_spool_full_total</code></td><td>counter</td><td>스풀이 가득 차서 버려진 항목</td></tr>
+        <tr><td><code>mcpd_forward_filtered_total</code></td><td>counter</td><td>필터가 목적지로 가지 않게 막은 항목</td></tr>
+        <tr><td><code>mcpd_forward_spool_entries</code></td><td>gauge</td><td>스풀에서 기다리는 요청</td></tr>
+        <tr><td><code>mcpd_forward_spool_bytes</code></td><td>gauge</td><td>스풀이 담고 있는 바이트</td></tr>
+        <tr><td><code>mcpd_forward_up</code></td><td>gauge</td><td>마지막 시도가 성공했거나 아직 시도가 없으면 1, 실패했으면 0</td></tr>
+        <tr><td><code>mcpd_forward_last_success_timestamp_seconds</code></td><td>gauge</td><td>목적지가 마지막으로 요청을 받은 때를 에포크 이후 초로 나타낸 값, 또는 0</td></tr>
+        <tr><td><code>mcpd_forward_dropped_spans_total</code></td><td>counter</td><td>데드 레터가 되었거나, 가득 찬 스풀에서 버려졌거나, 처리 중인 사본 64개를 넘어 버려진 스팬</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    늘어나는 <code>mcpd_forward_spool_bytes</code>와 오래된
+    <code>mcpd_forward_last_success_timestamp_seconds</code>에 알림을 거십시오.
+    둘이 함께 나타나면, mcpd가 데이터를 보관하는 동안 목적지가 받기를 멈췄다는
+    뜻입니다.
+  </p>
+  <p>
+    <code>mcpd doctor</code>는 목적지마다 항목 하나를 보고합니다. 아무것도 담지
+    않은 익스포트를 목적지 고유의 프로토콜로 보내므로, 데이터를 쓰지 않고도
+    엔드포인트와 자격 증명이 확인됩니다. Helicone은 건너뜁니다. 스풀 디렉터리도
+    읽어 항목 수, 바이트, 가장 오래된 항목의 나이, 데드 레터 수를 보고하고, 데드
+    레터가 있거나 가장 오래된 항목이 한 시간을 넘었으면 경고합니다.
   </p>
 
   <h2>mcpd에서 mcpd로 전달하기</h2>
   <p>
     양쪽 끝이 같은 프로토콜을 말하므로, 로컬 mcpd가 공용 mcpd로 전달할 수 있습니다.
     개발자는 자기 머신에 페이로드가 온전한 빠른 저장소를 두고, 팀의 인스턴스는 같은
-    실행을 받아 도착 시점에 자기 보존 기간과 자기 마스킹 규칙을 적용합니다.
+    실행을 받아 도착 시점에 자기 보존 기간과 자기 마스킹 규칙을 적용합니다. 스스로는
+    아무것도 저장하지 않는 컬렉터를 데몬 앞에 두려면
+    <a href={linkTo('/docs/relay')} class="link">릴레이</a>를 쓰십시오.
   </p>
 
   <h2>다음</h2>
   <ul>
     <li>
-      기존 OpenTelemetry 구성을 mcpd로 향하게 하기:
-      <a href={linkTo('/docs/opentelemetry')} class="link">OpenTelemetry</a>.
+      엣지 컬렉터와 여러 리전:
+      <a href={linkTo('/docs/relay')} class="link">릴레이와 리전</a>.
     </li>
     <li>
       스팬이 저장되거나 보내지기 전에 지워지는 것:

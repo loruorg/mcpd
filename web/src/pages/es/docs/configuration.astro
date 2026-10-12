@@ -218,6 +218,36 @@ volumes:
           <td>ninguna</td>
         </tr>
         <tr>
+          <td><code>--forward-vendor</code></td>
+          <td><code>MCPD_FORWARD_VENDOR</code></td>
+          <td><code>otlp</code></td>
+        </tr>
+        <tr>
+          <td><code>--forward-protocol</code></td>
+          <td><code>MCPD_FORWARD_PROTOCOL</code></td>
+          <td>el del propio proveedor</td>
+        </tr>
+        <tr>
+          <td><code>--spool-dir</code></td>
+          <td><code>MCPD_SPOOL_DIR</code></td>
+          <td>un directorio <code>.spool</code> junto a <code>--data</code></td>
+        </tr>
+        <tr>
+          <td><code>--spool-max-bytes</code></td>
+          <td><code>MCPD_SPOOL_MAX_BYTES</code></td>
+          <td><code>268435456</code> por destino, <code>1073741824</code> para el relé</td>
+        </tr>
+        <tr>
+          <td><code>--upstream</code></td>
+          <td><code>MCPD_UPSTREAMS</code></td>
+          <td>ninguno</td>
+        </tr>
+        <tr>
+          <td><code>--upstream-key</code></td>
+          <td><code>MCPD_UPSTREAM_KEY</code></td>
+          <td>sin fijar: se pasa la clave de cada emisor</td>
+        </tr>
+        <tr>
           <td>ninguno</td>
           <td><code>MCPD_LOG</code></td>
           <td><code>mcpd=info,mcpd_server=info,tower_http=warn</code></td>
@@ -711,6 +741,10 @@ volumes:
           <td><code>mcpd doctor</code></td>
           <td>Califica este despliegue e informa de lo que está mal configurado. Sale con 2 ante un fallo, así que puede servir de puerta para un despliegue. Consulta <a href={urlFor('/docs/operations', locale)} class="link">Operación</a></td>
         </tr>
+        <tr>
+          <td><code>mcpd relay</code></td>
+          <td>Se ejecuta como colector en el borde: acepta cada solicitud de ingesta, la guarda en el spool y la envía a los daemons que nombra <code>--upstream</code>, en orden. No abre ningún almacén. Consulta <a href={urlFor('/docs/relay', locale)} class="link">Relé y regiones</a></td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -756,6 +790,7 @@ volumes:
       { out: 'objectives      none' },
       { out: 'judge           off' },
       { out: 'forwarding      off' },
+      { out: 'relay           off: no --upstream' },
     ]}
   />
 
@@ -890,13 +925,29 @@ volumes:
       "webhook": "https://hooks.example.com/mcpd"
     }
   ],
-  "forward": {
-    "endpoint": "https://otlp.example.com",
-    "headers": [["Authorization", "Bearer sk-..."]],
-    "batch_size": 256,
-    "enabled": true
-  }
+  "forward": [
+    {
+      "endpoint": "https://otlp.example.com",
+      "headers": [["Authorization", "Bearer sk-..."]],
+      "batch_size": 256,
+      "enabled": true
+    },
+    {
+      "vendor": "langfuse",
+      "public_key": "\${LANGFUSE_PUBLIC_KEY}",
+      "secret_key": "\${LANGFUSE_SECRET_KEY}"
+    }
+  ]
 }`}</code></pre>
+
+  <p>
+    <code>forward</code> acepta un destino como objeto o varios como lista.
+    Cualquier cadena que contenga se puede escribir como
+    <code>$&#123;ENV_NAME&#125;</code> y se lee del entorno al arrancar; una
+    variable sin definir impide el arranque y se nombra en el error. Todos los
+    campos están en la página de
+    <a href={urlFor('/docs/forwarding', locale)} class="link">Reenvío</a>.
+  </p>
 
   <h3>Los proyectos, y las claves que llegan a ellos</h3>
   <p>
@@ -1009,14 +1060,16 @@ volumes:
 
   <h3>--forward-endpoint</h3>
   <p>
-    Copia cada span almacenado a otro endpoint OTLP/HTTP. Da la URL base; se le
-    añade <code>/v1/traces</code>. La escritura local ocurre siempre primero,
-    así que un destino caído no te cuesta nada.
+    Copia lo que mcpd almacena a otro endpoint. Da la URL base; se le añaden
+    <code>/v1/traces</code>, <code>/v1/logs</code> y <code>/v1/metrics</code>.
+    La escritura local ocurre siempre primero, así que un destino caído no te
+    cuesta nada.
   </p>
   <p>
-    Este flag gana al bloque <code>forward</code> del archivo de configuración,
-    así que se puede apuntar una instancia a otro sitio sin editar un ConfigMap
-    compartido. Consulta
+    Un destino dado por flags sustituye al bloque <code>forward</code> del
+    archivo de configuración, así que se puede apuntar una instancia a otro
+    sitio sin editar un ConfigMap compartido. Varios destinos a la vez van en el
+    archivo. Consulta
     <a href={urlFor('/docs/forwarding', locale)} class="link">Reenvío</a>.
   </p>
 
@@ -1030,6 +1083,48 @@ volumes:
     Un valor sin dos puntos se rechaza al arrancar, mostrando la forma que
     funciona, en lugar de descartarse. Una cabecera al estilo de OpenTelemetry,
     <code>key=value</code>, aquí se escribe <code>key: value</code>.
+  </p>
+
+  <h3>--forward-vendor y --forward-protocol</h3>
+  <p>
+    <code>--forward-vendor</code> elige un ajuste predefinido de proveedor, como
+    <code>langfuse</code>, <code>datadog</code> o <code>honeycomb</code>, por su
+    endpoint y sus convenciones de atributos. La credencial va en
+    <code>--forward-header</code>. Con un proveedor que tiene endpoint por
+    defecto, se puede omitir <code>--forward-endpoint</code>.
+    <code>--forward-protocol</code> es <code>json</code>, <code>protobuf</code>
+    o <code>grpc</code>, y por defecto es el del propio proveedor. La página de
+    <a href={urlFor('/docs/forwarding', locale)} class="link">Reenvío</a> enumera
+    todos los proveedores.
+  </p>
+
+  <h3>--spool-dir y --spool-max-bytes</h3>
+  <p>
+    Dónde guardan sus spools el reenvío y <code>mcpd relay</code>, un directorio
+    por destino. Por defecto es un directorio <code>.spool</code> junto a
+    <code>--data</code>, por ejemplo <code>/data/mcpd.spool</code>, y la memoria
+    cuando <code>--data</code> es <code>:memory:</code>. El valor
+    <code>memory</code> mantiene los spools en memoria a propósito.
+  </p>
+  <p>
+    <code>--spool-max-bytes</code> es lo máximo que puede guardar un spool:
+    268435456 (256 MiB) para cada destino de reenvío y 1073741824 (1 GiB) para
+    el relé, salvo que lo cambies. El <code>spool_max_bytes</code> propio de un
+    destino en el archivo de configuración gana a este valor.
+  </p>
+
+  <h3>--upstream y --upstream-key</h3>
+  <p>
+    Los daemons a los que envía <code>mcpd relay</code>, por orden de
+    preferencia. Repite el flag, o da una lista separada por comas en
+    <code>MCPD_UPSTREAMS</code>. Cada solicitud va al primer upstream que no
+    esté en pausa tras un fallo.
+  </p>
+  <p>
+    <code>--upstream-key</code> es la clave que el relé presenta a sus
+    upstreams, como token Bearer. Sin fijar, la clave propia de cada emisor se
+    guarda con su solicitud y se pasa tal cual. Consulta
+    <a href={urlFor('/docs/relay', locale)} class="link">Relé y regiones</a>.
   </p>
 
   <h3>--clickhouse-url</h3>

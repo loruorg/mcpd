@@ -1,0 +1,238 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+---
+
+<Doc
+  title="Aktarıcı ve bölgeler"
+  description="mcpd relay kenarda çalışan bir collector'dır: her alım isteğini kabul eder, yanıt vermeden önce bir biriktirme alanına yazar ve adını verdiğiniz daemon'lara sırayla, yedeğe geçerek ve çift sayım olmadan gönderir. Ortak bir depo üzerindeki birkaç aktarıcı ve daemon kopyası, çok bölgeli bir kurulum oluşturur."
+  lede="Ajanlarınızın yanında bir collector; bölgeler arasındaki bağlantı ise yeniden denemelerle aşılır."
+  og="docs"
+>
+  <h2>Aktarıcı nedir</h2>
+  <p>
+    <code>mcpd relay</code>, aynı ikili dosyayı kendisi hiçbir şey saklamayan
+    bir collector olarak çalıştırır. Bir daemon'un kabul ettiği her HTTP alım
+    isteğini kabul eder, isteği diskteki bir biriktirme alanına yazar,
+    göndericiye yanıt verir ve ardından isteği <code>--upstream</code> ile adı
+    verilen daemon'lara gönderir. Hiçbir depo açmaz.
+  </p>
+  <p>
+    Ajanlarınızın çalıştığı her bölgede bir tane çalıştırın. Böylece bir
+    gönderici birkaç milisaniye uzaklıktaki bir collector ile konuşur;
+    bölgeler arasındaki bağlantıyı da her ajan kendi başına değil, aktarıcı
+    yeniden denemelerle aşar.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="iki üst sunuculu bir kenar aktarıcısı"
+    command={`mcpd relay \\
+  --ingest-key $INGEST_KEY \\
+  --upstream http://mcpd.eu.internal:4317 \\
+  --upstream http://mcpd.us.internal:4317`}
+    primaryLabel="Seçenekler"
+    secondary={[
+      {
+        label: 'Ortam değişkenleri',
+        command: 'MCPD_INGEST_KEYS=$INGEST_KEY MCPD_UPSTREAMS=http://mcpd.eu.internal:4317,http://mcpd.us.internal:4317 mcpd relay',
+      },
+      {
+        label: 'Tek bir üst sunucu anahtarı',
+        command: 'mcpd relay --upstream http://mcpd.eu.internal:4317 --upstream-key $UPSTREAM_KEY',
+      },
+    ]}
+  />
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="aktarıcı"
+    lines={[
+      { cmd: 'MCPD_UPSTREAMS=http://mcpd.eu.internal:4317,http://mcpd.us.internal:4317 mcpd --data /data/mcpd.db config | grep ^relay' },
+      { out: "relay           2 upstream(s) in order, http://mcpd.eu.internal:4317, http://mcpd.us.internal:4317; each sender's key passed on; spool at /data/mcpd.spool/relay, 1024 MiB" },
+      { cmd: 'curl -s -D - -o /dev/null localhost:4317/v1/ingest -H "content-type: application/json" -d @batch.json | grep -e ^HTTP -e mcpd-relay' },
+      { out: 'HTTP/1.1 202 Accepted', tone: 'ok' },
+      { out: 'mcpd-relay: spooled' },
+      { cmd: 'curl -s localhost:4317/v1/ingest -H "content-type: application/json" -d @batch.json' },
+      { out: '{"accepted":0,"duplicate":0,"rejected":0}' },
+    ]}
+  />
+
+  <h2>Ne yanıt verir</h2>
+  <p>
+    Yoklama yolları dışındaki her yola gelen her POST kabul edilir. OTLP
+    yolları <code>/v1/traces</code>, <code>/v1/logs</code> ve
+    <code>/v1/metrics</code>, bir OpenTelemetry exporter'ının beklediği gibi,
+    OTLP <code>partialSuccess</code> ile 200 döner. Diğer her yol
+    <code>mcpd-relay: spooled</code> başlığı ve
+    <code>&#123;"accepted":0,"duplicate":0,"rejected":0&#125;</code> gövdesiyle
+    202 döner: istek tutulmuştur ve teslim edilecektir; gerçek sayılar ise onu
+    henüz görmemiş olan üst sunucuya aittir. Her SDK herhangi bir 2xx yanıtını
+    başarı sayar.
+  </p>
+  <p>
+    Aktarıcı <code>--ingest-key</code> değerini herhangi bir şey yazmadan önce
+    kendisi denetler ve <code>--max-body-bytes</code> ile
+    <code>--request-timeout-seconds</code> ayarlarını bir daemon gibi uygular.
+    Yanıt gönderilmeden önce istek biriktirme alanındadır:
+    <code>&lt;spool-dir&gt;/relay</code>.
+  </p>
+
+  <h2>Teslim ve yedeğe geçiş</h2>
+  <p>
+    Biriktirme alanını dört işçi gönderir. Her istek, <code>--upstream</code>
+    sırasında soğuma süresinde olmayan ilk üst sunucuya gider. Yeniden
+    denenebilir bir hata o üst sunucuyu geri çekilme ve rastgele sapmayla ya da
+    <code>Retry-After</code> ne kadar diyorsa o kadar süre soğumaya alır ve
+    istek hemen sonraki üst sunucuya gider. Soğuma bittiğinde önce yine birincil
+    denenir; böylece trafik kendiliğinden ona döner.
+  </p>
+  <p>
+    400 gibi kesin bir ret sonraki üst sunucuya gönderilmez: sonraki de aynı
+    baytları reddederdi. İstek biriktirme dizinindeki <code>dead/</code> içine
+    taşınır ve sayılır.
+  </p>
+
+  <h3>Çift sayım yok</h3>
+  <p>
+    Teslim en az bir kezdir ve yeniden gönderilen bir istek bir kez saklanır.
+    Her istek bir <code>Idempotency-Key</code> başlığı taşır: gönderici bir
+    tane gönderdiyse onunkini, yoksa <code>relay-</code> ve ardından yolun,
+    içerik kodlamasının ve gövdenin özetini. Daemon'daki her alım kapısı bu
+    başlığı dikkate alır; yerel bir yığın gövdesindeki anahtar ise ondan
+    üstündür. Aktarıcının bir zaman aşımından sonra yeniden gönderdiği ya da
+    birincil isteği alıp yanıt kaybolduktan sonra ikincile gönderdiği bir istek
+    tanınır ve yinelenen olarak bildirilir.
+  </p>
+
+  <h3>Anahtarlar</h3>
+  <p>
+    <code>--upstream-key</code> verildiğinde aktarıcı bu anahtarı her üst
+    sunucuya Bearer belirteci olarak sunar. Verilmediğinde göndericinin
+    <code>Authorization</code> veya <code>x-mcpd-key</code> başlığı, biriktirilen
+    istekle birlikte yalnızca aktarıcının kullanıcısının okuyabildiği bir
+    dosyada tutulur ve iletilir. İkinci biçim, her göndericinin projesini ve
+    kapsamını üst sunucunun gördüğü hâliyle korur.
+  </p>
+
+  <h2>Geri basınç ve hazır olma</h2>
+  <p>
+    Biriktirme alanı <code>--spool-max-bytes</code> ile sınırlıdır; siz
+    ayarlamadıkça aktarıcı için 1 GiB. Dolduğunda bir istek 503 ve
+    <code>Retry-After: 5</code> ile reddedilir. Her SDK ve OpenTelemetry
+    exporter'ı bunu yeniden dener; böylece aktarıcı veriyi düşürmez, veriyi
+    gönderici tutar.
+  </p>
+  <p>
+    <code>/healthz</code> her zaman 200 döner. <code>/readyz</code> şunları
+    döner:
+  </p>
+  <ul>
+    <li>bir üst sunucuya erişilebildiği sürece 200 <code>ok</code>;</li>
+    <li>
+      son 30 saniyede hiçbir üst sunucu <code>/readyz</code> yoklamasına yanıt
+      vermediğinde ya da bir teslim almadığında, bir <code>detail</code> ile
+      200 <code>degraded</code>. Üst sunucular 5 saniyede bir yoklanır;
+    </li>
+    <li>
+      biriktirme alanı dolduğunda ya da hiçbir üst sunucuya erişilemiyor ve
+      biriktirme alanı en az %80 doluyken 503.
+    </li>
+  </ul>
+  <p>
+    Bu yüzden bir yük dengeleyici, tamponlama yapan bir aktarıcıya göndermeyi
+    sürdürür ve artık alamayan bir aktarıcıdan trafiği uzaklaştırır.
+  </p>
+
+  <h3>Aktarıcı metrikleri</h3>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Metrik</th><th>Tür</th><th>Anlamı</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>mcpd_relay_accepted_total</code></td><td>counter</td><td>Biriktirme alanına yazılan istekler</td></tr>
+        <tr><td><code>mcpd_relay_refused_full_total</code></td><td>counter</td><td>Biriktirme alanı dolu olduğu için 503 ile reddedilen istekler</td></tr>
+        <tr><td><code>mcpd_relay_failovers_total</code></td><td>counter</td><td>İlki dışında bir üst sunucuya teslim edilen istekler</td></tr>
+        <tr><td><code>mcpd_relay_dead_letter_total</code></td><td>counter</td><td>Bir üst sunucunun kesin olarak reddettiği ve <code>dead/</code> içine taşınan istekler</td></tr>
+        <tr><td><code>mcpd_relay_spool_entries</code></td><td>gauge</td><td>Biriktirme alanında bekleyen istekler</td></tr>
+        <tr><td><code>mcpd_relay_spool_bytes</code></td><td>gauge</td><td>Biriktirme alanının tuttuğu bayt</td></tr>
+        <tr><td><code>mcpd_relay_spool_oldest_seconds</code></td><td>gauge</td><td>Bekleyen en eski isteğin yaşı ya da 0</td></tr>
+        <tr><td><code>mcpd_relay_delivered_total</code></td><td>counter</td><td>Bir üst sunucunun kabul ettiği istekler; <code>upstream</code> ve <code>order</code> etiketleriyle</td></tr>
+        <tr><td><code>mcpd_relay_failed_attempts_total</code></td><td>counter</td><td>Bir üst sunucunun kabul etmediği girişimler; aynı etiketlerle</td></tr>
+        <tr><td><code>mcpd_relay_upstream_up</code></td><td>gauge</td><td>Üst sunucu son 30 saniyede yanıt verdiyse 1, aksi hâlde 0</td></tr>
+        <tr><td><code>mcpd_uptime_seconds</code></td><td>gauge</td><td>Bu süreç başladığından beri geçen saniye</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Artan bir <code>mcpd_relay_failovers_total</code>, birincilin başarısız
+    olduğunu ve trafiğini ikincilin taşıdığını gösterir.
+    <code>mcpd_relay_spool_oldest_seconds</code>, teslimin ne kadar geride
+    olduğunu gösterir.
+  </p>
+
+  <h2>Birden çok bölge</h2>
+  <p>
+    Bir veya daha fazla bölgede, tek bir Postgres ya da ClickHouse deposuna
+    bağlı birkaç daemon kopyasını çalıştırmalar kapalıyken çalıştırın:
+    çalıştırma deposu gömülü bir dosyadır ve tek bir sürece aittir. Her
+    kopyanın <code>/readyz</code> yanıtı depoya erişip erişemediğini zaten
+    yansıtır. Her bölgede bunların önüne bir aktarıcı koyun;
+    <code>--upstream</code> listesinde önce en yakın daemon'u, ikinci olarak da
+    başka bir bölgedeki bir daemon'u verin.
+  </p>
+  <p>
+    Birden fazla kopya olduğunda dört ayar farklı davranır:
+  </p>
+  <ul>
+    <li>
+      Idempotency anahtarları ortak depoda tutulur; bu yüzden başka bir kopyaya
+      düşen yeniden gönderim de tanınır. Postgres anahtarı yığınla aynı
+      işlemde kaydeder.
+    </li>
+    <li>
+      Dakika başına kota tavanları kopya başına sayılır. İstediğiniz tavanı
+      kopya sayısına bölün.
+    </li>
+    <li>
+      İzleyiciler ve SLO hedefleri, yapılandırıldıkları her kopyadan tetiklenir.
+      Onları yalnızca bir kopyanın yapılandırma dosyasında tanımlayın.
+    </li>
+    <li>Yön analizi de aynıdır: onu tek bir kopyada yapılandırın.</li>
+  </ul>
+
+  <h3>Örnek kurulumlar</h3>
+  <p>
+    <code>deploy/docker/docker-compose.multi-region.yml</code> tek bir makinede
+    Postgres, iki daemon ve bir aktarıcı başlatır; bu, topolojinin tamamını
+    deneyebileceğiniz bir biçimde sunar.
+  </p>
+  <p>
+    Helm chart'ı <code>mode: relay</code> değerini alır.
+    <code>deploy/helm/examples/</code> altındaki üç değer dosyası her biri bir
+    bölgeyi tanımlar: <code>region-core.yaml</code>,
+    <code>region-standby.yaml</code> ve <code>region-edge-relay.yaml</code>;
+    sonuncusu yalnızca bir aktarıcı çalıştıran bir bölge içindir.
+  </p>
+
+  <h2>Sonraki</h2>
+  <ul>
+    <li>
+      Veriyi başka sağlayıcılara kopyalamak:
+      <a href={urlFor('/docs/forwarding', code)} class="link">İletme</a>.
+    </li>
+    <li>
+      Yoklamalar, metrikler ve depolar:
+      <a href={urlFor('/docs/operations', code)} class="link">İşletme</a>.
+    </li>
+    <li>
+      Her seçenek:
+      <a href={urlFor('/docs/configuration', code)} class="link">Yapılandırma</a>.
+    </li>
+  </ul>
+</Doc>

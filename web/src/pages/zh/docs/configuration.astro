@@ -219,6 +219,36 @@ volumes:
           <td>无</td>
         </tr>
         <tr>
+          <td><code>--forward-vendor</code></td>
+          <td><code>MCPD_FORWARD_VENDOR</code></td>
+          <td><code>otlp</code></td>
+        </tr>
+        <tr>
+          <td><code>--forward-protocol</code></td>
+          <td><code>MCPD_FORWARD_PROTOCOL</code></td>
+          <td>厂商自己的协议</td>
+        </tr>
+        <tr>
+          <td><code>--spool-dir</code></td>
+          <td><code>MCPD_SPOOL_DIR</code></td>
+          <td><code>--data</code> 旁边的一个 <code>.spool</code> 目录</td>
+        </tr>
+        <tr>
+          <td><code>--spool-max-bytes</code></td>
+          <td><code>MCPD_SPOOL_MAX_BYTES</code></td>
+          <td>每个目的地 <code>268435456</code>，中继为 <code>1073741824</code></td>
+        </tr>
+        <tr>
+          <td><code>--upstream</code></td>
+          <td><code>MCPD_UPSTREAMS</code></td>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td><code>--upstream-key</code></td>
+          <td><code>MCPD_UPSTREAM_KEY</code></td>
+          <td>未设置：原样传递每个发送方的密钥</td>
+        </tr>
+        <tr>
           <td>无</td>
           <td><code>MCPD_LOG</code></td>
           <td><code>mcpd=info,mcpd_server=info,tower_http=warn</code></td>
@@ -649,6 +679,10 @@ volumes:
           <td><code>mcpd doctor</code></td>
           <td>给这份部署评分，并报告哪里配错了。遇到故障时以 2 退出，所以它可以把住一次发布。见 <a href={to('/docs/operations')} class="link">把它跑起来</a></td>
         </tr>
+        <tr>
+          <td><code>mcpd relay</code></td>
+          <td>作为边缘采集器运行：接受每一个摄取请求，写进暂存区，再按顺序发给 <code>--upstream</code> 列出的守护进程。不打开任何存储。见 <a href={to('/docs/relay')} class="link">中继与多区域</a></td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -693,6 +727,7 @@ volumes:
       { out: 'objectives      none' },
       { out: 'judge           off' },
       { out: 'forwarding      off' },
+      { out: 'relay           off: no --upstream' },
     ]}
   />
 
@@ -813,13 +848,27 @@ volumes:
       "webhook": "https://hooks.example.com/mcpd"
     }
   ],
-  "forward": {
-    "endpoint": "https://otlp.example.com",
-    "headers": [["Authorization", "Bearer sk-..."]],
-    "batch_size": 256,
-    "enabled": true
-  }
+  "forward": [
+    {
+      "endpoint": "https://otlp.example.com",
+      "headers": [["Authorization", "Bearer sk-..."]],
+      "batch_size": 256,
+      "enabled": true
+    },
+    {
+      "vendor": "langfuse",
+      "public_key": "\${LANGFUSE_PUBLIC_KEY}",
+      "secret_key": "\${LANGFUSE_SECRET_KEY}"
+    }
+  ]
 }`}</code></pre>
+
+  <p>
+    <code>forward</code> 接受一个对象形式的目的地，或一个包含多个目的地的数组。
+    其中任何字符串都可以写成 <code>$&#123;ENV_NAME&#125;</code>，在启动时从环境
+    变量读取；变量未设置时，启动会被拒绝，并写明是哪个变量。每个字段都列在
+    <a href={to('/docs/forwarding')} class="link">转发</a>页面上。
+  </p>
 
   <h3>项目，以及能够到它们的密钥</h3>
   <p>
@@ -923,14 +972,14 @@ volumes:
 
   <h3>--forward-endpoint</h3>
   <p>
-    把每一个存下来的 span 复制一份，发到另一个 OTLP/HTTP 端点。给出基础 URL 即可，
-    <code>/v1/traces</code> 会被追加上去。本地写入总是先发生，所以一个挂掉的
-    目的地不会让你付出任何代价。
+    把 mcpd 存下的数据复制一份，发到另一个端点。给出基础 URL，
+    <code>/v1/traces</code>、<code>/v1/logs</code> 和 <code>/v1/metrics</code>
+    会被追加上去。本地写入总是先发生，所以一个挂掉的目的地不会让你付出任何代价。
   </p>
   <p>
-    这个参数压过配置文件里的 <code>forward</code> 块，所以一个实例可以被指到别处，
-    而不必编辑一份共享的 ConfigMap。见
-    <a href={to('/docs/forwarding')} class="link">转发</a>。
+    用参数给出的目的地会取代配置文件里的 <code>forward</code> 块，所以一个实例
+    可以被指到别处，而不必编辑一份共享的 ConfigMap。同时要发往多个目的地，请写在
+    文件里。见 <a href={to('/docs/forwarding')} class="link">转发</a>。
   </p>
 
   <h3>--forward-header</h3>
@@ -941,6 +990,42 @@ volumes:
   <p>
     没有冒号的值不会被悄悄丢掉，而是在启动时被拒绝，并给出正确的写法。OpenTelemetry 风格的 <code>key=value</code> 头部，
     在这里要写成 <code>key: value</code>。
+  </p>
+
+  <h3>--forward-vendor 和 --forward-protocol</h3>
+  <p>
+    <code>--forward-vendor</code> 选一个厂商预设，例如 <code>langfuse</code>、
+    <code>datadog</code> 或 <code>honeycomb</code>，用它的端点和属性约定。凭据
+    放在 <code>--forward-header</code> 里。厂商有默认端点时，可以省略
+    <code>--forward-endpoint</code>。<code>--forward-protocol</code> 取
+    <code>json</code>、<code>protobuf</code> 或 <code>grpc</code>，默认用厂商
+    自己的协议。<a href={to('/docs/forwarding')} class="link">转发</a>页面列出了
+    每一个厂商。
+  </p>
+
+  <h3>--spool-dir 和 --spool-max-bytes</h3>
+  <p>
+    转发和 <code>mcpd relay</code> 存放暂存区的位置，每个目的地一个目录。默认是
+    <code>--data</code> 旁边的一个 <code>.spool</code> 目录，例如
+    <code>/data/mcpd.spool</code>；<code>--data</code> 为 <code>:memory:</code>
+    时则放在内存里。取值 <code>memory</code> 会有意把暂存区放在内存里。
+  </p>
+  <p>
+    <code>--spool-max-bytes</code> 是一个暂存区最多能容纳的字节数：除非你另行设置，
+    每个转发目的地为 268435456（256 MiB），中继为 1073741824（1 GiB）。配置文件里
+    某个目的地自己的 <code>spool_max_bytes</code> 压过它。
+  </p>
+
+  <h3>--upstream 和 --upstream-key</h3>
+  <p>
+    <code>mcpd relay</code> 发往的守护进程，按优先顺序排列。重复这个参数，或在
+    <code>MCPD_UPSTREAMS</code> 里给出一个逗号分隔的列表。每个请求交给第一个
+    不处于失败后冷却期的上游。
+  </p>
+  <p>
+    <code>--upstream-key</code> 是中继向上游出示的密钥，作为 Bearer token 发送。
+    未设置时，每个发送方自己的密钥随请求一起保存，并原样传递。见
+    <a href={to('/docs/relay')} class="link">中继与多区域</a>。
   </p>
 
   <h3>--clickhouse-url</h3>

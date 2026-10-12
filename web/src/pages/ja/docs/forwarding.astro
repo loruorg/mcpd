@@ -6,21 +6,48 @@ import { localeOf, urlFor } from '@/lib/i18n'
 
 const code = localeOf(Astro.url.pathname)
 const linkTo = (route: string) => urlFor(route, code)
+
+const destinations = `{
+  "forward": [
+    {
+      "vendor": "langfuse",
+      "region": "eu",
+      "public_key": "\${LANGFUSE_PUBLIC_KEY}",
+      "secret_key": "\${LANGFUSE_SECRET_KEY}",
+      "filter": { "projects": ["checkout"], "sample": 0.25 },
+      "redact": { "key_contains": ["email"] }
+    },
+    {
+      "name": "honeycomb-prod",
+      "vendor": "honeycomb",
+      "api_key": "\${HONEYCOMB_API_KEY}",
+      "dataset": "agents",
+      "signals": { "traces": true, "logs": true, "metrics": false }
+    },
+    {
+      "name": "collector",
+      "endpoint": "https://otel.internal.example.com:4318",
+      "protocol": "protobuf",
+      "headers": { "Authorization": "Bearer \${COLLECTOR_TOKEN}" },
+      "redact": { "drop_payloads": true }
+    }
+  ]
+}`
 ---
 
 <Doc
   title="転送"
-  description="保存したすべてのスパンを別の OTLP エンドポイントへ複製し、mcpd をデータが閉じ込められる場所ではなく、テレメトリーのパイプラインの一区間にします。ローカルへの保存が常に先です。"
+  description="mcpd が保存したものを、1 つ以上の送信先へ複製します。Langfuse、LangSmith、Braintrust、Arize、Phoenix、Datadog、Honeycomb、New Relic、Grafana、Sentry、Weave、Laminar、Helicone、Opik、Elastic、Dynatrace、または任意の OTLP 受信側です。ローカルへの保存が常に先で、各コピーは送信先が受け取るまで、それぞれのスプールで待ちます。"
   lede="mcpd は OTLP を両方向に話します。ここに届いたものが、ここに閉じ込められることはありません。"
   og="docs"
 >
-  <h2>11 個のエクスポーターではなく、出口は 1 つのプロトコル</h2>
+  <h2>ストアは 1 つ、コピーは必要なだけ</h2>
   <p>
-    mcpd は OTLP を受け取り、OTLP を送出できます。この 1 つの性質が、ベンダー
-    ごとのエクスポーターの集まりがすることの大半を肩代わりします。Langfuse、
-    Datadog、Honeycomb、Grafana をはじめ、名前を挙げる価値のある送信先はどれも
-    HTTP 上の OTLP を受け付けます。したがって転送は 11 個ではなく 1 つの実装で
-    済み、あるベンダーの SDK のリリースに遅れることもありません。
+    mcpd は OTLP を受け取り、OTLP を送ります。送信先は設定ファイルの 1 つの
+    エントリーです。ベンダー名と資格情報を書き、必要ならフィルター、秘匿化の
+    ルール、受け取るシグナルを足します。各ベンダーのエンドポイント、認証
+    ヘッダー、読む属性名は mcpd が知っているので、あなたが書くのはキーだけで、
+    連携の実装ではありません。
   </p>
   <p>
     これは、mcpd の採用が取り消せるということでもあります。これまで使っていた
@@ -29,41 +56,328 @@ const linkTo = (route: string) => urlFor(route, code)
   </p>
 
   <h2>有効にする</h2>
+  <p>
+    OTLP の受信側が 1 つなら、フラグで足ります。<code>/v1/traces</code> では
+    なくベースの URL を渡してください。各シグナルのパスは自動で付け足されます。
+  </p>
 
   <Command
     class="not-prose my-6"
     title="ローカルに保存し、先へ複製する"
     command="mcpd serve --forward-endpoint https://otlp.example.com"
+    primaryLabel="OTLP"
+    secondary={[
+      {
+        label: 'ヘッダー付き',
+        command: "mcpd serve --forward-endpoint https://otlp.example.com --forward-header 'Authorization: Bearer $TOKEN'",
+      },
+      {
+        label: 'ベンダー',
+        command: "mcpd serve --forward-vendor honeycomb --forward-header 'x-honeycomb-team: $HONEYCOMB_API_KEY'",
+      },
+      {
+        label: 'Protobuf',
+        command: 'mcpd serve --forward-endpoint https://otlp.example.com --forward-protocol protobuf',
+      },
+    ]}
   />
 
   <p>
-    パスは自動で付け足されるので、<code>/v1/traces</code> ではなくベースの URL
-    を渡してください。資格情報が必要な送信先には、ヘッダーを足します。
+    <code>--forward-vendor</code> はベンダーのエンドポイントと規約を選び、
+    資格情報は <code>--forward-header</code> に書きます。既定のエンドポイントを
+    持つベンダーなら、<code>--forward-endpoint</code> は省けます。
+    <code>--forward-protocol</code> は <code>json</code>、
+    <code>protobuf</code>、<code>grpc</code> のどれかを取ります。フラグで
+    与えた送信先はファイルの <code>forward</code> ブロックを置き換えるので、
+    共有の ConfigMap を編集せずに、1 つのインスタンスだけ別の宛先へ向けられます。
   </p>
 
-  <Command
-    class="not-prose my-6"
-    title="認証ヘッダー付きで"
-    command={`mcpd serve \\
-  --forward-endpoint https://otlp.example.com \\
-  --forward-header 'Authorization: Bearer $TOKEN'`}
-  />
+  <h2>複数の送信先</h2>
+  <p>
+    設定ファイルの <code>forward</code> ブロックは、送信先 1 つをオブジェクトで
+    受け取ります。これは以前のリリースが読んでいた形で、今も使えます。複数の
+    送信先を配列で渡すこともできます。各送信先は自分のコピー、自分のスプール、
+    自分の再試行を持つので、遅いベンダーが速いベンダーを引き止めることは
+    ありません。
+  </p>
+
+  <pre><code class="language-json">{destinations}</code></pre>
 
   <p>
-    同じ設定は、設定ファイルの <code>forward</code> の下にもあります。そこでは
-    <code>batch_size</code> と <code>enabled</code> も使えます。フラグはファイル
-    より優先されるので、共有の ConfigMap を編集せずに、1 つのインスタンスだけ
-    別の宛先へ向けられます。
+    どの文字列も <code>$&#123;ENV_NAME&#125;</code> と書けます。値は起動時に
+    1 度だけ環境変数から読まれます。設定されていない変数があると起動は拒否
+    され、その変数の名前が示されます。Secret から抜けた資格情報は、1 週間後に
+    見つかる 401 ではなく、デプロイの時点で目に入るエラーになります。
   </p>
 
-  <pre><code class="language-json">{`{
-  "forward": {
-    "endpoint": "https://otlp.example.com",
-    "headers": [["Authorization", "Bearer sk-..."]],
-    "batch_size": 256,
-    "enabled": true
-  }
-}`}</code></pre>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>フィールド</th><th>役割</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>name</code></td>
+          <td>送信先の名前です。メトリクスの <code>destination</code> ラベルと、スプールのディレクトリー名に使われます。英字、数字、<code>-</code>、<code>_</code>、<code>.</code> が使えます。既定はベンダー名です</td>
+        </tr>
+        <tr>
+          <td><code>vendor</code></td>
+          <td>下に挙げるプリセットのどれかです。既定は <code>otlp</code></td>
+        </tr>
+        <tr>
+          <td><code>endpoint</code></td>
+          <td><code>/v1/traces</code> を付けないベース URL です。<code>otlp</code>、<code>otlp_grpc</code>、<code>elastic</code>、<code>dynatrace</code> では必須です。既定を持つベンダーでは、その既定を置き換えます</td>
+        </tr>
+        <tr>
+          <td><code>protocol</code></td>
+          <td><code>json</code>、<code>protobuf</code>、<code>grpc</code> のどれかです。既定は <code>otlp</code> が JSON、<code>otlp_grpc</code> が gRPC、それ以外のベンダーは protobuf です。Dynatrace は JSON を拒否します</td>
+        </tr>
+        <tr>
+          <td><code>headers</code></td>
+          <td><code>[name, value]</code> の組のリスト、またはオブジェクトです。プリセットが設定するヘッダーと同じ名前のヘッダーは、それを置き換えます</td>
+        </tr>
+        <tr>
+          <td><code>enabled</code></td>
+          <td><code>false</code> にすると、エントリーをファイルに残したまま何も送りません</td>
+        </tr>
+        <tr>
+          <td><code>batch_size</code></td>
+          <td>1 リクエストあたりのスパン数です。既定は 256</td>
+        </tr>
+        <tr>
+          <td><code>conventions</code></td>
+          <td>コピーを書くときの属性名です。<code>gen_ai</code>、<code>gen_ai_messages</code>、<code>openinference</code>、<code>langfuse</code>、<code>langsmith</code>、<code>braintrust</code>、<code>laminar</code> のどれかです。既定はベンダー自身のものです</td>
+        </tr>
+        <tr>
+          <td><code>region</code></td>
+          <td>ベンダーのリージョン別エンドポイントを選びます。一覧は下の表にあります</td>
+        </tr>
+        <tr>
+          <td><code>api_key</code>、<code>token</code>、<code>public_key</code>、<code>secret_key</code>、<code>instance_id</code>、<code>space_id</code></td>
+          <td>資格情報です。各ベンダーは表に書かれたものを読み、自分のヘッダーに変えます</td>
+        </tr>
+        <tr>
+          <td><code>project</code>、<code>workspace</code>、<code>dataset</code>、<code>dsn</code></td>
+          <td>ベンダーの中で、コピーが届く場所です</td>
+        </tr>
+        <tr>
+          <td><code>filter</code></td>
+          <td>この送信先が受け取るデータです。下を参照してください</td>
+        </tr>
+        <tr>
+          <td><code>redact</code></td>
+          <td>この送信先のコピーから外すものです。下を参照してください</td>
+        </tr>
+        <tr>
+          <td><code>signals</code></td>
+          <td><code>traces</code>、<code>logs</code>、<code>metrics</code> を、それぞれ true か false で指定します。既定は、そのベンダーが受け付けるすべてのシグナルです</td>
+        </tr>
+        <tr>
+          <td><code>spool_max_bytes</code></td>
+          <td>この送信先のスプールが持てる最大量です。既定は <code>--spool-max-bytes</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>ベンダー</h2>
+  <p>
+    各プリセットは、エンドポイント、認証、規約を設定します。シグナルの列は
+    そのベンダーが受け付けるもので、<code>signals</code> で指定しないかぎり、
+    送信先が送るものでもあります。
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>ベンダー</th><th>エンドポイント</th><th>資格情報と配置</th><th>シグナル</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>otlp</code></td>
+          <td><code>endpoint</code>、必須</td>
+          <td><code>headers</code>。任意の OTLP/HTTP 受信側です。<code>protocol</code> が <code>protobuf</code> でなければ JSON です</td>
+          <td>traces、logs、metrics</td>
+        </tr>
+        <tr>
+          <td><code>otlp_grpc</code></td>
+          <td><code>endpoint</code>、必須</td>
+          <td><code>headers</code>。任意の OTLP/gRPC 受信側で、<code>/opentelemetry.proto.collector.&lt;signal&gt;.v1.&lt;Service&gt;/Export</code> に送ります</td>
+          <td>traces、logs、metrics</td>
+        </tr>
+        <tr>
+          <td><code>langfuse</code></td>
+          <td><code>region</code> が <code>eu</code>（既定）なら <code>https://cloud.langfuse.com/api/public/otel</code>、<code>us</code> なら <code>us.cloud.langfuse.com</code>、<code>hipaa</code> なら <code>hipaa.cloud.langfuse.com</code>。セルフホストの <code>endpoint</code> には <code>/api/public/otel</code> が付け足されます</td>
+          <td><code>public_key</code> と <code>secret_key</code> による Basic 認証。<code>langfuse.*</code> 属性：観測の種類、入力、出力、モデル、使用量とコストの詳細、レベル、セッション、ユーザー、環境、リリース、トレース名、タグ</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>langsmith</code></td>
+          <td><code>https://api.smith.langchain.com/otel</code>。<code>region</code> が <code>eu</code> なら <code>eu.api.smith.langchain.com/otel</code></td>
+          <td><code>api_key</code> を <code>x-api-key</code> に、<code>project</code> を <code>Langsmith-Project</code> ヘッダーに。<code>langsmith.span.kind</code>、<code>gen_ai.prompt</code>、<code>gen_ai.completion</code></td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>braintrust</code></td>
+          <td><code>https://api.braintrust.dev/otel</code></td>
+          <td><code>api_key</code> を Bearer トークンに、必須の <code>project</code> を <code>x-bt-parent: project_name:&lt;project&gt;</code> に。<code>braintrust.*</code> 属性</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>arize</code></td>
+          <td><code>https://otlp.arize.com</code>。<code>region</code> が <code>eu</code> なら <code>https://otlp.eu-west-1a.arize.com</code></td>
+          <td><code>space_id</code> と <code>api_key</code> のヘッダー。必須の <code>project</code> を、リソースの <code>openinference.project.name</code> と <code>model_id</code> に。OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>phoenix</code></td>
+          <td><code>endpoint</code> を設定しなければ <code>http://localhost:6006</code></td>
+          <td>任意の <code>api_key</code> を Bearer トークンに、<code>project</code> を <code>openinference.project.name</code> に。OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>datadog</code></td>
+          <td><code>https://otlp.&lt;site&gt;</code>。<code>region</code> がサイトで、<code>datadoghq.com</code>（既定）、<code>us3</code>、<code>us5</code>、<code>eu</code> または <code>datadoghq.eu</code>、<code>ap1</code>、<code>ap2</code>、<code>gov</code> のどれかです</td>
+          <td><code>api_key</code> を <code>dd-api-key</code> に。LLM Observability 向けに <code>dd-otlp-source: llmobs</code> を付けます。<code>gen_ai.input.messages</code> と <code>gen_ai.output.messages</code></td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>honeycomb</code></td>
+          <td><code>https://api.honeycomb.io</code>。<code>region</code> が <code>eu</code> なら <code>api.eu1.honeycomb.io</code></td>
+          <td><code>api_key</code> を <code>x-honeycomb-team</code> に、<code>dataset</code> を <code>x-honeycomb-dataset</code> に</td>
+          <td>traces、logs、metrics</td>
+        </tr>
+        <tr>
+          <td><code>newrelic</code></td>
+          <td><code>https://otlp.nr-data.net</code>。<code>region</code> が <code>eu</code> なら <code>otlp.eu01.nr-data.net</code>、<code>fedramp</code> なら <code>gov-otlp.nr-data.net</code></td>
+          <td><code>api_key</code> を <code>api-key</code> に。文字列の値は 4095 バイトで切られ、切ったことを示す印が付きます</td>
+          <td>traces、logs、metrics</td>
+        </tr>
+        <tr>
+          <td><code>grafana</code></td>
+          <td>OTLP ゲートウェイの URL を <code>endpoint</code> に書くか、<code>region</code> にゾーンを書いて <code>https://otlp-gateway-&lt;zone&gt;.grafana.net/otlp</code> にします</td>
+          <td><code>instance_id</code> と <code>api_key</code>（または <code>token</code>）による Basic 認証</td>
+          <td>traces、logs、metrics</td>
+        </tr>
+        <tr>
+          <td><code>sentry</code></td>
+          <td><code>dsn</code> から：<code>https://&lt;host&gt;/api/&lt;project&gt;/integration/otlp</code></td>
+          <td>DSN のキーを <code>x-sentry-auth: sentry sentry_key=&lt;key&gt;</code> に</td>
+          <td>traces、logs</td>
+        </tr>
+        <tr>
+          <td><code>weave</code></td>
+          <td><code>https://trace.wandb.ai/otel</code></td>
+          <td>Basic 認証 <code>api:&lt;api_key&gt;</code>。<code>project</code>（<code>entity/project</code>）を <code>project_id</code> ヘッダーに。OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>laminar</code></td>
+          <td><code>https://api.lmnr.ai</code></td>
+          <td><code>api_key</code> を Bearer トークンに。<code>lmnr.*</code> 属性</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>helicone</code></td>
+          <td><code>https://api.worker.helicone.ai/custom/v1/log</code>、Helicone のロギング API</td>
+          <td><code>api_key</code> を Bearer トークンに。モデル呼び出し 1 回につき 1 リクエストです。モデルのスパンは送られ、それ以外のスパンはフィルターで除いたものとして数えられます</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>opik</code></td>
+          <td><code>https://www.comet.com/opik/api/v1/private/otel</code>。セルフホストの Opik は <code>endpoint</code> を設定します</td>
+          <td><code>api_key</code> を <code>Authorization</code> に、<code>workspace</code> を <code>Comet-Workspace</code> に、<code>project</code> を <code>projectName</code> に。OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>elastic</code></td>
+          <td><code>endpoint</code>、必須</td>
+          <td><code>Authorization: ApiKey &lt;api_key&gt;</code>、または <code>Bearer &lt;token&gt;</code></td>
+          <td>traces、logs、metrics</td>
+        </tr>
+        <tr>
+          <td><code>dynatrace</code></td>
+          <td>環境の URL を <code>endpoint</code> に。<code>/api/v2/otlp</code> が付け足されます</td>
+          <td><code>Authorization: Api-Token &lt;token&gt;</code>。Protobuf のみ</td>
+          <td>traces、logs、metrics</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>どのコピーにも含まれるもの</h2>
+  <p>
+    送信先がどの規約を使っても、コピーには <code>gen_ai.*</code> 属性も
+    含まれます。操作名、リクエストのモデル、システムとプロバイダーの名前、
+    入力と出力のトークン数、会話の id、エージェントとツールの名前、そして
+    リクエストの temperature、top_p、max_tokens です。<code>session.id</code>
+    と <code>user.id</code> も含まれ、mcpd がハッシュ化する場合は、すでに
+    ハッシュになっています。さらに <code>mcpd.*</code> 属性、つまりスパンの
+    種類、エンティティ名、コスト、タグが含まれ、リソースには
+    <code>mcpd.project</code> が付きます。そのため、別の mcpd に送ったコピーは
+    変わらずに、同じプロジェクトに届きます。
+  </p>
+  <p>
+    スパンはリンクを保ち、リンクの種類は <code>mcpd.link.kind</code> になります。
+    イベントも保ちます。イベントのスパンは、運び手のスパンが同じバッチにあれば、
+    OTLP のスパンイベントとして運び手に戻されます。ログは、ロガーを計装スコープ
+    として送られます。送信元が送ったメトリクスの点は転送され、カウンターは
+    デルタの単調な合計として、ゲージとヒストグラムはそのまま送られます。mcpd が
+    スパンから導き出す点は送られません。スパンがすでに言っていることの繰り返し
+    であり、送信先が二重に数えてしまうからです。
+  </p>
+  <p>
+    スパンはサービスごとにまとめられて <code>resourceSpans</code> になります。
+    受け取り側が期待する形です。スコア、フィードバック、観点ノートは mcpd に
+    残ります。
+  </p>
+
+  <h2>フィルター</h2>
+  <p>
+    <code>filter</code> は、1 つの送信先が受け取るものを絞ります。どのリストも
+    省略でき、空のリストはすべてを通します。
+  </p>
+  <ul>
+    <li><code>projects</code>：これらのプロジェクトだけ。</li>
+    <li><code>environments</code>：これらの環境だけ。</li>
+    <li><code>kinds</code>：これらのスパンの種類だけ。</li>
+    <li>
+      <code>sample</code>：0 から 1 の割合。トレース id から決めるので、
+      トレースはまるごと送られるか、まったく送られないかのどちらかで、
+      トレースの中のログもそのトレースに従います。
+    </li>
+  </ul>
+  <p>
+    フィルターが止めたものは <code>mcpd_forward_filtered_total</code> に
+    数えられます。送信先が受け取る量が思ったより少ないとき、その理由が
+    わかります。
+  </p>
+
+  <h2>秘匿化</h2>
+  <p>
+    転送は取り込みパイプラインの後で起きます。そのパイプラインは、何かが書かれる
+    前にその場で秘匿化します。mcpd が隠すよう指示されたものは、送信先にも
+    届きません。
+  </p>
+  <p>
+    <code>redact</code> は、1 つの送信先についてさらに先へ進みます。変えるのは
+    その送信先のコピーだけで、mcpd が保存するものは決して変えません。
+  </p>
+  <ul>
+    <li>
+      <code>drop_payloads: true</code> は、スパンの入力と出力、ログの
+      フィールドを送りません。送信先には、時間、モデル、使用量、コスト、
+      エラーは届きます。
+    </li>
+    <li>
+      <code>key_contains</code> は部分文字列のリストです。そのどれかを含む
+      キーは、値が <code>[redacted]</code> に置き換えられます。
+    </li>
+  </ul>
+  <p>
+    これで、自分のストアにはペイロードを丸ごと残し、ベンダーには各実行の
+    内容を除いた形だけを送れます。
+  </p>
 
   {/* The diagram belongs here, not at the top. It draws the intake ending at
       Store, and this section is about what happens after Store, so the two read
@@ -73,64 +387,93 @@ const linkTo = (route: string) => urlFor(route, code)
 
   <h2>ローカルへの保存が先に起きます</h2>
   <p>
-    スパンは、何かが転送されるより先に mcpd 自身のストアへ書かれ、転送はその
-    後、独立したタスクで走ります。ここから 2 つの帰結が出てきます。どちらも意図
-    したものです。
-  </p>
-  <p>
-    遅い送信先が、そのスパンを生んだリクエストに自分のレイテンシを足すことは
-    ありません。あなたのエージェントが、他人のコレクターを待つことはありません。
-  </p>
-  <p>
-    落ちている送信先が、取り込みの拒否に化けることもありません。mcpd は動き
-    続け、転送は独立したタスクで再試行されます。もう一方のやり方、つまり
-    他社の障害であなたのテレメトリーがまったく残らなくなるやり方こそ、この設計
-    が避けるためにある失敗です。
-  </p>
-  <p>
-    各バッチには 3 回の試行があります。429、5xx、または接続の失敗は 250 ms 後に
-    再試行され、待ち時間は試行のたびに倍になります。秒で指定された
-    <code>Retry-After</code> は、30 秒を上限としてこの待ち時間の代わりに使われ
-    ます。それ以外の 4xx は最初の応答で確定します。そのバッチは、その送信先に
-    とって不正な形のままだからです。デーモンが停止する途中なら、残りの試行を
-    すぐに行います。最終的に拒否されたバッチや、最後の試行の後も未配送の
-    バッチはログに記録され、そのスパンは
-    <code>mcpd_forward_dropped_spans_total</code> に加算されます。これで、
-    コピーのどれだけが欠けているかがわかります。
-  </p>
-  <p>
-    接続を受け付けたまま決して応答しない送信先も、デーモンのメモリを奪うことはできません。
-    送信先を同時に待てるのは、取り込みリクエスト 64 件分のコピーまでです。それだけ待っている間は、
-    新しいコピーはその場で破棄されて <code>mcpd_forward_dropped_spans_total</code> に数えられ、
-    ローカルへの書き込みには影響しません。
-  </p>
-  <p>
-    永続的な送信キューはありません。バッチは再試行の間メモリ上で待ち、転送
-    キューが満杯のときは新しいバッチが捨てられ、そのスパンは同じメトリクスに
-    数えられます。永続的なキューは別の製品であり、黙ったまま何時間も遅れる
-    キューは、目に見える欠落より悪いものです。配送の保証が必要なら、mcpd と
-    送信先の間に本物のコレクターを置き、それが作られた目的の仕事をさせて
-    ください。
+    バッチは、何かが転送されるより先に mcpd 自身のストアへ書かれます。コピーは
+    ローカルへの書き込みの後に取られ、各送信先のスプールに渡されます。遅い
+    送信先が、そのスパンを生んだリクエストに自分のレイテンシを足すことは
+    ありません。落ちている送信先が、取り込みの拒否に化けることもありません。
   </p>
 
-  <h2>秘匿化は、出ていくものにも適用されます</h2>
+  <h3>スプール</h3>
   <p>
-    転送は取り込みパイプラインの後で起きます。そのパイプラインは、何かが書かれる
-    前にその場で秘匿化します。mcpd が隠すよう指示されたものは、次の区間にも
-    届きません。ストレージは守るのに出口は守らないルールは、プライバシーの制御
-    とは呼べません。
+    各送信先は、<code>&lt;spool-dir&gt;/forward-&lt;name&gt;/</code> という
+    スプールディレクトリーを持ちます。コピーは一時ファイルに書かれ、同期され、
+    モード 0600 で所定の場所へ名前を変えて置かれます。そのため、クラッシュの
+    後にはエントリーが丸ごと残るか、まったく残らないかのどちらかです。
+    スプールディレクトリーの既定は <code>--data</code> の隣の
+    <code>.spool</code> ディレクトリー、たとえば <code>/data/mcpd.spool</code>
+    で、<code>--data</code> が <code>:memory:</code> のときはメモリーに置かれ
+    ます。<code>--spool-dir memory</code> は、意図してメモリーに置きます。
+  </p>
+  <p>
+    スプールの大きさは <code>spool_max_bytes</code> で制限され、設定しなければ
+    送信先ごとに 256 MiB です。いっぱいになると新しいコピーは捨てられ、
+    <code>mcpd_forward_spool_full_total</code> に数えられます。ローカルへの
+    書き込みには影響しません。ディスク上の滞留分は再起動の後も残り、起動時に
+    送られます。停止するとき、メモリー上のスプールには最後の試行が 1 回あります。
   </p>
 
-  <h2>何が転送されるか</h2>
+  <h3>再試行</h3>
   <p>
-    スパンです。ログ、メトリクス、スコア、フィードバック、観点ノートは
-    mcpd に残ります。人が転送する先はトレーシングのバックエンドであり、それ以外は
-    捨てるか、属性に押し込んで壊してしまうからです。
+    送信先ごとに 2 つのワーカーが、スプールにあるものを送ります。失敗した送信は、
+    ジッター付きの指数バックオフで再試行されます。待ち時間は 0.5 秒から始まり、
+    60 秒まで倍になっていき、各待ち時間はその範囲の上半分からランダムに選ばれ
+    ます。秒数または HTTP の日付で指定された <code>Retry-After</code> は、
+    300 秒を上限として守られます。
   </p>
   <p>
-    スパンはサービスごとにまとめられて <code>resourceSpans</code> になります。
-    受け取り側が期待する形です。スパンごとに 1 つのリソースを置く形も規格上は
-    正しいのですが、下流のすべてにまとめ直させることになります。
+    再試行されるもの：401、403、404、408、409、425、429、すべての 5xx、
+    通信のエラー、そして gRPC のコード <code>CANCELLED</code>、
+    <code>DEADLINE_EXCEEDED</code>、<code>PERMISSION_DENIED</code>、
+    <code>RESOURCE_EXHAUSTED</code>、<code>ABORTED</code>、
+    <code>OUT_OF_RANGE</code>、<code>UNAVAILABLE</code>、<code>DATA_LOSS</code>、
+    <code>UNAUTHENTICATED</code>。期限切れのキーや、まだ作成中の送信先でも、
+    データを失わずに待ちます。
+  </p>
+  <p>
+    それ以外の 4xx は最終的な結果です。そのバッチは、その送信先にとって不正な
+    形のままだからです。エントリーはスプールディレクトリーの <code>dead/</code>
+    に移され、新しい 100 件が残され、数えられます。1 日たっても届かない
+    エントリーも <code>dead/</code> に移されます。OTLP/HTTP では、1 KiB を
+    超える本文は gzip で圧縮されます。
+  </p>
+
+  <h2>見守る</h2>
+  <p>
+    どのメトリクスにも <code>destination</code> と <code>vendor</code> の
+    ラベルが付きます。
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>メトリクス</th><th>種類</th><th>意味</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>mcpd_forward_sent_total</code></td><td>counter</td><td>送信先が受け付けた項目</td></tr>
+        <tr><td><code>mcpd_forward_failed_attempts_total</code></td><td>counter</td><td>失敗し、再試行される試行</td></tr>
+        <tr><td><code>mcpd_forward_dead_letter_total</code></td><td>counter</td><td>最終的に拒否されたか 1 日より古くなり、<code>dead/</code> に移された項目</td></tr>
+        <tr><td><code>mcpd_forward_spool_full_total</code></td><td>counter</td><td>スプールがいっぱいで捨てられた項目</td></tr>
+        <tr><td><code>mcpd_forward_filtered_total</code></td><td>counter</td><td>フィルターが送信先へ送らなかった項目</td></tr>
+        <tr><td><code>mcpd_forward_spool_entries</code></td><td>gauge</td><td>スプールで待っているリクエスト</td></tr>
+        <tr><td><code>mcpd_forward_spool_bytes</code></td><td>gauge</td><td>スプールが持っているバイト数</td></tr>
+        <tr><td><code>mcpd_forward_up</code></td><td>gauge</td><td>最後の試行が成功したか、まだ試行がなければ 1、失敗したなら 0</td></tr>
+        <tr><td><code>mcpd_forward_last_success_timestamp_seconds</code></td><td>gauge</td><td>送信先が最後にリクエストを受け付けた時刻。エポックからの秒数で、なければ 0</td></tr>
+        <tr><td><code>mcpd_forward_dropped_spans_total</code></td><td>counter</td><td>デッドレターになった、いっぱいのスプールで捨てられた、または送信中のコピー 64 件を超えて捨てられたスパン</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    <code>mcpd_forward_spool_bytes</code> の増加と、古いままの
+    <code>mcpd_forward_last_success_timestamp_seconds</code> に警報を設定して
+    ください。2 つがそろえば、送信先がデータを受け取らなくなり、その間 mcpd が
+    データを預かっていることを示します。
+  </p>
+  <p>
+    <code>mcpd doctor</code> は、送信先ごとに 1 件の所見を報告します。何も
+    含まないエクスポートを送信先自身のプロトコルで送るので、データを書かずに
+    エンドポイントと資格情報を確かめられます。Helicone は飛ばします。
+    スプールディレクトリーも読み、エントリー数、バイト数、最も古いエントリーの
+    経過時間、デッドレターの数を報告し、デッドレターがあるときや、最も古い
+    エントリーが 1 時間を超えているときは警告します。
   </p>
 
   <h2>mcpd から mcpd への転送</h2>
@@ -138,14 +481,16 @@ const linkTo = (route: string) => urlFor(route, code)
     両端が同じプロトコルを話すので、ローカルの mcpd から共有の mcpd へ転送でき
     ます。開発者は自分のマシンに、ペイロードを丸ごと持つ速いストアを持ち、チーム
     のインスタンスは同じ実行を受け取って、到着時に自分の保持期間と自分の秘匿化
-    ルールを適用します。
+    ルールを適用します。自分では何も保存しないコレクターをデーモンの前に置く
+    なら、<a href={linkTo('/docs/relay')} class="link">リレー</a>を使って
+    ください。
   </p>
 
   <h2>次に</h2>
   <ul>
     <li>
-      既存の OpenTelemetry の構成を mcpd に向ける：
-      <a href={linkTo('/docs/opentelemetry')} class="link">OpenTelemetry</a>。
+      エッジのコレクターと複数のリージョン：
+      <a href={linkTo('/docs/relay')} class="link">リレーとリージョン</a>。
     </li>
     <li>
       スパンが保存され、送られる前に取り除かれるもの：

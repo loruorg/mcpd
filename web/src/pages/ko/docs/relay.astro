@@ -1,0 +1,229 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="릴레이와 리전"
+  description="mcpd relay는 엣지 컬렉터입니다. 모든 수집 요청을 받아 응답하기 전에 스풀에 쓰고, 지정한 데몬으로 순서대로 보내며, 장애 조치를 하고 두 번 세지 않습니다. 공유 저장소 하나에 릴레이 여러 개와 데몬 레플리카 여러 개를 두면 여러 리전에 걸친 배포가 됩니다."
+  lede="에이전트 곁의 컬렉터, 그리고 재시도와 함께 건너는 리전 사이의 연결."
+  og="docs"
+>
+  <h2>릴레이란</h2>
+  <p>
+    <code>mcpd relay</code>는 같은 바이너리를 스스로는 아무것도 저장하지 않는
+    컬렉터로 실행합니다. 데몬이 받는 모든 HTTP 수집 요청을 받아 디스크의 스풀에
+    쓰고, 보낸 쪽에 응답한 다음, <code>--upstream</code>이 지정한 데몬으로 그
+    요청을 보냅니다. 저장소는 열지 않습니다.
+  </p>
+  <p>
+    에이전트가 도는 리전마다 하나씩 실행하십시오. 그러면 보낸 쪽은 몇 밀리초
+    거리에 있는 컬렉터와 이야기하고, 리전 사이의 연결은 에이전트마다 따로가
+    아니라 릴레이가 재시도와 함께 건넙니다.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="업스트림 두 개를 둔 엣지 릴레이"
+    command={`mcpd relay \\
+  --ingest-key $INGEST_KEY \\
+  --upstream http://mcpd.eu.internal:4317 \\
+  --upstream http://mcpd.us.internal:4317`}
+    primaryLabel="플래그"
+    secondary={[
+      {
+        label: '환경 변수',
+        command: 'MCPD_INGEST_KEYS=$INGEST_KEY MCPD_UPSTREAMS=http://mcpd.eu.internal:4317,http://mcpd.us.internal:4317 mcpd relay',
+      },
+      {
+        label: '업스트림 키 하나',
+        command: 'mcpd relay --upstream http://mcpd.eu.internal:4317 --upstream-key $UPSTREAM_KEY',
+      },
+    ]}
+  />
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="릴레이"
+    lines={[
+      { cmd: 'MCPD_UPSTREAMS=http://mcpd.eu.internal:4317,http://mcpd.us.internal:4317 mcpd --data /data/mcpd.db config | grep ^relay' },
+      { out: "relay           2 upstream(s) in order, http://mcpd.eu.internal:4317, http://mcpd.us.internal:4317; each sender's key passed on; spool at /data/mcpd.spool/relay, 1024 MiB" },
+      { cmd: 'curl -s -D - -o /dev/null localhost:4317/v1/ingest -H "content-type: application/json" -d @batch.json | grep -e ^HTTP -e mcpd-relay' },
+      { out: 'HTTP/1.1 202 Accepted', tone: 'ok' },
+      { out: 'mcpd-relay: spooled' },
+      { cmd: 'curl -s localhost:4317/v1/ingest -H "content-type: application/json" -d @batch.json' },
+      { out: '{"accepted":0,"duplicate":0,"rejected":0}' },
+    ]}
+  />
+
+  <h2>릴레이의 응답</h2>
+  <p>
+    프로브를 뺀 어느 경로로 오든 POST는 모두 받습니다. OTLP 경로인
+    <code>/v1/traces</code>, <code>/v1/logs</code>, <code>/v1/metrics</code>는
+    OTLP <code>partialSuccess</code>와 함께 200으로 응답하며, 이것이
+    OpenTelemetry 익스포터가 기대하는 응답입니다. 그 밖의 경로는
+    <code>mcpd-relay: spooled</code> 헤더와
+    <code>&#123;"accepted":0,"duplicate":0,"rejected":0&#125;</code> 본문으로
+    202를 응답합니다. 요청은 보관되어 있고 전달될 것이며, 실제 건수는 아직 그
+    요청을 보지 못한 업스트림의 몫입니다. 모든 SDK는 2xx를 성공으로 읽습니다.
+  </p>
+  <p>
+    릴레이는 무엇이든 쓰기 전에 <code>--ingest-key</code>를 직접 확인하고,
+    <code>--max-body-bytes</code>와 <code>--request-timeout-seconds</code>를
+    데몬과 똑같이 적용합니다. 응답을 보내기 전에 요청은 이미 스풀
+    <code>&lt;spool-dir&gt;/relay</code>에 들어 있습니다.
+  </p>
+
+  <h2>전달과 장애 조치</h2>
+  <p>
+    워커 네 개가 스풀을 보냅니다. 요청은 <code>--upstream</code> 순서에서 쉬고
+    있지 않은 첫 번째 업스트림으로 갑니다. 재시도할 수 있는 실패가 나면 그
+    업스트림은 백오프와 지터에 따라, 또는 그 <code>Retry-After</code>가 말하는
+    동안 쉬고, 요청은 곧바로 다음 업스트림으로 갑니다. 쉬는 시간이 끝나면 다시
+    기본 업스트림부터 시도하므로, 트래픽은 저절로 그쪽으로 돌아갑니다.
+  </p>
+  <p>
+    400 같은 최종 거부는 다음 업스트림으로 보내지 않습니다. 다음 업스트림도 같은
+    바이트를 거부할 것이기 때문입니다. 요청은 스풀 디렉터리의
+    <code>dead/</code>로 옮겨지고 집계됩니다.
+  </p>
+
+  <h3>두 번 세지 않습니다</h3>
+  <p>
+    전달은 최소 한 번이고, 다시 보낸 것은 한 번만 저장됩니다. 모든 요청에는
+    <code>Idempotency-Key</code> 헤더가 붙습니다. 보낸 쪽이 직접 붙였으면 그
+    값이고, 아니면 <code>relay-</code> 뒤에 경로, 콘텐츠 인코딩, 본문의
+    다이제스트를 이은 값입니다. 데몬의 모든 수집 입구가 이 헤더를 따르며, 네이티브
+    배치 본문 안의 키가 있으면 그것이 헤더를 이깁니다. 릴레이가 타임아웃 뒤에 다시
+    보낸 요청이나, 기본 업스트림이 받았지만 응답을 잃어 보조 업스트림으로 보낸
+    요청은 알아보고 중복으로 보고됩니다.
+  </p>
+
+  <h3>키</h3>
+  <p>
+    <code>--upstream-key</code>를 주면 릴레이는 모든 업스트림에 그 키를 Bearer
+    토큰으로 제시합니다. 주지 않으면 보낸 쪽의 <code>Authorization</code>이나
+    <code>x-mcpd-key</code> 헤더를 스풀에 넣은 요청과 함께, 릴레이를 실행하는
+    사용자만 읽을 수 있는 파일에 보관했다가 그대로 넘깁니다. 두 번째 방식에서는
+    업스트림이 보는 프로젝트와 스코프가 보낸 쪽마다 그대로 유지됩니다.
+  </p>
+
+  <h2>배압과 레디니스</h2>
+  <p>
+    스풀의 크기는 <code>--spool-max-bytes</code>로 묶이며, 따로 정하지 않으면
+    릴레이는 1 GiB입니다. 가득 차면 요청은 503과
+    <code>Retry-After: 5</code>로 거부됩니다. 모든 SDK와 OpenTelemetry
+    익스포터가 이것을 재시도하므로, 릴레이가 데이터를 버리는 대신 보낸 쪽이
+    데이터를 들고 있게 됩니다.
+  </p>
+  <p>
+    <code>/healthz</code>는 언제나 200을 응답합니다. <code>/readyz</code>의
+    응답은 이렇습니다.
+  </p>
+  <ul>
+    <li>닿을 수 있는 업스트림이 있으면 200 <code>ok</code>.</li>
+    <li>
+      지난 30초 동안 어느 업스트림도 자기 <code>/readyz</code>에 응답하지 않았고
+      전달도 받지 않았으면, <code>detail</code>과 함께 200
+      <code>degraded</code>. 업스트림은 5초마다 확인합니다.
+    </li>
+    <li>
+      스풀이 가득 찼거나, 닿을 수 있는 업스트림이 없고 스풀이 80% 이상 찼으면
+      503.
+    </li>
+  </ul>
+  <p>
+    그래서 로드 밸런서는 버퍼링 중인 릴레이에는 계속 보내고, 더는 받을 수 없는
+    릴레이에서는 트래픽을 옮깁니다.
+  </p>
+
+  <h3>릴레이 메트릭</h3>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>메트릭</th><th>유형</th><th>의미</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>mcpd_relay_accepted_total</code></td><td>counter</td><td>스풀에 쓴 요청</td></tr>
+        <tr><td><code>mcpd_relay_refused_full_total</code></td><td>counter</td><td>스풀이 가득 차서 503으로 거부한 요청</td></tr>
+        <tr><td><code>mcpd_relay_failovers_total</code></td><td>counter</td><td>첫 번째가 아닌 업스트림으로 전달된 요청</td></tr>
+        <tr><td><code>mcpd_relay_dead_letter_total</code></td><td>counter</td><td>업스트림이 최종 거부해 <code>dead/</code>로 옮겨진 요청</td></tr>
+        <tr><td><code>mcpd_relay_spool_entries</code></td><td>gauge</td><td>스풀에서 기다리는 요청</td></tr>
+        <tr><td><code>mcpd_relay_spool_bytes</code></td><td>gauge</td><td>스풀이 담고 있는 바이트</td></tr>
+        <tr><td><code>mcpd_relay_spool_oldest_seconds</code></td><td>gauge</td><td>기다리는 요청 중 가장 오래된 것의 나이, 또는 0</td></tr>
+        <tr><td><code>mcpd_relay_delivered_total</code></td><td>counter</td><td>업스트림이 받은 요청. <code>upstream</code>과 <code>order</code> 레이블이 붙습니다</td></tr>
+        <tr><td><code>mcpd_relay_failed_attempts_total</code></td><td>counter</td><td>업스트림이 받지 않은 시도. 레이블은 같습니다</td></tr>
+        <tr><td><code>mcpd_relay_upstream_up</code></td><td>gauge</td><td>업스트림이 지난 30초 안에 응답했으면 1, 아니면 0</td></tr>
+        <tr><td><code>mcpd_uptime_seconds</code></td><td>gauge</td><td>이 프로세스가 시작된 뒤 지난 초</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    <code>mcpd_relay_failovers_total</code>이 늘고 있다면 기본 업스트림이
+    실패하고 있고 보조 업스트림이 그 트래픽을 나르고 있다는 뜻입니다.
+    <code>mcpd_relay_spool_oldest_seconds</code>는 전달이 얼마나 뒤처졌는지를
+    나타냅니다.
+  </p>
+
+  <h2>여러 리전</h2>
+  <p>
+    데몬 레플리카 여러 개를 리전 하나 또는 여럿에서 Postgres나 ClickHouse
+    저장소 하나에 붙여 실행하고, 실행 기능은 끄십시오. 실행 저장소는 내장
+    파일이라 프로세스 하나에 속합니다. 각 레플리카의 <code>/readyz</code>는
+    이미 저장소에 닿을 수 있는지를 반영합니다. 리전마다 그 앞에 릴레이를 두고,
+    <code>--upstream</code>에는 가장 가까운 데몬을 먼저, 다른 리전의 데몬을
+    두 번째로 나열하십시오.
+  </p>
+  <p>
+    레플리카가 둘 이상이 되면 네 가지 설정이 다르게 동작합니다.
+  </p>
+  <ul>
+    <li>
+      멱등성 키는 공유 저장소에 보관되므로, 다른 레플리카에 도착한 재전송도
+      알아봅니다. Postgres는 배치와 같은 트랜잭션에서 키를 기록합니다.
+    </li>
+    <li>
+      분당 할당량 상한은 레플리카마다 따로 셉니다. 원하는 상한을 레플리카 수로
+      나누십시오.
+    </li>
+    <li>
+      모니터와 목표는 그것이 설정된 모든 레플리카에서 발동합니다. 레플리카 하나의
+      설정 파일에만 두십시오.
+    </li>
+    <li>관점 분석도 같습니다. 레플리카 하나에만 설정하십시오.</li>
+  </ul>
+
+  <h3>배포 예제</h3>
+  <p>
+    <code>deploy/docker/docker-compose.multi-region.yml</code>은 머신 하나에서
+    Postgres, 데몬 두 개, 릴레이 하나를 시작합니다. 전체 구성을 직접 시험해 볼 수
+    있는 형태입니다.
+  </p>
+  <p>
+    Helm 차트는 <code>mode: relay</code>를 받습니다.
+    <code>deploy/helm/examples/</code> 아래의 values 파일 세 개가 각각 리전 하나를
+    기술합니다. <code>region-core.yaml</code>, <code>region-standby.yaml</code>,
+    그리고 릴레이만 도는 리전을 위한 <code>region-edge-relay.yaml</code>입니다.
+  </p>
+
+  <h2>다음</h2>
+  <ul>
+    <li>
+      데이터를 다른 벤더로 복사하기:
+      <a href={linkTo('/docs/forwarding')} class="link">전달</a>.
+    </li>
+    <li>
+      프로브, 메트릭, 저장소:
+      <a href={linkTo('/docs/operations')} class="link">운영하기</a>.
+    </li>
+    <li>
+      모든 플래그:
+      <a href={linkTo('/docs/configuration')} class="link">설정</a>.
+    </li>
+  </ul>
+</Doc>

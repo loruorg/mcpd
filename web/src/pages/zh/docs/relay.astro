@@ -1,0 +1,214 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="中继与多区域"
+  description="mcpd relay 是一个边缘采集器：它接受每一个摄取请求，在答复之前先写进暂存区，再按顺序发给你指定的守护进程，带故障切换，也不会重复计数。几个中继加上共用一个存储的若干守护进程副本，就构成一套多区域部署。"
+  lede="一个就在你的智能体旁边的采集器，跨区域的那段链路由它带着重试去走。"
+  og="docs"
+>
+  <h2>中继是什么</h2>
+  <p>
+    <code>mcpd relay</code> 用同一个二进制文件，作为一个自己不存储任何东西的
+    采集器运行。它接受守护进程接受的每一种 HTTP 摄取请求，把请求写进磁盘上的
+    暂存区，答复发送方，然后把请求发给 <code>--upstream</code> 列出的守护进程。
+    它不打开任何存储。
+  </p>
+  <p>
+    在你的智能体运行的每个区域各跑一个。这样发送方连接的是几毫秒之外的采集器，
+    跨区域的链路由中继带着重试去走，而不是由每个智能体各自去走。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="一个带两个上游的边缘中继"
+    command={`mcpd relay \\
+  --ingest-key $INGEST_KEY \\
+  --upstream http://mcpd.eu.internal:4317 \\
+  --upstream http://mcpd.us.internal:4317`}
+    primaryLabel="参数"
+    secondary={[
+      {
+        label: '环境变量',
+        command: 'MCPD_INGEST_KEYS=$INGEST_KEY MCPD_UPSTREAMS=http://mcpd.eu.internal:4317,http://mcpd.us.internal:4317 mcpd relay',
+      },
+      {
+        label: '统一的上游密钥',
+        command: 'mcpd relay --upstream http://mcpd.eu.internal:4317 --upstream-key $UPSTREAM_KEY',
+      },
+    ]}
+  />
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="中继"
+    lines={[
+      { cmd: 'MCPD_UPSTREAMS=http://mcpd.eu.internal:4317,http://mcpd.us.internal:4317 mcpd --data /data/mcpd.db config | grep ^relay' },
+      { out: "relay           2 upstream(s) in order, http://mcpd.eu.internal:4317, http://mcpd.us.internal:4317; each sender's key passed on; spool at /data/mcpd.spool/relay, 1024 MiB" },
+      { cmd: 'curl -s -D - -o /dev/null localhost:4317/v1/ingest -H "content-type: application/json" -d @batch.json | grep -e ^HTTP -e mcpd-relay' },
+      { out: 'HTTP/1.1 202 Accepted', tone: 'ok' },
+      { out: 'mcpd-relay: spooled' },
+      { cmd: 'curl -s localhost:4317/v1/ingest -H "content-type: application/json" -d @batch.json' },
+      { out: '{"accepted":0,"duplicate":0,"rejected":0}' },
+    ]}
+  />
+
+  <h2>它怎样答复</h2>
+  <p>
+    除探针之外，任何路径上的任何 POST 都会被接受。OTLP 路径
+    <code>/v1/traces</code>、<code>/v1/logs</code> 和 <code>/v1/metrics</code>
+    答复 200，并带上一个 OTLP <code>partialSuccess</code>，这正是 OpenTelemetry
+    导出器所期待的。其他每条路径答复 202，带上请求头
+    <code>mcpd-relay: spooled</code> 和响应体
+    <code>&#123;"accepted":0,"duplicate":0,"rejected":0&#125;</code>：请求已被
+    留存并将会投递，真实的计数属于上游，而上游还没见到它。每个 SDK 都把任何 2xx
+    当作成功。
+  </p>
+  <p>
+    中继自己检查 <code>--ingest-key</code>，在写入任何东西之前完成，并像守护进程
+    一样应用 <code>--max-body-bytes</code> 和
+    <code>--request-timeout-seconds</code>。答复发出之前，请求已经在暂存区
+    <code>&lt;spool-dir&gt;/relay</code> 里了。
+  </p>
+
+  <h2>投递与故障切换</h2>
+  <p>
+    四个 worker 负责发送暂存区里的内容。每个请求按 <code>--upstream</code> 的顺序，
+    交给第一个不在冷却期的上游。可重试的失败会让那个上游进入冷却，时长按退避加
+    抖动计算，或者按它的 <code>Retry-After</code> 指定的时长，而请求会立刻交给
+    下一个上游。冷却结束后，首选上游会重新被最先尝试，所以流量会自行回到它那里。
+  </p>
+  <p>
+    最终拒绝，例如 400，不会发给下一个上游：下一个也会拒绝同样的字节。请求会被
+    移到暂存目录里的 <code>dead/</code>，并计数。
+  </p>
+
+  <h3>不重复计数</h3>
+  <p>
+    投递至少一次，重发的内容只存一次。每个请求都带一个
+    <code>Idempotency-Key</code> 请求头：发送方自己带了就用发送方的，否则是
+    <code>relay-</code> 加上路径、内容编码和请求体的摘要。守护进程的每一个摄取
+    入口都遵守这个请求头，原生批次请求体里的键优先于它。中继在超时后重发的请求，
+    或者在首选上游已经收下、但答复丢失之后发给次选上游的请求，都会被识别出来，并
+    报告为重复。
+  </p>
+
+  <h3>密钥</h3>
+  <p>
+    设置了 <code>--upstream-key</code> 时，中继把这把密钥作为 Bearer token 出示给
+    每一个上游。没有设置时，发送方的 <code>Authorization</code> 或
+    <code>x-mcpd-key</code> 请求头会随暂存的请求一起保存在一个只有中继的用户能读的
+    文件里，并原样传递。第二种方式让上游看到的仍是每个发送方各自的项目和作用域。
+  </p>
+
+  <h2>背压与就绪</h2>
+  <p>
+    暂存区的上限是 <code>--spool-max-bytes</code>，除非你另行设置，中继为 1 GiB。
+    满了之后，请求会以 503 和 <code>Retry-After: 5</code> 被拒绝。每个 SDK 和
+    OpenTelemetry 导出器都会对此重试，于是数据留在发送方手里，而不是被中继丢掉。
+  </p>
+  <p>
+    <code>/healthz</code> 总是答复 200。<code>/readyz</code> 的答复是：
+  </p>
+  <ul>
+    <li>有上游可达时，200 <code>ok</code>；</li>
+    <li>
+      过去 30 秒内没有任何上游答复过它的 <code>/readyz</code> 或收下过一次投递时，
+      200 <code>degraded</code>，并带上 <code>detail</code>。每 5 秒探测一次上游；
+    </li>
+    <li>
+      暂存区已满，或没有上游可达且暂存区至少已满 80% 时，503。
+    </li>
+  </ul>
+  <p>
+    所以负载均衡器会继续把流量发给一个正在缓冲的中继，而把流量从一个已经接不住的
+    中继那里移走。
+  </p>
+
+  <h3>中继指标</h3>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>指标</th><th>类型</th><th>含义</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>mcpd_relay_accepted_total</code></td><td>counter</td><td>写进暂存区的请求</td></tr>
+        <tr><td><code>mcpd_relay_refused_full_total</code></td><td>counter</td><td>因暂存区已满而以 503 拒绝的请求</td></tr>
+        <tr><td><code>mcpd_relay_failovers_total</code></td><td>counter</td><td>投递给第一个之外的上游的请求</td></tr>
+        <tr><td><code>mcpd_relay_dead_letter_total</code></td><td>counter</td><td>被上游最终拒绝、移到 <code>dead/</code> 的请求</td></tr>
+        <tr><td><code>mcpd_relay_spool_entries</code></td><td>gauge</td><td>在暂存区里等待的请求数</td></tr>
+        <tr><td><code>mcpd_relay_spool_bytes</code></td><td>gauge</td><td>暂存区占用的字节数</td></tr>
+        <tr><td><code>mcpd_relay_spool_oldest_seconds</code></td><td>gauge</td><td>等待中最早的请求的年龄，没有则为 0</td></tr>
+        <tr><td><code>mcpd_relay_delivered_total</code></td><td>counter</td><td>上游收下的请求，带 <code>upstream</code> 和 <code>order</code> 标签</td></tr>
+        <tr><td><code>mcpd_relay_failed_attempts_total</code></td><td>counter</td><td>上游没有收下的尝试，标签同上</td></tr>
+        <tr><td><code>mcpd_relay_upstream_up</code></td><td>gauge</td><td>上游在过去 30 秒内答复过时为 1，否则为 0</td></tr>
+        <tr><td><code>mcpd_uptime_seconds</code></td><td>gauge</td><td>这个进程启动以来的秒数</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    <code>mcpd_relay_failovers_total</code> 上升，说明首选上游在失败，次选上游正在
+    承接它的流量。<code>mcpd_relay_spool_oldest_seconds</code> 表示投递落后了多少。
+  </p>
+
+  <h2>多个区域</h2>
+  <p>
+    在一个或多个区域里运行若干个守护进程副本，共用一个 Postgres 或 ClickHouse
+    存储，并关闭运行功能：运行存储是一个内嵌文件，只属于一个进程。每个副本的
+    <code>/readyz</code> 已经反映了它能否连上存储。在每个区域里，把一个中继放在
+    它们前面，<code>--upstream</code> 先列最近的守护进程，再列另一个区域的守护
+    进程。
+  </p>
+  <p>
+    副本多于一个时，有四项设置的行为会不同：
+  </p>
+  <ul>
+    <li>
+      幂等键保存在共用的存储里，所以落到另一个副本上的重发仍然会被识别。Postgres
+      在与批次相同的事务里记录这个键。
+    </li>
+    <li>
+      每分钟的配额上限按副本分别计数。请把你想要的上限除以副本数。
+    </li>
+    <li>
+      监视器和目标会从每一个配置了它们的副本触发。请只在一个副本的配置文件里配置
+      它们。
+    </li>
+    <li>方面分析也一样：只在一个副本上配置。</li>
+  </ul>
+
+  <h3>部署示例</h3>
+  <p>
+    <code>deploy/docker/docker-compose.multi-region.yml</code> 在一台机器上启动
+    Postgres、两个守护进程和一个中继，也就是可以直接试用的完整拓扑。
+  </p>
+  <p>
+    Helm chart 接受 <code>mode: relay</code>。<code>deploy/helm/examples/</code>
+    下的三个 values 文件各描述一个区域：<code>region-core.yaml</code>、
+    <code>region-standby.yaml</code> 和 <code>region-edge-relay.yaml</code>，
+    最后一个用于只运行中继的区域。
+  </p>
+
+  <h2>接下来</h2>
+  <ul>
+    <li>
+      把数据复制到其他厂商：
+      <a href={linkTo('/docs/forwarding')} class="link">转发</a>。
+    </li>
+    <li>
+      探针、指标和存储：
+      <a href={linkTo('/docs/operations')} class="link">把它跑起来</a>。
+    </li>
+    <li>
+      每一个参数：
+      <a href={linkTo('/docs/configuration')} class="link">配置</a>。
+    </li>
+  </ul>
+</Doc>

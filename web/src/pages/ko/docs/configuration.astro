@@ -220,6 +220,36 @@ volumes:
           <td>없음</td>
         </tr>
         <tr>
+          <td><code>--forward-vendor</code></td>
+          <td><code>MCPD_FORWARD_VENDOR</code></td>
+          <td><code>otlp</code></td>
+        </tr>
+        <tr>
+          <td><code>--forward-protocol</code></td>
+          <td><code>MCPD_FORWARD_PROTOCOL</code></td>
+          <td>벤더 고유의 값</td>
+        </tr>
+        <tr>
+          <td><code>--spool-dir</code></td>
+          <td><code>MCPD_SPOOL_DIR</code></td>
+          <td><code>--data</code> 옆의 <code>.spool</code> 디렉터리</td>
+        </tr>
+        <tr>
+          <td><code>--spool-max-bytes</code></td>
+          <td><code>MCPD_SPOOL_MAX_BYTES</code></td>
+          <td>목적지마다 <code>268435456</code>, 릴레이는 <code>1073741824</code></td>
+        </tr>
+        <tr>
+          <td><code>--upstream</code></td>
+          <td><code>MCPD_UPSTREAMS</code></td>
+          <td>없음</td>
+        </tr>
+        <tr>
+          <td><code>--upstream-key</code></td>
+          <td><code>MCPD_UPSTREAM_KEY</code></td>
+          <td>설정 안 함: 보낸 쪽마다 자기 키를 그대로 넘김</td>
+        </tr>
+        <tr>
           <td>없음</td>
           <td><code>MCPD_LOG</code></td>
           <td><code>mcpd=info,mcpd_server=info,tower_http=warn</code></td>
@@ -692,6 +722,10 @@ volumes:
           <td><code>mcpd doctor</code></td>
           <td>이 배포를 채점하고 무엇이 잘못 구성되었는지 보고합니다. 결함이 있으면 2로 종료하므로 배포를 막는 관문으로 쓸 수 있습니다. <a href={to('/docs/operations')} class="link">운영하기</a>를 보십시오</td>
         </tr>
+        <tr>
+          <td><code>mcpd relay</code></td>
+          <td>엣지 컬렉터로 실행합니다. 모든 수집 요청을 받아 스풀에 쓰고, <code>--upstream</code>이 지정한 데몬으로 순서대로 보냅니다. 스토어는 열지 않습니다. <a href={to('/docs/relay')} class="link">릴레이와 리전</a>을 보십시오</td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -736,6 +770,7 @@ volumes:
       { out: 'objectives      none' },
       { out: 'judge           off' },
       { out: 'forwarding      off' },
+      { out: 'relay           off: no --upstream' },
     ]}
   />
 
@@ -864,13 +899,28 @@ volumes:
       "webhook": "https://hooks.example.com/mcpd"
     }
   ],
-  "forward": {
-    "endpoint": "https://otlp.example.com",
-    "headers": [["Authorization", "Bearer sk-..."]],
-    "batch_size": 256,
-    "enabled": true
-  }
+  "forward": [
+    {
+      "endpoint": "https://otlp.example.com",
+      "headers": [["Authorization", "Bearer sk-..."]],
+      "batch_size": 256,
+      "enabled": true
+    },
+    {
+      "vendor": "langfuse",
+      "public_key": "\${LANGFUSE_PUBLIC_KEY}",
+      "secret_key": "\${LANGFUSE_SECRET_KEY}"
+    }
+  ]
 }`}</code></pre>
+
+  <p>
+    <code>forward</code>는 목적지 하나를 객체로, 또는 여러 개를 배열로 받습니다.
+    그 안의 문자열은 어느 것이든 <code>$&#123;ENV_NAME&#125;</code>으로 쓸 수
+    있고, 시작할 때 환경에서 읽힙니다. 설정되지 않은 변수가 있으면 시작을 거부하고
+    그 변수 이름을 알려 줍니다. 모든 필드는
+    <a href={to('/docs/forwarding')} class="link">전달</a> 페이지에 있습니다.
+  </p>
 
   <h3>프로젝트, 그리고 프로젝트에 닿는 키</h3>
   <p>
@@ -980,13 +1030,15 @@ volumes:
 
   <h3>--forward-endpoint</h3>
   <p>
-    저장된 모든 스팬을 다른 OTLP/HTTP 엔드포인트로 이어서 보냅니다. 베이스 URL을
-    주면 <code>/v1/traces</code>가 뒤에 붙습니다. 로컬 쓰기가 언제나 먼저
-    일어나므로, 목적지가 죽어 있어도 잃는 것이 없습니다.
+    mcpd가 저장하는 것을 다른 엔드포인트로 이어서 보냅니다. 베이스 URL을 주면
+    <code>/v1/traces</code>, <code>/v1/logs</code>, <code>/v1/metrics</code>가
+    뒤에 붙습니다. 로컬 쓰기가 언제나 먼저 일어나므로, 목적지가 죽어 있어도 잃는
+    것이 없습니다.
   </p>
   <p>
-    이 플래그는 설정 파일의 <code>forward</code> 블록을 이깁니다. 그래서 공유
-    ConfigMap을 고치지 않고도 한 인스턴스만 다른 곳을 향하게 할 수 있습니다.
+    플래그로 준 목적지는 설정 파일의 <code>forward</code> 블록을 대신합니다.
+    그래서 공유 ConfigMap을 고치지 않고도 한 인스턴스만 다른 곳을 향하게 할 수
+    있습니다. 여러 목적지를 한꺼번에 두려면 파일에 쓰십시오.
     <a href={to('/docs/forwarding')} class="link">전달</a>을 보십시오.
   </p>
 
@@ -999,6 +1051,46 @@ volumes:
   <p>
     콜론이 없는 값은 버려지지 않고, 올바른 형식을 보여 주며 시작할 때 거부됩니다. OpenTelemetry 방식의
     <code>key=value</code> 헤더는 여기서 <code>key: value</code>로 씁니다.
+  </p>
+
+  <h3>--forward-vendor와 --forward-protocol</h3>
+  <p>
+    <code>--forward-vendor</code>는 <code>langfuse</code>, <code>datadog</code>,
+    <code>honeycomb</code> 같은 벤더 프리셋을 골라 그 엔드포인트와 속성 규칙을
+    씁니다. 자격 증명은 <code>--forward-header</code>에 넣습니다. 기본
+    엔드포인트가 있는 벤더라면 <code>--forward-endpoint</code>를 빼도 됩니다.
+    <code>--forward-protocol</code>은 <code>json</code>, <code>protobuf</code>,
+    <code>grpc</code> 중 하나이며 기본값은 벤더 고유의 것입니다. 모든 벤더는
+    <a href={to('/docs/forwarding')} class="link">전달</a> 페이지에 나와
+    있습니다.
+  </p>
+
+  <h3>--spool-dir와 --spool-max-bytes</h3>
+  <p>
+    전달과 <code>mcpd relay</code>가 스풀을 두는 곳이며, 목적지마다 디렉터리가
+    하나씩 생깁니다. 기본값은 <code>/data/mcpd.spool</code>처럼
+    <code>--data</code> 옆에 있는 <code>.spool</code> 디렉터리이고,
+    <code>--data</code>가 <code>:memory:</code>이면 메모리입니다. 값을
+    <code>memory</code>로 주면 일부러 스풀을 메모리에 둡니다.
+  </p>
+  <p>
+    <code>--spool-max-bytes</code>는 스풀 하나가 담을 수 있는 최대 크기입니다.
+    따로 정하지 않으면 전달 목적지마다 268435456(256 MiB), 릴레이는
+    1073741824(1 GiB)입니다. 설정 파일에서 목적지마다 준
+    <code>spool_max_bytes</code>가 이 값을 이깁니다.
+  </p>
+
+  <h3>--upstream과 --upstream-key</h3>
+  <p>
+    <code>mcpd relay</code>가 보내는 데몬들이며, 선호하는 순서대로 씁니다.
+    플래그를 반복하거나, <code>MCPD_UPSTREAMS</code>에 쉼표로 구분한 목록을
+    주십시오. 각 요청은 실패 뒤 쉬고 있지 않은 첫 번째 업스트림이 받습니다.
+  </p>
+  <p>
+    <code>--upstream-key</code>는 릴레이가 업스트림에 Bearer 토큰으로 제시하는
+    키입니다. 설정하지 않으면 보낸 쪽마다 자기 키가 요청과 함께 보관되었다가
+    그대로 넘겨집니다.
+    <a href={to('/docs/relay')} class="link">릴레이와 리전</a>을 보십시오.
   </p>
 
   <h3>--clickhouse-url</h3>
