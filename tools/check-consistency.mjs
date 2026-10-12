@@ -50,9 +50,9 @@ function checkDocsNav() {
 /* ------------------------------ 2. every page carries a motion graphic */
 
 const MOTION = [
-  'StripChart', 'Waterfall', 'SignalFlow', 'PipelineDiagram',
-  'SearchDemo', 'TerminalCast', 'Annunciator', 'RunCursor', 'LeaseProtocol',
-  'SortingBench', 'LeaseBoard', 'RunDrum',
+  'LiveTrace', 'RunViews', 'Waterfall', 'SignalFlow', 'PipelineDiagram',
+  'SearchDemo', 'TerminalCast', 'MonitorChart', 'DurableRun', 'LeaseProtocol',
+  'SamplingGate',
 ]
 
 function walk(dir, out = []) {

@@ -67,26 +67,26 @@ Kubernetes under their own auth and retention rules with no vendor account.
 
 ## Positioning
 
-**[inferred from the brief's "alternative for ../mastra"]**
+**The unopinionated agent observatory.**
 
-The incumbent (`../mastra`) is a **TypeScript agent framework** that includes
-observability as one subsystem. Its observability is excellent but arrives
-attached to the framework: to be seen, an agent is expected to be built with it,
-in TypeScript.
-
-`mcpd` inverts that. It is **not a framework** — it is a daemon. The claim a
-neighbouring product cannot truthfully copy:
+Observability that arrives inside an agent framework can only see agents built
+with that framework. `mcpd` is **not a framework**: it is a daemon. It watches
+any agent, built with any framework, in any language, against any model
+provider, through OpenTelemetry or six SDKs. Nothing has to be adopted for an
+agent to be seen.
 
 > Observability that is a *process*, not a dependency. One static Rust binary,
-> no runtime, no required database, speaking OTLP — so it observes agents
+> no runtime, no required database, speaking OTLP, so it observes agents
 > written in any language, with any framework, including ones that already
 > exist.
 
-This is the `statsd` / `collectd` / `fluentd` lineage applied to AI agents, and
-it is the reason the name ends in `d`. The consequences that follow from it are
-the positioning: a solo operator can run it beside their app with no
-infrastructure; an enterprise can run the same binary as a StatefulSet; and
-neither has to rewrite their agent to be observed.
+The consequences are the positioning: a solo operator can use the free hosted
+version at mcpd.sh or run the binary beside their app with no infrastructure;
+an enterprise can run the same binary as a StatefulSet; and neither has to
+rewrite their agent to be observed.
+
+The public site never lists shortcomings, parity scores or "not yet" hedges.
+It states what mcpd does, confidently and accurately.
 
 ## Operating Context
 
@@ -109,8 +109,9 @@ neither has to rewrite their agent to be observed.
 
 **[brief] Required:**
 
-- Full feature parity with `../mastra`'s observability surface.
-- More value than the incumbent for solo operators *and* for enterprise.
+- A complete observability surface for agents: traces, logs, metrics, scores,
+  feedback, cost, evaluation and alerting.
+- Value for solo operators *and* for enterprise.
 - Runs well in Kubernetes and in Docker.
 - Free and open source.
 - SDKs for TypeScript/JavaScript, Python, Rust, Go, and Kotlin.
@@ -122,7 +123,7 @@ neither has to rewrite their agent to be observed.
 **[inferred] Technical constraints that follow:**
 
 - The wire protocol must be open (OTLP/HTTP + a native JSON ingest) so that
-  parity does not require our SDK.
+  being observed does not require our SDK.
 - Prompt and completion payloads must be redactable *before* storage, since the
   enterprise audience cannot store raw PII.
 - The zero-dependency path and the horizontally-scaled path must be the same
@@ -153,15 +154,14 @@ anywhere).
   as a daemon name, lowercase, always set in the product's mono voice.
 - Visual direction: "vercel-like styles (not exactly)" — precise, technical,
   high-contrast, generous space. Explicitly *not* a copy.
-- Theme: **light**. A light theme is the committed default.
+- Theme: **light and dark**, following the reader's system by default, with a
+  persisted toggle. Both are first-class.
 - Motion is a brand commitment, not decoration: every page animated, every page
   carrying at least one motion graphic.
 - The brief bans slop explicitly, and the project's design law is binding.
 
 ## Evidence on Hand
 
-- `../mastra` is present on disk and is real, readable source. It is the
-  parity reference and is being audited directly, not from memory.
 - **No customers, no testimonials, no benchmarks, no press, no logos, and no
   adoption numbers exist.** Future work must not fabricate any of these. Social
   proof, if ever shown, must come from something real (e.g. the project's own
@@ -190,7 +190,7 @@ anywhere).
 ## Accessibility & Inclusion
 
 **[inferred]** No user-specific requirement was established. The working default
-is WCAG 2.2 AA: real contrast on a light theme, full keyboard operation of the
+is WCAG 2.2 AA: real contrast in both themes, full keyboard operation of the
 trace explorer, visible focus, and every motion commitment gated behind
 `prefers-reduced-motion` — a page that never animates must still be complete and
 readable.

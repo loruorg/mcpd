@@ -1,0 +1,257 @@
+---
+/**
+ * A workflow that survives a crash.
+ *
+ * The daemon holds the run between steps; workers hold one step at a time.
+ * This plays one run of four steps. The worker serving `draft` dies mid-step,
+ * its lease expires, a second worker claims the step and finishes it. Then the
+ * run waits for an approval with no process alive at all, the event arrives,
+ * and the last step runs. The journal on the right is what the daemon records.
+ *
+ * The markup is the finished run, crash included, so the figure tells the
+ * whole story without playing.
+ */
+import { localeOf } from '@/lib/i18n'
+import { strings } from '@/lib/ui-strings'
+
+interface Props {
+  class?: string
+}
+const { class: className = '' } = Astro.props
+const s = strings(localeOf(Astro.url.pathname))
+
+/* One clock, in seconds. Everything below is read from it. */
+const STEPS = [
+  { id: 'classify', kind: 'task', claim: 0.5, worker: 'worker-a', done: 1.9 },
+  { id: 'draft', kind: 'agent', claim: 2.2, worker: 'worker-a', lost: 3.7, expire: 5.3, reclaim: 5.4, worker2: 'worker-b', done: 7.2 },
+  { id: 'approval', kind: 'wait_event', wait: 7.5, done: 10.6 },
+  { id: 'send', kind: 'task', claim: 10.9, worker: 'worker-b', done: 12.1 },
+]
+const END = 12.4
+const CYCLE = 17
+
+const at = (sec: number) => `00:${String(Math.floor(sec * 2)).padStart(2, '0')}`
+const JOURNAL = [
+  { t: 0.2, tone: 'ink', text: s('fig.durable.j.started') },
+  { t: 1.9, tone: 'ok', text: s('fig.durable.j.done', { step: 'classify' }) },
+  { t: 2.2, tone: 'ink', text: s('fig.durable.j.claimed', { step: 'draft', worker: 'worker-a' }) },
+  { t: 3.7, tone: 'fault', text: s('fig.durable.j.crashed', { worker: 'worker-a' }) },
+  { t: 5.3, tone: 'warn', text: s('fig.durable.j.expired', { step: 'draft' }) },
+  { t: 5.4, tone: 'ink', text: s('fig.durable.j.retried', { step: 'draft', worker: 'worker-b' }) },
+  { t: 7.2, tone: 'ok', text: s('fig.durable.j.done', { step: 'draft' }) },
+  { t: 7.5, tone: 'warn', text: s('fig.durable.j.waiting', { event: 'approval' }) },
+  { t: 10.6, tone: 'ok', text: s('fig.durable.j.event', { event: 'approval' }) },
+  { t: 12.1, tone: 'ok', text: s('fig.durable.j.done', { step: 'send' }) },
+  { t: END, tone: 'ok', text: s('fig.durable.j.finished') },
+]
+const tone: Record<string, string> = {
+  ink: 'var(--color-ink-3)',
+  ok: 'var(--color-olive)',
+  warn: 'var(--color-amber)',
+  fault: 'var(--color-oxide)',
+}
+const WORKERS = [
+  { id: 'worker-a', crash: 3.7 },
+  { id: 'worker-b', crash: null },
+]
+const labels = {
+  pending: s('fig.durable.pending'),
+  running: s('fig.durable.running'),
+  done: s('fig.durable.done'),
+  lost: s('fig.durable.lost'),
+  waiting: s('fig.durable.waiting'),
+  idle: s('fig.durable.idle'),
+  exited: s('fig.durable.exited'),
+  holding: s('fig.durable.holding'),
+}
+---
+
+<figure
+  class={`fig ${className}`}
+  data-motion
+  data-durable
+  data-steps={JSON.stringify(STEPS)}
+  data-workers={JSON.stringify(WORKERS)}
+  data-labels={JSON.stringify(labels)}
+  data-end={END}
+  data-cycle={CYCLE}
+>
+  <div class="fig-head">
+    <span class="legend">{s('fig.durable.title')}</span>
+    <span class="data hidden text-[0.75rem] text-ink-3 sm:inline">refund-request · run 2c81</span>
+    <span class="dr-status annunciator ml-auto py-0.5 text-[0.625rem]" data-lit="olive">{labels.done}</span>
+  </div>
+
+  <div class="dr-body grid">
+    <div class="min-w-0 p-4 sm:p-5">
+      <ol class="dr-steps m-0 grid list-none grid-cols-2 gap-2 p-0" style="padding-left:0">
+        {STEPS.map((st) => (
+          <li class="dr-step" data-step={st.id} data-state={st.id === 'draft' ? 'done' : 'done'}>
+            <span class="flex items-center justify-between gap-2">
+              <span class="data text-[0.8125rem] text-ink">{st.id}</span>
+              <span class="dr-mark" aria-hidden="true"></span>
+            </span>
+            <span class="data mt-0.5 block text-[0.6875rem] text-ink-3">{st.kind}</span>
+            <span class="dr-label mt-2 block text-[0.75rem] text-ink-2">{st.id === 'draft' ? s('fig.durable.attempt', { n: 2 }) : labels.done}</span>
+            <span class="dr-meter" aria-hidden="true"><span></span></span>
+          </li>
+        ))}
+      </ol>
+
+      <div class="mt-4 grid gap-1.5">
+        {WORKERS.map((w) => (
+          <div class="dr-lane" data-worker={w.id} data-state={w.crash ? 'exited' : 'idle'}>
+            <span class="data w-20 shrink-0 text-[0.75rem] text-ink-2">{w.id}</span>
+            <span class="dr-lane-bar"></span>
+            <span class="dr-lane-label data shrink-0 text-[0.6875rem]">{w.crash ? labels.exited : labels.idle}</span>
+          </div>
+        ))}
+        <div class="dr-lane" data-worker="daemon" data-state="idle">
+          <span class="data w-20 shrink-0 text-[0.75rem] text-ink">mcpd</span>
+          <span class="dr-lane-bar"></span>
+          <span class="dr-lane-label data shrink-0 text-[0.6875rem]">{labels.holding}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="dr-journal border-t border-scribe-2 bg-panel-1 px-4 py-3">
+      <p class="legend mb-2">{s('fig.durable.journal')}</p>
+      <ol class="m-0 list-none space-y-1 p-0" style="padding-left:0">
+        {JOURNAL.map((j) => (
+          <li class="dr-entry flex gap-3 text-[0.75rem] leading-snug" data-t={j.t}>
+            <span class="data shrink-0 text-ink-3">{at(j.t)}</span>
+            <span class="h-1.5 w-1.5 shrink-0 translate-y-[0.4rem] rounded-full" style={`background:${tone[j.tone]}`} aria-hidden="true"></span>
+            <span class="text-ink-2">{j.text}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  </div>
+</figure>
+
+<style>
+  /* Laid out by the figure's own width: in a docs column the steps stack two
+     by two and the journal sits underneath. */
+  [data-durable] { container-type: inline-size; }
+  @container (min-width: 640px) {
+    .dr-steps { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  }
+  @container (min-width: 980px) {
+    .dr-body { grid-template-columns: minmax(0, 1fr) minmax(0, 21rem); }
+    .dr-journal { border-top: 0; border-left: 1px solid var(--color-scribe-2); }
+  }
+  .dr-step {
+    position: relative;
+    overflow: hidden;
+    padding: 0.6rem 0.7rem 0.75rem;
+    border: 1px solid var(--color-scribe);
+    border-radius: var(--radius-tile);
+    background: var(--color-panel-2);
+    transition: border-color 200ms var(--ease-out), background-color 200ms var(--ease-out);
+  }
+  .dr-mark { width: 0.55rem; height: 0.55rem; border-radius: 99px; background: var(--color-ink-4); }
+  .dr-step[data-state='done'] .dr-mark { background: var(--color-olive); }
+  .dr-step[data-state='running'] { border-color: var(--color-accent); }
+  .dr-step[data-state='running'] .dr-mark { background: var(--color-accent); }
+  .dr-step[data-state='lost'] { border-color: var(--color-oxide); background: var(--lit-oxide-bg); }
+  .dr-step[data-state='lost'] .dr-mark { background: var(--color-oxide); }
+  .dr-step[data-state='waiting'] { border-style: dashed; border-color: var(--color-amber); }
+  .dr-step[data-state='waiting'] .dr-mark { background: var(--color-amber); }
+  .dr-step[data-state='pending'] { border-style: dashed; }
+  .dr-step[data-state='pending'] .dr-label { color: var(--color-ink-3); }
+  .dr-meter { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; }
+  .dr-meter > span {
+    position: absolute; inset: 0; transform-origin: left center; transform: scaleX(0);
+    background: var(--color-accent);
+  }
+  .dr-step[data-state='lost'] .dr-meter > span { background: var(--color-oxide); }
+  .dr-step[data-state='waiting'] .dr-meter > span { background: var(--color-amber); }
+
+  .dr-lane {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.4rem 0.6rem;
+    border-radius: var(--radius-tile);
+    background: var(--color-well);
+  }
+  .dr-lane-bar { flex: 1; height: 2px; border-radius: 2px; background: var(--color-scribe); position: relative; overflow: hidden; }
+  .dr-lane-label { color: var(--color-ink-3); }
+  .dr-lane[data-state='busy'] .dr-lane-label { color: var(--color-accent); }
+  .dr-lane[data-state='busy'] .dr-lane-bar::after {
+    content: ''; position: absolute; inset: 0; width: 30%;
+    background: var(--color-accent);
+    animation: dr-flow 1.1s linear infinite;
+  }
+  .dr-lane[data-state='exited'] .dr-lane-label { color: var(--color-oxide); }
+  .dr-lane[data-state='exited'] .dr-lane-bar { background: color-mix(in oklab, var(--color-oxide) 45%, transparent); }
+  .dr-lane[data-state='holding'] .dr-lane-label { color: var(--color-amber); }
+  .dr-lane[data-state='holding'] .dr-lane-bar { background: color-mix(in oklab, var(--color-amber) 55%, transparent); }
+  @keyframes dr-flow { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+</style>
+
+<script>
+  import { animate, each } from '@/lib/motion'
+
+  type Step = { id: string; claim?: number; worker?: string; lost?: number; expire?: number; reclaim?: number; worker2?: string; wait?: number; done: number }
+
+  each('[data-durable]', (fig) => {
+    const steps: Step[] = JSON.parse(fig.dataset.steps!)
+    const workers: { id: string; crash: number | null }[] = JSON.parse(fig.dataset.workers!)
+    const L: Record<string, string> = JSON.parse(fig.dataset.labels!)
+    const end = Number(fig.dataset.end)
+    const cycle = Number(fig.dataset.cycle)
+    const stepEl = (id: string) => fig.querySelector<HTMLElement>(`[data-step="${id}"]`)!
+    const lane = (id: string) => fig.querySelector<HTMLElement>(`[data-worker="${id}"]`)!
+    const entries = [...fig.querySelectorAll<HTMLElement>('.dr-entry')]
+    const status = fig.querySelector<HTMLElement>('.dr-status')!
+    const attemptLabel = stepEl('draft').querySelector('.dr-label')!.textContent ?? ''
+
+    const set = (el: HTMLElement, state: string, label: string, meter: number) => {
+      if (el.dataset.state !== state) el.dataset.state = state
+      const l = el.querySelector('.dr-label')
+      if (l && l.textContent !== label) l.textContent = label
+      const m = el.querySelector<HTMLElement>('.dr-meter > span')
+      if (m) m.style.transform = `scaleX(${meter})`
+    }
+    const setLane = (id: string, state: string, label: string) => {
+      const el = lane(id)
+      if (el.dataset.state !== state) el.dataset.state = state
+      const l = el.querySelector('.dr-lane-label')!
+      if (l.textContent !== label) l.textContent = label
+    }
+    const frac = (t: number, a: number, b: number) => Math.max(0, Math.min(1, (t - a) / (b - a)))
+
+    animate(fig, (time) => {
+      const t = time % cycle
+      const busy: Record<string, string> = {}
+      let holding = false
+      for (const st of steps) {
+        const el = stepEl(st.id)
+        if (t >= st.done) set(el, 'done', st.id === 'draft' ? attemptLabel : L.done!, 1)
+        else if (st.wait !== undefined) {
+          if (t >= st.wait) {
+            set(el, 'waiting', L.waiting!, frac(t, st.wait, st.done))
+            holding = true
+          } else set(el, 'pending', L.pending!, 0)
+        } else if (st.reclaim !== undefined && t >= st.reclaim) {
+          set(el, 'running', attemptLabel, frac(t, st.reclaim, st.done))
+          busy[st.worker2!] = st.id
+        } else if (st.lost !== undefined && t >= st.lost) {
+          set(el, 'lost', L.lost!, 1 - frac(t, st.lost, st.expire!))
+        } else if (st.claim !== undefined && t >= st.claim) {
+          set(el, 'running', L.running!, frac(t, st.claim, st.lost ?? st.done))
+          busy[st.worker!] = st.id
+        } else set(el, 'pending', L.pending!, 0)
+      }
+      for (const w of workers) {
+        if (w.crash !== null && t >= w.crash) setLane(w.id, 'exited', L.exited!)
+        else if (busy[w.id]) setLane(w.id, 'busy', `${L.running} ${busy[w.id]}`)
+        else setLane(w.id, 'idle', L.idle!)
+      }
+      setLane('daemon', holding ? 'holding' : 'idle', L.holding!)
+      for (const e of entries) e.style.opacity = t >= Number(e.dataset.t) ? '1' : '0.22'
+      const finished = t >= end
+      status.dataset.lit = finished ? 'olive' : 'amber'
+      status.textContent = finished ? L.done! : L.running!
+    })
+  })
+</script>

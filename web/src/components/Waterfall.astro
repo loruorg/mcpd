@@ -1,254 +1,151 @@
 ---
 /**
- * A trace waterfall, drawn from real span data.
+ * A trace waterfall, drawn from the failing run in `mcpd demo`.
  *
- * This is the product doing its job, not a picture of a product doing its job:
- * the bars are positioned from actual start and duration values, the tokens and
- * costs are the figures those spans carry, and the tree indentation is the real
- * parent chain.
- *
- * The motion is a playhead sweeping the span of the run, the way a recorder's
- * pen crosses the paper. Every row is fully rendered and readable before it
- * starts and after it stops.
+ * Every bar is placed from the span's real offset and duration (see
+ * `@/lib/specimen`), on one coordinate system with its ruler. Playing replays
+ * the run: bars grow from their start time under a sweeping "now" line, and
+ * the failing agent lights when the run ends. The markup is the finished run.
  */
-
-import { SPECIMEN, type Row } from '@/lib/specimen'
+import { SPECIMEN, SPECIMEN_TRACE, type Row } from '@/lib/specimen'
+import { localeOf } from '@/lib/i18n'
+import { strings } from '@/lib/ui-strings'
 
 interface Props {
   rows?: Row[]
   class?: string
 }
-
-/* The failing run from `mcpd demo`, shared with the run drum. See
-   `@/lib/specimen` for where every figure in it comes from. */
 const { rows = SPECIMEN, class: className = '' } = Astro.props
+const s = strings(localeOf(Astro.url.pathname))
 
 const total = Math.max(...rows.map((r) => r.at + r.ms))
 const pct = (n: number) => `${((n / total) * 100).toFixed(3)}%`
-
-/**
- * Tick positions, derived from the run's real duration rather than hard-coded.
- * The ruler and the bars have to share one coordinate system: a scale that says
- * 8s where the bar actually ends at 2.97s is worse than no scale, because it
- * invites the reader to measure and then lies to them.
- */
-const TICKS = 5
-const ticks = Array.from({ length: TICKS }, (_, i) => {
-  const at = (total / (TICKS - 1)) * i
-  return {
-    at,
-    fraction: i / (TICKS - 1),
-    label: at >= 1000 ? `${(at / 1000).toFixed(at >= 10_000 ? 0 : 1)}s` : `${Math.round(at)}ms`,
-  }
-})
-
-/* The columns the bar track shares with every row. Declared once so the ruler
-   and the rows cannot drift apart. */
-// The name column is capped much lower on a narrow screen: at 15rem it left the
-// bar track about 66px wide, which is not a chart.
-const GRID =
-  'grid grid-cols-[minmax(6rem,9rem)_1fr] gap-3 sm:grid-cols-[minmax(12rem,18rem)_1fr]'
-
-/** Bar colour carries meaning: a model call is not the same thing as a tool call. */
-const tone: Record<string, string> = {
-  agent: 'var(--color-ink)',
-  model: 'var(--color-slate)',
-  tool: 'var(--color-amber)',
-  memory: 'var(--color-ink-4)',
-  guardrail: 'var(--color-oxide)',
-}
+const fmt = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(2)}s` : `${n}ms`)
+const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => ({ f, label: fmt(Math.round(total * f)) }))
 ---
 
-<div class={`panel-raised overflow-hidden ${className}`}>
-  <div class="flex items-center gap-3 border-b border-scribe-2 bg-panel-1 px-4 py-2.5">
-    <span class="legend text-ink-3">Trace b3d9e71a</span>
-    <span class="annunciator py-1 text-[0.625rem]" data-lit="oxide">Fault</span>
-    {/* The run's own figures, and the cost rendered the way the interface
-        renders it: 0.0005454 to five places is $0.00055, not $0.00054. */}
-    <span class="data hidden text-[0.75rem] text-ink-3 sm:inline">
-      8.42 s · {rows.length} spans · $0.00055
-    </span>
+<figure class={`fig ${className}`} data-motion data-waterfall data-total={total}>
+  <div class="fig-head">
+    <span class="legend">{s('fig.waterfall.title')}</span>
+    <span class="data text-[0.75rem] text-ink-3">{SPECIMEN_TRACE}</span>
+    <span class="wf-fault annunciator ml-auto py-0.5 text-[0.625rem]" data-lit="oxide">{s('fig.waterfall.fault')}</span>
+    <span class="data hidden text-[0.75rem] text-ink-3 sm:inline">8.42 s · {rows.length} spans · $0.00055</span>
   </div>
 
-  {/* The measured scale. It sits on the same grid as the rows and reserves the
-      same trailing columns, so ruler 0-100% maps exactly onto bar-track
-      0-100%. */}
-  <div class={`${GRID} border-b border-scribe-2 bg-panel-1 px-4 pb-1 pt-1.5`}>
-    <div aria-hidden="true"></div>
-    <div class="flex min-w-0 items-center gap-3">
-      <div class="mcpd-axis relative h-5 min-w-0 flex-1">
-        {
-          ticks.map((t) => (
-            <span
-              class="absolute top-0 block h-1.5 w-px bg-scribe"
-              style={`left:${(t.fraction * 100).toFixed(3)}%`}
-              aria-hidden="true"
-            />
-          ))
-        }
-        {
-          ticks.map((t, i) => (
-            <span
-              class:list={[
-                'mcpd-tick data absolute bottom-0 text-[0.625rem] leading-none text-ink-3',
-                // Which of these survive is decided by the width of the TRACK,
-                // in the container query below, not by the viewport. Keying it
-                // to a viewport breakpoint was wrong in the one direction that
-                // matters: the trailing metric columns appear at `lg`, so the
-                // track gets NARROWER as the window gets wider, and five labels
-                // overprinted into an unreadable smear on a wide screen.
-                i % 2 === 1 ? 'mcpd-tick-odd' : '',
-                i !== 0 && i !== TICKS - 1 ? 'mcpd-tick-mid' : '',
-              ]}
-              style={`left:${(t.fraction * 100).toFixed(3)}%; transform: translateX(${
-                i === 0 ? '0' : i === ticks.length - 1 ? '-100%' : '-50%'
-              })`}
-            >
-              {t.label}
-            </span>
-          ))
-        }
-      </div>
-      {/* The same spacers the rows use, so the track ends where their bars do. */}
-      <span class="hidden w-14 shrink-0 sm:block" aria-hidden="true"></span>
-      <span class="hidden w-24 shrink-0 lg:block" aria-hidden="true"></span>
-      <span class="hidden w-16 shrink-0 lg:block" aria-hidden="true"></span>
+  <div class="wf-grid border-b border-scribe-2 px-4 py-1.5">
+    <span class="legend">{s('fig.live.span')}</span>
+    <div class="wf-axis relative h-4">
+      {ticks.map((t, i) => (
+        <span
+          class:list={['data absolute top-0 text-[0.625rem] text-ink-3', i % 2 === 1 && 'wf-odd']}
+          style={`left:${(t.f * 100).toFixed(3)}%; transform:translateX(${i === 0 ? '0' : i === ticks.length - 1 ? '-100%' : '-50%'})`}
+        >{t.label}</span>
+      ))}
     </div>
+    <span class="wf-metric legend text-right">{s('fig.waterfall.duration')}</span>
+    <span class="wf-metric wf-wide legend text-right">{s('fig.waterfall.tokens')}</span>
+    <span class="wf-metric wf-wide legend text-right">{s('fig.waterfall.cost')}</span>
   </div>
 
   <div class="relative">
-    {/* The playhead. Motion on content that is already fully drawn. */}
-    <div class="mcpd-playhead pointer-events-none absolute inset-y-0 left-0 z-10 w-px bg-oxide/45" aria-hidden="true"></div>
-
-    {/* The list holds its own geometry rather than inheriting the page's.
-        `panel.css` indents every `ol` inside `.prose` by 1.3em, and `not-prose`
-        on the panel does not cancel it, because that is a plain descendant
-        selector and not a Tailwind typography one. The indent moved every row
-        20.8px right of the ruler while the right edges still met, so the scale
-        was stretched over the bars rather than laid on them: at 1440px the
-        ruler measured 75.5px against a 54.7px bar track, and the tick labelled
-        4.2s sat where 3.4s actually was. That is the exact failure the ruler
-        exists to prevent, on five documentation pages. */}
-    <ol class="divide-y divide-scribe-2" style="padding-left:0">
-      {
-        rows.map((r, i) => (
-          <li data-row={i} class={`mcpd-row ${GRID} items-center px-4 py-1.5 transition-colors duration-200 hover:bg-panel-3`}>
-            <div class="flex min-w-0 items-baseline gap-2" style={`padding-left:${r.depth * 0.9}rem`}>
+    <ol class="m-0 list-none py-1.5" style="padding-left:0">
+      {rows.map((r) => (
+        <li class="wf-row wf-grid items-center px-4 py-[0.38rem]" data-kind={r.kind} data-at={r.at} data-ms={r.ms} data-error={r.status === 'error' ? '' : undefined}>
+          <span class="flex min-w-0 items-center gap-2" style={`padding-left:${r.depth * 0.85}rem`}>
+            <span class="h-2 w-2 shrink-0 rounded-[2px]" style="background:var(--kind)" aria-hidden="true"></span>
+            <span class="data truncate text-[0.75rem] text-ink">{r.name}</span>
+            {r.status === 'error' && <span class="data shrink-0 text-[0.625rem] text-oxide">error</span>}
+          </span>
+          <span class="wf-track relative h-[0.9rem]">
+            <span class="absolute inset-y-0" style={`left:${pct(r.at)}; width:max(3px, ${pct(r.ms)})`}>
               <span
-                class="data shrink-0 text-[0.625rem] uppercase tracking-wider"
-                style={`color:${tone[r.kind] ?? 'var(--color-ink-4)'}`}
-              >
-                {r.kind}
-              </span>
-              <span class="truncate text-[0.8125rem] text-ink">{r.name}</span>
-              {r.status === 'error' && (
-                <span class="data shrink-0 text-[0.625rem] text-oxide">fail</span>
-              )}
-            </div>
-
-            <div class="flex min-w-0 items-center gap-3">
-              <div class="mcpd-track relative h-3.5 min-w-0 flex-1">
-                <div
-                  class="absolute top-1/2 h-[7px] -translate-y-1/2 rounded-[1px]"
-                  style={`left:${pct(r.at)}; width:max(2px, ${pct(r.ms)});
-                          background:${tone[r.kind] ?? 'var(--color-ink-4)'};
-                          opacity:${r.status === 'error' ? 1 : 0.82}`}
-                  title={`${r.name} · ${r.ms} ms`}
-                />
-              </div>
-              <span class="data hidden w-14 shrink-0 text-right text-[0.6875rem] text-ink-3 sm:block">
-                {r.ms >= 1000 ? `${(r.ms / 1000).toFixed(2)}s` : `${r.ms}ms`}
-              </span>
-              <span class="data hidden w-24 shrink-0 text-right text-[0.6875rem] text-ink-3 lg:block">
-                {r.tokens ?? ''}
-              </span>
-              <span class="data hidden w-16 shrink-0 text-right text-[0.6875rem] text-ink-3 lg:block">
-                {r.cost ?? ''}
-              </span>
-            </div>
-          </li>
-        ))
-      }
+                class="wf-bar absolute inset-0 rounded-[3px]"
+                style={`background:color-mix(in oklab, var(--kind) ${r.status === 'error' ? 26 : 80}%, transparent);${r.status === 'error' ? 'box-shadow: inset 0 0 0 1px var(--color-oxide)' : ''}`}
+                title={`${r.name} · ${r.ms} ms`}
+              ></span>
+            </span>
+          </span>
+          <span class="wf-metric data text-right text-[0.6875rem] text-ink-3">{fmt(r.ms)}</span>
+          <span class="wf-metric wf-wide data text-right text-[0.6875rem] text-ink-3">{r.tokens ?? ''}</span>
+          <span class="wf-metric wf-wide data text-right text-[0.6875rem] text-ink-3">{r.cost ?? ''}</span>
+        </li>
+      ))}
     </ol>
+    <div class="wf-now pointer-events-none absolute inset-y-0 left-0 w-px bg-accent opacity-0" aria-hidden="true"></div>
   </div>
 
-  <div class="border-t border-scribe-2 bg-panel-1 px-4 py-2.5">
-    <p class="text-[0.8125rem] leading-relaxed text-ink-2">
-      <span class="text-ink">The model called one tool three times and never answered.</span>
-      That is visible in four seconds here, and invisible in a log file.
-    </p>
-  </div>
-</div>
+  <figcaption class="fig-foot">
+    <span class="text-ink">{s('fig.waterfall.caption')}</span>
+    {' '}{s('fig.waterfall.note')}
+  </figcaption>
+</figure>
 
 <style>
-  /* The ruler labels are sized against the track they sit on. A container query
-     rather than a media query, because the track's width is set by the grid and
-     the trailing columns, and has no fixed relationship to the viewport. */
-  .mcpd-axis {
-    container-type: inline-size;
+  /* Columns follow the figure's own width, not the viewport: in a docs column
+     a wide screen still leaves the figure narrow, and the bar track is the
+     thing that must keep its room. */
+  [data-waterfall] { container-type: inline-size; }
+  .wf-grid {
+    display: grid;
+    grid-template-columns: minmax(7rem, 9rem) minmax(0, 1fr);
+    column-gap: 0.75rem;
   }
-  .mcpd-tick {
-    white-space: nowrap;
+  .wf-metric { display: none; }
+  @container (min-width: 520px) {
+    .wf-grid { grid-template-columns: minmax(9rem, 11rem) minmax(0, 1fr) 3.5rem; }
+    .wf-metric { display: block; }
+    .wf-wide { display: none; }
   }
-  /* Under about 300px five labels touch; keep the ends and the midpoint. */
-  @container (max-width: 300px) {
-    .mcpd-tick-odd { display: none; }
+  @container (min-width: 860px) {
+    .wf-grid { grid-template-columns: minmax(10rem, 13rem) minmax(0, 1fr) 3.5rem 5.5rem 4.5rem; }
+    .wf-wide { display: block; }
   }
-  /* Under about 150px even three touch; keep the two ends, which are the ones
-     that state the scale. */
-  @container (max-width: 150px) {
-    .mcpd-tick-mid { display: none; }
-  }
-
-  .mcpd-playhead {
-    animation: mcpd-sweep 8.42s cubic-bezier(0.42, 0, 0.58, 1) infinite;
-  }
-  @keyframes mcpd-sweep {
-    0%   { transform: translateX(0); opacity: 0; }
-    4%   { opacity: 1; }
-    92%  { opacity: 1; }
-    /* Zero, not a viewport. Unmeasured, the playhead used to travel a whole
-       screen width and cross the span names on its way. Resting at the origin
-       is the honest fallback: it shows where the run starts. */
-    100% { transform: translateX(var(--sweep, 0px)); opacity: 0; }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .mcpd-playhead { animation: none; opacity: 0; }
-  }
-  /* The row the run drum's pen is on, when the drum is on the same page. */
-  .mcpd-row[data-reading] { background: var(--color-panel-3); }
+  .wf-axis { container-type: inline-size; }
+  @container (max-width: 260px) { .wf-odd { display: none; } }
+  .wf-bar { transform-origin: left center; }
 </style>
 
 <script>
-  // The sweep distance is the element's own width, which CSS alone cannot know.
-  // Measured once, and again on resize, so the playhead always crosses exactly
-  // the run and never stops short or runs past the edge.
-  // The playhead must sweep the BAR TRACK, not the card: run over the whole
-  // card it crossed the span names and finished long after the bars ended.
-  const measure = () => {
-    document.querySelectorAll<HTMLElement>('.mcpd-playhead').forEach((p) => {
-      const card = p.parentElement
-      const track = card?.querySelector<HTMLElement>('.mcpd-track')
-      if (!card || !track) return
-      const cardBox = card.getBoundingClientRect()
-      const trackBox = track.getBoundingClientRect()
-      p.style.left = `${Math.round(trackBox.left - cardBox.left)}px`
-      p.style.setProperty('--sweep', `${Math.round(trackBox.width)}px`)
-    })
-  }
-  measure()
-  addEventListener('resize', measure, { passive: true })
-  // Re-measure once the real faces land. The track's width is set by a column
-  // of span names in Tabular, and the first measurement runs against the
-  // fallback font, so the playhead is aligned to a track that is about to move.
-  document.fonts?.ready.then(measure)
+  import { animate, each, easeOut } from '@/lib/motion'
 
-  // The run drum reads the same run. When its pen moves onto a span, mark the
-  // row for that span here, so the two instruments point at one thing.
-  addEventListener('mcpd:specimen', (e) => {
-    const index = (e as CustomEvent<{ index: number }>).detail.index
-    document.querySelectorAll<HTMLElement>('.mcpd-row').forEach((row) => {
-      row.toggleAttribute('data-reading', Number(row.dataset.row) === index)
+  each('[data-waterfall]', (fig) => {
+    const total = Number(fig.dataset.total)
+    const rows = [...fig.querySelectorAll<HTMLElement>('.wf-row')].map((el) => ({
+      el,
+      at: Number(el.dataset.at),
+      ms: Number(el.dataset.ms),
+      bar: el.querySelector<HTMLElement>('.wf-bar')!,
+    }))
+    const track = fig.querySelector<HTMLElement>('.wf-track')!
+    const now = fig.querySelector<HTMLElement>('.wf-now')!
+    const fault = fig.querySelector<HTMLElement>('.wf-fault')!
+    let left = 0
+    let width = 0
+    const measure = () => {
+      const box = fig.getBoundingClientRect()
+      const t = track.getBoundingClientRect()
+      left = t.left - box.left
+      width = t.width
+    }
+    measure()
+    addEventListener('resize', measure, { passive: true })
+    document.fonts?.ready.then(measure)
+
+    const FILL = 5.5
+    const CYCLE = FILL + 4
+    animate(fig, (time) => {
+      const k = time % CYCLE
+      const u = Math.min(1, k / FILL) * total
+      for (const r of rows) {
+        const started = u >= r.at
+        const p = Math.max(0, Math.min(1, (u - r.at) / r.ms))
+        r.el.style.opacity = started ? String(0.4 + 0.6 * easeOut(Math.min(1, (u - r.at) / 200))) : '0.15'
+        r.bar.style.transform = `scaleX(${p})`
+      }
+      const done = k >= FILL
+      fault.style.visibility = done ? 'visible' : 'hidden'
+      now.style.opacity = done ? '0' : '0.8'
+      now.style.transform = `translateX(${left + (u / total) * width}px)`
     })
   })
 </script>

@@ -1,0 +1,219 @@
+---
+/**
+ * Four views of what mcpd shows, cycling: the waterfall of a run, the
+ * conversation the model had, where the money went, and the log lines a run
+ * wrote. Each is a small, faithful drawing of the screen it names in the
+ * interface. A reader can pick a tab; otherwise they advance on their own.
+ *
+ * Every view is in the markup and the first is shown, so the figure is
+ * complete without playing.
+ */
+import { localeOf } from '@/lib/i18n'
+import { strings } from '@/lib/ui-strings'
+
+interface Props {
+  class?: string
+}
+const { class: className = '' } = Astro.props
+const s = strings(localeOf(Astro.url.pathname))
+
+const TABS = [
+  { id: 'waterfall', label: s('fig.views.waterfall') },
+  { id: 'conversation', label: s('fig.views.conversation') },
+  { id: 'cost', label: s('fig.views.cost') },
+  { id: 'logs', label: s('fig.views.logs') },
+]
+
+const SPANS = [
+  { depth: 0, kind: 'agent', name: 'support_agent', at: 0, ms: 2860 },
+  { depth: 1, kind: 'model', name: 'gpt-4.1-mini', at: 60, ms: 910 },
+  { depth: 1, kind: 'tool', name: 'lookup_order', at: 990, ms: 420 },
+  { depth: 2, kind: 'retrieval', name: 'orders.get', at: 1030, ms: 300 },
+  { depth: 1, kind: 'model', name: 'gpt-4.1-mini', at: 1440, ms: 1380 },
+]
+const TOTAL = 2860
+const pct = (n: number) => `${((n / TOTAL) * 100).toFixed(2)}%`
+
+const MESSAGES = [
+  { role: 'user', text: 'Where is my order 4471?' },
+  { role: 'assistant', tool: 'lookup_order', text: '{ "order_id": 4471 }' },
+  { role: 'tool', text: '{ "status": "shipped", "carrier": "DPD", "eta": "Thu" }' },
+  { role: 'assistant', text: 'It shipped on Tuesday with DPD and arrives on Thursday.' },
+]
+
+const COST = [
+  { model: 'claude-sonnet-4', usd: 2.31, tokens: '612k' },
+  { model: 'gpt-4.1-mini', usd: 0.84, tokens: '1.9M' },
+  { model: 'text-embedding-3-small', usd: 0.04, tokens: '2.0M' },
+]
+const MAX_COST = Math.max(...COST.map((c) => c.usd))
+const COST_TOTAL = COST.reduce((a, c) => a + c.usd, 0)
+
+const LOGS = [
+  { t: '14:02:07.118', level: 'INFO', msg: 'request received path=/api/chat', span: 'support_agent' },
+  { t: '14:02:08.004', level: 'INFO', msg: 'lookup_order order_id=4471', span: 'lookup_order' },
+  { t: '14:02:08.211', level: 'WARN', msg: 'carrier api slow, retrying attempt=2', span: 'orders.get' },
+  { t: '14:02:08.392', level: 'INFO', msg: 'order status=shipped eta=Thu', span: 'orders.get' },
+  { t: '14:02:09.977', level: 'INFO', msg: 'answered tokens=1,310 cost=$0.00071', span: 'support_agent' },
+]
+const levelColor: Record<string, string> = { INFO: 'var(--color-slate)', WARN: 'var(--color-amber)', ERROR: 'var(--color-oxide)' }
+---
+
+<figure class={`fig ${className}`} data-motion data-views>
+  <div class="fig-head !gap-0 !p-0">
+    <div class="flex min-w-0 flex-1 overflow-x-auto" role="tablist" aria-label={s('fig.views.title')}>
+      {TABS.map((t, i) => (
+        <button
+          type="button"
+          role="tab"
+          class="rv-tab relative shrink-0 px-4 py-2.5 text-[0.8125rem] text-ink-3 transition-colors hover:text-ink aria-selected:text-ink"
+          aria-selected={i === 0 ? 'true' : 'false'}
+          data-tab={t.id}
+        >
+          {t.label}
+          <span class="rv-progress absolute inset-x-3 bottom-0 h-[2px] origin-left bg-accent" aria-hidden="true"></span>
+        </button>
+      ))}
+    </div>
+    <span class="data hidden px-4 text-[0.75rem] text-ink-3 sm:inline">support_agent · 2.86 s</span>
+  </div>
+
+  <div class="relative min-h-[17rem]">
+    {/* Waterfall */}
+    <div class="rv-panel px-4 py-3" data-panel="waterfall" role="tabpanel">
+      <ol class="m-0 list-none space-y-1.5 p-0" style="padding-left:0">
+        {SPANS.map((r) => (
+          <li class="rv-step grid grid-cols-[minmax(6.5rem,10rem)_minmax(0,1fr)_3.25rem] items-center gap-3" data-kind={r.kind}>
+            <span class="flex min-w-0 items-center gap-2" style={`padding-left:${r.depth * 0.75}rem`}>
+              <span class="h-2 w-2 shrink-0 rounded-[2px]" style="background:var(--kind)"></span>
+              <span class="data truncate text-[0.75rem] text-ink">{r.name}</span>
+            </span>
+            <span class="relative h-[0.95rem]">
+              <span class="absolute inset-y-0" style={`left:${pct(r.at)}; width:${pct(r.ms)}`}>
+                <span class="rv-bar absolute inset-0 origin-left rounded-[3px]" style="background:color-mix(in oklab, var(--kind) 80%, transparent)"></span>
+              </span>
+            </span>
+            <span class="data text-right text-[0.6875rem] text-ink-3">{r.ms >= 1000 ? `${(r.ms / 1000).toFixed(2)}s` : `${r.ms}ms`}</span>
+          </li>
+        ))}
+      </ol>
+      <div class="mt-4 grid grid-cols-3 gap-2 border-t border-scribe-2 pt-3">
+        <span><span class="legend block">{s('fig.waterfall.tokens')}</span><span class="data text-[0.875rem] text-ink">2,184 → 96</span></span>
+        <span><span class="legend block">{s('fig.waterfall.cost')}</span><span class="data text-[0.875rem] text-ink">$0.00071</span></span>
+        <span><span class="legend block">{s('fig.waterfall.duration')}</span><span class="data text-[0.875rem] text-ink">2.86 s</span></span>
+      </div>
+    </div>
+
+    {/* Conversation */}
+    <div class="rv-panel space-y-2.5 px-4 py-3" data-panel="conversation" role="tabpanel" hidden>
+      {MESSAGES.map((m) => (
+        <div class:list={['rv-step flex', m.role === 'user' ? 'justify-end' : 'justify-start']}>
+          <div
+            class:list={[
+              'max-w-[85%] rounded-[8px] border px-3 py-2',
+              m.role === 'user' ? 'border-scribe bg-panel-1' : m.role === 'tool' ? 'border-scribe-2 bg-well' : 'border-scribe bg-panel-2',
+            ]}
+          >
+            <span class="data mb-0.5 block text-[0.625rem] uppercase tracking-wider text-ink-3">
+              {m.role}{m.tool && <span class="normal-case text-amber"> · {m.tool}</span>}
+            </span>
+            <span class:list={['block text-[0.8125rem] leading-snug', m.role === 'tool' || m.tool ? 'data text-[0.75rem] text-ink-2' : 'text-ink']}>{m.text}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+
+    {/* Cost */}
+    <div class="rv-panel px-4 py-3" data-panel="cost" role="tabpanel" hidden>
+      <div class="flex items-baseline justify-between">
+        <span class="legend">{s('fig.views.costTitle')}</span>
+        <span class="data text-[1.25rem] text-ink">$<span class="rv-total" data-to={COST_TOTAL.toFixed(2)}>{COST_TOTAL.toFixed(2)}</span></span>
+      </div>
+      <ul class="m-0 mt-3 list-none space-y-3 p-0" style="padding-left:0">
+        {COST.map((c) => (
+          <li class="rv-step">
+            <span class="flex items-baseline justify-between gap-3">
+              <span class="data truncate text-[0.75rem] text-ink">{c.model}</span>
+              <span class="data shrink-0 text-[0.75rem] text-ink-2">{c.tokens} tok · <span class="text-ink">${c.usd.toFixed(2)}</span></span>
+            </span>
+            <span class="mt-1.5 block h-2 rounded-full bg-well">
+              <span class="rv-bar block h-full origin-left rounded-full bg-slate" style={`width:${((c.usd / MAX_COST) * 100).toFixed(1)}%`}></span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+
+    {/* Logs */}
+    <div class="rv-panel px-0 py-2" data-panel="logs" role="tabpanel" hidden>
+      <ul class="m-0 list-none p-0" style="padding-left:0">
+        {LOGS.map((l) => (
+          <li class="rv-step grid grid-cols-[auto_2.6rem_minmax(0,1fr)] items-baseline gap-x-3 px-4 py-1.5 text-[0.75rem] sm:grid-cols-[auto_2.6rem_minmax(0,1fr)_auto]">
+            <span class="data text-ink-3">{l.t}</span>
+            <span class="data" style={`color:${levelColor[l.level]}`}>{l.level}</span>
+            <span class="data truncate text-ink">{l.msg}</span>
+            <span class="data hidden text-ink-3 sm:inline">→ {l.span}</span>
+          </li>
+        ))}
+      </ul>
+      <p class="mx-4 mt-2 border-t border-scribe-2 pt-2 text-[0.75rem] text-ink-3">{s('fig.views.logsNote')}</p>
+    </div>
+  </div>
+</figure>
+
+<style>
+  .rv-progress { transform: scaleX(0); }
+  .rv-tab[aria-selected='true'] .rv-progress { transform: scaleX(1); }
+  [data-playing] .rv-tab[aria-selected='true'] .rv-progress { transform: scaleX(var(--p, 1)); }
+  .rv-tab[aria-selected='true'] { background: var(--color-panel-2); }
+  .rv-tab + .rv-tab { border-left: 1px solid var(--color-scribe-2); }
+</style>
+
+<script>
+  import { animate, each, easeOut } from '@/lib/motion'
+
+  each('[data-views]', (fig) => {
+    const tabs = [...fig.querySelectorAll<HTMLButtonElement>('.rv-tab')]
+    const panels = [...fig.querySelectorAll<HTMLElement>('.rv-panel')]
+    const total = fig.querySelector<HTMLElement>('.rv-total')!
+    let current = 0
+    let pinned = false
+    let since = 0
+    let clock = 0
+
+    const show = (i: number) => {
+      current = i
+      since = clock
+      tabs.forEach((t, n) => t.setAttribute('aria-selected', String(n === i)))
+      panels.forEach((p, n) => (p.hidden = n !== i))
+    }
+    tabs.forEach((t, i) =>
+      t.addEventListener('click', () => {
+        pinned = true
+        show(i)
+        tabs[i]!.style.setProperty('--p', '1')
+      }),
+    )
+
+    const PER = 6
+    animate(fig, (time) => {
+      clock = time
+      const local = time - since
+      if (!pinned && local >= PER) show((current + 1) % tabs.length)
+      const k = clock - since
+      if (!pinned) tabs[current]!.style.setProperty('--p', String(Math.min(1, k / PER)))
+      const panel = panels[current]!
+      panel.querySelectorAll<HTMLElement>('.rv-step').forEach((el, n) => {
+        const p = easeOut(Math.max(0, Math.min(1, (k - 0.15 - n * 0.32) / 0.35)))
+        el.style.opacity = String(p)
+        el.style.transform = `translateY(${(1 - p) * 5}px)`
+        const bar = el.querySelector<HTMLElement>('.rv-bar')
+        if (bar) bar.style.transform = `scaleX(${easeOut(Math.max(0, Math.min(1, (k - 0.25 - n * 0.32) / 0.6)))})`
+      })
+      if (panel.dataset.panel === 'cost') {
+        const to = Number(total.dataset.to)
+        total.textContent = (to * easeOut(Math.min(1, k / 1.4))).toFixed(2)
+      }
+    })
+  })
+</script>

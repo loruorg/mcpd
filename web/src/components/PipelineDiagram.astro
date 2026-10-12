@@ -1,100 +1,101 @@
 ---
 /**
- * What happens to a signal between arriving and being stored.
+ * What happens to a span between arriving and being stored.
  *
- * Drawn because the order genuinely matters and is the thing people get wrong
- * about observability tools: redaction happens BEFORE storage, so a secret that
- * should never have been kept is never kept, rather than being deleted later.
+ * One real-shaped payload rides the ingest pipeline. At Redact its credential
+ * is replaced before anything is written, at Price it gains its cost, at Store
+ * it is committed. The order is the point: a secret that should never be kept
+ * is never kept, rather than deleted later.
  *
- * The stages and their descriptions are static text. A carrier travels the rail
- * and lights each stage as it passes; with motion reduced every stage simply
- * sits at full strength.
+ * The markup is the stored payload, redacted and priced. Playing steps through
+ * the stages and shows the payload as each one leaves it.
  */
+import { localeOf } from '@/lib/i18n'
+import { strings } from '@/lib/ui-strings'
+
 interface Props {
   class?: string
 }
 const { class: className = '' } = Astro.props
+const s = strings(localeOf(Astro.url.pathname))
 
-/* No numerals. The carrier already says the order, and a stage that says
-   "03" beside a rail that draws it is the same fact twice. */
-const stages = [
-  { name: 'Decode', detail: 'OTLP or native, gzip or plain' },
-  { name: 'Sample', detail: 'Decided once, at the root' },
-  { name: 'Redact', detail: 'Before anything is written' },
-  { name: 'Price',  detail: 'From the configured price book' },
-  { name: 'Store',  detail: 'One transaction per batch' },
+const STAGES = [
+  { name: s('fig.pipeline.decode'), detail: s('fig.pipeline.decodeDetail') },
+  { name: s('fig.pipeline.sample'), detail: s('fig.pipeline.sampleDetail') },
+  { name: s('fig.pipeline.redact'), detail: s('fig.pipeline.redactDetail') },
+  { name: s('fig.pipeline.price'), detail: s('fig.pipeline.priceDetail') },
+  { name: s('fig.pipeline.store'), detail: s('fig.pipeline.storeDetail') },
 ]
-/** Where the carrier stops: the centre of each stage, as a percentage. */
-const stops = stages.map((_, i) => ((i + 0.5) / stages.length) * 100)
 ---
 
-<div class={`panel overflow-hidden ${className}`}>
-  <div class="border-b border-scribe-2 bg-panel-1 px-4 py-2.5">
-    <span class="legend text-ink-3">Ingest pipeline</span>
+<figure class={`fig ${className}`} data-motion data-pipeline>
+  <div class="fig-head">
+    <span class="legend">{s('fig.pipeline.title')}</span>
+    <span class="data ml-auto text-[0.75rem] text-ink-3">POST /v1/traces</span>
   </div>
 
-  <ol class="relative grid gap-px bg-scribe sm:grid-cols-5">
-    {/* The rail the carrier runs along, above the legends and over the stages
-        so the carrier is seen. Horizontal on wide screens only, because a
-        five-across rail on a phone would be unreadable. */}
-    <div
-      class="pointer-events-none absolute inset-x-0 top-[0.75rem] z-10 hidden h-px bg-scribe sm:block"
-      aria-hidden="true"
-    >
-      <span class="mcpd-carrier absolute -top-[3px] block h-[7px] w-[7px] -translate-x-1/2 rotate-45 border border-amber bg-amber/80"></span>
-    </div>
-
-    {
-      stages.map((s, i) => (
-        <li
-          class="mcpd-stage relative bg-panel-2 px-4 pb-4 pt-4 sm:pt-6"
-          style={`animation-delay:${i * 0.7}s`}
-        >
-          <p class="legend text-ink">{s.name}</p>
-          <p class="mt-1.5 text-[0.8125rem] leading-snug text-ink-3">{s.detail}</p>
-        </li>
-      ))
-    }
+  <ol class="m-0 grid list-none grid-cols-5 border-b border-scribe-2 p-0" style="padding-left:0">
+    {STAGES.map((st, i) => (
+      <li class="pd-stage relative px-2 py-2.5 text-center sm:px-3 sm:text-left" data-i={i} data-on={i === 4 ? '' : undefined}>
+        <span class="block text-[0.75rem] font-medium text-ink sm:text-[0.8125rem]">{st.name}</span>
+        <span class="mt-0.5 hidden text-[0.75rem] leading-snug text-ink-3 md:block">{st.detail}</span>
+        <span class="pd-bar absolute inset-x-0 bottom-[-1px] h-[2px]"></span>
+      </li>
+    ))}
   </ol>
 
-  <p class="border-t border-scribe-2 bg-panel-1 px-4 py-2.5 text-[0.8125rem] text-ink-2">
-    Redaction is stage three, not a cleanup job. A value that a rule matches
-    never reaches storage at all.
-  </p>
-</div>
+  <div class="bg-well px-4 py-3">
+    <pre class="data m-0 overflow-x-auto text-[0.75rem] leading-[1.7]"><code><span class="text-ink-3">{'{'}</span>
+  <span class="text-slate">"name"</span><span class="text-ink-3">:</span> <span class="text-olive">"chat"</span><span class="text-ink-3">,</span>
+  <span class="text-slate">"model"</span><span class="text-ink-3">:</span> <span class="text-olive">"gpt-4.1-mini"</span><span class="text-ink-3">,</span>
+  <span class="text-slate">"http.request.header.authorization"</span><span class="text-ink-3">:</span> <span class="pd-secret" data-raw={'"Bearer sk-live-8f2c41d9e0"'} data-safe={'"[redacted]"'}>"[redacted]"</span><span class="text-ink-3">,</span>
+  <span class="text-slate">"usage.input_tokens"</span><span class="text-ink-3">:</span> <span class="text-amber">1100</span><span class="text-ink-3">,</span>
+  <span class="pd-cost"><span class="text-slate">"cost_usd"</span><span class="text-ink-3">:</span> <span class="text-amber">0.00018</span></span>
+<span class="text-ink-3">{'}'}</span>  <span class="pd-stored text-olive">{s('fig.pipeline.stored')}</span></code></pre>
+  </div>
 
-{/* The stops are computed from the stage list, so a stage added to it
-    cannot leave the carrier parking between two cells. */}
-<style is:inline set:html={`
-  .mcpd-carrier {
-    left: ${stops[0]!.toFixed(2)}%;
-    animation: mcpd-travel 3.5s cubic-bezier(0.65, 0, 0.35, 1) infinite;
-  }
-  @keyframes mcpd-travel {
-    0%, 6%    { left: ${stops[0]!.toFixed(2)}%; }
-    22%, 26%  { left: ${stops[1]!.toFixed(2)}%; }
-    42%, 46%  { left: ${stops[2]!.toFixed(2)}%; }
-    62%, 66%  { left: ${stops[3]!.toFixed(2)}%; }
-    82%, 100% { left: ${stops[4]!.toFixed(2)}%; }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .mcpd-carrier { animation: none; left: ${stops[2]!.toFixed(2)}%; }
-  }
-`}></style>
+  <figcaption class="fig-foot">{s('fig.pipeline.caption')}</figcaption>
+</figure>
 
 <style>
-
-  /* Each stage brightens as the carrier reaches it. The base state is already
-     fully legible; this only adds emphasis. */
-  .mcpd-stage {
-    animation: mcpd-stage-lit 3.5s ease-in-out infinite;
+  .pd-stage + .pd-stage { border-left: 1px solid var(--color-scribe-2); }
+  .pd-stage { transition: background-color 220ms var(--ease-out); }
+  .pd-stage[data-on] { background: var(--color-panel-3); }
+  .pd-stage[data-on] .pd-bar { background: var(--color-accent); }
+  .pd-secret {
+    border-radius: 3px;
+    padding: 0 0.15rem;
+    color: var(--color-accent);
+    background: color-mix(in oklab, var(--color-accent) 12%, transparent);
+    transition: background-color 260ms var(--ease-out), color 260ms var(--ease-out);
   }
-  @keyframes mcpd-stage-lit {
-    0%, 14%, 100% { background-color: var(--color-panel-2); }
-    4%            { background-color: var(--color-panel-3); }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .mcpd-stage { animation: none; }
+  .pd-secret[data-exposed] {
+    color: var(--color-oxide);
+    background: color-mix(in oklab, var(--color-oxide) 12%, transparent);
   }
 </style>
+
+<script>
+  import { animate, each } from '@/lib/motion'
+
+  each('[data-pipeline]', (fig) => {
+    const stages = [...fig.querySelectorAll<HTMLElement>('.pd-stage')]
+    const secret = fig.querySelector<HTMLElement>('.pd-secret')!
+    const cost = fig.querySelector<HTMLElement>('.pd-cost')!
+    const stored = fig.querySelector<HTMLElement>('.pd-stored')!
+    const STEP = 1.7
+    const CYCLE = STEP * stages.length + 1.5
+    let last = -1
+    animate(fig, (time) => {
+      const i = Math.min(stages.length - 1, Math.floor((time % CYCLE) / STEP))
+      if (i === last) return
+      last = i
+      stages.forEach((el, n) => el.toggleAttribute('data-on', n === i))
+      const redacted = i >= 2
+      secret.toggleAttribute('data-exposed', !redacted)
+      secret.textContent = redacted ? secret.dataset.safe! : secret.dataset.raw!
+      cost.style.visibility = i >= 3 ? 'visible' : 'hidden'
+      stored.style.visibility = i >= 4 ? 'visible' : 'hidden'
+    })
+  })
+</script>

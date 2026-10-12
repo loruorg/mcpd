@@ -15,15 +15,13 @@ const url = (route: string) =>
 
 <Doc
   title="Sicurezza"
-  description="Che cosa archivia un mcpd in esercizio, che cosa esce dalla macchina e con quale impostazione, come funzionano chiavi, ambiti e progetti, i limiti dell’oscuramento e i controlli che mcpd non ha."
-  lede="Una pagina sola per rispondere a una revisione. Che cosa viene conservato, che cosa viene mandato altrove, chi lo può leggere, e i controlli che mcpd non ha."
+  description="Che cosa archivia un mcpd in esercizio, che cosa esce dalla macchina e con quale impostazione, come funzionano chiavi, ambiti e progetti, che cosa copre l’oscuramento e i controlli attorno."
+  lede="Una pagina sola per rispondere a una revisione. Che cosa viene conservato, che cosa viene mandato altrove, chi lo può leggere, e i controlli da mettere intorno a mcpd."
   og="docs"
 >
   <p>
     Tutto quello che segue è tratto dal sorgente del daemon e da
     <code>spec/mcpd.spec.json</code>, che è ciò da cui l’API viene generata.
-    Dove un controllo non esiste, questa pagina lo dice, invece di lasciarti il
-    buco da scoprire dentro un questionario.
   </p>
 
   <h2>Che cosa archivia mcpd</h2>
@@ -91,7 +89,7 @@ const url = (route: string) =>
     <a href={`${url('/docs/runs')}#storage`} class="link">Esecuzioni</a>.
   </p>
   <p>
-    mcpd non cifra quello che scrive. La cifratura a riposo è compito del volume
+    La cifratura a riposo è compito del volume
     sullo storage incorporato, e del database sugli altri due.
   </p>
 
@@ -390,9 +388,8 @@ const url = (route: string) =>
       un daemon aperto viene registrata come <code>anonymous</code>.
     </li>
     <li>
-      <strong>La persona arriva dal tuo ingress, oppure non arriva.</strong>
-      mcpd non ha account utente, quindi da sola una riga attribuisce un’azione
-      a una chiave e non a un essere umano. Il campo <code>subject</code> porta
+      <strong>La persona arriva dal tuo ingress.</strong> Da sola una riga
+      attribuisce un’azione a una chiave. Il campo <code>subject</code> porta
       un’identità quando <code>--trusted-identity-header</code> e
       <code>--trusted-proxy-cidr</code> sono impostati entrambi, ed è vuoto
       altrimenti, che è il comportamento predefinito. mcpd non stabilisce mai
@@ -411,17 +408,15 @@ const url = (route: string) =>
       <strong>Registra quale chiave, e se vuoi anche chi.</strong> La chiave è
       archiviata come digest troncato, mai la chiave stessa, quindi il registro
       non è un posto dove si accumulano credenziali. Questo risponde a «una
-      chiave admin ha cancellato questo» e non a «quale persona lo ha fatto»,
-      perché mcpd non ha un identity provider. Se vuoi la
-      seconda risposta, dagli l’header che il tuo ingress imposta già e gli
+      chiave admin ha cancellato questo». Per rispondere a «quale persona lo ha
+      fatto», dagli l’header che il tuo ingress imposta già e gli
       indirizzi autorizzati a impostarlo:
       <code>--trusted-identity-header x-forwarded-user</code> con
       <code>--trusted-proxy-cidr 10.42.0.0/16</code>. Servono tutte e due le
       metà. Un header è una stringa che chiunque raggiunga la porta può mandare,
       quindi mcpd lo legge solo da un indirizzo che hai nominato tu; una
       richiesta da qualunque altro posto viene servita normalmente e la sua riga
-      non porta nessun subject, che è la risposta onesta invece di una
-      supposizione. Senza nessuna delle due opzioni non viene mai registrato
+      non porta nessun subject invece di uno tirato a indovinare. Senza nessuna delle due opzioni non viene mai registrato
       nessun subject, ed è il comportamento predefinito.
     </li>
     <li>
@@ -465,14 +460,13 @@ const url = (route: string) =>
     </li>
   </ul>
 
-  <h2>Che cosa fa l’oscuramento, e che cosa non può fare</h2>
+  <h2>Che cosa fa l’oscuramento</h2>
   <p>
     L’oscuramento è attivo per impostazione predefinita e gira prima della
     scrittura, come terza fase della pipeline di ingest. Un valore che una
     regola intercetta non arriva mai al database, che è una garanzia diversa
     da quella di un valore cancellato dopo, ed è la differenza su cui un
-    auditor fa domande. Quello che non può fare è tenere quei byte fuori dalla
-    rete: quando la regola gira, l’hanno già attraversata. Per questo gli SDK
+    auditor fa domande. Per tenere quei byte anche fuori dalla rete, gli SDK
     portano <code>MCPD_CAPTURE_PAYLOADS=false</code>, che toglie
     <code>input</code> e <code>output</code> prima che uno span sia messo in
     coda e lascia dov’è tutto il resto.
@@ -492,31 +486,27 @@ const url = (route: string) =>
     <a href={url('/docs/privacy')} class="link">Oscuramento e conservazione</a>.
   </p>
   <p>
-    Adesso il limite, quello su cui una revisione farà domande e che nessuna
-    configurazione toglie. <strong>Le regole corrispondono a nomi di campo, non
-    alla forma di un valore.</strong> Una chiave API che un utente ha incollato
-    in mezzo a una frase, e che arriva sotto un campo chiamato
-    <code>content</code> o <code>question</code>, non viene intercettata da
-    niente nella pipeline. Il nome del campo è innocente, quindi il valore viene
-    archiviato per intero.
+    <strong>Le regole corrispondono a nomi di campo, non alla forma di un
+    valore.</strong> Un valore che arriva sotto un campo chiamato
+    <code>content</code> o <code>question</code> viene archiviato così come è
+    stato mandato, quindi nomina i campi che portano credenziali e
+    identificatori.
   </p>
-  <p>L’oscuramento ferma quindi una cosa sola:</p>
+  <p>L’oscuramento copre un ambito preciso:</p>
   <ul>
     <li>Ferma la cattura strutturata di credenziali e identificatori, dove una credenziale arriva in un campo che porta il nome di quello che è.</li>
-    <li>Non analizza il testo libero, e non è un classificatore di contenuti.</li>
-    <li>Non riconosce un segreto dalla sua forma né dalla sua entropia.</li>
-    <li>Non tocca il nome di uno span né il messaggio di un record di log. Quelli sono identificatori che servono a raggruppare, non payload, e riscriverli romperebbe il raggruppamento. Non costruire il nome di uno span con l’indirizzo email di un cliente.</li>
-    <li>Non tocca lo storage delle esecuzioni. I payload di un’esecuzione durevole sono il suo stato di lavoro e sono tenuti così come sono stati mandati; vengono oscurati solo gli span che un’esecuzione scrive nello storage delle tracce.</li>
+    <li>Lavora sui nomi dei campi. Il testo libero sotto un nome di campo qualunque viene archiviato così come è stato mandato.</li>
+    <li>Lascia così come sono stati mandati il nome di uno span e il messaggio di un record di log. Quelli sono identificatori che servono a raggruppare, non payload, e riscriverli romperebbe il raggruppamento. Non costruire il nome di uno span con l’indirizzo email di un cliente.</li>
+    <li>Lascia lo storage delle esecuzioni così come è stato mandato. I payload di un’esecuzione durevole sono il suo stato di lavoro; vengono oscurati solo gli span che un’esecuzione scrive nello storage delle tracce.</li>
   </ul>
   <p>
-    Un controllo che lavora sulla forma c’è, ed è rilevamento a cose fatte
-    invece che prevenzione: lo scorer integrato <code>no_leaked_secret</code>
-    abbassa il voto a un’esecuzione la cui <em>risposta</em> porta un token che
-    sembra una credenziale, per prefisso noto o per una lunga sequenza
-    alfanumerica con maiuscole e minuscole. Dà un punteggio a un’esecuzione che
-    è già archiviata. Non toglie niente, non legge il prompt, e gira solo quando
-    glielo chiedi. Consideralo un modo per scoprire che questo è successo, non
-    una seconda linea di oscuramento.
+    Un controllo lavora sulla forma, come rilevamento a cose fatte: lo scorer
+    integrato <code>no_leaked_secret</code> abbassa il voto a un’esecuzione la
+    cui <em>risposta</em> porta un token che sembra una credenziale, per
+    prefisso noto o per una lunga sequenza alfanumerica con maiuscole e
+    minuscole. Dà un punteggio alla risposta di un’esecuzione che è già
+    archiviata, non toglie niente, e gira solo quando glielo chiedi. Usalo per
+    scoprire che questo è successo, non come una seconda linea di oscuramento.
   </p>
   <p>
     Due limiti valgono che una regola abbia corrisposto o no. Qualunque singola
@@ -563,43 +553,42 @@ const url = (route: string) =>
     quello che ne dipende in una transazione sola. Prendono entrambe l’ambito
     <code>admin</code> ed entrambe finiscono nel registro di audit.
     <a href={url('/docs/privacy')} class="link">Oscuramento e conservazione</a>
-    ripercorre la richiesta di cancellazione e che cosa può e non può
-    promettere.
+    ripercorre la richiesta di cancellazione e che cosa ti dice la sua
+    risposta.
   </p>
 
-  <h2>Che cosa mcpd non fa</h2>
+  <h2>I controlli da mettere intorno a mcpd</h2>
   <p>
-    Niente di quello che segue esiste in questa build. È elencato perché una
-    revisione che lo scopre più tardi è un esito peggiore di una revisione che
-    lo legge qui.
+    Questi controlli appartengono allo strato intorno al daemon. Ogni riga dice
+    dove impostarli.
   </p>
   <table>
     <thead>
-      <tr><th>Non c’è in mcpd</th><th>Che cosa fare invece</th></tr>
+      <tr><th>Controllo</th><th>Dove impostarlo</th></tr>
     </thead>
     <tbody>
       <tr>
-        <td><strong>Terminazione TLS.</strong> mcpd parla HTTP in chiaro. Prompt e completion attraversano quel collegamento per intero.</td>
+        <td><strong>TLS.</strong> mcpd serve HTTP in chiaro, e prompt e completion viaggiano su quel collegamento per intero.</td>
         <td>Termina il TLS sul tuo ingress o nella tua mesh, e tieni la porta del daemon fuori da qualunque rete non fidata.</td>
       </tr>
       <tr>
-        <td><strong>SSO.</strong> Nessuna integrazione con un identity provider, niente OIDC, niente SAML, nessuna schermata di login.</td>
+        <td><strong>Single sign-on.</strong> L’identità di una persona arriva dal proxy davanti a mcpd.</td>
         <td>Metti l’interfaccia dietro il proxy di identità che già gestisci. L’identità di una persona è quella che quel proxy stabilisce.</td>
       </tr>
       <tr>
-        <td><strong>SCIM.</strong> Nessun provisioning di utenti o di gruppi, perché mcpd non ha il concetto di account utente.</td>
-        <td>Fai il provisioning sul proxy. Dentro mcpd l’unità è una chiave, aggiunta a un elenco o tolta da un elenco.</td>
+        <td><strong>Provisioning.</strong> Dentro mcpd l’unità è una chiave.</td>
+        <td>Fai il provisioning sul proxy. Dentro mcpd, aggiungi una chiave a un elenco o toglila.</td>
       </tr>
       <tr>
-        <td><strong>Ruoli oltre i sei ambiti.</strong> L’autorizzazione è un ambito e un elenco di progetti. Non c’è un ruolo per endpoint e non ci sono gruppi.</td>
+        <td><strong>Ruoli.</strong> L’autorizzazione è uno dei sei ambiti e un elenco di progetti.</td>
         <td>Separa per chiave e per progetto. Se una distinzione conta, falla diventare un progetto.</td>
       </tr>
       <tr>
-        <td><strong>Stabilire chi è una persona.</strong> Il registro di audit può registrare un subject, ma mcpd non ricava mai da sé chi è il chiamante. Registra quello che il tuo ingress ha affermato, e solo da un indirizzo che hai nominato tu.</td>
+        <td><strong>Chi è una persona.</strong> Il registro di audit registra il subject che il tuo ingress ha affermato, e solo da un indirizzo che hai nominato tu.</td>
         <td>Imposta <code>--trusted-identity-header</code> e <code>--trusted-proxy-cidr</code>, così l’header che il tuo proxy imposta già arriva nella riga di audit. Senza di loro una riga attribuisce un’azione a una chiave, ed emettere una chiave per team restringe il campo del digest.</td>
       </tr>
       <tr>
-        <td><strong>Ciclo di vita delle chiavi.</strong> Le chiavi sono elenchi letti all’avvio. Non c’è scadenza, non c’è un calendario di rotazione e non c’è una quota per chiave. Il tetto che esiste è per progetto: <code>--quota-per-minute</code> limita quanti segnali un progetto può archiviare in un minuto, quale che sia la chiave che li ha mandati.</td>
+        <td><strong>Ciclo di vita delle chiavi.</strong> Le chiavi sono elenchi letti all’avvio. Il tetto è per progetto: <code>--quota-per-minute</code> limita quanti segnali un progetto può archiviare in un minuto, quale che sia la chiave che li ha mandati.</td>
         <td>Configura più chiavi, una per team o per flotta, così revocarne una è una modifica e un riavvio, invece del rideploy di tutto quello che emette uno span. Se una flotta ha bisogno del suo tetto, falla diventare un progetto.</td>
       </tr>
       <tr>

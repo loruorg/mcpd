@@ -1,0 +1,114 @@
+---
+/**
+ * Deterministic sampling, at a glance.
+ *
+ * Each trace id hashes to a number between 0 and 1. A trace is kept when that
+ * number is under the rate. Because the decision is a function of the id, two
+ * services that see the same trace reach the same answer with no
+ * coordination, and a kept trace is kept whole. The figure computes the hash
+ * here, at build time, and draws both services from that one number.
+ *
+ * The markup is every decision made. Playing replays them arriving.
+ */
+import { localeOf } from '@/lib/i18n'
+import { strings } from '@/lib/ui-strings'
+
+interface Props {
+  rate?: number
+  class?: string
+}
+const { rate = 0.25, class: className = '' } = Astro.props
+const s = strings(localeOf(Astro.url.pathname))
+
+/* FNV-1a, 32 bits: a stand-in for the daemon's hash, enough to show that the
+   decision is a pure function of the id. */
+const unit = (id: string) => {
+  let h = 0x811c9dc5
+  for (const ch of id) {
+    h ^= ch.charCodeAt(0)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h / 2 ** 32
+}
+const IDS = ['4bf92f35', 'a3ce929d', '0af76519', 'e457b5a2', '7d3efb1c', '19c0e2aa', 'c01f9d42', '5b8a6e03', 'f2d41c77']
+const ROWS = IDS.map((id) => ({ id, h: unit(id) })).map((r) => ({ ...r, keep: r.h < rate }))
+const kept = ROWS.filter((r) => r.keep).length
+---
+
+<figure class={`fig ${className}`} data-motion data-sampling>
+  <div class="fig-head">
+    <span class="legend">{s('fig.sampling.title')}</span>
+    <span class="data ml-auto text-[0.75rem] text-ink-2">rate = {rate}</span>
+  </div>
+
+  <div class="sg-grid border-b border-scribe-2 px-4 py-1.5">
+    <span class="legend">trace_id</span>
+    <span class="legend">hash(trace_id)</span>
+    <span class="legend text-center">api</span>
+    <span class="legend text-center">worker</span>
+  </div>
+  <ol class="m-0 list-none p-0 py-1" style="padding-left:0">
+    {ROWS.map((r) => (
+      <li class="sg-row sg-grid items-center px-4 py-[0.45rem]" data-keep={r.keep ? '' : undefined}>
+        <span class="data text-[0.75rem] text-ink">{r.id}</span>
+        <span class="flex min-w-0 items-center gap-2.5">
+          <span class="relative h-1.5 flex-1 rounded-full bg-well">
+            <span class="absolute inset-y-0 left-0 rounded-full" style={`width:${rate * 100}%; background: color-mix(in oklab, var(--color-accent) 22%, transparent)`}></span>
+            <span class="sg-dot absolute top-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full" style={`left:${(r.h * 100).toFixed(2)}%; background:${r.keep ? 'var(--color-accent)' : 'var(--color-ink-3)'}`}></span>
+          </span>
+          <span class="data w-9 shrink-0 text-right text-[0.6875rem] text-ink-3">{r.h.toFixed(2)}</span>
+        </span>
+        <span class="sg-cell" data-keep={r.keep ? '' : undefined}>{r.keep ? s('fig.sampling.keep') : s('fig.sampling.drop')}</span>
+        <span class="sg-cell" data-keep={r.keep ? '' : undefined}>{r.keep ? s('fig.sampling.keep') : s('fig.sampling.drop')}</span>
+      </li>
+    ))}
+  </ol>
+  <figcaption class="fig-foot">{s('fig.sampling.caption', { kept, total: ROWS.length })}</figcaption>
+</figure>
+
+<style>
+  .sg-grid {
+    display: grid;
+    grid-template-columns: 4.6rem minmax(0, 1fr) 3.6rem 3.6rem;
+    column-gap: 0.75rem;
+  }
+  @media (min-width: 640px) {
+    .sg-grid { grid-template-columns: 6rem minmax(0, 1fr) 5rem 5rem; column-gap: 1.25rem; }
+  }
+  .sg-cell {
+    justify-self: center;
+    font-family: var(--font-data);
+    font-size: 0.6875rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 4px;
+    color: var(--color-ink-3);
+  }
+  .sg-cell[data-keep] { color: var(--color-accent); background: color-mix(in oklab, var(--color-accent) 12%, transparent); }
+  .sg-row:not([data-keep]) .text-ink { color: var(--color-ink-3); }
+</style>
+
+<script>
+  import { animate, each, easeOut } from '@/lib/motion'
+
+  each('[data-sampling]', (fig) => {
+    const rows = [...fig.querySelectorAll<HTMLElement>('.sg-row')].map((el) => {
+      const dot = el.querySelector<HTMLElement>('.sg-dot')!
+      return { el, dot, left: dot.style.left, cells: [...el.querySelectorAll<HTMLElement>('.sg-cell')] }
+    })
+    const STEP = 0.9
+    const CYCLE = STEP * rows.length + 3
+    animate(fig, (time) => {
+      const k = time % CYCLE
+      rows.forEach((r, i) => {
+        const p = (k - i * STEP) / STEP
+        const seen = p >= 0
+        r.el.style.opacity = seen ? '1' : '0.18'
+        // The dot travels from 0 to its hash; the decision lands when it stops.
+        const travel = easeOut(Math.max(0, Math.min(1, p / 0.6)))
+        r.dot.style.left = `calc(${r.left} * ${travel})`
+        const decided = p >= 0.6
+        r.cells.forEach((c) => (c.style.visibility = decided ? 'visible' : 'hidden'))
+      })
+    })
+  })
+</script>

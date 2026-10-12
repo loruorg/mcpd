@@ -1,137 +1,108 @@
 ---
 /**
- * How the six signals reach the daemon and why they stay together.
+ * Six signals, one run.
  *
- * A diagram of the actual mechanism rather than a row of feature cards: the
- * point being made is that all six signals carry the same trace and span ids,
- * so the drawing has to show them converging on one correlation key.
+ * mcpd stores spans, logs, metrics, scores, feedback and aspect notes against
+ * the same trace and span ids. The figure is one run's timeline with a lane
+ * per signal: as the run plays, each signal lands in its lane at the moment it
+ * was produced, and the counters on the left add up. Every lane is keyed by
+ * the one trace id in the header, which is the whole point.
  *
- * The labels and the structure are static markup. Only the packets move, and
- * with motion reduced they simply rest on the paths.
+ * The markup is the finished run.
  */
+import { localeOf } from '@/lib/i18n'
+import { strings } from '@/lib/ui-strings'
+
 interface Props {
   class?: string
 }
 const { class: className = '' } = Astro.props
+const s = strings(localeOf(Astro.url.pathname))
 
-const signals = [
-  { id: 'span',     label: 'Spans',    detail: 'What ran, nested, with timings' },
-  { id: 'log',      label: 'Logs',     detail: 'Lines the run emitted' },
-  { id: 'metric',   label: 'Metrics',  detail: 'Numbers, with exemplars back to a run' },
-  { id: 'score',    label: 'Scores',   detail: 'Machine evaluation' },
-  { id: 'feedback', label: 'Feedback', detail: 'What a person thought' },
-  { id: 'aspect_note', label: 'Aspect notes', detail: 'A sentence a model wrote about the run' },
+/* Times are fractions of the run. Hand-placed to read as one plausible run:
+   spans throughout, logs inside the tool calls, a metric per model call, the
+   scores and the feedback after it ends. */
+const LANES = [
+  { id: 'span', label: s('fig.signals.spans'), color: 'var(--color-slate)', marks: [0.02, 0.08, 0.2, 0.31, 0.38, 0.5, 0.62, 0.7, 0.78] },
+  { id: 'log', label: s('fig.signals.logs'), color: 'var(--color-ink-2)', marks: [0.22, 0.25, 0.4, 0.42, 0.44, 0.64, 0.73] },
+  { id: 'metric', label: s('fig.signals.metrics'), color: 'var(--color-amber)', marks: [0.3, 0.6, 0.8] },
+  { id: 'score', label: s('fig.signals.scores'), color: 'var(--color-accent)', marks: [0.86, 0.88] },
+  { id: 'feedback', label: s('fig.signals.feedback'), color: 'var(--color-violet)', marks: [0.95] },
+  { id: 'note', label: s('fig.signals.notes'), color: 'var(--color-oxide)', marks: [0.91] },
 ]
 ---
 
-<div class={`panel overflow-hidden ${className}`}>
-  <div class="grid gap-px bg-scribe lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)]">
-    {/* The six inputs. */}
-    <ul class="grid gap-px bg-scribe">
-      {
-        signals.map((s) => (
-          <li class="flex items-baseline gap-3 bg-panel-2 px-5 py-3.5">
-            {/* The pip is a static mark, not a second animation. It used to
-                pulse on the same stagger as the packets travelling the paths
-                beside it, so the diagram ran two motion systems making the same
-                argument. The packets carry it; six rows and six paths already
-                read as six inputs. */}
-            <span class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-amber" aria-hidden="true" />
-            <div class="min-w-0">
-              <p class="legend text-ink-2">{s.label}</p>
-              <p class="mt-0.5 text-[0.8125rem] leading-snug text-ink-3">{s.detail}</p>
-            </div>
-          </li>
-        ))
-      }
-    </ul>
-
-    {/* The convergence. */}
-    <div class="relative bg-panel-2 p-6 sm:px-8 sm:py-6">
-      <svg
-        class="h-auto w-full"
-        style="min-height: 190px"
-        viewBox="0 0 520 250"
-        preserveAspectRatio="xMidYMid meet"
-        fill="none"
-        role="img"
-        aria-label="Six signal paths converging on one trace identifier, then splitting to storage, search and export."
-      >
-        <defs>
-          {/* Six paths, evenly spaced and symmetric about the junction at
-              y=130. The outer two keep the exact y they had when there were
-              five, so adding a signal did not move the drawing's bounds; the
-              spacing is (234 - 26) / 5 = 41.6. With an even number of inputs no
-              path runs straight through the centre any more, so all six are the
-              same curve rather than four curves around one straight line. */}
-          <path id="mcpd-p0" d="M0,26 C130,26 150,130 240,130" />
-          <path id="mcpd-p1" d="M0,67.6 C130,67.6 150,130 240,130" />
-          <path id="mcpd-p2" d="M0,109.2 C130,109.2 150,130 240,130" />
-          <path id="mcpd-p3" d="M0,150.8 C130,150.8 150,130 240,130" />
-          <path id="mcpd-p4" d="M0,192.4 C130,192.4 150,130 240,130" />
-          <path id="mcpd-p5" d="M0,234 C130,234 150,130 240,130" />
-        </defs>
-
-        {[0, 1, 2, 3, 4, 5].map((i) => (
-          <use href={`#mcpd-p${i}`} stroke="var(--color-scribe)" stroke-width="1" />
-        ))}
-        {/* One shared stem into the box, so six converging hairlines do not
-            stack into a dark blob at the junction. */}
-        <path d="M240,130 L262,130" stroke="var(--color-scribe)" stroke-width="1" />
-
-        {/* The correlation key everything converges on. */}
-        <rect x="262" y="112" width="120" height="36" fill="var(--color-well)" stroke="var(--color-scribe)" />
-        {/* Dead centre of the rect: y = 112 + 36/2. `dominant-baseline: central`
-            does the vertical centring, so the coordinate must be the box's
-            centre and not a baseline guessed from it. */}
-        <text
-          x="322" y="130"
-          text-anchor="middle" dominant-baseline="central"
-          fill="var(--color-ink)"
-          style="font-family:var(--font-data);font-size:14px"
-        >trace_id</text>
-
-        <path d="M382,130 L440,130" stroke="var(--color-scribe)" stroke-width="1" />
-        <path d="M440,130 L440,60 L446,60" stroke="var(--color-scribe)" stroke-width="1" />
-        <path d="M440,130 L446,130" stroke="var(--color-scribe)" stroke-width="1" />
-        <path d="M440,130 L440,200 L446,200" stroke="var(--color-scribe)" stroke-width="1" />
-
-        {/* On the line, not above it: same y as each branch, centred on it. */}
-        <text x="450" y="60" dominant-baseline="central" fill="var(--color-ink-3)" style="font-family:var(--font-display);font-size:13px;letter-spacing:.14em;text-transform:uppercase">Store</text>
-        <text x="450" y="130" dominant-baseline="central" fill="var(--color-ink-3)" style="font-family:var(--font-display);font-size:13px;letter-spacing:.14em;text-transform:uppercase">Search</text>
-        <text x="450" y="200" dominant-baseline="central" fill="var(--color-ink-3)" style="font-family:var(--font-display);font-size:13px;letter-spacing:.14em;text-transform:uppercase">Export</text>
-
-        {/* The packets. Each rides its own path at its own pace.
-
-            The stagger is NEGATIVE, and that is the whole point of it. A
-            positive `begin` leaves a circle at its own coordinates until its
-            delay elapses, and a circle driven by `animateMotion` has to sit at
-            0,0 for the path to place it, so four amber dots sat stacked in the
-            top-left corner of the diagram, half clipped by the edge, for the
-            first 1.7 seconds of every visit. A negative offset starts each
-            animation already in progress, so a packet is on its path in the
-            first painted frame and never rests at the origin. */}
-        {[0, 1, 2, 3, 4, 5].map((i) => (
-          <circle r="2.75" fill="var(--color-amber)" class="mcpd-packet">
-            <animateMotion
-              dur={`${3.4 + i * 0.35}s`}
-              repeatCount="indefinite"
-              begin={`-${(i * 0.42).toFixed(2)}s`}
-            >
-              <mpath href={`#mcpd-p${i}`} />
-            </animateMotion>
-          </circle>
-        ))}
-      </svg>
-    </div>
+<figure class={`fig ${className}`} data-motion data-signals>
+  <div class="fig-head">
+    <span class="legend">{s('fig.signals.title')}</span>
+    <span class="data ml-auto text-[0.75rem] text-ink-2">trace_id <span class="text-ink">7f3a91c2…</span></span>
   </div>
-</div>
+  <div class="relative px-4 py-3">
+    <ul class="m-0 grid list-none gap-1 p-0" style="padding-left:0">
+      {LANES.map((l) => (
+        <li class="sf-lane grid grid-cols-[6.5rem_1.75rem_minmax(0,1fr)] items-center gap-3 sm:grid-cols-[8rem_2rem_minmax(0,1fr)]">
+          <span class="truncate text-[0.8125rem] text-ink-2">{l.label}</span>
+          <span class="sf-count data text-right text-[0.75rem] text-ink">{l.marks.length}</span>
+          <span class="sf-track relative h-6 rounded-[4px] bg-well">
+            {l.marks.map((m) => (
+              <span
+                class="sf-mark absolute top-1/2 h-3 w-[3px] rounded-[2px]"
+                data-at={m}
+                style={`left:${(m * 100).toFixed(2)}%; background:${l.color}; transform:translateY(-50%)`}
+              ></span>
+            ))}
+          </span>
+        </li>
+      ))}
+    </ul>
+    <div class="sf-now pointer-events-none absolute inset-y-3 w-px bg-accent opacity-0" aria-hidden="true"></div>
+  </div>
+  <figcaption class="fig-foot">{s('fig.signals.caption')}</figcaption>
+</figure>
 
 <style>
-  /* With motion reduced the packets stop where they are. Everything else on the
-     diagram is static markup, so it still reads as six inputs converging on
-     one id. */
-  @media (prefers-reduced-motion: reduce) {
-    .mcpd-packet { display: none; }
-  }
+  .sf-mark { transition: transform 260ms var(--ease-out); }
 </style>
+
+<script>
+  import { animate, each } from '@/lib/motion'
+
+  each('[data-signals]', (fig) => {
+    const lanes = [...fig.querySelectorAll<HTMLElement>('.sf-lane')].map((el) => ({
+      count: el.querySelector<HTMLElement>('.sf-count')!,
+      marks: [...el.querySelectorAll<HTMLElement>('.sf-mark')].map((m) => ({ m, at: Number(m.dataset.at) })),
+    }))
+    const track = fig.querySelector<HTMLElement>('.sf-track')!
+    const now = fig.querySelector<HTMLElement>('.sf-now')!
+    let left = 0
+    let width = 0
+    const measure = () => {
+      const box = fig.getBoundingClientRect()
+      const t = track.getBoundingClientRect()
+      left = t.left - box.left
+      width = t.width
+    }
+    measure()
+    addEventListener('resize', measure, { passive: true })
+    document.fonts?.ready.then(measure)
+
+    const RUN = 6
+    const CYCLE = RUN + 3
+    animate(fig, (time) => {
+      const k = time % CYCLE
+      const u = Math.min(1, k / RUN)
+      for (const lane of lanes) {
+        let n = 0
+        for (const { m, at } of lane.marks) {
+          const on = u >= at
+          if (on) n += 1
+          m.style.opacity = on ? '1' : '0'
+          m.style.transform = `translateY(-50%) scaleY(${on ? 1 : 0.2})`
+        }
+        lane.count.textContent = String(n)
+      }
+      now.style.opacity = k < RUN ? '0.8' : '0'
+      now.style.transform = `translateX(${left + u * width}px)`
+    })
+  })
+</script>

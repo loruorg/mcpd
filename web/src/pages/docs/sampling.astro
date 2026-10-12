@@ -1,12 +1,12 @@
 ---
 import Doc from '@/layouts/Doc.astro'
 import Command from '@/components/Command.astro'
-import StripChart from '@/components/StripChart.astro'
+import SamplingGate from '@/components/SamplingGate.astro'
 ---
 
 <Doc
   title="Sampling"
-  description="The five sampling strategies mcpd implements, why the decision is made once at the root, why the deterministic hash lets a fleet agree, and how tail sampling keeps the runs worth reading."
+  description="The five sampling strategies mcpd implements, why the decision is made once at the root, why the deterministic hash lets a fleet agree, and how head and tail decisions differ."
   lede="Keeping a fraction of the traces, without keeping a fraction of each one."
   og="docs"
 >
@@ -90,12 +90,9 @@ import StripChart from '@/components/StripChart.astro'
     a dozen services report into one instance.
   </p>
   <p>
-    Of the five strategies, the daemon reaches <code>always</code> and
+    The daemon samples with <code>always</code> or
     <code>deterministic</code>: <code>--sample</code> and a project's
     <code>sample</code> in the config file both set the deterministic strategy.
-    <code>never</code>, <code>ratio</code> and <code>tail</code> are
-    implemented in the policy type and are not reachable from a flag or the
-    config file in this build.
   </p>
 
   <h2>Why hashing lets a fleet agree</h2>
@@ -114,7 +111,7 @@ import StripChart from '@/components/StripChart.astro'
     cannot half arrive.
   </p>
   <p>
-    Two details make that mapping honest. It reads the <em>trailing</em> sixteen
+    Two details keep that mapping accurate. It reads the <em>trailing</em> sixteen
     hex characters of the id: OpenTelemetry requires trace ids to be random, but
     some producers derive the leading bytes from a timestamp, and a sampler
     reading those would correlate with the time of day rather than sample. When
@@ -131,10 +128,9 @@ import StripChart from '@/components/StripChart.astro'
     the flag clear drops it whatever the local rate.
   </p>
   <p>
-    The daemon does not do this in this build. Its OTLP door keeps the
-    trace-flags byte on each span, in the attribute
-    <code>mcpd.otlp.flags</code>, but the daemon's sampler does not read it. A
-    daemon with a rate applies that rate to every trace, whatever the flag says.
+    The daemon applies its own rate. Its OTLP door keeps the trace-flags byte on
+    each span, in the attribute <code>mcpd.otlp.flags</code>, and a daemon with
+    a rate applies that rate to every trace, whatever the flag says.
   </p>
   <p>
     The alternative is worse than it sounds. If each service applied its own
@@ -143,12 +139,11 @@ import StripChart from '@/components/StripChart.astro'
     of holes in the shape of one.
   </p>
 
-  <h2>Tail sampling keeps the runs worth reading</h2>
+  <h2>Head and tail decisions</h2>
   <p>
-    A head sampler decides before it knows anything. It is cheap, and it is
-    blind: at a tenth, it keeps a tenth of the failures too. The traces you
-    actually open are the rare ones, and rarity is exactly what a ratio sampler
-    is worst at.
+    A head sampler decides when the trace starts, from the trace id alone. It is
+    cheap and holds nothing in memory, and the rate applies evenly: at a tenth,
+    it keeps a tenth of the failures too.
   </p>
 
   {/* The pen stands 200 units in rather than at the component's default. An
@@ -156,23 +151,19 @@ import StripChart from '@/components/StripChart.astro'
       arm stands at 760, so this chart had never once drawn its pen: the one
       element that makes a recorder a recorder was outside the field at every
       width, including a phone's. */}
-  <StripChart class="not-prose my-8" height={260} pen={200} />
+  <SamplingGate class="not-prose my-8" />
 
   <p>
     That is what a latency recording looks like: a flat baseline and a handful
     of excursions. The baseline is where the volume is and the excursions are
-    where the answers are. Tail sampling holds the trace until it ends, then
-    keeps it if anything in it errored, keeps it if it ran longer than the
-    threshold you set, and otherwise applies the same deterministic hash as
-    before. Keeping errors is on by default, because the traces you most need
-    are the rare ones and a ratio sampler is most likely to throw them away.
+    where the answers are. A tail decision waits until the trace ends, then
+    keeps it if anything in it errored or it ran longer than a threshold, and
+    otherwise applies the same deterministic hash.
   </p>
   <p>
-    The cost is buffering. A tail sampler must hold every unfinished trace in
-    memory until it can decide, which is why it is a deliberate choice and not
-    the default. As above, the tail strategy is implemented in the policy type
-    and is not reachable from a flag or the config file in this build; the
-    daemon's ingest path applies the head decision.
+    The cost of a tail decision is buffering: it must hold every unfinished
+    trace in memory until it can decide. The daemon's ingest path makes the head
+    decision, so it holds no trace back.
   </p>
 
   <h2>Knowing what was dropped</h2>

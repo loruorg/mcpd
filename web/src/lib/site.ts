@@ -4,11 +4,11 @@ export const SITE = {
   name: 'mcpd',
   url: 'https://mcpd.sh',
   /** Used as the default share description and the meta description fallback. */
-  tagline: 'Durable runs and observability for agents, in one binary.',
+  tagline: 'The unopinionated agent observatory.',
   description:
-    'A free, open-source daemon for AI agents. It holds a workflow between steps while ' +
-    'your own code, in any language, does the work inside each one, and records every ' +
-    'step as a trace with its cost.',
+    'Free, open-source observability for AI agents. Any framework, any language, any ' +
+    'model provider, through OpenTelemetry or six SDKs. Self-host one binary, or use it ' +
+    'free at mcpd.sh.',
   repo: 'https://github.com/mcpd/mcpd',
   licence: 'Apache-2.0',
   /** The port mcpd listens on by default. Referenced in a lot of copy. */

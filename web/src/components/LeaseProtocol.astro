@@ -1,111 +1,94 @@
 ---
 /**
- * The worker protocol, as a timing diagram: what a worker posts about one
- * step, in the order it posts it.
- *
- * Two lifelines, time running downwards, and a marker descending the page. Each
- * message is drawn in full from the first paint at a resting tone and comes up
- * to ink as the marker reaches it, so a reader sees the whole exchange at once
- * and the order as a second reading. With motion reduced the marker is hidden
- * and every message sits at ink, which is the whole conversation.
+ * The worker protocol as a sequence diagram: what a worker posts about one
+ * step, in order. Two lifelines, time running down. Playing sends each message
+ * across in turn; the markup shows the whole exchange.
  */
+import { localeOf } from '@/lib/i18n'
+import { strings } from '@/lib/ui-strings'
+
 interface Props {
   class?: string
 }
 const { class: className = '' } = Astro.props
+const s = strings(localeOf(Astro.url.pathname))
 
-const WORKER = 180
-const DAEMON = 540
-
-/* y is the message's row. `to` says which lifeline the arrow points at. */
+const WORKER = 150
+const DAEMON = 470
 const messages = [
-  { y: 40, label: 'POST /steps/claim', to: 'daemon', note: 'long poll, up to 60 s' },
-  { y: 68, label: 'a lease', to: 'worker', note: 'input, prior steps, ids' },
-  { y: 96, label: 'POST /steps/{lease}/started', to: 'daemon', note: 'before the body, always' },
-  { y: 130, label: 'heartbeat', to: 'daemon', note: 'every 10 s while it runs' },
-  { y: 158, label: 'heartbeat', to: 'daemon', note: '' },
-  { y: 186, label: 'heartbeat', to: 'daemon', note: '' },
-  { y: 220, label: 'POST /steps/{lease}/complete', to: 'daemon', note: 'output, state, usage' },
-  { y: 248, label: 'run_status, next', to: 'worker', note: 'or a 409, one of four' },
+  { y: 50, label: 'POST /steps/claim', to: 'daemon', note: s('fig.lease.claim') },
+  { y: 80, label: 'lease', to: 'worker', note: s('fig.lease.lease') },
+  { y: 110, label: 'POST /steps/{lease}/started', to: 'daemon', note: s('fig.lease.started') },
+  { y: 145, label: 'heartbeat', to: 'daemon', note: s('fig.lease.heartbeat') },
+  { y: 172, label: 'heartbeat', to: 'daemon', note: '' },
+  { y: 199, label: 'heartbeat', to: 'daemon', note: '' },
+  { y: 234, label: 'POST /steps/{lease}/complete', to: 'daemon', note: s('fig.lease.complete') },
+  { y: 264, label: 'run_status, next', to: 'worker', note: s('fig.lease.ack') },
 ]
-const TOP = 26
-const BOTTOM = 268
-const DUR = 9
-/* When the marker passes a row, as a fraction of the loop. */
-const reach = (y: number) => ((y - TOP) / (BOTTOM - TOP)) * 0.9
+const TOP = 32
+const BOTTOM = 284
 ---
 
-<div class={`panel overflow-hidden ${className}`}>
-  <div class="grid gap-px bg-scribe">
-    <div class="flex flex-wrap items-baseline gap-x-8 gap-y-1 bg-panel-2 px-5 py-3.5">
-      <p class="legend text-ink-2">One lease</p>
-      <p class="max-w-[64ch] text-[0.8125rem] leading-snug text-ink-3">
-        The daemon learns that a body is running from
-        <span class="data text-ink-2">started</span>, that the worker is alive
-        from the heartbeats, and how the step ended from
-        <span class="data text-ink-2">complete</span> or
-        <span class="data text-ink-2">fail</span>. Miss the heartbeats and the
-        lease is reclaimed; a later call about it is refused with a reason,
-        never lost.
-      </p>
-    </div>
-
-    <div class="relative bg-panel-2 px-4 py-5 sm:px-8">
-      <svg
-        class="h-auto w-full"
-        style="min-height: 220px"
-        viewBox="0 0 800 290"
-        preserveAspectRatio="xMidYMid meet"
-        fill="none"
-        role="img"
-        aria-label="A worker and the daemon exchanging messages about one lease: claim, the lease, started, three heartbeats, complete, and the acknowledgement."
-      >
-        {/* The lifelines. */}
-        <text x={WORKER} y="10" text-anchor="middle" dominant-baseline="central" fill="var(--color-ink-3)" style="font-family:var(--font-display);font-size:12px;letter-spacing:.14em;text-transform:uppercase">Worker</text>
-        <text x={DAEMON} y="10" text-anchor="middle" dominant-baseline="central" fill="var(--color-ink-3)" style="font-family:var(--font-display);font-size:12px;letter-spacing:.14em;text-transform:uppercase">Daemon</text>
-        <line x1={WORKER} y1={TOP} x2={WORKER} y2={BOTTOM} stroke="var(--color-scribe)" stroke-width="1" />
-        <line x1={DAEMON} y1={TOP} x2={DAEMON} y2={BOTTOM} stroke="var(--color-scribe)" stroke-width="1" />
-
-        {/* The body's own time on the worker's line: from started to complete. */}
-        <rect x={WORKER - 5} y="96" width="10" height="124" fill="var(--color-well)" stroke="var(--color-scribe)" />
-        <text x={WORKER - 14} y="158" text-anchor="end" dominant-baseline="central" fill="var(--color-ink-3)" style="font-family:var(--font-display);font-size:12px;letter-spacing:.14em;text-transform:uppercase">the body runs</text>
-
-        {messages.map((m) => {
-          const from = m.to === 'daemon' ? WORKER : DAEMON
-          const to = m.to === 'daemon' ? DAEMON : WORKER
-          const head = m.to === 'daemon' ? `M${to - 7},${m.y - 4} L${to},${m.y} L${to - 7},${m.y + 4}` : `M${to + 7},${m.y - 4} L${to},${m.y} L${to + 7},${m.y + 4}`
-          const t = reach(m.y).toFixed(3)
-          const after = Math.min(reach(m.y) + 0.01, 0.99).toFixed(3)
-          return (
-            <g class="mcpd-lease-msg" stroke="var(--color-ink-3)">
-              <line x1={from + (m.to === 'daemon' ? 5 : -5)} y1={m.y} x2={to} y2={m.y} stroke-width="1" />
-              <path d={head} stroke-width="1" />
-              <text x={(WORKER + DAEMON) / 2} y={m.y - 10} text-anchor="middle" dominant-baseline="central" fill="var(--color-ink-2)" stroke="none" style="font-family:var(--font-data);font-size:13px">{m.label}</text>
-              {m.note && (
-                <text x={DAEMON + 14} y={m.y} dominant-baseline="central" fill="var(--color-ink-3)" stroke="none" style="font-family:var(--font-data);font-size:12px">{m.note}</text>
-              )}
-              {/* Up to ink as the marker reaches this row, and back down when the loop restarts. */}
-              <animate attributeName="opacity" dur={`${DUR}s`} repeatCount="indefinite" calcMode="discrete" keyTimes={`0;${t};${after};0.96;1`} values="0.45;0.45;1;1;0.45" />
-            </g>
-          )
-        })}
-
-        {/* The marker: now, descending. */}
-        <g class="mcpd-lease-now">
-          <line x1="60" y1={TOP} x2="740" y2={TOP} stroke="var(--color-amber)" stroke-width="1" stroke-dasharray="2 3">
-            <animateTransform attributeName="transform" type="translate" dur={`${DUR}s`} repeatCount="indefinite" calcMode="linear" keyTimes="0;0.9;1" values={`0 0;0 ${BOTTOM - TOP};0 ${BOTTOM - TOP}`} />
-          </line>
-        </g>
-      </svg>
-    </div>
+<figure class={`fig ${className}`} data-motion data-lease>
+  <div class="fig-head">
+    <span class="legend">{s('fig.lease.title')}</span>
   </div>
-</div>
+  <div class="px-3 py-3 sm:px-5">
+    <svg viewBox="0 0 760 296" class="block h-auto w-full" role="img" aria-label={s('fig.lease.aria')}>
+      <text x={WORKER} y="14" text-anchor="middle" dominant-baseline="central" fill="var(--color-ink-2)" style="font-family:var(--font-data);font-size:12px">worker</text>
+      <text x={DAEMON} y="14" text-anchor="middle" dominant-baseline="central" fill="var(--color-ink)" style="font-family:var(--font-data);font-size:12px">mcpd</text>
+      <line x1={WORKER} y1={TOP} x2={WORKER} y2={BOTTOM} stroke="var(--color-scribe)" />
+      <line x1={DAEMON} y1={TOP} x2={DAEMON} y2={BOTTOM} stroke="var(--color-scribe)" />
+      <rect x={WORKER - 4} y="110" width="8" height="124" rx="2" fill="color-mix(in oklab, var(--color-accent) 25%, transparent)" stroke="var(--color-accent)" stroke-width="0.75" />
+      <text x={WORKER - 14} y="172" text-anchor="end" dominant-baseline="central" fill="var(--color-ink-3)" style="font-family:var(--font-body);font-size:12px">{s('fig.lease.body')}</text>
+      {messages.map((m, i) => {
+        const from = m.to === 'daemon' ? WORKER + 5 : DAEMON
+        const to = m.to === 'daemon' ? DAEMON : WORKER + 5
+        const dir = m.to === 'daemon' ? 1 : -1
+        return (
+          <g class="lp-msg" data-i={i} data-from={from} data-to={to} data-y={m.y}>
+            <line x1={from} y1={m.y} x2={to - dir * 2} y2={m.y} stroke="var(--color-ink-3)" stroke-width="1" />
+            <path d={`M${to - dir * 7},${m.y - 4} L${to},${m.y} L${to - dir * 7},${m.y + 4}`} fill="none" stroke="var(--color-ink-3)" stroke-width="1" />
+            <text x={(WORKER + DAEMON) / 2} y={m.y - 9} text-anchor="middle" fill="var(--color-ink)" style="font-family:var(--font-data);font-size:12px">{m.label}</text>
+            {m.note && <text x={DAEMON + 14} y={m.y} dominant-baseline="central" fill="var(--color-ink-3)" style="font-family:var(--font-body);font-size:12px">{m.note}</text>}
+          </g>
+        )
+      })}
+      <circle class="lp-dot" r="3.5" cx="0" cy="0" fill="var(--color-accent)" opacity="0" />
+    </svg>
+  </div>
+  <figcaption class="fig-foot">{s('fig.lease.caption')}</figcaption>
+</figure>
 
 <style>
-  /* With motion reduced the marker is hidden and every message sits at ink. */
-  @media (prefers-reduced-motion: reduce) {
-    .mcpd-lease-now { display: none; }
-    .mcpd-lease-msg { opacity: 1 !important; }
-    .mcpd-lease-msg animate { display: none; }
-  }
+  .lp-msg { transition: opacity 200ms var(--ease-out); }
 </style>
+
+<script>
+  import { animate, each, easeOut } from '@/lib/motion'
+
+  each('[data-lease]', (fig) => {
+    const msgs = [...fig.querySelectorAll<SVGGElement>('.lp-msg')].map((g) => ({
+      g,
+      from: Number(g.dataset.from),
+      to: Number(g.dataset.to),
+      y: Number(g.dataset.y),
+    }))
+    const dot = fig.querySelector<SVGCircleElement>('.lp-dot')!
+    const STEP = 0.9
+    const CYCLE = STEP * msgs.length + 2.5
+    animate(fig, (time) => {
+      const k = time % CYCLE
+      const i = Math.floor(k / STEP)
+      msgs.forEach((m, n) => (m.g.style.opacity = n <= i ? '1' : '0.3'))
+      const m = msgs[i]
+      if (!m) {
+        dot.setAttribute('opacity', '0')
+        return
+      }
+      const p = easeOut(Math.min(1, (k - i * STEP) / (STEP * 0.7)))
+      dot.setAttribute('opacity', p < 1 ? '1' : '0')
+      dot.style.transform = `translate(${m.from + (m.to - m.from) * p}px, ${m.y}px)`
+    })
+  })
+</script>

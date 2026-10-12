@@ -1,0 +1,168 @@
+---
+/**
+ * A monitor watching the error rate, and the rule that makes it trustworthy.
+ *
+ * The chart draws one reading per window. When a reading crosses the
+ * threshold the monitor fires, and it stays firing through windows with too
+ * few runs to judge: silence is not recovery. It resolves only when a real
+ * reading falls back under the line. The latch below is folded out of the
+ * readings by that same rule, the one `crates/mcpd-server/src/monitor.rs`
+ * applies, so the drawing cannot claim behaviour the daemon does not have.
+ *
+ * The markup is the finished chart. Playing draws it left to right while the
+ * monitor list changes state on the same clock.
+ */
+import { localeOf } from '@/lib/i18n'
+import { strings } from '@/lib/ui-strings'
+
+interface Props {
+  class?: string
+}
+const { class: className = '' } = Astro.props
+const s = strings(localeOf(Astro.url.pathname))
+
+const THRESHOLD = 5
+const READINGS: (number | null)[] = [
+  0.8, 1.1, 0.6, 1.4, 0.9, 1.2, 2.1, 3.4, 6.8, 8.9, 7.4, null, null, 6.2, 3.1, 1.6, 0.9, 1.1, 0.7, 1.0,
+]
+let held = false
+const LATCH = READINGS.map((v) => {
+  if (v !== null) held = v > THRESHOLD
+  return held
+})
+const TRIP = LATCH.indexOf(true)
+const CLEAR = LATCH.indexOf(false, TRIP)
+
+const W = 600
+const H = 200
+const PAD = { l: 34, r: 12, t: 14, b: 26 }
+const MAX = 10
+const x = (i: number) => PAD.l + (i / (READINGS.length - 1)) * (W - PAD.l - PAD.r)
+const y = (v: number) => PAD.t + (1 - v / MAX) * (H - PAD.t - PAD.b)
+
+/* The line, broken where there is no reading. */
+const segments: string[] = []
+let d = ''
+READINGS.forEach((v, i) => {
+  if (v === null) {
+    if (d) segments.push(d)
+    d = ''
+    return
+  }
+  d += `${d ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`
+})
+if (d) segments.push(d)
+const gaps = READINGS.map((v, i) => (v === null ? i : -1)).filter((i) => i >= 0)
+const gapFrom = x(gaps[0]! - 0.5)
+const gapTo = x(gaps[gaps.length - 1]! + 0.5)
+
+/* Four monitors. Only the first moves; a list where everything fires tells an
+   operator nothing. Names are the real watch kinds and a real scorer. */
+const MONITORS = [
+  { watch: 'error_rate', rule: '> 5%', live: true },
+  { watch: 'latency_p95', rule: '> 4 s', live: false },
+  { watch: 'cost', rule: '> $5 / h', live: false },
+  { watch: 'score_mean', rule: 'no_tool_loop < 0.9', live: false },
+]
+const labels = { ok: s('fig.monitor.ok'), firing: s('fig.monitor.firing'), resolved: s('fig.monitor.resolved') }
+---
+
+<figure class={`fig ${className}`} data-motion data-monitor data-n={READINGS.length} data-trip={TRIP} data-clear={CLEAR} data-labels={JSON.stringify(labels)}>
+  <div class="fig-head">
+    <span class="legend">{s('fig.monitor.title')}</span>
+    <span class="data ml-auto text-[0.75rem] text-ink-3">{s('fig.monitor.every')}</span>
+  </div>
+
+  <div>
+    <div class="relative min-w-0 px-3 pb-2 pt-3">
+      <svg viewBox={`0 0 ${W} ${H}`} class="block h-auto w-full" role="img" aria-label={s('fig.monitor.aria')}>
+        {[0, 5, 10].map((v) => (
+          <g>
+            <line x1={PAD.l} x2={W - PAD.r} y1={y(v)} y2={y(v)} stroke="var(--color-scribe-2)" />
+            <text x={PAD.l - 8} y={y(v)} text-anchor="end" dominant-baseline="central" fill="var(--color-ink-3)" style="font-family:var(--font-data);font-size:11px">{v}%</text>
+          </g>
+        ))}
+        <rect x={x(TRIP) - 6} y={PAD.t} width={x(CLEAR) - x(TRIP)} height={H - PAD.t - PAD.b} fill="var(--color-oxide)" fill-opacity="0.08" />
+        <rect x={gapFrom} y={PAD.t} width={gapTo - gapFrom} height={H - PAD.t - PAD.b} fill="url(#mon-hatch)" />
+        <defs>
+          <pattern id="mon-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <line x1="0" y1="0" x2="0" y2="6" stroke="var(--color-ink-4)" stroke-width="1" opacity="0.5" />
+          </pattern>
+        </defs>
+        <text x={(gapFrom + gapTo) / 2} y={H - PAD.b + 16} text-anchor="middle" fill="var(--color-ink-3)" style="font-family:var(--font-data);font-size:10.5px">{s('fig.monitor.gap')}</text>
+        <line x1={PAD.l} x2={W - PAD.r} y1={y(THRESHOLD)} y2={y(THRESHOLD)} stroke="var(--color-oxide)" stroke-dasharray="4 4" stroke-width="1" />
+        <text x={W - PAD.r} y={y(THRESHOLD) - 7} text-anchor="end" fill="var(--color-oxide)" style="font-family:var(--font-data);font-size:11px">{s('fig.monitor.threshold')} 5%</text>
+        {segments.map((seg) => (
+          <path d={seg} fill="none" stroke="var(--color-ink)" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round" />
+        ))}
+        {READINGS.map((v, i) => v !== null && (
+          <circle cx={x(i)} cy={y(v)} r={v > THRESHOLD ? 3.25 : 2.25} fill={v > THRESHOLD ? 'var(--color-oxide)' : 'var(--color-panel-2)'} stroke={v > THRESHOLD ? 'none' : 'var(--color-ink)'} stroke-width="1.25" />
+        ))}
+        <rect class="mon-cover" x={W} y="0" width={W} height={H - PAD.b + 4} fill="var(--color-panel-2)" style="transform-box: view-box" />
+        <line class="mon-pen" x1="0" x2="0" y1={PAD.t} y2={H - PAD.b} stroke="var(--color-accent)" stroke-width="1" opacity="0" />
+      </svg>
+    </div>
+
+    <ul class="mon-list m-0 grid list-none border-t border-scribe-2 bg-panel-1 p-0 sm:grid-cols-2" style="padding-left:0">
+      {MONITORS.map((m) => (
+        <li class="flex items-center gap-3 px-4 py-2.5">
+          <span class="min-w-0 flex-1">
+            <span class="data block truncate text-[0.75rem] text-ink">{m.watch}</span>
+            <span class="data block truncate text-[0.6875rem] text-ink-3">{m.rule}</span>
+          </span>
+          <span
+            class:list={['annunciator py-0.5 text-[0.625rem]', m.live && 'mon-state']}
+            data-lit={m.live ? 'olive' : 'olive'}
+          >{m.live ? labels.resolved : labels.ok}</span>
+        </li>
+      ))}
+    </ul>
+  </div>
+
+  <figcaption class="fig-foot">{s('fig.monitor.caption')}</figcaption>
+</figure>
+
+<style>
+  .mon-list > li + li { border-top: 1px solid var(--color-scribe-2); }
+  @media (min-width: 640px) {
+    .mon-list > li:nth-child(2) { border-top: 0; }
+    .mon-list > li:nth-child(even) { border-left: 1px solid var(--color-scribe-2); }
+  }
+</style>
+
+<script>
+  import { animate, each } from '@/lib/motion'
+
+  each('[data-monitor]', (fig) => {
+    const n = Number(fig.dataset.n)
+    const trip = Number(fig.dataset.trip)
+    const clear = Number(fig.dataset.clear)
+    const L: Record<string, string> = JSON.parse(fig.dataset.labels!)
+    const cover = fig.querySelector<SVGRectElement>('.mon-cover')!
+    const pen = fig.querySelector<SVGLineElement>('.mon-pen')!
+    const state = fig.querySelector<HTMLElement>('.mon-state')!
+    const W = 600
+    const l = 34
+    const r = 12
+    const x = (i: number) => l + (i / (n - 1)) * (W - l - r)
+
+    const STEP = 0.55
+    const DRAW = STEP * (n - 1)
+    const CYCLE = DRAW + 3.5
+    animate(fig, (time) => {
+      const k = time % CYCLE
+      const i = Math.min(n - 1, k / STEP)
+      const px = x(i)
+      cover.style.transform = `translateX(${px + 6 - W}px)`
+      pen.style.transform = `translateX(${px}px)`
+      pen.style.opacity = k < DRAW ? '0.9' : '0'
+      const at = Math.floor(i + 0.001)
+      const next = at >= clear ? 'resolved' : at >= trip ? 'firing' : 'ok'
+      if (state.dataset.state !== next) {
+        state.dataset.state = next
+        state.dataset.lit = next === 'firing' ? 'oxide' : 'olive'
+        state.textContent = L[next]!
+      }
+    })
+  })
+</script>

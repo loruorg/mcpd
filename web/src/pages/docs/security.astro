@@ -7,15 +7,13 @@ import TerminalCast from '@/components/TerminalCast.astro'
 
 <Doc
   title="Security"
-  description="What a deployed mcpd stores, what leaves the machine and under which setting, how keys, scopes and project tenancy work, the limits of redaction, and the controls mcpd does not have."
-  lede="One page to answer a review. What is kept, what is sent anywhere else, who can read it, and the controls mcpd does not have."
+  description="What a deployed mcpd stores, what leaves the machine and under which setting, how keys, scopes and project tenancy work, what redaction covers, and the controls to put around mcpd."
+  lede="One page to answer a review. What is kept, what is sent anywhere else, who can read it, and the controls to put around mcpd."
   og="docs"
 >
   <p>
     Everything below is drawn from the daemon's own source and from
     <code>spec/mcpd.spec.json</code>, which is what the API is generated from.
-    Where a control does not exist, this page says so rather than leaving the
-    gap for you to find in a questionnaire.
   </p>
 
   <h2>What mcpd stores</h2>
@@ -76,7 +74,7 @@ import TerminalCast from '@/components/TerminalCast.astro'
     runs that have ended; see <a href="/docs/runs#storage" class="link">Runs</a>.
   </p>
   <p>
-    mcpd does not encrypt what it writes. Encryption at rest is the volume's job
+    Encryption at rest is the volume's job
     on the embedded store and the database's job on the other two.
   </p>
 
@@ -208,7 +206,6 @@ import TerminalCast from '@/components/TerminalCast.astro'
     values, shown once, and stored only as SHA-256 digests. A wrong password
     and an unknown email get the same answer. Sign-up and log-in are limited
     per client address, and failed log-ins per email. Sessions last 30 days.
-    There is no email verification and no password reset in this build.
   </p>
   <p>
     The mode also turns off the rule that a scope with no keys is open: a
@@ -384,9 +381,8 @@ import TerminalCast from '@/components/TerminalCast.astro'
       open daemon is recorded as <code>anonymous</code>.
     </li>
     <li>
-      <strong>The person comes from your ingress, or not at all.</strong> mcpd
-      has no user accounts, so on its own a row attributes an action to a key
-      and not to a human. The <code>subject</code> field carries an identity
+      <strong>The person comes from your ingress.</strong> On its own a row
+      attributes an action to a key. The <code>subject</code> field carries an identity
       when <code>--trusted-identity-header</code> and
       <code>--trusted-proxy-cidr</code> are both set, and is empty otherwise,
       which is the default. mcpd never establishes that identity itself; it
@@ -402,15 +398,15 @@ import TerminalCast from '@/components/TerminalCast.astro'
     <li>
       <strong>It records which key, and optionally who.</strong> The key is
       stored as a truncated digest, never the key itself, so the log is not a
-      place credentials accumulate. That answers "an admin key deleted this"
-      and not "which person did", because mcpd has no identity provider. If you want the second answer, give it the header
+      place credentials accumulate. That answers "an admin key deleted this".
+      To answer "which person did", give it the header
       your ingress already sets and the addresses allowed to set it:
       <code>--trusted-identity-header x-forwarded-user</code> with
       <code>--trusted-proxy-cidr 10.42.0.0/16</code>. Both halves are required.
       A header is a string anyone who can reach the port may send, so mcpd
       reads it only from an address you named; a request from anywhere else is
-      served normally and its row carries no subject, which is the honest
-      answer rather than a guess. With neither flag set, no subject is ever
+      served normally and its row carries no subject rather than a
+      guessed one. With neither flag set, no subject is ever
       recorded, and that is the default.
     </li>
     <li>
@@ -453,14 +449,13 @@ import TerminalCast from '@/components/TerminalCast.astro'
     </li>
   </ul>
 
-  <h2>What redaction does, and what it cannot do</h2>
+  <h2>What redaction does</h2>
   <p>
     Redaction is on by default and runs before the write, as stage three of the
     intake pipeline. A value a rule matches never reaches the database, which is
     a different guarantee from a value deleted afterwards, and the difference is
-    the one an auditor asks about. What it cannot do is keep the bytes off the
-    network: they have crossed it by the time the rule runs. For that, the
-    SDKs carry <code>MCPD_CAPTURE_PAYLOADS=false</code>, which drops
+    the one an auditor asks about. To keep the bytes off the network as well,
+    the SDKs carry <code>MCPD_CAPTURE_PAYLOADS=false</code>, which drops
     <code>input</code> and <code>output</code> before a span is queued and
     leaves everything else on it.
   </p>
@@ -477,29 +472,26 @@ import TerminalCast from '@/components/TerminalCast.astro'
     <a href="/docs/privacy" class="link">Redaction and retention</a>.
   </p>
   <p>
-    Now the limit, which a review will ask about and which no amount of
-    configuration removes. <strong>Rules match field names, not the shape of a
-    value.</strong> An API key that a user pasted into the middle of a sentence,
-    and that arrives under a field called <code>content</code> or
-    <code>question</code>, is not matched by anything in the pipeline. The field
-    name is innocent, so the value is stored in full.
+    <strong>Rules match field names, not the shape of a value.</strong> A value
+    that arrives under a field called <code>content</code> or
+    <code>question</code> is stored as sent, so name the fields that carry
+    credentials and identifiers.
   </p>
-  <p>Redaction therefore stops one specific thing:</p>
+  <p>Redaction covers a precise scope:</p>
   <ul>
     <li>It stops the structured capture of credentials and identifiers, where a credential arrives in a field named after what it is.</li>
-    <li>It does not scan free text, and it is not a content classifier.</li>
-    <li>It does not detect a secret by its shape or by entropy.</li>
-    <li>It does not touch a span's name or a log record's message. Those are identifiers used for grouping rather than payloads, and rewriting them would break the grouping. Do not build a span name out of a customer's email address.</li>
-    <li>It does not touch the run store. A durable run's payloads are its working state and are kept as sent; only the spans a run writes into the trace store are redacted.</li>
+    <li>It works on field names. Free text under an ordinary field name is stored as sent.</li>
+    <li>It leaves a span's name and a log record's message as sent. Those are identifiers used for grouping rather than payloads, and rewriting them would break the grouping. Do not build a span name out of a customer's email address.</li>
+    <li>It leaves the run store as sent. A durable run's payloads are its working state; only the spans a run writes into the trace store are redacted.</li>
   </ul>
   <p>
-    One control does work on shape, and it is detection after the fact rather
-    than prevention: the built-in <code>no_leaked_secret</code> scorer marks
-    down a run whose <em>answer</em> carries a token that looks like a
-    credential, by known prefix or by a long mixed-case alphanumeric run. It
-    scores a run that is already stored. It removes nothing, it does not read
-    the prompt, and it runs only when you ask for it. Treat it as a way to find
-    out that this has happened, not as a second line of redaction.
+    One control works on shape, as detection after the fact: the built-in
+    <code>no_leaked_secret</code> scorer marks down a run whose
+    <em>answer</em> carries a token that looks like a credential, by known
+    prefix or by a long mixed-case alphanumeric run. It scores the answer of a
+    run that is already stored, removes nothing, and runs only when you ask for
+    it. Use it to find out that this has happened, not as a second line of
+    redaction.
   </p>
   <p>
     Two bounds apply whether or not a rule matched. Any single string longer
@@ -542,42 +534,41 @@ import TerminalCast from '@/components/TerminalCast.astro'
     attached to it in one transaction. Both take the <code>admin</code> scope
     and both are recorded in the audit log.
     <a href="/docs/privacy" class="link">Redaction and retention</a> walks
-    through the erasure request and what it can and cannot promise.
+    through the erasure request and what its reply tells you.
   </p>
 
-  <h2>What mcpd does not do</h2>
+  <h2>Controls to put around mcpd</h2>
   <p>
-    None of the following exists in this build. They are listed because a review
-    that discovers them later is a worse outcome than a review that reads them
-    here.
+    These controls belong to the layer around the daemon. Each row names where
+    to set it.
   </p>
   <table>
     <thead>
-      <tr><th>Not in mcpd</th><th>What to do instead</th></tr>
+      <tr><th>Control</th><th>Where to set it</th></tr>
     </thead>
     <tbody>
       <tr>
-        <td><strong>TLS termination.</strong> mcpd speaks plain HTTP. Prompts and completions cross that link in full.</td>
+        <td><strong>TLS.</strong> mcpd serves plain HTTP, and prompts and completions travel over that link in full.</td>
         <td>Terminate TLS at your ingress or in your mesh, and keep the daemon's port off any untrusted network.</td>
       </tr>
       <tr>
-        <td><strong>SSO.</strong> No identity provider integration, no OIDC, no SAML, no login screen.</td>
+        <td><strong>Single sign-on.</strong> A person's identity comes from the proxy in front of mcpd.</td>
         <td>Put the interface behind the identity proxy you already run. A person's identity is whatever that proxy establishes.</td>
       </tr>
       <tr>
-        <td><strong>SCIM.</strong> No user or group provisioning. The accounts <code>--signup</code> creates own one project each and have no groups.</td>
-        <td>Provision at the proxy. Inside mcpd the unit is a key, added to or removed from a list.</td>
+        <td><strong>Provisioning.</strong> Inside mcpd the unit is a key. The accounts <code>--signup</code> creates own one project each.</td>
+        <td>Provision at the proxy. Inside mcpd, add a key to a list or remove it.</td>
       </tr>
       <tr>
-        <td><strong>Roles beyond the six scopes.</strong> Authorisation is a scope and a project list. There is no per-endpoint role and no group.</td>
+        <td><strong>Roles.</strong> Authorisation is one of six scopes and a project list.</td>
         <td>Separate by key and by project. If a distinction matters, make it a project.</td>
       </tr>
       <tr>
-        <td><strong>Establishing who a person is.</strong> The audit log can record a subject, but mcpd never works out who the caller is. It records what your ingress asserted, and only from an address you named.</td>
+        <td><strong>Who a person is.</strong> The audit log records the subject your ingress asserted, and only from an address you named.</td>
         <td>Set <code>--trusted-identity-header</code> and <code>--trusted-proxy-cidr</code> so the header your proxy already sets reaches the audit row. Without them a row attributes an action to a key, and issuing one key per team narrows the digest.</td>
       </tr>
       <tr>
-        <td><strong>Key lifecycle.</strong> Keys are lists read at start-up. There is no expiry, no rotation schedule and no per-key quota. The ceiling that exists is per project: <code>--quota-per-minute</code> bounds how many signals a project may store in a minute, whichever key sent them.</td>
+        <td><strong>Key lifecycle.</strong> Keys are lists read at start-up. The ceiling is per project: <code>--quota-per-minute</code> bounds how many signals a project may store in a minute, whichever key sent them.</td>
         <td>Configure several keys, one per team or fleet, so revoking one is an edit and a restart rather than a redeployment of everything that emits a span. Make a fleet its own project if it needs its own ceiling.</td>
       </tr>
       <tr>
