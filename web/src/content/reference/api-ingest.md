@@ -12,7 +12,7 @@ generated: true
 
 <div class="endpoint"><span class="method method--post">POST</span><code>/v1/traces</code></div>
 
-The standard OTLP/HTTP trace endpoint. Accepts protobuf (`application/x-protobuf`) and JSON (`application/json`), gzip-encoded or uncompressed. Point any OpenTelemetry SDK here and mcpd will record its spans, mapping GenAI and OpenInference semantic conventions onto mcpd's own model. This is the endpoint that makes mcpd framework-agnostic: nothing about it requires an mcpd SDK.
+The standard OTLP/HTTP trace endpoint. Accepts protobuf (`application/x-protobuf`) and JSON (`application/json`), gzip-encoded or uncompressed. Point any OpenTelemetry SDK here and mcpd will record its spans, mapping GenAI and OpenInference semantic conventions onto mcpd's own model. This is the endpoint that makes mcpd framework-agnostic: nothing about it requires an mcpd SDK. Send an `Idempotency-Key` header to make a retry idempotent: a request repeated under the same key is stored once and reported as a duplicate.
 
 **Request body:** `Otlp.ExportTraceServiceRequest`
 
@@ -26,7 +26,7 @@ The standard OTLP/HTTP trace endpoint. Accepts protobuf (`application/x-protobuf
 
 <div class="endpoint"><span class="method method--post">POST</span><code>/v1/logs</code></div>
 
-The standard OTLP/HTTP log endpoint. Records correlate to spans automatically through their trace and span ids.
+The standard OTLP/HTTP log endpoint. Records correlate to spans automatically through their trace and span ids. Send an `Idempotency-Key` header to make a retry idempotent: a request repeated under the same key is stored once and reported as a duplicate.
 
 **Request body:** `Otlp.ExportLogsServiceRequest`
 
@@ -40,7 +40,7 @@ The standard OTLP/HTTP log endpoint. Records correlate to spans automatically th
 
 <div class="endpoint"><span class="method method--post">POST</span><code>/v1/metrics</code></div>
 
-The standard OTLP/HTTP metric endpoint, including exemplars, which mcpd turns into links back to the exact span that produced a data point.
+The standard OTLP/HTTP metric endpoint, including exemplars, which mcpd turns into links back to the exact span that produced a data point. Send an `Idempotency-Key` header to make a retry idempotent: a request repeated under the same key is stored once and reported as a duplicate.
 
 **Request body:** `Otlp.ExportMetricsServiceRequest`
 
@@ -54,7 +54,7 @@ The standard OTLP/HTTP metric endpoint, including exemplars, which mcpd turns in
 
 <div class="endpoint"><span class="method method--post">POST</span><code>/v1/ingest</code></div>
 
-Accepts mcpd's own shapes for all five signals in one batch, posted as a single `IngestBatch` object, gzip-encoded or uncompressed. Use this when you want the full model without translating through OTLP: token detail, cost, scores and feedback all survive intact. Supply `ingest_key` on a batch to make retries idempotent.
+Accepts mcpd's own shapes for all five signals in one batch, posted as a single `IngestBatch` object, gzip-encoded or uncompressed. Use this when you want the full model without translating through OTLP: token detail, cost, scores and feedback all survive intact. Supply `ingest_key` on a batch to make retries idempotent, or send an `Idempotency-Key` header, which covers the batches that carry no key of their own.
 
 **Request body:** `IngestBatch`
 

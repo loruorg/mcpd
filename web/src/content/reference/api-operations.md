@@ -24,7 +24,7 @@ Returns 200 as long as the process is running. Wire this to a Kubernetes livenes
 
 <div class="endpoint"><span class="method method--get">GET</span><code>/readyz</code></div>
 
-Returns 200 once storage is reachable and migrations have completed. Wire this to a Kubernetes readiness probe so traffic is not sent to an instance that cannot serve it.
+Returns 200 once storage is reachable and migrations have completed. Wire this to a Kubernetes readiness probe so traffic is not sent to an instance that cannot serve it. On `mcpd relay` it reports the spool and the upstreams instead: 503 when the spool is full, or when no upstream has answered for 30 seconds and the spool is at least 80% full, and `degraded` with a 200 while it is spooling for an upstream it cannot reach.
 
 **Response:** `HealthStatus`
 
@@ -36,7 +36,7 @@ Returns 200 once storage is reachable and migrations have completed. Wire this t
 
 <div class="endpoint"><span class="method method--get">GET</span><code>/metrics</code></div>
 
-mcpd's own counters in Prometheus text format: signals accepted, rejected, over quota and unbounded, duplicate batches, traces sampled out, ingest and query requests handled, request errors, audit rows that could not be written, and uptime. An observability tool that cannot be observed is a liability.
+mcpd's own counters in Prometheus text format: signals accepted, rejected, over quota and unbounded, duplicate batches, traces sampled out, ingest and query requests handled, request errors, audit rows that could not be written, each forwarding destination's deliveries, retries, dead letters and spool depth, and uptime. An observability tool that cannot be observed is a liability.
 
 **Response:** `String`
 
