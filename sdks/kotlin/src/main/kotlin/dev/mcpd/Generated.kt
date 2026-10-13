@@ -2179,6 +2179,18 @@ data class ScorerConfig(
     @SerialName("tool_name") val toolName: String? = null,
     /** A regular expression the answer must match somewhere, for `matches_pattern`. */
     @SerialName("pattern") val pattern: String? = null,
+    /**
+     * How `trajectory` compares the tools the run called with `expected_tools`:
+     * `strict` for the same calls in the same order and nothing else, `ordered` for
+     * the expected calls in order with others allowed between them, `unordered` for
+     * every expected call in any order. Defaults to `ordered`.
+     */
+    @SerialName("trajectory_match") val trajectoryMatch: String? = null,
+    /**
+     * The most steps a healthy run takes, for `trajectory`. A step is a tool call, a
+     * model generation or a handoff.
+     */
+    @SerialName("max_steps") val maxSteps: Int? = null,
     /** The shortest acceptable answer in characters, for `answer_length`. */
     @SerialName("min_chars") val minChars: Int? = null,
     /** The longest acceptable answer in characters, for `answer_length`. */
@@ -4576,6 +4588,148 @@ data class CreateEvaluationRuleRequest(
 }
 
 /**
+ * One action an agent took: a tool call, a model generation or a handoff, in the
+ * order they started.
+ */
+@Serializable
+data class TrajectoryStep(
+    /** Its position in the trajectory, from 0. */
+    @SerialName("index") val index: Int,
+    /** The span it was read from. */
+    @SerialName("span_id") val spanId: String,
+    /** What kind of action. */
+    @SerialName("kind") val kind: SpanKind,
+    /** The tool, model step or agent it names. */
+    @SerialName("name") val name: String,
+    /** How it ended. */
+    @SerialName("status") val status: SpanStatus,
+    /** When it started, in milliseconds after the run started. */
+    @SerialName("start_offset_ms") val startOffsetMs: Double,
+    /** How long it took. Absent while it is still running. */
+    @SerialName("duration_ms") val durationMs: Double? = null,
+    /** The model, for a model generation. */
+    @SerialName("model") val model: String? = null,
+    /** The start of its input as plain text, up to 240 characters. */
+    @SerialName("input_preview") val inputPreview: String? = null,
+    /** The start of its output as plain text, up to 240 characters. */
+    @SerialName("output_preview") val outputPreview: String? = null,
+    /** Input and output tokens together, for a model generation. */
+    @SerialName("tokens") val tokens: Long? = null
+) {
+}
+
+/**
+ * A run read as the sequence of actions its agent took. This is what a trajectory
+ * is scored on: which tools were called, in what order, how many steps it took,
+ * and whether it ended with an answer.
+ */
+@Serializable
+data class Trajectory(
+    /** The run. */
+    @SerialName("trace_id") val traceId: String,
+    /** Every action, in start order. */
+    @SerialName("steps") val steps: List<TrajectoryStep>,
+    /** The names of the tool calls, in order. What `expected_tools` is compared with. */
+    @SerialName("tool_sequence") val toolSequence: List<String>,
+    /** How many steps. */
+    @SerialName("step_count") val stepCount: Int,
+    /** How many of them were tool calls. */
+    @SerialName("tool_count") val toolCount: Int,
+    /** How many of them failed. */
+    @SerialName("error_count") val errorCount: Int,
+    /** True when the run ended `ok` with a non-empty answer. */
+    @SerialName("goal_reached") val goalReached: Boolean,
+    /** The start of the run's answer, from the root step's output. */
+    @SerialName("final_output_preview") val finalOutputPreview: String? = null
+) {
+}
+
+/** Which scorers to run over every run recorded under an experiment. */
+@Serializable
+data class ExperimentScoreRequest(
+    /**
+     * The scorers, as `POST /v1/api/score` takes them. Empty runs the code scorers
+     * that need no settings.
+     */
+    @SerialName("scorers") val scorers: List<String>,
+    /** Store nothing; report what would be stored. */
+    @SerialName("dry_run") val dryRun: Boolean = false,
+    /**
+     * Settings for the code scorers. `expected` is filled per run from the dataset
+     * case the run answered, when the run names one.
+     */
+    @SerialName("config") val config: ScorerConfig? = null
+) {
+}
+
+/**
+ * One case of an experiment: the run that answered it and how each scorer marked
+ * it.
+ */
+@Serializable
+data class ExperimentItemResult(
+    /** The run that answered the case. */
+    @SerialName("trace_id") val traceId: String,
+    /** How the run ended. */
+    @SerialName("status") val status: SpanStatus,
+    /** The mean value per scorer for this run, keyed by scorer id. */
+    @SerialName("scores") val scores: JsonElement,
+    /**
+     * The dataset case, when the run named one in its `mcpd.dataset_item_id`
+     * attribute.
+     */
+    @SerialName("item_id") val itemId: String? = null,
+    /** How long the run took. */
+    @SerialName("duration_ns") val durationNs: Long? = null,
+    /** What the run cost. */
+    @SerialName("cost") val cost: Double? = null,
+    /** The start of the run's input. */
+    @SerialName("input_preview") val inputPreview: String? = null,
+    /** The start of the run's answer. */
+    @SerialName("output_preview") val outputPreview: String? = null,
+    /** The case's expected answer, when it has one. */
+    @SerialName("expected") val expected: JsonElement? = null
+) {
+}
+
+/** One scorer's marks across an experiment. */
+@Serializable
+data class ScorerSummary(
+    /** The scorer. */
+    @SerialName("scorer_id") val scorerId: String,
+    /** How many scores. */
+    @SerialName("n") val n: Long,
+    /** Their mean. */
+    @SerialName("mean") val mean: Double,
+    /** The lowest. */
+    @SerialName("min") val min: Double,
+    /** The highest. */
+    @SerialName("max") val max: Double,
+    /** Which way is better. */
+    @SerialName("direction") val direction: ScoreDirection
+) {
+}
+
+/**
+ * An experiment case by case, with a summary per scorer. Two of these joined on
+ * `item_id` are the per-case comparison of two versions.
+ */
+@Serializable
+data class ExperimentResults(
+    /** The experiment. */
+    @SerialName("experiment_id") val experimentId: String,
+    /** One row per run recorded under the experiment, oldest first. */
+    @SerialName("items") val items: List<ExperimentItemResult>,
+    /** Per scorer, across every run. */
+    @SerialName("scorers") val scorers: List<ScorerSummary>,
+    /** How many runs are recorded under it. */
+    @SerialName("runs") val runs: Int,
+    /** How many of them ended in an error. */
+    @SerialName("failed") val failed: Int
+) {
+}
+
+/**
  * One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and
  * feedback all hang off a span or a trace. Stored in the `spans` table.
  */
@@ -4727,12 +4881,13 @@ data class Trace(
     /**
      * The start of the root step's input as plain text, up to 240 characters, for a
      * list column. For a chat input it is the last user message. Filled by the trace
-     * list; the full input is on the span.
+     * list when it is asked with `preview=true`; the full input is on the span.
      */
     @SerialName("input_preview") val inputPreview: String? = null,
     /**
      * The start of the root step's output as plain text, up to 240 characters. Filled
-     * by the trace list; the full output is on the span.
+     * by the trace list when it is asked with `preview=true`; the full output is on
+     * the span.
      */
     @SerialName("output_preview") val outputPreview: String? = null,
     /** Tags from the root span. */

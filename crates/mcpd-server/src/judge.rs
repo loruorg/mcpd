@@ -502,8 +502,18 @@ pub async fn grade(
         .get(scorer_id)
         .ok_or_else(|| Declined::UnknownCriterion(scorer_id.to_owned()))?;
     let version = cfg.model.clone();
-    grade_criterion(state, scorer_id, criterion, &version, target, trace_id, correlation, now, latest)
-        .await
+    grade_criterion(
+        state,
+        scorer_id,
+        criterion,
+        &version,
+        target,
+        trace_id,
+        correlation,
+        now,
+        latest,
+    )
+    .await
 }
 
 /// Grade one run against a criterion's text, under a scorer id and version.

@@ -25,13 +25,14 @@ pub mod definitions;
 pub mod derive;
 pub mod error;
 pub mod eval;
+pub mod experiments;
 pub mod forward;
 pub mod grpc;
 pub mod identity;
 pub mod ingest;
 pub mod judge;
-pub mod live;
 pub mod layers;
+pub mod live;
 pub mod mail;
 pub mod monitor;
 pub mod orgs;
@@ -159,6 +160,7 @@ fn api_router(config: &ServerConfig) -> Router<Arc<AppState>> {
     let routes = Router::new()
         .route("/v1/api/traces", get(query::list_traces))
         .route("/v1/api/traces/{trace_id}", get(query::get_trace))
+        .route("/v1/api/traces/{trace_id}/trajectory", get(query::get_trajectory))
         .route("/v1/api/traces/{trace_id}", delete(query::delete_trace))
         .route("/v1/api/spans", get(query::list_spans))
         .route("/v1/api/logs", get(query::list_logs))
@@ -202,6 +204,8 @@ fn api_router(config: &ServerConfig) -> Router<Arc<AppState>> {
         .route("/v1/api/datasets/{id}/capture", post(query::capture_into_dataset))
         .route("/v1/api/experiments", get(query::list_experiments))
         .route("/v1/api/experiments", post(query::create_experiment))
+        .route("/v1/api/experiments/{id}/score", post(experiments::score_experiment))
+        .route("/v1/api/experiments/{id}/results", get(experiments::get_experiment_results))
         .route("/v1/api/prompts", get(prompts::list_prompts))
         .route("/v1/api/prompts", post(prompts::create_prompt))
         .route("/v1/api/prompts/{name}", get(prompts::get_prompt))

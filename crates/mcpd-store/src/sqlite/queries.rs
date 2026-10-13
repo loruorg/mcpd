@@ -816,6 +816,9 @@ pub(super) fn list_traces_sync(conn: &Connection, q: &TraceQuery) -> Result<Page
     if let Some(s) = &q.environment {
         w.push("t.environment = ?", s.clone());
     }
+    if let Some(s) = &q.experiment_id {
+        w.push("t.experiment_id = ?", s.clone());
+    }
     if let Some(f) = q.from {
         w.push("t.start_time >= ?", to_nanos(f));
     }
@@ -957,7 +960,9 @@ pub(super) fn list_traces_sync(conn: &Connection, q: &TraceQuery) -> Result<Page
     };
 
     let mut items: Vec<Trace> = rows.into_iter().map(|(t, _)| t).collect();
-    fill_previews(conn, &q.project, &mut items)?;
+    if q.previews {
+        fill_previews(conn, &q.project, &mut items)?;
+    }
     Ok(Paged { items, next_cursor, total: None })
 }
 

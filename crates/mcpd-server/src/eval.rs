@@ -24,7 +24,10 @@ use time::OffsetDateTime;
 /// not a judge is configured, marked unavailable when none is, so a caller
 /// can see what turning one on would give them.
 #[must_use]
-pub fn catalogue(judge: Option<&JudgeConfig>, defined: &[mcpd_core::ScorerDefinition]) -> Vec<ScorerInfo> {
+pub fn catalogue(
+    judge: Option<&JudgeConfig>,
+    defined: &[mcpd_core::ScorerDefinition],
+) -> Vec<ScorerInfo> {
     let keys = |k: &[&str]| k.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
     let mut out: Vec<ScorerInfo> = Builtin::ALL
         .iter()
@@ -169,15 +172,16 @@ fn split_version(raw: &str) -> Result<(&str, Option<u32>), String> {
 /// # Errors
 /// [`ApiError::BadParam`] naming the first id that resolves to nothing, with
 /// the list of what does.
-pub async fn plan(
-    state: &Arc<AppState>,
-    project: &str,
-    ids: &[String],
-) -> ApiResult<Vec<Planned>> {
+pub async fn plan(state: &Arc<AppState>, project: &str, ids: &[String]) -> ApiResult<Vec<Planned>> {
     if ids.is_empty() {
         return Ok(default_set()
             .into_iter()
-            .map(|b| Planned::Code { builtin: b, id: b.id().to_owned(), version: None, config: None })
+            .map(|b| Planned::Code {
+                builtin: b,
+                id: b.id().to_owned(),
+                version: None,
+                config: None,
+            })
             .collect());
     }
     let judge = state.config.judge.as_ref();

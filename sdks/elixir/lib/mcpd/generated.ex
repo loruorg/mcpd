@@ -2848,6 +2848,8 @@ defmodule Mcpd.ScorerConfig do
           span_name: String.t() | nil,
           tool_name: String.t() | nil,
           pattern: String.t() | nil,
+          trajectory_match: String.t() | nil,
+          max_steps: non_neg_integer() | nil,
           min_chars: non_neg_integer() | nil,
           max_chars: non_neg_integer() | nil,
           json_schema: term() | nil
@@ -2870,6 +2872,8 @@ defmodule Mcpd.ScorerConfig do
     span_name: nil,
     tool_name: nil,
     pattern: nil,
+    trajectory_match: nil,
+    max_steps: nil,
     min_chars: nil,
     max_chars: nil,
     json_schema: nil,
@@ -5327,6 +5331,168 @@ defmodule Mcpd.CreateEvaluationRuleRequest do
     config: nil,
     max_judged_per_minute: nil,
     note: nil,
+  ]
+end
+
+defmodule Mcpd.TrajectoryStep do
+  @moduledoc """
+  One action an agent took: a tool call, a model generation or a handoff, in the order they started.
+  """
+
+  @type t :: %__MODULE__{
+          index: non_neg_integer(),
+          span_id: String.t(),
+          kind: Mcpd.SpanKind.t(),
+          name: String.t(),
+          status: Mcpd.SpanStatus.t(),
+          start_offset_ms: float(),
+          duration_ms: float() | nil,
+          model: String.t() | nil,
+          input_preview: String.t() | nil,
+          output_preview: String.t() | nil,
+          tokens: non_neg_integer() | nil
+        }
+
+  @enforce_keys [:index, :span_id, :kind, :name, :status, :start_offset_ms]
+  defstruct [
+    index: nil,
+    span_id: nil,
+    kind: nil,
+    name: nil,
+    status: nil,
+    start_offset_ms: nil,
+    duration_ms: nil,
+    model: nil,
+    input_preview: nil,
+    output_preview: nil,
+    tokens: nil,
+  ]
+end
+
+defmodule Mcpd.Trajectory do
+  @moduledoc """
+  A run read as the sequence of actions its agent took. This is what a trajectory is scored on: which tools were called, in what order, how many steps it took, and whether it ended with an answer.
+  """
+
+  @type t :: %__MODULE__{
+          trace_id: String.t(),
+          steps: [Mcpd.TrajectoryStep.t()],
+          tool_sequence: [String.t()],
+          step_count: non_neg_integer(),
+          tool_count: non_neg_integer(),
+          error_count: non_neg_integer(),
+          goal_reached: boolean(),
+          final_output_preview: String.t() | nil
+        }
+
+  @enforce_keys [:trace_id, :steps, :tool_sequence, :step_count, :tool_count, :error_count, :goal_reached]
+  defstruct [
+    trace_id: nil,
+    steps: [],
+    tool_sequence: [],
+    step_count: nil,
+    tool_count: nil,
+    error_count: nil,
+    goal_reached: nil,
+    final_output_preview: nil,
+  ]
+end
+
+defmodule Mcpd.ExperimentScoreRequest do
+  @moduledoc """
+  Which scorers to run over every run recorded under an experiment.
+  """
+
+  @type t :: %__MODULE__{
+          scorers: [String.t()],
+          dry_run: boolean(),
+          config: Mcpd.ScorerConfig.t() | nil
+        }
+
+  @enforce_keys [:scorers]
+  defstruct [
+    scorers: [],
+    dry_run: false,
+    config: nil,
+  ]
+end
+
+defmodule Mcpd.ExperimentItemResult do
+  @moduledoc """
+  One case of an experiment: the run that answered it and how each scorer marked it.
+  """
+
+  @type t :: %__MODULE__{
+          trace_id: String.t(),
+          status: Mcpd.SpanStatus.t(),
+          scores: term(),
+          item_id: String.t() | nil,
+          duration_ns: non_neg_integer() | nil,
+          cost: float() | nil,
+          input_preview: String.t() | nil,
+          output_preview: String.t() | nil,
+          expected: term() | nil
+        }
+
+  @enforce_keys [:trace_id, :status, :scores]
+  defstruct [
+    trace_id: nil,
+    status: nil,
+    scores: nil,
+    item_id: nil,
+    duration_ns: nil,
+    cost: nil,
+    input_preview: nil,
+    output_preview: nil,
+    expected: nil,
+  ]
+end
+
+defmodule Mcpd.ScorerSummary do
+  @moduledoc """
+  One scorer's marks across an experiment.
+  """
+
+  @type t :: %__MODULE__{
+          scorer_id: String.t(),
+          n: non_neg_integer(),
+          mean: float(),
+          min: float(),
+          max: float(),
+          direction: Mcpd.ScoreDirection.t()
+        }
+
+  @enforce_keys [:scorer_id, :n, :mean, :min, :max, :direction]
+  defstruct [
+    scorer_id: nil,
+    n: nil,
+    mean: nil,
+    min: nil,
+    max: nil,
+    direction: nil,
+  ]
+end
+
+defmodule Mcpd.ExperimentResults do
+  @moduledoc """
+  An experiment case by case, with a summary per scorer. Two of these joined on `item_id` are the per-case comparison of two versions.
+  """
+
+  @type t :: %__MODULE__{
+          experiment_id: String.t(),
+          items: [Mcpd.ExperimentItemResult.t()],
+          scorers: [Mcpd.ScorerSummary.t()],
+          runs: non_neg_integer(),
+          failed: non_neg_integer()
+        }
+
+  @enforce_keys [:experiment_id, :items, :scorers, :runs, :failed]
+  defstruct [
+    experiment_id: nil,
+    items: [],
+    scorers: [],
+    runs: nil,
+    failed: nil,
   ]
 end
 

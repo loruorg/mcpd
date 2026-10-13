@@ -974,6 +974,8 @@ Settings shared by the scorers that need them. Every field is optional; a scorer
 | `pattern` | `string` | A regular expression the answer must match somewhere, for `matches_pattern`. |
 | `expected_tools` | `string`[] <span class="req">required</span> | The tools the run should call, for `tool_call_accuracy`, and the order it should call them in, for `tool_order`. Matched exactly against tool-call span names. |
 | `forbidden_tools` | `string`[] <span class="req">required</span> | Tools the run must not call, for `tool_not_called`. |
+| `trajectory_match` | `string` | How `trajectory` compares the tools the run called with `expected_tools`: `strict` for the same calls in the same order and nothing else, `ordered` for the expected calls in order with others allowed between them, `unordered` for every expected call in any order. Defaults to `ordered`. |
+| `max_steps` | `u32` | The most steps a healthy run takes, for `trajectory`. A step is a tool call, a model generation or a handoff. |
 | `min_chars` | `u32` | The shortest acceptable answer in characters, for `answer_length`. |
 | `max_chars` | `u32` | The longest acceptable answer in characters, for `answer_length`. |
 | `json_schema` | `json` | A JSON Schema the answer must satisfy, for `json_schema`. `type`, `properties`, `required`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and `additionalProperties: false` are checked. |
@@ -2268,6 +2270,90 @@ A new version of a live scoring rule. Posting the same body as the latest versio
 | `max_judged_per_minute` | `u32` | The most judged scores per minute. Defaults to 30. |
 | `note` | `string` | What changed. |
 
+### TrajectoryStep
+
+One action an agent took: a tool call, a model generation or a handoff, in the order they started.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `index` | `u32` <span class="req">required</span> | Its position in the trajectory, from 0. |
+| `span_id` | `string` <span class="req">required</span> | The span it was read from. |
+| `kind` | [`SpanKind`](#spankind) <span class="req">required</span> | What kind of action. |
+| `name` | `string` <span class="req">required</span> | The tool, model step or agent it names. |
+| `status` | [`SpanStatus`](#spanstatus) <span class="req">required</span> | How it ended. |
+| `start_offset_ms` | `f64` <span class="req">required</span> | When it started, in milliseconds after the run started. |
+| `duration_ms` | `f64` | How long it took. Absent while it is still running. |
+| `model` | `string` | The model, for a model generation. |
+| `input_preview` | `string` | The start of its input as plain text, up to 240 characters. |
+| `output_preview` | `string` | The start of its output as plain text, up to 240 characters. |
+| `tokens` | `u64` | Input and output tokens together, for a model generation. |
+
+### Trajectory
+
+A run read as the sequence of actions its agent took. This is what a trajectory is scored on: which tools were called, in what order, how many steps it took, and whether it ended with an answer.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `trace_id` | `string` <span class="req">required</span> | The run. |
+| `steps` | [`TrajectoryStep`](#trajectorystep)[] <span class="req">required</span> | Every action, in start order. |
+| `tool_sequence` | `string`[] <span class="req">required</span> | The names of the tool calls, in order. What `expected_tools` is compared with. |
+| `step_count` | `u32` <span class="req">required</span> | How many steps. |
+| `tool_count` | `u32` <span class="req">required</span> | How many of them were tool calls. |
+| `error_count` | `u32` <span class="req">required</span> | How many of them failed. |
+| `final_output_preview` | `string` | The start of the run's answer, from the root step's output. |
+| `goal_reached` | `bool` <span class="req">required</span> | True when the run ended `ok` with a non-empty answer. |
+
+### ExperimentScoreRequest
+
+Which scorers to run over every run recorded under an experiment.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `scorers` | `string`[] <span class="req">required</span> | The scorers, as `POST /v1/api/score` takes them. Empty runs the code scorers that need no settings. |
+| `config` | [`ScorerConfig`](#scorerconfig) | Settings for the code scorers. `expected` is filled per run from the dataset case the run answered, when the run names one. |
+| `dry_run` | `bool` <span class="req">required</span> | Store nothing; report what would be stored. |
+
+### ExperimentItemResult
+
+One case of an experiment: the run that answered it and how each scorer marked it.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `trace_id` | `string` <span class="req">required</span> | The run that answered the case. |
+| `item_id` | `string` | The dataset case, when the run named one in its `mcpd.dataset_item_id` attribute. |
+| `status` | [`SpanStatus`](#spanstatus) <span class="req">required</span> | How the run ended. |
+| `duration_ns` | `u64` | How long the run took. |
+| `cost` | `f64` | What the run cost. |
+| `input_preview` | `string` | The start of the run's input. |
+| `output_preview` | `string` | The start of the run's answer. |
+| `expected` | `json` | The case's expected answer, when it has one. |
+| `scores` | `json` <span class="req">required</span> | The mean value per scorer for this run, keyed by scorer id. |
+
+### ScorerSummary
+
+One scorer's marks across an experiment.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `scorer_id` | `string` <span class="req">required</span> | The scorer. |
+| `n` | `u64` <span class="req">required</span> | How many scores. |
+| `mean` | `f64` <span class="req">required</span> | Their mean. |
+| `min` | `f64` <span class="req">required</span> | The lowest. |
+| `max` | `f64` <span class="req">required</span> | The highest. |
+| `direction` | [`ScoreDirection`](#scoredirection) <span class="req">required</span> | Which way is better. |
+
+### ExperimentResults
+
+An experiment case by case, with a summary per scorer. Two of these joined on `item_id` are the per-case comparison of two versions.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `experiment_id` | `string` <span class="req">required</span> | The experiment. |
+| `items` | [`ExperimentItemResult`](#experimentitemresult)[] <span class="req">required</span> | One row per run recorded under the experiment, oldest first. |
+| `scorers` | [`ScorerSummary`](#scorersummary)[] <span class="req">required</span> | Per scorer, across every run. |
+| `runs` | `u32` <span class="req">required</span> | How many runs are recorded under it. |
+| `failed` | `u32` <span class="req">required</span> | How many of them ended in an error. |
+
 ### Span
 
 One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.
@@ -2339,8 +2425,8 @@ Stored in the `traces` table.
 | `cost` | [`Cost`](#cost) | Cost summed across the trace. This is the number a bill is reconciled against. |
 | `model_count` | `u32` <span class="req">required</span> | How many model calls the run made. |
 | `tool_count` | `u32` <span class="req">required</span> | How many tool calls the run made. |
-| `input_preview` | `string` | The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list; the full input is on the span. |
-| `output_preview` | `string` | The start of the root step's output as plain text, up to 240 characters. Filled by the trace list; the full output is on the span. |
+| `input_preview` | `string` | The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list when it is asked with `preview=true`; the full input is on the span. |
+| `output_preview` | `string` | The start of the root step's output as plain text, up to 240 characters. Filled by the trace list when it is asked with `preview=true`; the full output is on the span. |
 | `tags` | `string`[] | Tags from the root span. |
 | `correlation` | [`Correlation`](#correlation) <span class="req">required</span> | Context inherited from the root span. |
 | `score_summary` | `json` | Mean score per scorer id, maintained as scores arrive, so the list can sort by quality without a join. |

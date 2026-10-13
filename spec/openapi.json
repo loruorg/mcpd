@@ -2090,6 +2090,16 @@
             },
             "description": "Tools the run must not call, for `tool_not_called`."
           },
+          "trajectory_match": {
+            "type": "string",
+            "description": "How `trajectory` compares the tools the run called with `expected_tools`: `strict` for the same calls in the same order and nothing else, `ordered` for the expected calls in order with others allowed between them, `unordered` for every expected call in any order. Defaults to `ordered`."
+          },
+          "max_steps": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "The most steps a healthy run takes, for `trajectory`. A step is a tool call, a model generation or a handoff."
+          },
           "min_chars": {
             "type": "integer",
             "format": "int32",
@@ -5724,6 +5734,289 @@
           "scorers"
         ]
       },
+      "TrajectoryStep": {
+        "type": "object",
+        "description": "One action an agent took: a tool call, a model generation or a handoff, in the order they started.",
+        "properties": {
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "Its position in the trajectory, from 0."
+          },
+          "span_id": {
+            "type": "string",
+            "description": "The span it was read from."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SpanKind",
+            "description": "What kind of action."
+          },
+          "name": {
+            "type": "string",
+            "description": "The tool, model step or agent it names."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SpanStatus",
+            "description": "How it ended."
+          },
+          "start_offset_ms": {
+            "type": "number",
+            "format": "double",
+            "description": "When it started, in milliseconds after the run started."
+          },
+          "duration_ms": {
+            "type": "number",
+            "format": "double",
+            "description": "How long it took. Absent while it is still running."
+          },
+          "model": {
+            "type": "string",
+            "description": "The model, for a model generation."
+          },
+          "input_preview": {
+            "type": "string",
+            "description": "The start of its input as plain text, up to 240 characters."
+          },
+          "output_preview": {
+            "type": "string",
+            "description": "The start of its output as plain text, up to 240 characters."
+          },
+          "tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Input and output tokens together, for a model generation."
+          }
+        },
+        "required": [
+          "index",
+          "span_id",
+          "kind",
+          "name",
+          "status",
+          "start_offset_ms"
+        ]
+      },
+      "Trajectory": {
+        "type": "object",
+        "description": "A run read as the sequence of actions its agent took. This is what a trajectory is scored on: which tools were called, in what order, how many steps it took, and whether it ended with an answer.",
+        "properties": {
+          "trace_id": {
+            "type": "string",
+            "description": "The run."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrajectoryStep"
+            },
+            "description": "Every action, in start order."
+          },
+          "tool_sequence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names of the tool calls, in order. What `expected_tools` is compared with."
+          },
+          "step_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many steps."
+          },
+          "tool_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many of them were tool calls."
+          },
+          "error_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many of them failed."
+          },
+          "final_output_preview": {
+            "type": "string",
+            "description": "The start of the run's answer, from the root step's output."
+          },
+          "goal_reached": {
+            "type": "boolean",
+            "description": "True when the run ended `ok` with a non-empty answer."
+          }
+        },
+        "required": [
+          "trace_id",
+          "steps",
+          "tool_sequence",
+          "step_count",
+          "tool_count",
+          "error_count",
+          "goal_reached"
+        ]
+      },
+      "ExperimentScoreRequest": {
+        "type": "object",
+        "description": "Which scorers to run over every run recorded under an experiment.",
+        "properties": {
+          "scorers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The scorers, as `POST /v1/api/score` takes them. Empty runs the code scorers that need no settings."
+          },
+          "config": {
+            "$ref": "#/components/schemas/ScorerConfig",
+            "description": "Settings for the code scorers. `expected` is filled per run from the dataset case the run answered, when the run names one."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Store nothing; report what would be stored.",
+            "default": false
+          }
+        },
+        "required": [
+          "scorers",
+          "dry_run"
+        ]
+      },
+      "ExperimentItemResult": {
+        "type": "object",
+        "description": "One case of an experiment: the run that answered it and how each scorer marked it.",
+        "properties": {
+          "trace_id": {
+            "type": "string",
+            "description": "The run that answered the case."
+          },
+          "item_id": {
+            "type": "string",
+            "description": "The dataset case, when the run named one in its `mcpd.dataset_item_id` attribute."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SpanStatus",
+            "description": "How the run ended."
+          },
+          "duration_ns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "How long the run took."
+          },
+          "cost": {
+            "type": "number",
+            "format": "double",
+            "description": "What the run cost."
+          },
+          "input_preview": {
+            "type": "string",
+            "description": "The start of the run's input."
+          },
+          "output_preview": {
+            "type": "string",
+            "description": "The start of the run's answer."
+          },
+          "expected": {
+            "description": "The case's expected answer, when it has one."
+          },
+          "scores": {
+            "description": "The mean value per scorer for this run, keyed by scorer id."
+          }
+        },
+        "required": [
+          "trace_id",
+          "status",
+          "scores"
+        ]
+      },
+      "ScorerSummary": {
+        "type": "object",
+        "description": "One scorer's marks across an experiment.",
+        "properties": {
+          "scorer_id": {
+            "type": "string",
+            "description": "The scorer."
+          },
+          "n": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "How many scores."
+          },
+          "mean": {
+            "type": "number",
+            "format": "double",
+            "description": "Their mean."
+          },
+          "min": {
+            "type": "number",
+            "format": "double",
+            "description": "The lowest."
+          },
+          "max": {
+            "type": "number",
+            "format": "double",
+            "description": "The highest."
+          },
+          "direction": {
+            "$ref": "#/components/schemas/ScoreDirection",
+            "description": "Which way is better."
+          }
+        },
+        "required": [
+          "scorer_id",
+          "n",
+          "mean",
+          "min",
+          "max",
+          "direction"
+        ]
+      },
+      "ExperimentResults": {
+        "type": "object",
+        "description": "An experiment case by case, with a summary per scorer. Two of these joined on `item_id` are the per-case comparison of two versions.",
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "description": "The experiment."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExperimentItemResult"
+            },
+            "description": "One row per run recorded under the experiment, oldest first."
+          },
+          "scorers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScorerSummary"
+            },
+            "description": "Per scorer, across every run."
+          },
+          "runs": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many runs are recorded under it."
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many of them ended in an error."
+          }
+        },
+        "required": [
+          "experiment_id",
+          "items",
+          "scorers",
+          "runs",
+          "failed"
+        ]
+      },
       "Span": {
         "type": "object",
         "description": "One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.",
@@ -5944,11 +6237,11 @@
           },
           "input_preview": {
             "type": "string",
-            "description": "The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list; the full input is on the span."
+            "description": "The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list when it is asked with `preview=true`; the full input is on the span."
           },
           "output_preview": {
             "type": "string",
-            "description": "The start of the root step's output as plain text, up to 240 characters. Filled by the trace list; the full output is on the span."
+            "description": "The start of the root step's output as plain text, up to 240 characters. Filled by the trace list when it is asked with `preview=true`; the full output is on the span."
           },
           "tags": {
             "type": "array",
@@ -7821,7 +8114,7 @@
           "Traces"
         ],
         "summary": "List traces",
-        "description": "The trace list. Filter on status, kind, name, tags, session, thread, user, environment, model, time window, duration, cost, tokens, score and feedback, and sort by start time, duration, cost, span count, tokens or score. Each trace carries a short preview of its input and output. Unlike a plain span dump, this reads the materialised trace projection rather than aggregating spans on every request.",
+        "description": "The trace list. Filter on status, kind, name, tags, session, thread, user, environment, model, time window, duration, cost, tokens, score and feedback, and sort by start time, duration, cost, span count, tokens or score. With `preview=true` each trace carries a short preview of its input and output. Unlike a plain span dump, this reads the materialised trace projection rather than aggregating spans on every request.",
         "parameters": [
           {
             "name": "project",
@@ -7914,6 +8207,15 @@
             "in": "query",
             "required": false,
             "description": "Restrict to one environment.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "experiment_id",
+            "in": "query",
+            "required": false,
+            "description": "Only runs recorded under this experiment.",
             "schema": {
               "type": "string"
             }
@@ -8034,6 +8336,15 @@
             "in": "query",
             "required": false,
             "description": "`true` for only traces a person gave feedback on, `false` for only traces with none.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "preview",
+            "in": "query",
+            "required": false,
+            "description": "Fill `input_preview` and `output_preview` on each trace. A list read with previews carries the start of each run's input and output, so it is recorded in the audit log as `list_traces`; one without is not.",
             "schema": {
               "type": "boolean"
             }
@@ -8197,6 +8508,65 @@
           },
           "401": {
             "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/traces/{trace_id}/trajectory": {
+      "get": {
+        "operationId": "get_trajectory",
+        "tags": [
+          "Traces"
+        ],
+        "summary": "Read a run as a trajectory",
+        "description": "The run as the ordered actions its agent took: tool calls, model generations and handoffs, with the tool sequence, the step count and whether it reached an answer. Score one with the `trajectory` scorer.",
+        "parameters": [
+          {
+            "name": "trace_id",
+            "in": "path",
+            "required": true,
+            "description": "The run.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": true,
+            "description": "Which project to read. Required.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Trajectory"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No run with that id in the project."
           },
           "429": {
             "description": "Rate limited. `Retry-After` says how long to wait."
@@ -10567,6 +10937,134 @@
           },
           "401": {
             "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/experiments/{experiment_id}/score": {
+      "post": {
+        "operationId": "score_experiment",
+        "tags": [
+          "Datasets"
+        ],
+        "summary": "Score an experiment's runs",
+        "description": "Runs scorers over every run recorded under the experiment and stores the scores with source `experiment`. A run that names its dataset case in the `mcpd.dataset_item_id` attribute is scored against that case's expected answer, so `exact_match`, `similarity` and the judged rubrics that read `expected` compare each answer with its own case. This is the step an SDK's experiment runner calls after the target has answered every case.",
+        "parameters": [
+          {
+            "name": "experiment_id",
+            "in": "path",
+            "required": true,
+            "description": "The experiment.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExperimentScoreRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScoreRunResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No experiment with that id in the project."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/experiments/{experiment_id}/results": {
+      "get": {
+        "operationId": "get_experiment_results",
+        "tags": [
+          "Datasets"
+        ],
+        "summary": "Read an experiment case by case",
+        "description": "Every run recorded under the experiment with its case, its answer and its scores, and a summary per scorer.",
+        "parameters": [
+          {
+            "name": "experiment_id",
+            "in": "path",
+            "required": true,
+            "description": "The experiment.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExperimentResults"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No experiment with that id in the project."
           },
           "429": {
             "description": "Rate limited. `Retry-After` says how long to wait."

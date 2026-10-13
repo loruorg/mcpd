@@ -2244,6 +2244,14 @@ type ScorerConfig struct {
 	ExpectedTools []string `json:"expected_tools"`
 	// Tools the run must not call, for `tool_not_called`.
 	ForbiddenTools []string `json:"forbidden_tools"`
+	// How `trajectory` compares the tools the run called with `expected_tools`: `strict`
+	// for the same calls in the same order and nothing else, `ordered` for the expected
+	// calls in order with others allowed between them, `unordered` for every expected call
+	// in any order. Defaults to `ordered`.
+	TrajectoryMatch *string `json:"trajectory_match,omitempty"`
+	// The most steps a healthy run takes, for `trajectory`. A step is a tool call, a model
+	// generation or a handoff.
+	MaxSteps *uint32 `json:"max_steps,omitempty"`
 	// The shortest acceptable answer in characters, for `answer_length`.
 	MinChars *uint32 `json:"min_chars,omitempty"`
 	// The longest acceptable answer in characters, for `answer_length`.
@@ -4048,6 +4056,127 @@ type CreateEvaluationRuleRequest struct {
 	Note *string `json:"note,omitempty"`
 }
 
+// One action an agent took: a tool call, a model generation or a handoff, in the order
+// they started.
+type TrajectoryStep struct {
+	// Its position in the trajectory, from 0.
+	Index uint32 `json:"index"`
+	// The span it was read from.
+	SpanID string `json:"span_id"`
+	// What kind of action.
+	Kind SpanKind `json:"kind"`
+	// The tool, model step or agent it names.
+	Name string `json:"name"`
+	// How it ended.
+	Status SpanStatus `json:"status"`
+	// When it started, in milliseconds after the run started.
+	StartOffsetMs float64 `json:"start_offset_ms"`
+	// How long it took. Absent while it is still running.
+	DurationMs *float64 `json:"duration_ms,omitempty"`
+	// The model, for a model generation.
+	Model *string `json:"model,omitempty"`
+	// The start of its input as plain text, up to 240 characters.
+	InputPreview *string `json:"input_preview,omitempty"`
+	// The start of its output as plain text, up to 240 characters.
+	OutputPreview *string `json:"output_preview,omitempty"`
+	// Input and output tokens together, for a model generation.
+	Tokens *uint64 `json:"tokens,omitempty"`
+}
+
+// A run read as the sequence of actions its agent took. This is what a trajectory is
+// scored on: which tools were called, in what order, how many steps it took, and
+// whether it ended with an answer.
+type Trajectory struct {
+	// The run.
+	TraceID string `json:"trace_id"`
+	// Every action, in start order.
+	Steps []TrajectoryStep `json:"steps"`
+	// The names of the tool calls, in order. What `expected_tools` is compared with.
+	ToolSequence []string `json:"tool_sequence"`
+	// How many steps.
+	StepCount uint32 `json:"step_count"`
+	// How many of them were tool calls.
+	ToolCount uint32 `json:"tool_count"`
+	// How many of them failed.
+	ErrorCount uint32 `json:"error_count"`
+	// The start of the run's answer, from the root step's output.
+	FinalOutputPreview *string `json:"final_output_preview,omitempty"`
+	// True when the run ended `ok` with a non-empty answer.
+	GoalReached bool `json:"goal_reached"`
+}
+
+// Which scorers to run over every run recorded under an experiment.
+type ExperimentScoreRequest struct {
+	// The scorers, as `POST /v1/api/score` takes them. Empty runs the code scorers that
+	// need no settings.
+	Scorers []string `json:"scorers"`
+	// Settings for the code scorers. `expected` is filled per run from the dataset case
+	// the run answered, when the run names one.
+	Config *ScorerConfig `json:"config,omitempty"`
+	// Store nothing; report what would be stored.
+	DryRun bool `json:"dry_run"`
+}
+
+// NewExperimentScoreRequest returns a ExperimentScoreRequest with every spec-declared default applied.
+func NewExperimentScoreRequest() ExperimentScoreRequest {
+	return ExperimentScoreRequest{
+		DryRun: false,
+	}
+}
+
+// One case of an experiment: the run that answered it and how each scorer marked it.
+type ExperimentItemResult struct {
+	// The run that answered the case.
+	TraceID string `json:"trace_id"`
+	// The dataset case, when the run named one in its `mcpd.dataset_item_id` attribute.
+	ItemID *string `json:"item_id,omitempty"`
+	// How the run ended.
+	Status SpanStatus `json:"status"`
+	// How long the run took.
+	DurationNs *uint64 `json:"duration_ns,omitempty"`
+	// What the run cost.
+	Cost *float64 `json:"cost,omitempty"`
+	// The start of the run's input.
+	InputPreview *string `json:"input_preview,omitempty"`
+	// The start of the run's answer.
+	OutputPreview *string `json:"output_preview,omitempty"`
+	// The case's expected answer, when it has one.
+	Expected json.RawMessage `json:"expected,omitempty"`
+	// The mean value per scorer for this run, keyed by scorer id.
+	Scores json.RawMessage `json:"scores"`
+}
+
+// One scorer's marks across an experiment.
+type ScorerSummary struct {
+	// The scorer.
+	ScorerID string `json:"scorer_id"`
+	// How many scores.
+	N uint64 `json:"n"`
+	// Their mean.
+	Mean float64 `json:"mean"`
+	// The lowest.
+	Min float64 `json:"min"`
+	// The highest.
+	Max float64 `json:"max"`
+	// Which way is better.
+	Direction ScoreDirection `json:"direction"`
+}
+
+// An experiment case by case, with a summary per scorer. Two of these joined on
+// `item_id` are the per-case comparison of two versions.
+type ExperimentResults struct {
+	// The experiment.
+	ExperimentID string `json:"experiment_id"`
+	// One row per run recorded under the experiment, oldest first.
+	Items []ExperimentItemResult `json:"items"`
+	// Per scorer, across every run.
+	Scorers []ScorerSummary `json:"scorers"`
+	// How many runs are recorded under it.
+	Runs uint32 `json:"runs"`
+	// How many of them ended in an error.
+	Failed uint32 `json:"failed"`
+}
+
 // One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback
 // all hang off a span or a trace.
 // Stored in the spans table.
@@ -4162,11 +4291,11 @@ type Trace struct {
 	// How many tool calls the run made.
 	ToolCount uint32 `json:"tool_count"`
 	// The start of the root step's input as plain text, up to 240 characters, for a list
-	// column. For a chat input it is the last user message. Filled by the trace list; the
-	// full input is on the span.
+	// column. For a chat input it is the last user message. Filled by the trace list when
+	// it is asked with `preview=true`; the full input is on the span.
 	InputPreview *string `json:"input_preview,omitempty"`
 	// The start of the root step's output as plain text, up to 240 characters. Filled by
-	// the trace list; the full output is on the span.
+	// the trace list when it is asked with `preview=true`; the full output is on the span.
 	OutputPreview *string `json:"output_preview,omitempty"`
 	// Tags from the root span.
 	Tags []string `json:"tags,omitempty"`

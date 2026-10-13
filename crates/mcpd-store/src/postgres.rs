@@ -1974,6 +1974,9 @@ impl Store for PostgresStore {
         if let Some(v) = &q.environment {
             w.push("t.environment = {}", v.clone());
         }
+        if let Some(v) = &q.experiment_id {
+            w.push("t.experiment_id = {}", v.clone());
+        }
         if let Some(t) = q.from {
             w.push("t.start_time >= {}", to_nanos(t));
         }
@@ -2124,7 +2127,9 @@ impl Store for PostgresStore {
         };
 
         let mut items: Vec<Trace> = items.into_iter().map(|(t, _)| t).collect();
-        pg_fill_previews(&conn, &q.project, &mut items).await?;
+        if q.previews {
+            pg_fill_previews(&conn, &q.project, &mut items).await?;
+        }
         Ok(Paged { items, next_cursor, total: None })
     }
 

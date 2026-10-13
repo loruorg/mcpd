@@ -32,10 +32,11 @@ rather than every commit.
 - **More trace filters and list previews.** `GET /v1/api/traces` also filters
   on `max_duration_ms`, `max_cost`, `min_tokens`, `score_above` (with
   `has_score`, and between two bounds with `score_below`) and `has_feedback`.
-  Each listed trace carries `input_preview` and `output_preview`, the start of
-  the root step's input and output as plain text, and the run list shows them
-  as Input and Output columns. Wire-contract change: two `Trace` fields and
-  five query parameters.
+  With `preview=true` each listed trace carries `input_preview` and
+  `output_preview`, the start of the root step's input and output as plain
+  text, and the run list shows them as Input and Output columns. A list read
+  with previews is recorded in the audit log as `list_traces`. Wire-contract
+  change: two `Trace` fields and six query parameters.
 - **Live scoring, scorer definitions and judge runs.** Evaluation rules
   (`/v1/api/evaluation-rules`) score runs as they finish, in the background,
   with the scorers they name, on a sampled share of the runs they match, with
@@ -48,6 +49,16 @@ rather than every commit.
   rules and definitions. Wire-contract change: two entities, six endpoints,
   the `custom` scorer kind and a `project` parameter on
   `GET /v1/api/scorers`.
+- **Trajectories and experiments case by case.** `GET /v1/api/traces/{id}/trajectory`
+  reads a run as the tool calls, model generations and handoffs its agent
+  took, and the `trajectory` scorer marks that path against
+  `expected_tools` (`strict`, `ordered` or `unordered`) and
+  `max_steps`. `POST /v1/api/experiments/{id}/score` scores every run of an
+  experiment against the expected answer of the dataset case it names in
+  `mcpd.dataset_item_id`, and `GET /v1/api/experiments/{id}/results` reads
+  it back case by case with a summary per scorer. The trace list filters on
+  `experiment_id`. Wire-contract change: four types, three endpoints, two
+  `ScorerConfig` fields.
 - **Organisations, roles, single sign-on and SCIM.** An account can create
   organisations, which own projects, invite members by email and give each a
   role (owner, admin, member or viewer, optionally replaced on one project)

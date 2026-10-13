@@ -1227,6 +1227,10 @@ class ScorerConfig:
     """The tool that must have run and ended `ok`, for `tool_succeeded`. Matched exactly against the `name` of a span whose kind is `tool_call`, `client_tool_call`, `provider_tool_call` or `mcp_tool_call`."""
     pattern: str | None = None
     """A regular expression the answer must match somewhere, for `matches_pattern`."""
+    trajectory_match: str | None = None
+    """How `trajectory` compares the tools the run called with `expected_tools`: `strict` for the same calls in the same order and nothing else, `ordered` for the expected calls in order with others allowed between them, `unordered` for every expected call in any order. Defaults to `ordered`."""
+    max_steps: int | None = None
+    """The most steps a healthy run takes, for `trajectory`. A step is a tool call, a model generation or a handoff."""
     min_chars: int | None = None
     """The shortest acceptable answer in characters, for `answer_length`."""
     max_chars: int | None = None
@@ -2911,6 +2915,126 @@ class CreateEvaluationRuleRequest:
     """What changed."""
 
 @dataclass(**_SLOTS)
+class TrajectoryStep:
+    """One action an agent took: a tool call, a model generation or a handoff, in the order they started.
+    """
+
+    index: int
+    """Its position in the trajectory, from 0."""
+    span_id: str
+    """The span it was read from."""
+    kind: SpanKind
+    """What kind of action."""
+    name: str
+    """The tool, model step or agent it names."""
+    status: SpanStatus
+    """How it ended."""
+    start_offset_ms: float
+    """When it started, in milliseconds after the run started."""
+    duration_ms: float | None = None
+    """How long it took. Absent while it is still running."""
+    model: str | None = None
+    """The model, for a model generation."""
+    input_preview: str | None = None
+    """The start of its input as plain text, up to 240 characters."""
+    output_preview: str | None = None
+    """The start of its output as plain text, up to 240 characters."""
+    tokens: int | None = None
+    """Input and output tokens together, for a model generation."""
+
+@dataclass(**_SLOTS)
+class Trajectory:
+    """A run read as the sequence of actions its agent took. This is what a trajectory is scored on: which tools were called, in what order, how many steps it took, and whether it ended with an answer.
+    """
+
+    trace_id: str
+    """The run."""
+    step_count: int
+    """How many steps."""
+    tool_count: int
+    """How many of them were tool calls."""
+    error_count: int
+    """How many of them failed."""
+    goal_reached: bool
+    """True when the run ended `ok` with a non-empty answer."""
+    steps: list[TrajectoryStep] = field(default_factory=list)
+    """Every action, in start order."""
+    tool_sequence: list[str] = field(default_factory=list)
+    """The names of the tool calls, in order. What `expected_tools` is compared with."""
+    final_output_preview: str | None = None
+    """The start of the run's answer, from the root step's output."""
+
+@dataclass(**_SLOTS)
+class ExperimentScoreRequest:
+    """Which scorers to run over every run recorded under an experiment.
+    """
+
+    scorers: list[str] = field(default_factory=list)
+    """The scorers, as `POST /v1/api/score` takes them. Empty runs the code scorers that need no settings."""
+    dry_run: bool = False
+    """Store nothing; report what would be stored."""
+    config: ScorerConfig | None = None
+    """Settings for the code scorers. `expected` is filled per run from the dataset case the run answered, when the run names one."""
+
+@dataclass(**_SLOTS)
+class ExperimentItemResult:
+    """One case of an experiment: the run that answered it and how each scorer marked it.
+    """
+
+    trace_id: str
+    """The run that answered the case."""
+    status: SpanStatus
+    """How the run ended."""
+    scores: Any
+    """The mean value per scorer for this run, keyed by scorer id."""
+    item_id: str | None = None
+    """The dataset case, when the run named one in its `mcpd.dataset_item_id` attribute."""
+    duration_ns: int | None = None
+    """How long the run took."""
+    cost: float | None = None
+    """What the run cost."""
+    input_preview: str | None = None
+    """The start of the run's input."""
+    output_preview: str | None = None
+    """The start of the run's answer."""
+    expected: Any | None = None
+    """The case's expected answer, when it has one."""
+
+@dataclass(**_SLOTS)
+class ScorerSummary:
+    """One scorer's marks across an experiment.
+    """
+
+    scorer_id: str
+    """The scorer."""
+    n: int
+    """How many scores."""
+    mean: float
+    """Their mean."""
+    min: float
+    """The lowest."""
+    max: float
+    """The highest."""
+    direction: ScoreDirection
+    """Which way is better."""
+
+@dataclass(**_SLOTS)
+class ExperimentResults:
+    """An experiment case by case, with a summary per scorer. Two of these joined on `item_id` are the per-case comparison of two versions.
+    """
+
+    experiment_id: str
+    """The experiment."""
+    runs: int
+    """How many runs are recorded under it."""
+    failed: int
+    """How many of them ended in an error."""
+    items: list[ExperimentItemResult] = field(default_factory=list)
+    """One row per run recorded under the experiment, oldest first."""
+    scorers: list[ScorerSummary] = field(default_factory=list)
+    """Per scorer, across every run."""
+
+@dataclass(**_SLOTS)
 class Span:
     """One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.
 
@@ -3022,9 +3146,9 @@ class Trace:
     cost: Cost | None = None
     """Cost summed across the trace. This is the number a bill is reconciled against."""
     input_preview: str | None = None
-    """The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list; the full input is on the span."""
+    """The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list when it is asked with `preview=true`; the full input is on the span."""
     output_preview: str | None = None
-    """The start of the root step's output as plain text, up to 240 characters. Filled by the trace list; the full output is on the span."""
+    """The start of the root step's output as plain text, up to 240 characters. Filled by the trace list when it is asked with `preview=true`; the full output is on the span."""
     tags: list[str] | None = None
     """Tags from the root span."""
     score_summary: Any | None = None

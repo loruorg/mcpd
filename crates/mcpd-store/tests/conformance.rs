@@ -2434,7 +2434,7 @@ async fn observe_trace_filters(store: &dyn Store, project: String) -> Answers {
         ),
     );
     let page = store
-        .list_traces(&TraceQuery { name: Some("mid".into()), ..base() })
+        .list_traces(&TraceQuery { name: Some("mid".into()), previews: true, ..base() })
         .await
         .expect("list one run");
     a.insert(

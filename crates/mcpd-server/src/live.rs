@@ -54,15 +54,21 @@ pub fn spawn(state: Arc<AppState>) {
     let started = OffsetDateTime::now_utc();
     let memory = Arc::new(Mutex::new(Memory::default()));
     let looped = Arc::clone(&state);
-    crate::spawn_loop(&state, "live scoring", INTERVAL, crate::FirstPass::AfterInterval, move || {
-        let state = Arc::clone(&looped);
-        let memory = Arc::clone(&memory);
-        async move {
-            if let Err(e) = pass(&state, &memory, started, OffsetDateTime::now_utc()).await {
-                tracing::warn!(error = %e, "a live scoring pass failed; the next one retries");
+    crate::spawn_loop(
+        &state,
+        "live scoring",
+        INTERVAL,
+        crate::FirstPass::AfterInterval,
+        move || {
+            let state = Arc::clone(&looped);
+            let memory = Arc::clone(&memory);
+            async move {
+                if let Err(e) = pass(&state, &memory, started, OffsetDateTime::now_utc()).await {
+                    tracing::warn!(error = %e, "a live scoring pass failed; the next one retries");
+                }
             }
-        }
-    });
+        },
+    );
 }
 
 /// One pass over every project. Public so a test can drive it without a timer.
@@ -205,8 +211,12 @@ async fn run_rule(
             dry_run: false,
             judge_by,
         };
-        let mut result =
-            ScoreRunResult { traces_scored: 0, scores_written: 0, skipped: Vec::new(), scores: Vec::new() };
+        let mut result = ScoreRunResult {
+            traces_scored: 0,
+            scores_written: 0,
+            skipped: Vec::new(),
+            scores: Vec::new(),
+        };
         if let Err(e) = score_trace(state, &pass, &chosen, &trace.trace_id, &mut result).await {
             tracing::warn!(rule = %rule.id, trace_id = %trace.trace_id, error = %e,
                 "live scoring could not store a score");
@@ -234,7 +244,10 @@ pub fn matches(rule: &EvaluationRule, trace: &Trace) -> bool {
     rule.name.as_ref().is_none_or(|n| *n == trace.name)
         && rule.kind.is_none_or(|k| k == trace.kind)
         && rule.status.is_none_or(|s| s == trace.status)
-        && rule.environment.as_ref().is_none_or(|e| trace.correlation.environment.as_ref() == Some(e))
+        && rule
+            .environment
+            .as_ref()
+            .is_none_or(|e| trace.correlation.environment.as_ref() == Some(e))
         && rule.tags.iter().all(|t| trace.tags.as_ref().is_some_and(|have| have.contains(t)))
 }
 

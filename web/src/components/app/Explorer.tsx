@@ -365,6 +365,10 @@ export default function Explorer({
   }, [endpoint, apiKey, probe])
 
   /* ------------------------------------------------------------- read --- */
+  // Previews are asked for only while a preview column is on screen. A read
+  // with them carries the start of each run's input and output, and the
+  // daemon records it in the audit log; a list without them is not recorded.
+  const previews = !prefs.hidden.includes('input_preview') || !prefs.hidden.includes('output_preview')
   const query = useMemo<TraceQuery>(() => {
     const filters = toParams(view.filters)
     return {
@@ -372,11 +376,12 @@ export default function Explorer({
       q: debouncedQuery.trim() || undefined,
       ...filters,
       ...rangeParams(view.range),
+      preview: previews ? 'true' : undefined,
       sort: view.sort,
       order: view.order,
       limit: PAGE,
     }
-  }, [view.project, view.filters, view.range, view.sort, view.order, debouncedQuery])
+  }, [view.project, view.filters, view.range, view.sort, view.order, debouncedQuery, previews])
 
   const filtered = anyApplied(view.filters) || Boolean(debouncedQuery.trim()) || rangeBounded(view.range)
 

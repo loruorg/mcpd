@@ -3497,6 +3497,16 @@ pub struct ScorerConfig {
     /// Tools the run must not call, for `tool_not_called`.
     #[serde(default)]
     pub forbidden_tools: Vec<String>,
+    /// How `trajectory` compares the tools the run called with `expected_tools`: `strict`
+    /// for the same calls in the same order and nothing else, `ordered` for the expected
+    /// calls in order with others allowed between them, `unordered` for every expected call
+    /// in any order. Defaults to `ordered`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trajectory_match: Option<String>,
+    /// The most steps a healthy run takes, for `trajectory`. A step is a tool call, a model
+    /// generation or a handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<u32>,
     /// The shortest acceptable answer in characters, for `answer_length`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_chars: Option<u32>,
@@ -3539,6 +3549,8 @@ impl Default for ScorerConfig {
             pattern: None,
             expected_tools: Vec::new(),
             forbidden_tools: Vec::new(),
+            trajectory_match: None,
+            max_steps: None,
             min_chars: None,
             max_chars: None,
             json_schema: None,
@@ -5754,6 +5766,160 @@ pub struct CreateEvaluationRuleRequest {
     pub note: Option<String>,
 }
 
+/// One action an agent took: a tool call, a model generation or a handoff, in the order
+/// they started.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrajectoryStep {
+    /// Its position in the trajectory, from 0.
+    pub index: u32,
+    /// The span it was read from.
+    pub span_id: String,
+    /// What kind of action.
+    pub kind: SpanKind,
+    /// The tool, model step or agent it names.
+    pub name: String,
+    /// How it ended.
+    pub status: SpanStatus,
+    /// When it started, in milliseconds after the run started.
+    pub start_offset_ms: f64,
+    /// How long it took. Absent while it is still running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<f64>,
+    /// The model, for a model generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The start of its input as plain text, up to 240 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_preview: Option<String>,
+    /// The start of its output as plain text, up to 240 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_preview: Option<String>,
+    /// Input and output tokens together, for a model generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+}
+
+/// A run read as the sequence of actions its agent took. This is what a trajectory is
+/// scored on: which tools were called, in what order, how many steps it took, and
+/// whether it ended with an answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Trajectory {
+    /// The run.
+    pub trace_id: String,
+    /// Every action, in start order.
+    #[serde(default)]
+    pub steps: Vec<TrajectoryStep>,
+    /// The names of the tool calls, in order. What `expected_tools` is compared with.
+    #[serde(default)]
+    pub tool_sequence: Vec<String>,
+    /// How many steps.
+    pub step_count: u32,
+    /// How many of them were tool calls.
+    pub tool_count: u32,
+    /// How many of them failed.
+    pub error_count: u32,
+    /// The start of the run's answer, from the root step's output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_output_preview: Option<String>,
+    /// True when the run ended `ok` with a non-empty answer.
+    pub goal_reached: bool,
+}
+
+/// Which scorers to run over every run recorded under an experiment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentScoreRequest {
+    /// The scorers, as `POST /v1/api/score` takes them. Empty runs the code scorers that
+    /// need no settings.
+    #[serde(default)]
+    pub scorers: Vec<String>,
+    /// Settings for the code scorers. `expected` is filled per run from the dataset case
+    /// the run answered, when the run names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<ScorerConfig>,
+    /// Store nothing; report what would be stored.
+    #[serde(default = "experiment_score_request_default_dry_run")]
+    pub dry_run: bool,
+}
+
+/// Spec-declared default for [`ExperimentScoreRequest::dry_run`].
+fn experiment_score_request_default_dry_run() -> bool {
+    false
+}
+
+impl Default for ExperimentScoreRequest {
+    fn default() -> Self {
+        Self {
+            scorers: Vec::new(),
+            config: None,
+            dry_run: experiment_score_request_default_dry_run(),
+        }
+    }
+}
+
+/// One case of an experiment: the run that answered it and how each scorer marked it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentItemResult {
+    /// The run that answered the case.
+    pub trace_id: String,
+    /// The dataset case, when the run named one in its `mcpd.dataset_item_id` attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    /// How the run ended.
+    pub status: SpanStatus,
+    /// How long the run took.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ns: Option<u64>,
+    /// What the run cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    /// The start of the run's input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_preview: Option<String>,
+    /// The start of the run's answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_preview: Option<String>,
+    /// The case's expected answer, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<serde_json::Value>,
+    /// The mean value per scorer for this run, keyed by scorer id.
+    pub scores: serde_json::Value,
+}
+
+/// One scorer's marks across an experiment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScorerSummary {
+    /// The scorer.
+    pub scorer_id: String,
+    /// How many scores.
+    pub n: u64,
+    /// Their mean.
+    pub mean: f64,
+    /// The lowest.
+    pub min: f64,
+    /// The highest.
+    pub max: f64,
+    /// Which way is better.
+    pub direction: ScoreDirection,
+}
+
+/// An experiment case by case, with a summary per scorer. Two of these joined on
+/// `item_id` are the per-case comparison of two versions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentResults {
+    /// The experiment.
+    pub experiment_id: String,
+    /// One row per run recorded under the experiment, oldest first.
+    #[serde(default)]
+    pub items: Vec<ExperimentItemResult>,
+    /// Per scorer, across every run.
+    #[serde(default)]
+    pub scorers: Vec<ScorerSummary>,
+    /// How many runs are recorded under it.
+    pub runs: u32,
+    /// How many of them ended in an error.
+    pub failed: u32,
+}
+
 /// One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback
 /// all hang off a span or a trace.
 /// Stored in the `spans` table.
@@ -5904,12 +6070,12 @@ pub struct Trace {
     /// How many tool calls the run made.
     pub tool_count: u32,
     /// The start of the root step's input as plain text, up to 240 characters, for a list
-    /// column. For a chat input it is the last user message. Filled by the trace list; the
-    /// full input is on the span.
+    /// column. For a chat input it is the last user message. Filled by the trace list when
+    /// it is asked with `preview=true`; the full input is on the span.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_preview: Option<String>,
     /// The start of the root step's output as plain text, up to 240 characters. Filled by
-    /// the trace list; the full output is on the span.
+    /// the trace list when it is asked with `preview=true`; the full output is on the span.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_preview: Option<String>,
     /// Tags from the root span.

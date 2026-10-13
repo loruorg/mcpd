@@ -47,9 +47,9 @@ fn check_id(id: &str, dash: bool) -> ApiResult<()> {
     let ok = !id.is_empty()
         && id.len() <= 64
         && id.starts_with(|c: char| c.is_ascii_lowercase())
-        && id
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || (dash && c == '-'));
+        && id.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || (dash && c == '-')
+        });
     if ok {
         Ok(())
     } else {
@@ -80,7 +80,9 @@ pub fn to_definition(doc: &StoredDocument) -> ScorerDefinition {
         project: doc.project.clone(),
         id: doc.id.clone(),
         version: doc.version,
-        kind: opt_str(b, "kind").and_then(|k| k.parse().ok()).unwrap_or(ScorerDefinitionKind::Judge),
+        kind: opt_str(b, "kind")
+            .and_then(|k| k.parse().ok())
+            .unwrap_or(ScorerDefinitionKind::Judge),
         description: opt_str(b, "description").unwrap_or_default(),
         direction: opt_str(b, "direction")
             .and_then(|d| d.parse().ok())
@@ -133,7 +135,10 @@ pub fn planned_from(doc: &StoredDocument, judge: Option<&JudgeConfig>) -> ApiRes
 fn definition_body(state: &AppState, req: &CreateScorerDefinitionRequest) -> ApiResult<Value> {
     check_id(&req.id, false)?;
     if Builtin::from_id(&req.id).is_some() || Judged::from_id(&req.id).is_some() {
-        return Err(bad("id", format!("{:?} is the id of a scorer mcpd ships; choose another", req.id)));
+        return Err(bad(
+            "id",
+            format!("{:?} is the id of a scorer mcpd ships; choose another", req.id),
+        ));
     }
     if state.config.judge.as_ref().is_some_and(|j| j.criteria.contains_key(&req.id)) {
         return Err(bad(
@@ -163,7 +168,10 @@ fn definition_body(state: &AppState, req: &CreateScorerDefinitionRequest) -> Api
                 ));
             }
             if req.builtin.is_some() || req.config.is_some() {
-                return Err(bad("builtin", "a judge definition takes a `prompt`, not `builtin` or `config`"));
+                return Err(bad(
+                    "builtin",
+                    "a judge definition takes a `prompt`, not `builtin` or `config`",
+                ));
             }
             body["prompt"] = Value::String(prompt.to_owned());
         }
@@ -177,19 +185,17 @@ fn definition_body(state: &AppState, req: &CreateScorerDefinitionRequest) -> Api
                 )
             })?;
             if req.prompt.is_some() {
-                return Err(bad("prompt", "a code definition takes `builtin` and `config`, not a `prompt`"));
+                return Err(bad(
+                    "prompt",
+                    "a code definition takes `builtin` and `config`, not a `prompt`",
+                ));
             }
             let config = req.config.clone().unwrap_or_default();
-            builtin
-                .check_config(&config)
-                .map_err(|m| bad("config", format!("{name}: {m}")))?;
+            builtin.check_config(&config).map_err(|m| bad("config", format!("{name}: {m}")))?;
             if builtin.needs_config() && config == ScorerConfig::default() {
                 return Err(bad(
                     "config",
-                    format!(
-                        "{name} needs settings to run: {}",
-                        builtin.config_keys().join(" or ")
-                    ),
+                    format!("{name} needs settings to run: {}", builtin.config_keys().join(" or ")),
                 ));
             }
             body["builtin"] = Value::String(name.to_owned());
@@ -251,7 +257,9 @@ pub async fn get_scorer_definition(
         .await?
         .ok_or_else(|| match q.version {
             Some(v) => ApiError::NotFound(format!("scorer definition {id:?} has no version {v}")),
-            None => ApiError::NotFound(format!("no scorer definition {id:?} in project {project:?}")),
+            None => {
+                ApiError::NotFound(format!("no scorer definition {id:?} in project {project:?}"))
+            }
         })?;
     Ok(Json(to_definition(&doc)))
 }
@@ -267,7 +275,9 @@ pub async fn list_scorer_definition_versions(
     let project = select_project(&state, &grant, q.project.as_deref())?;
     let docs = state.store.list_documents(&project, DocKind::Scorer, Some(&id)).await?;
     if docs.is_empty() {
-        return Err(ApiError::NotFound(format!("no scorer definition {id:?} in project {project:?}")));
+        return Err(ApiError::NotFound(format!(
+            "no scorer definition {id:?} in project {project:?}"
+        )));
     }
     Ok(Json(ScorerDefinitionVersions { id, versions: docs.iter().map(to_definition).collect() }))
 }
@@ -343,11 +353,17 @@ pub async fn create_evaluation_rule(
     let config = req.config.clone().unwrap_or_default();
     for p in &planned {
         if let Planned::Code { builtin, config: None, .. } = p {
-            builtin.check_config(&config).map_err(|m| bad("config", format!("{}: {m}", builtin.id())))?;
+            builtin
+                .check_config(&config)
+                .map_err(|m| bad("config", format!("{}: {m}", builtin.id())))?;
             if builtin.needs_config() && config == ScorerConfig::default() {
                 return Err(bad(
                     "config",
-                    format!("{} needs settings to run: {}", builtin.id(), builtin.config_keys().join(" or ")),
+                    format!(
+                        "{} needs settings to run: {}",
+                        builtin.id(),
+                        builtin.config_keys().join(" or ")
+                    ),
                 ));
             }
         }

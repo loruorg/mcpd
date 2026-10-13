@@ -503,7 +503,10 @@ async fn a_judged_score_points_at_the_scorer_run_that_produced_it() {
     let root = &detail.spans[0];
     assert_eq!(root.kind, mcpd_core::SpanKind::ScorerRun);
     assert_eq!(root.entity_name.as_deref(), Some("relevance"));
-    assert!(root.input.as_ref().is_some_and(|i| i["prompt"].as_str().is_some_and(|p| p.contains("where is my order"))));
+    assert!(root
+        .input
+        .as_ref()
+        .is_some_and(|i| i["prompt"].as_str().is_some_and(|p| p.contains("where is my order"))));
     assert!(root.output.as_ref().is_some_and(|o| o["reply"].as_str().is_some()));
     let link = root.links.as_ref().and_then(|l| l.first()).expect("a link to the scored run");
     assert_eq!(link.trace_id, ids[0]);
@@ -541,11 +544,13 @@ async fn a_stored_judge_definition_grades_with_its_own_prompt() {
         .get_trace("default", &run, &mcpd_store::Include::default())
         .await
         .expect("stored");
-    let prompt = detail.spans[0].input.as_ref().map(|i| i["prompt"].to_string()).unwrap_or_default();
+    let prompt =
+        detail.spans[0].input.as_ref().map(|i| i["prompt"].to_string()).unwrap_or_default();
     assert!(prompt.contains("says when the order ships"), "{prompt}");
 
     let (status, _) =
-        send(&app, "/v1/api/score", &json!({ "trace_ids": ids, "scorers": ["ships_soon@2"] })).await;
+        send(&app, "/v1/api/score", &json!({ "trace_ids": ids, "scorers": ["ships_soon@2"] }))
+            .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "version 2 does not exist");
 
     let (_, catalogue) = get(&app, "/v1/api/scorers?project=default").await;
@@ -672,7 +677,10 @@ async fn live_scoring_scores_each_matching_finished_run_once() {
         .await
         .expect("scores");
     assert!(scores.items.iter().all(|s| s.source == mcpd_core::ScoreSource::Live));
-    assert!(scores.items.iter().all(|s| s.trace_id.as_deref() == Some(format!("{:032x}", 1).as_str())));
+    assert!(scores
+        .items
+        .iter()
+        .all(|s| s.trace_id.as_deref() == Some(format!("{:032x}", 1).as_str())));
 
     let (status, _) = send(
         &app,

@@ -787,6 +787,9 @@ fn trace_where(q: &TraceQuery, spans_table: &str) -> String {
     if let Some(v) = &q.environment {
         w.push(format!("environment = {}", quote(v)));
     }
+    if let Some(v) = &q.experiment_id {
+        w.push(format!("experiment_id = {}", quote(v)));
+    }
     if let Some(f) = q.from {
         w.push(format!("start_time >= {}", ts(f)));
     }
@@ -1209,7 +1212,9 @@ impl Store for ClickHouseStore {
             .await?;
 
         let mut items: Vec<Trace> = rows.into_iter().map(Into::into).collect();
-        self.fill_previews(&q.project, &mut items).await?;
+        if q.previews {
+            self.fill_previews(&q.project, &mut items).await?;
+        }
         Ok(Paged { items, next_cursor: None, total: None })
     }
 

@@ -163,6 +163,7 @@ pub const TRACE_PARAMS: &[&str] = &[
     "thread_id",
     "user_id",
     "environment",
+    "experiment_id",
     "model",
     "from",
     "to",
@@ -175,6 +176,7 @@ pub const TRACE_PARAMS: &[&str] = &[
     "score_below",
     "score_above",
     "has_feedback",
+    "preview",
     "sort",
     "order",
     "limit",
@@ -549,10 +551,28 @@ pub async fn list_audit(
 pub async fn list_traces(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: Peer,
     Query(p): Query<Params>,
 ) -> ApiResult<Json<TraceListResponse>> {
     let project = project(&p, &state, &headers);
-    authorize_project(&state, &headers, Scope::Read, &project)?;
+    let previews: bool = parse(&p, "preview")?.unwrap_or(false);
+    if previews {
+        // Audited only with previews: they carry the start of each run's
+        // input and output, and the audit boundary is the payload. A list
+        // without them is names, timings and figures, and is not recorded.
+        audited(
+            &state,
+            &headers,
+            peer.0,
+            authorize_project(&state, &headers, Scope::Read, &project),
+            "list_traces",
+            &project,
+            None,
+        )
+        .await?;
+    } else {
+        authorize_project(&state, &headers, Scope::Read, &project)?;
+    }
     // Before anything is read, and after the key is checked. A refusal that
     // named the vocabulary before authorising would tell an anonymous caller
     // what this daemon serves.
@@ -576,6 +596,7 @@ pub async fn list_traces(
         // field exists.
         user_id: state.redactor.hash_identifier(get(&p, "user_id")),
         environment: get(&p, "environment").map(str::to_owned),
+        experiment_id: get(&p, "experiment_id").map(str::to_owned),
         model: get(&p, "model").map(str::to_owned),
         from: parse_time(&p, "from")?,
         to: parse_time(&p, "to")?,
@@ -588,6 +609,7 @@ pub async fn list_traces(
         score_below: parse(&p, "score_below")?,
         score_above: parse(&p, "score_above")?,
         has_feedback: parse(&p, "has_feedback")?,
+        previews,
         sort: match get(&p, "sort") {
             Some("duration") => TraceSort::Duration,
             Some("cost") => TraceSort::Cost,
@@ -641,6 +663,31 @@ pub async fn get_trace(
     let include = Include::parse(get(&p, "include"));
     let detail = state.store.get_trace(&project, &trace_id, &include).await?;
     Ok(Json(detail))
+}
+
+/// `GET /v1/api/traces/{trace_id}/trajectory`
+pub async fn get_trajectory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: Peer,
+    Path(trace_id): Path<String>,
+    Query(p): Query<Params>,
+) -> ApiResult<Json<mcpd_core::Trajectory>> {
+    let project = project(&p, &state, &headers);
+    // Audited like the run it reads: the previews carry the start of each
+    // step's input and output.
+    audited(
+        &state,
+        &headers,
+        peer.0,
+        authorize_project(&state, &headers, Scope::Read, &project),
+        "get_trajectory",
+        &project,
+        Some(&trace_id),
+    )
+    .await?;
+    let detail = state.store.get_trace(&project, &trace_id, &Include::default()).await?;
+    Ok(Json(mcpd_core::trajectory::trajectory(&trace_id, &detail.spans)))
 }
 
 /// `DELETE /v1/api/traces/{trace_id}`
