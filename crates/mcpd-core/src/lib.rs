@@ -12,6 +12,7 @@
 
 pub mod cost;
 pub mod generated;
+pub mod histogram;
 pub mod ids;
 pub mod judged;
 pub mod metrics;
@@ -24,6 +25,28 @@ pub mod sketch;
 pub mod stats;
 
 pub use generated::*;
+
+impl Correlation {
+    /// A correlation naming only a project and an environment, which is all a
+    /// metric point stores.
+    #[must_use]
+    pub fn for_project(project: String, environment: Option<String>) -> Self {
+        Self {
+            project,
+            environment,
+            service_name: None,
+            service_version: None,
+            session_id: None,
+            thread_id: None,
+            user_id: None,
+            resource_id: None,
+            run_id: None,
+            request_id: None,
+            experiment_id: None,
+            release: None,
+        }
+    }
+}
 
 /// The crate version, which is also the released mcpd version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

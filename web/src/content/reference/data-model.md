@@ -714,6 +714,49 @@ One bucket of an aggregated series.
 | `count` | `u64` | How many raw observations fell in this bucket. Distinguishes a genuine zero from no data. |
 | `exemplar_trace_id` | `string` | A trace that contributed to this bucket, so a spike on the chart opens the run that caused it. |
 
+### MetricHistogram
+
+A histogram metric read back as distributions: the buckets of every point in the window added up, one distribution per label combination, with quantiles read from the merged counts.
+
+Bucketed points from OpenTelemetry are added bucket by bucket; for a cumulative stream only the growth across the window counts. Points with one value each, such as mcpd's own derived durations, give exact quantiles and are placed into OpenTelemetry's default boundaries.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | `string` <span class="req">required</span> | The metric read. |
+| `unit` | `string` | UCUM unit of the observations, for axis labelling. |
+| `points_read` | `u64` <span class="req">required</span> | How many stored points were merged. |
+| `truncated` | `bool` <span class="req">required</span> | Whether the window held more points than one read merges, so the newest ones were used and the rest left out. Narrow the window or add a filter. |
+| `series` | [`HistogramSeries`](#histogramseries)[] <span class="req">required</span> | One distribution per label combination. |
+
+### HistogramSeries
+
+One merged distribution.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `labels` | `json` | The `group_by` label values that identify this series. Absent when nothing was grouped. |
+| `bounds` | `f64`[] <span class="req">required</span> | Upper bound of each bucket but the last, which is unbounded above. |
+| `counts` | `u64`[] <span class="req">required</span> | Observations per bucket: one more entry than `bounds`. |
+| `count` | `u64` <span class="req">required</span> | Every observation counted. |
+| `sum` | `f64` | Their sum. |
+| `min` | `f64` | The smallest observation, when the points recorded single values. |
+| `max` | `f64` | The largest observation, when the points recorded single values. |
+| `p50` | `f64` | Median. |
+| `p90` | `f64` | 90th percentile. |
+| `p95` | `f64` | 95th percentile. |
+| `p99` | `f64` | 99th percentile. |
+| `exact` | `bool` <span class="req">required</span> | Whether the quantiles are exact, read from single observations, or interpolated linearly inside the bucket the rank falls in. |
+| `points_skipped` | `u64` <span class="req">required</span> | Points left out because their bucket boundaries differ from the ones most of this series uses. |
+
+### MetricPointListResponse
+
+A page of stored metric points, as they were recorded.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `points` | [`MetricPoint`](#metricpoint)[] <span class="req">required</span> | The matching points. |
+| `page` | [`Page`](#page) <span class="req">required</span> | Cursor and totals. |
+
 ### MetricSeries
 
 One line on a chart: a single label combination over time.

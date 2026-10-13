@@ -883,6 +883,66 @@ class MetricSeriesPoint:
     """A trace that contributed to this bucket, so a spike on the chart opens the run that caused it."""
 
 @dataclass(**_SLOTS)
+class MetricHistogram:
+    """A histogram metric read back as distributions: the buckets of every point in the window added up, one distribution per label combination, with quantiles read from the merged counts.
+
+Bucketed points from OpenTelemetry are added bucket by bucket; for a cumulative stream only the growth across the window counts. Points with one value each, such as mcpd's own derived durations, give exact quantiles and are placed into OpenTelemetry's default boundaries.
+    """
+
+    name: str
+    """The metric read."""
+    points_read: int
+    """How many stored points were merged."""
+    truncated: bool
+    """Whether the window held more points than one read merges, so the newest ones were used and the rest left out. Narrow the window or add a filter."""
+    series: list[HistogramSeries] = field(default_factory=list)
+    """One distribution per label combination."""
+    unit: str | None = None
+    """UCUM unit of the observations, for axis labelling."""
+
+@dataclass(**_SLOTS)
+class HistogramSeries:
+    """One merged distribution.
+    """
+
+    count: int
+    """Every observation counted."""
+    exact: bool
+    """Whether the quantiles are exact, read from single observations, or interpolated linearly inside the bucket the rank falls in."""
+    points_skipped: int
+    """Points left out because their bucket boundaries differ from the ones most of this series uses."""
+    bounds: list[float] = field(default_factory=list)
+    """Upper bound of each bucket but the last, which is unbounded above."""
+    counts: list[int] = field(default_factory=list)
+    """Observations per bucket: one more entry than `bounds`."""
+    labels: Any | None = None
+    """The `group_by` label values that identify this series. Absent when nothing was grouped."""
+    sum: float | None = None
+    """Their sum."""
+    min: float | None = None
+    """The smallest observation, when the points recorded single values."""
+    max: float | None = None
+    """The largest observation, when the points recorded single values."""
+    p50: float | None = None
+    """Median."""
+    p90: float | None = None
+    """90th percentile."""
+    p95: float | None = None
+    """95th percentile."""
+    p99: float | None = None
+    """99th percentile."""
+
+@dataclass(**_SLOTS)
+class MetricPointListResponse:
+    """A page of stored metric points, as they were recorded.
+    """
+
+    page: Page
+    """Cursor and totals."""
+    points: list[MetricPoint] = field(default_factory=list)
+    """The matching points."""
+
+@dataclass(**_SLOTS)
 class MetricSeries:
     """One line on a chart: a single label combination over time.
     """

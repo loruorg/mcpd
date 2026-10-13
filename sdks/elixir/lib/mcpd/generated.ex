@@ -2276,6 +2276,87 @@ defmodule Mcpd.MetricSeriesPoint do
   ]
 end
 
+defmodule Mcpd.MetricHistogram do
+  @moduledoc """
+  A histogram metric read back as distributions: the buckets of every point in the window added up, one distribution per label combination, with quantiles read from the merged counts.
+
+  Bucketed points from OpenTelemetry are added bucket by bucket; for a cumulative stream only the growth across the window counts. Points with one value each, such as mcpd's own derived durations, give exact quantiles and are placed into OpenTelemetry's default boundaries.
+  """
+
+  @type t :: %__MODULE__{
+          name: String.t(),
+          points_read: non_neg_integer(),
+          truncated: boolean(),
+          series: [Mcpd.HistogramSeries.t()],
+          unit: String.t() | nil
+        }
+
+  @enforce_keys [:name, :points_read, :truncated, :series]
+  defstruct [
+    name: nil,
+    points_read: nil,
+    truncated: nil,
+    series: [],
+    unit: nil,
+  ]
+end
+
+defmodule Mcpd.HistogramSeries do
+  @moduledoc """
+  One merged distribution.
+  """
+
+  @type t :: %__MODULE__{
+          bounds: [float()],
+          counts: [non_neg_integer()],
+          count: non_neg_integer(),
+          exact: boolean(),
+          points_skipped: non_neg_integer(),
+          labels: term() | nil,
+          sum: float() | nil,
+          min: float() | nil,
+          max: float() | nil,
+          p50: float() | nil,
+          p90: float() | nil,
+          p95: float() | nil,
+          p99: float() | nil
+        }
+
+  @enforce_keys [:bounds, :counts, :count, :exact, :points_skipped]
+  defstruct [
+    bounds: [],
+    counts: [],
+    count: nil,
+    exact: nil,
+    points_skipped: nil,
+    labels: nil,
+    sum: nil,
+    min: nil,
+    max: nil,
+    p50: nil,
+    p90: nil,
+    p95: nil,
+    p99: nil,
+  ]
+end
+
+defmodule Mcpd.MetricPointListResponse do
+  @moduledoc """
+  A page of stored metric points, as they were recorded.
+  """
+
+  @type t :: %__MODULE__{
+          points: [Mcpd.MetricPoint.t()],
+          page: Mcpd.Page.t()
+        }
+
+  @enforce_keys [:points, :page]
+  defstruct [
+    points: [],
+    page: nil,
+  ]
+end
+
 defmodule Mcpd.MetricSeries do
   @moduledoc """
   One line on a chart: a single label combination over time.

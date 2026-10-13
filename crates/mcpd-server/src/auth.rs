@@ -475,6 +475,12 @@ mod tests {
             ) -> mcpd_store::Result<mcpd_core::MetricSeriesResponse> {
                 unimplemented!()
             }
+            async fn list_metric_points(
+                &self,
+                _: &mcpd_store::MetricPointQuery,
+            ) -> mcpd_store::Result<mcpd_store::Paged<mcpd_core::MetricPoint>> {
+                unimplemented!()
+            }
             async fn list_scores(
                 &self,
                 _: &mcpd_store::ScoreQuery,

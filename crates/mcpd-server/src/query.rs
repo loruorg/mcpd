@@ -217,6 +217,13 @@ pub const SCORE_PARAMS: &[&str] = &[
 pub const METRIC_PARAMS: &[&str] =
     &["project", "name", "from", "to", "bucket", "agg", "group_by", "filter"];
 
+/// Every parameter `GET /v1/api/metrics/histogram` accepts.
+pub const HISTOGRAM_PARAMS: &[&str] = &["project", "name", "from", "to", "group_by", "filter"];
+
+/// Every parameter `GET /v1/api/metrics/points` accepts.
+pub const METRIC_POINT_PARAMS: &[&str] =
+    &["project", "name", "from", "to", "filter", "trace_id", "order", "limit", "cursor"];
+
 /// Every parameter `GET /v1/api/feedback` accepts.
 pub const FEEDBACK_PARAMS: &[&str] = &["project", "trace_id", "limit"];
 
@@ -759,6 +766,128 @@ pub async fn query_metrics(
             .unwrap_or_default(),
     };
     Ok(Json(state.store.query_metrics(&q).await?))
+}
+
+/// `key:value,key:value`, the label filter grammar every metric door shares.
+fn label_filter(p: &Params) -> Vec<(String, String)> {
+    get(p, "filter")
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|pair| pair.split_once(':'))
+                .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
+                .filter(|(k, _)| !k.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The most points one histogram read merges. Past it the newest are used
+/// and the reply says it was cut, rather than holding an unbounded window in
+/// memory.
+pub const HISTOGRAM_POINTS_MAX: u32 = 50_000;
+
+/// `GET /v1/api/metrics/histogram`
+pub async fn metric_histogram(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(p): Query<Params>,
+) -> ApiResult<Json<mcpd_core::MetricHistogram>> {
+    let project = project(&p, &state, &headers);
+    authorize_project(&state, &headers, Scope::Read, &project)?;
+    only(&p, "GET /v1/api/metrics/histogram", HISTOGRAM_PARAMS, &[])?;
+    state.metrics.query_requests.fetch_add(1, AtomicOrdering::Relaxed);
+    let name = get(&p, "name").ok_or_else(|| ApiError::BadParam {
+        field: "name".to_owned(),
+        message: "a metric name is required".to_owned(),
+    })?;
+    let from = parse_time(&p, "from")?
+        .unwrap_or_else(|| OffsetDateTime::now_utc() - time::Duration::hours(1));
+    let to = parse_time(&p, "to")?.unwrap_or_else(OffsetDateTime::now_utc);
+    if to <= from {
+        return Err(ApiError::BadParam {
+            field: "to".to_owned(),
+            message: "the end of the window must be after its start".to_owned(),
+        });
+    }
+    let group_by: Vec<String> = get(&p, "group_by")
+        .map(|s| s.split(',').map(|k| k.trim().to_owned()).filter(|k| !k.is_empty()).collect())
+        .unwrap_or_default();
+    let mut q = mcpd_store::MetricPointQuery {
+        project,
+        name: Some(name.to_owned()),
+        from: Some(from),
+        to: Some(to),
+        filter: label_filter(&p),
+        trace_id: None,
+        order: Order::Desc,
+        limit: 10_000,
+        cursor: None,
+    };
+    let mut points = Vec::new();
+    let mut truncated = false;
+    loop {
+        let page = state.store.list_metric_points(&q).await?;
+        points.extend(page.items);
+        match page.next_cursor {
+            Some(c) if points.len() < HISTOGRAM_POINTS_MAX as usize => q.cursor = Some(c),
+            Some(_) => {
+                truncated = true;
+                break;
+            }
+            None => break,
+        }
+    }
+    let unit = points.iter().find_map(|m| m.unit.clone());
+    let series = mcpd_core::histogram::merge(&points, &group_by)
+        .into_iter()
+        .map(|(labels, d, skipped)| mcpd_core::HistogramSeries {
+            labels,
+            p50: d.quantile(0.50),
+            p90: d.quantile(0.90),
+            p95: d.quantile(0.95),
+            p99: d.quantile(0.99),
+            bounds: d.bounds,
+            counts: d.counts,
+            count: d.count,
+            sum: d.sum,
+            min: d.min,
+            max: d.max,
+            exact: d.exact,
+            points_skipped: skipped,
+        })
+        .collect();
+    Ok(Json(mcpd_core::MetricHistogram {
+        name: name.to_owned(),
+        unit,
+        points_read: points.len() as u64,
+        truncated,
+        series,
+    }))
+}
+
+/// `GET /v1/api/metrics/points`
+pub async fn list_metric_points(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(p): Query<Params>,
+) -> ApiResult<Json<mcpd_core::MetricPointListResponse>> {
+    let project = project(&p, &state, &headers);
+    authorize_project(&state, &headers, Scope::Read, &project)?;
+    only(&p, "GET /v1/api/metrics/points", METRIC_POINT_PARAMS, &[])?;
+    state.metrics.query_requests.fetch_add(1, AtomicOrdering::Relaxed);
+    let q = mcpd_store::MetricPointQuery {
+        project,
+        name: get(&p, "name").map(str::to_owned),
+        from: parse_time(&p, "from")?,
+        to: parse_time(&p, "to")?,
+        filter: label_filter(&p),
+        trace_id: get(&p, "trace_id").map(str::to_owned),
+        order: order(&p),
+        limit: parse::<u32>(&p, "limit")?.unwrap_or(100).clamp(1, 1000),
+        cursor: page_cursor(&p, false)?,
+    };
+    let paged = state.store.list_metric_points(&q).await?;
+    Ok(Json(mcpd_core::MetricPointListResponse { page: page_of(&paged), points: paged.items }))
 }
 
 /// Parse `30s`, `5m`, `1h`, `1d` into seconds.

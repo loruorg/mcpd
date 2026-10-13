@@ -985,6 +985,14 @@ impl Store for SqliteStore {
         self.with_read(move |conn| query_metrics_sync(conn, &q)).await
     }
 
+    async fn list_metric_points(
+        &self,
+        q: &crate::MetricPointQuery,
+    ) -> Result<Paged<mcpd_core::MetricPoint>> {
+        let q = q.clone();
+        self.with_read(move |conn| list_metric_points_sync(conn, &q)).await
+    }
+
     async fn list_scores(&self, q: &ScoreQuery) -> Result<Paged<Score>> {
         let q = q.clone();
         self.with_read(move |conn| list_scores_sync(conn, &q)).await

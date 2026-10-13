@@ -1692,6 +1692,83 @@ data class MetricSeriesPoint(
 ) {
 }
 
+/**
+ * A histogram metric read back as distributions: the buckets of every point in the
+ * window added up, one distribution per label combination, with quantiles read
+ * from the merged counts. Bucketed points from OpenTelemetry are added bucket by
+ * bucket; for a cumulative stream only the growth across the window counts. Points
+ * with one value each, such as mcpd's own derived durations, give exact quantiles
+ * and are placed into OpenTelemetry's default boundaries.
+ */
+@Serializable
+data class MetricHistogram(
+    /** The metric read. */
+    @SerialName("name") val name: String,
+    /** How many stored points were merged. */
+    @SerialName("points_read") val pointsRead: Long,
+    /**
+     * Whether the window held more points than one read merges, so the newest ones
+     * were used and the rest left out. Narrow the window or add a filter.
+     */
+    @SerialName("truncated") val truncated: Boolean,
+    /** One distribution per label combination. */
+    @SerialName("series") val series: List<HistogramSeries>,
+    /** UCUM unit of the observations, for axis labelling. */
+    @SerialName("unit") val unit: String? = null
+) {
+}
+
+/** One merged distribution. */
+@Serializable
+data class HistogramSeries(
+    /** Upper bound of each bucket but the last, which is unbounded above. */
+    @SerialName("bounds") val bounds: List<Double>,
+    /** Observations per bucket: one more entry than `bounds`. */
+    @SerialName("counts") val counts: List<Long>,
+    /** Every observation counted. */
+    @SerialName("count") val count: Long,
+    /**
+     * Whether the quantiles are exact, read from single observations, or interpolated
+     * linearly inside the bucket the rank falls in.
+     */
+    @SerialName("exact") val exact: Boolean,
+    /**
+     * Points left out because their bucket boundaries differ from the ones most of
+     * this series uses.
+     */
+    @SerialName("points_skipped") val pointsSkipped: Long,
+    /**
+     * The `group_by` label values that identify this series. Absent when nothing was
+     * grouped.
+     */
+    @SerialName("labels") val labels: JsonElement? = null,
+    /** Their sum. */
+    @SerialName("sum") val sum: Double? = null,
+    /** The smallest observation, when the points recorded single values. */
+    @SerialName("min") val min: Double? = null,
+    /** The largest observation, when the points recorded single values. */
+    @SerialName("max") val max: Double? = null,
+    /** Median. */
+    @SerialName("p50") val p50: Double? = null,
+    /** 90th percentile. */
+    @SerialName("p90") val p90: Double? = null,
+    /** 95th percentile. */
+    @SerialName("p95") val p95: Double? = null,
+    /** 99th percentile. */
+    @SerialName("p99") val p99: Double? = null
+) {
+}
+
+/** A page of stored metric points, as they were recorded. */
+@Serializable
+data class MetricPointListResponse(
+    /** The matching points. */
+    @SerialName("points") val points: List<MetricPoint>,
+    /** Cursor and totals. */
+    @SerialName("page") val page: Page
+) {
+}
+
 /** One line on a chart: a single label combination over time. */
 @Serializable
 data class MetricSeries(

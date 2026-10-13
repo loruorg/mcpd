@@ -1466,6 +1466,113 @@ export interface MetricSeriesPoint {
 }
 
 /**
+ * A histogram metric read back as distributions: the buckets of every point in the
+ * window added up, one distribution per label combination, with quantiles read from
+ * the merged counts. Bucketed points from OpenTelemetry are added bucket by bucket;
+ * for a cumulative stream only the growth across the window counts. Points with one
+ * value each, such as mcpd's own derived durations, give exact quantiles and are
+ * placed into OpenTelemetry's default boundaries.
+ */
+export interface MetricHistogram {
+  /**
+   * The metric read.
+   */
+  name: string
+  /**
+   * UCUM unit of the observations, for axis labelling.
+   */
+  unit?: string
+  /**
+   * How many stored points were merged.
+   */
+  pointsRead: number
+  /**
+   * Whether the window held more points than one read merges, so the newest ones were
+   * used and the rest left out. Narrow the window or add a filter.
+   */
+  truncated: boolean
+  /**
+   * One distribution per label combination.
+   */
+  series: HistogramSeries[]
+}
+
+/**
+ * One merged distribution.
+ */
+export interface HistogramSeries {
+  /**
+   * The `group_by` label values that identify this series. Absent when nothing was
+   * grouped.
+   */
+  labels?: unknown
+  /**
+   * Upper bound of each bucket but the last, which is unbounded above.
+   */
+  bounds: number[]
+  /**
+   * Observations per bucket: one more entry than `bounds`.
+   */
+  counts: number[]
+  /**
+   * Every observation counted.
+   */
+  count: number
+  /**
+   * Their sum.
+   */
+  sum?: number
+  /**
+   * The smallest observation, when the points recorded single values.
+   */
+  min?: number
+  /**
+   * The largest observation, when the points recorded single values.
+   */
+  max?: number
+  /**
+   * Median.
+   */
+  p50?: number
+  /**
+   * 90th percentile.
+   */
+  p90?: number
+  /**
+   * 95th percentile.
+   */
+  p95?: number
+  /**
+   * 99th percentile.
+   */
+  p99?: number
+  /**
+   * Whether the quantiles are exact, read from single observations, or interpolated
+   * linearly inside the bucket the rank falls in.
+   */
+  exact: boolean
+  /**
+   * Points left out because their bucket boundaries differ from the ones most of this
+   * series uses.
+   */
+  pointsSkipped: number
+}
+
+/**
+ * A page of stored metric points, as they were recorded.
+ */
+export interface MetricPointListResponse {
+  /**
+   * The matching points.
+   */
+  points: MetricPoint[]
+  /**
+   * Cursor and totals.
+   */
+  page: Page
+}
+
+/**
  * One line on a chart: a single label combination over time.
  */
 export interface MetricSeries {

@@ -1679,6 +1679,52 @@ impl Store for ClickHouseStore {
         })
     }
 
+    async fn list_metric_points(
+        &self,
+        q: &crate::MetricPointQuery,
+    ) -> Result<Paged<mcpd_core::MetricPoint>> {
+        let mut w = vec![format!("project = {}", quote(&q.project))];
+        if let Some(n) = &q.name {
+            w.push(format!("name = {}", quote(n)));
+        }
+        if let Some(t) = &q.trace_id {
+            w.push(format!("trace_id = {}", quote(t)));
+        }
+        if let Some(f) = q.from {
+            w.push(format!("timestamp >= {}", ts(f)));
+        }
+        if let Some(t) = q.to {
+            w.push(format!("timestamp < {}", ts(t)));
+        }
+        for (k, v) in &q.filter {
+            w.push(format!("JSONExtractString(labels, {}) = {}", quote(k), quote(v)));
+        }
+        let (cmp, dir) = if q.order == Order::Asc { ('>', "ASC") } else { ('<', "DESC") };
+        if let Some(c) = &q.cursor {
+            let (v, id) = decode_cursor(c)?;
+            w.push(format!("(timestamp, metric_id) {cmp} ({}, {})", nanos_literal(v), quote(&id)));
+        }
+        let limit = q.limit.clamp(1, 10_000);
+        let rows: Vec<MetricRow> = self
+            .select(&format!(
+                "SELECT metric_id, name, kind, value, unit, timestamp, labels, buckets, trace_id, \
+                        span_id, project, environment, received_at
+                 FROM {} WHERE {} ORDER BY timestamp {dir}, metric_id {dir} LIMIT {}",
+                self.table("metrics"),
+                w.join(" AND "),
+                limit + 1
+            ))
+            .await?;
+        let mut items: Vec<mcpd_core::MetricPoint> = rows.into_iter().map(Into::into).collect();
+        let next_cursor = if items.len() > limit as usize {
+            items.truncate(limit as usize);
+            items.last().map(|m| encode_cursor(m.timestamp, &m.metric_id))
+        } else {
+            None
+        };
+        Ok(Paged { items, next_cursor, total: None })
+    }
+
     async fn query_metrics(&self, q: &MetricQuery) -> Result<MetricSeriesResponse> {
         let bucket = if q.bucket_seconds > 0 { q.bucket_seconds } else { 60 };
 
@@ -3807,6 +3853,42 @@ struct LogRow {
     session_id: String,
     user_id: String,
     received_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetricRow {
+    metric_id: String,
+    name: String,
+    kind: String,
+    value: f64,
+    unit: String,
+    timestamp: String,
+    labels: String,
+    buckets: String,
+    trace_id: String,
+    span_id: String,
+    project: String,
+    environment: String,
+    received_at: String,
+}
+
+impl From<MetricRow> for mcpd_core::MetricPoint {
+    fn from(r: MetricRow) -> Self {
+        Self {
+            metric_id: r.metric_id,
+            name: r.name,
+            kind: r.kind.parse().unwrap_or(mcpd_core::MetricKind::Gauge),
+            value: r.value,
+            unit: opt(r.unit),
+            timestamp: parse_ts(&r.timestamp),
+            labels: parse_json(&r.labels),
+            buckets: parse_json(&r.buckets),
+            trace_id: opt(r.trace_id),
+            span_id: opt(r.span_id),
+            correlation: mcpd_core::Correlation::for_project(r.project, opt(r.environment)),
+            received_at: parse_ts(&r.received_at),
+        }
+    }
 }
 
 impl From<LogRow> for LogRecord {

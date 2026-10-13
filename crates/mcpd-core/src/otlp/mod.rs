@@ -325,7 +325,7 @@ fn read_nano(v: &Value, camel: &str, snake: &str) -> u128 {
 }
 
 /// Flatten OTLP's `[{key, value:{stringValue}}]` list into a plain map.
-fn flatten_attributes(v: &Value) -> Map<String, Value> {
+pub fn flatten_attributes(v: &Value) -> Map<String, Value> {
     let mut out = Map::new();
     if let Some(list) = v.as_array() {
         for kv in list {

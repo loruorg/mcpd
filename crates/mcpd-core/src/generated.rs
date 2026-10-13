@@ -2876,6 +2876,83 @@ pub struct MetricSeriesPoint {
     pub exemplar_trace_id: Option<String>,
 }
 
+/// A histogram metric read back as distributions: the buckets of every point in the
+/// window added up, one distribution per label combination, with quantiles read from
+/// the merged counts. Bucketed points from OpenTelemetry are added bucket by bucket;
+/// for a cumulative stream only the growth across the window counts. Points with one
+/// value each, such as mcpd's own derived durations, give exact quantiles and are
+/// placed into OpenTelemetry's default boundaries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricHistogram {
+    /// The metric read.
+    pub name: String,
+    /// UCUM unit of the observations, for axis labelling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// How many stored points were merged.
+    pub points_read: u64,
+    /// Whether the window held more points than one read merges, so the newest ones were
+    /// used and the rest left out. Narrow the window or add a filter.
+    pub truncated: bool,
+    /// One distribution per label combination.
+    #[serde(default)]
+    pub series: Vec<HistogramSeries>,
+}
+
+/// One merged distribution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistogramSeries {
+    /// The `group_by` label values that identify this series. Absent when nothing was
+    /// grouped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<serde_json::Value>,
+    /// Upper bound of each bucket but the last, which is unbounded above.
+    #[serde(default)]
+    pub bounds: Vec<f64>,
+    /// Observations per bucket: one more entry than `bounds`.
+    #[serde(default)]
+    pub counts: Vec<u64>,
+    /// Every observation counted.
+    pub count: u64,
+    /// Their sum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sum: Option<f64>,
+    /// The smallest observation, when the points recorded single values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    /// The largest observation, when the points recorded single values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    /// Median.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p50: Option<f64>,
+    /// 90th percentile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p90: Option<f64>,
+    /// 95th percentile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p95: Option<f64>,
+    /// 99th percentile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p99: Option<f64>,
+    /// Whether the quantiles are exact, read from single observations, or interpolated
+    /// linearly inside the bucket the rank falls in.
+    pub exact: bool,
+    /// Points left out because their bucket boundaries differ from the ones most of this
+    /// series uses.
+    pub points_skipped: u64,
+}
+
+/// A page of stored metric points, as they were recorded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricPointListResponse {
+    /// The matching points.
+    #[serde(default)]
+    pub points: Vec<MetricPoint>,
+    /// Cursor and totals.
+    pub page: Page,
+}
+
 /// One line on a chart: a single label combination over time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetricSeries {

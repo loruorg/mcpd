@@ -342,6 +342,29 @@ pub struct MetricQuery {
     pub filter: Vec<(String, String)>,
 }
 
+/// Filters for listing stored metric points.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetricPointQuery {
+    /// The project to read.
+    pub project: String,
+    /// Only this metric.
+    pub name: Option<String>,
+    /// Window start.
+    pub from: Option<OffsetDateTime>,
+    /// Window end.
+    pub to: Option<OffsetDateTime>,
+    /// Label equality filters.
+    pub filter: Vec<(String, String)>,
+    /// Only points whose exemplar names this run.
+    pub trace_id: Option<String>,
+    /// Sort direction, by timestamp.
+    pub order: Order,
+    /// Page size.
+    pub limit: u32,
+    /// Opaque cursor.
+    pub cursor: Option<String>,
+}
+
 /// How to combine the raw observations in a bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -1627,6 +1650,10 @@ pub trait Store: Send + Sync + 'static {
 
     /// Query a metric as an aggregated time series.
     async fn query_metrics(&self, q: &MetricQuery) -> Result<MetricSeriesResponse>;
+
+    /// List stored metric points as they were recorded, keyset paged on
+    /// `(timestamp, metric_id)`.
+    async fn list_metric_points(&self, q: &MetricPointQuery) -> Result<Paged<MetricPoint>>;
 
     /// List scores.
     async fn list_scores(&self, q: &ScoreQuery) -> Result<Paged<Score>>;

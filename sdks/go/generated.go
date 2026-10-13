@@ -1789,6 +1789,67 @@ type MetricSeriesPoint struct {
 	ExemplarTraceID *string `json:"exemplar_trace_id,omitempty"`
 }
 
+// A histogram metric read back as distributions: the buckets of every point in the
+// window added up, one distribution per label combination, with quantiles read from
+// the merged counts. Bucketed points from OpenTelemetry are added bucket by bucket;
+// for a cumulative stream only the growth across the window counts. Points with one
+// value each, such as mcpd's own derived durations, give exact quantiles and are
+// placed into OpenTelemetry's default boundaries.
+type MetricHistogram struct {
+	// The metric read.
+	Name string `json:"name"`
+	// UCUM unit of the observations, for axis labelling.
+	Unit *string `json:"unit,omitempty"`
+	// How many stored points were merged.
+	PointsRead uint64 `json:"points_read"`
+	// Whether the window held more points than one read merges, so the newest ones were
+	// used and the rest left out. Narrow the window or add a filter.
+	Truncated bool `json:"truncated"`
+	// One distribution per label combination.
+	Series []HistogramSeries `json:"series"`
+}
+
+// One merged distribution.
+type HistogramSeries struct {
+	// The `group_by` label values that identify this series. Absent when nothing was
+	// grouped.
+	Labels json.RawMessage `json:"labels,omitempty"`
+	// Upper bound of each bucket but the last, which is unbounded above.
+	Bounds []float64 `json:"bounds"`
+	// Observations per bucket: one more entry than `bounds`.
+	Counts []uint64 `json:"counts"`
+	// Every observation counted.
+	Count uint64 `json:"count"`
+	// Their sum.
+	Sum *float64 `json:"sum,omitempty"`
+	// The smallest observation, when the points recorded single values.
+	Min *float64 `json:"min,omitempty"`
+	// The largest observation, when the points recorded single values.
+	Max *float64 `json:"max,omitempty"`
+	// Median.
+	P50 *float64 `json:"p50,omitempty"`
+	// 90th percentile.
+	P90 *float64 `json:"p90,omitempty"`
+	// 95th percentile.
+	P95 *float64 `json:"p95,omitempty"`
+	// 99th percentile.
+	P99 *float64 `json:"p99,omitempty"`
+	// Whether the quantiles are exact, read from single observations, or interpolated
+	// linearly inside the bucket the rank falls in.
+	Exact bool `json:"exact"`
+	// Points left out because their bucket boundaries differ from the ones most of this
+	// series uses.
+	PointsSkipped uint64 `json:"points_skipped"`
+}
+
+// A page of stored metric points, as they were recorded.
+type MetricPointListResponse struct {
+	// The matching points.
+	Points []MetricPoint `json:"points"`
+	// Cursor and totals.
+	Page Page `json:"page"`
+}
+
 // One line on a chart: a single label combination over time.
 type MetricSeries struct {
 	// The label values that identify this series.

@@ -15,7 +15,8 @@ use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use mcpd_server::query::{
-    FEEDBACK_PARAMS, LOG_PARAMS, METRIC_PARAMS, SCORE_PARAMS, SPAN_PARAMS, TRACE_PARAMS,
+    FEEDBACK_PARAMS, HISTOGRAM_PARAMS, LOG_PARAMS, METRIC_PARAMS, METRIC_POINT_PARAMS,
+    SCORE_PARAMS, SPAN_PARAMS, TRACE_PARAMS,
 };
 use mcpd_server::{router, AppState, ServerConfig};
 use mcpd_store::sqlite::SqliteStore;
@@ -135,6 +136,8 @@ fn every_list_accepts_exactly_what_the_spec_documents() {
         ("list_logs", LOG_PARAMS),
         ("list_scores", SCORE_PARAMS),
         ("query_metrics", METRIC_PARAMS),
+        ("metric_histogram", HISTOGRAM_PARAMS),
+        ("list_metric_points", METRIC_POINT_PARAMS),
         ("list_feedback", FEEDBACK_PARAMS),
     ] {
         let enforced: BTreeSet<String> = enforced.iter().map(|s| (*s).to_owned()).collect();

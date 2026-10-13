@@ -1348,6 +1348,148 @@
           "value"
         ]
       },
+      "MetricHistogram": {
+        "type": "object",
+        "description": "A histogram metric read back as distributions: the buckets of every point in the window added up, one distribution per label combination, with quantiles read from the merged counts.\n\nBucketed points from OpenTelemetry are added bucket by bucket; for a cumulative stream only the growth across the window counts. Points with one value each, such as mcpd's own derived durations, give exact quantiles and are placed into OpenTelemetry's default boundaries.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The metric read."
+          },
+          "unit": {
+            "type": "string",
+            "description": "UCUM unit of the observations, for axis labelling."
+          },
+          "points_read": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "How many stored points were merged."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Whether the window held more points than one read merges, so the newest ones were used and the rest left out. Narrow the window or add a filter."
+          },
+          "series": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistogramSeries"
+            },
+            "description": "One distribution per label combination."
+          }
+        },
+        "required": [
+          "name",
+          "points_read",
+          "truncated",
+          "series"
+        ]
+      },
+      "HistogramSeries": {
+        "type": "object",
+        "description": "One merged distribution.",
+        "properties": {
+          "labels": {
+            "description": "The `group_by` label values that identify this series. Absent when nothing was grouped."
+          },
+          "bounds": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "description": "Upper bound of each bucket but the last, which is unbounded above."
+          },
+          "counts": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Observations per bucket: one more entry than `bounds`."
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Every observation counted."
+          },
+          "sum": {
+            "type": "number",
+            "format": "double",
+            "description": "Their sum."
+          },
+          "min": {
+            "type": "number",
+            "format": "double",
+            "description": "The smallest observation, when the points recorded single values."
+          },
+          "max": {
+            "type": "number",
+            "format": "double",
+            "description": "The largest observation, when the points recorded single values."
+          },
+          "p50": {
+            "type": "number",
+            "format": "double",
+            "description": "Median."
+          },
+          "p90": {
+            "type": "number",
+            "format": "double",
+            "description": "90th percentile."
+          },
+          "p95": {
+            "type": "number",
+            "format": "double",
+            "description": "95th percentile."
+          },
+          "p99": {
+            "type": "number",
+            "format": "double",
+            "description": "99th percentile."
+          },
+          "exact": {
+            "type": "boolean",
+            "description": "Whether the quantiles are exact, read from single observations, or interpolated linearly inside the bucket the rank falls in."
+          },
+          "points_skipped": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Points left out because their bucket boundaries differ from the ones most of this series uses."
+          }
+        },
+        "required": [
+          "bounds",
+          "counts",
+          "count",
+          "exact",
+          "points_skipped"
+        ]
+      },
+      "MetricPointListResponse": {
+        "type": "object",
+        "description": "A page of stored metric points, as they were recorded.",
+        "properties": {
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricPoint"
+            },
+            "description": "The matching points."
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page",
+            "description": "Cursor and totals."
+          }
+        },
+        "required": [
+          "points",
+          "page"
+        ]
+      },
       "MetricSeries": {
         "type": "object",
         "description": "One line on a chart: a single label combination over time.",
@@ -6828,6 +6970,230 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MetricSeriesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/metrics/histogram": {
+      "get": {
+        "operationId": "metric_histogram",
+        "tags": [
+          "Metrics"
+        ],
+        "summary": "Read a histogram metric as distributions",
+        "description": "Merges the buckets of every point of a histogram metric in the window into one distribution per label combination, and reads p50, p90, p95 and p99 from the merged counts. Use it for latency and size distributions, where a mean of bucket sums answers nothing.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": true,
+            "description": "Which project to read. Required.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": true,
+            "description": "Metric name. Required.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "description": "Start of the window. The last hour when omitted.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "description": "End of the window. Now when omitted.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "group_by",
+            "in": "query",
+            "required": false,
+            "description": "Label keys to split the distributions on.",
+            "style": "form",
+            "explode": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "required": false,
+            "description": "Label equality filters, as `key:value` pairs joined by commas, as on `/v1/api/metrics`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricHistogram"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/metrics/points": {
+      "get": {
+        "operationId": "list_metric_points",
+        "tags": [
+          "Metrics"
+        ],
+        "summary": "List stored metric points",
+        "description": "The raw points behind a chart, newest first, with their labels, buckets and exemplar links. Use it to see exactly what a producer sent.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": true,
+            "description": "Which project to read. Required.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "description": "Only this metric.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "description": "Start of the window.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "description": "End of the window.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "required": false,
+            "description": "Label equality filters, as `key:value` pairs joined by commas.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "trace_id",
+            "in": "query",
+            "required": false,
+            "description": "Only points whose exemplar names this run.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "description": "`asc` or `desc`.",
+            "schema": {
+              "type": "string",
+              "default": "desc"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 1000.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0,
+              "default": 100
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "From a previous page.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricPointListResponse"
                 }
               }
             }

@@ -562,6 +562,12 @@ fn documented_answers() -> Answers {
     e.insert("a policy with no window keeps everything", "0,1".into());
     e.insert("expiring runs removes them", "0".into());
 
+    // Metric points read back as they were written, keyset paged.
+    e.insert("metric points list newest first", "m3,m2".into());
+    e.insert("metric points page on", "m1".into());
+    e.insert("metric points keep their buckets", "[1,2]".into());
+    e.insert("metric points filter on a label", "m2".into());
+
     e
 }
 
@@ -2094,6 +2100,70 @@ async fn observe_themes(store: &dyn Store, project: String) -> Answers {
     a
 }
 
+async fn observe_metric_points(store: &dyn Store, project: String) -> Answers {
+    let mut a = Answers::new();
+    let now = OffsetDateTime::now_utc();
+    let point = |id: &str, secs: i64, model: &str| MetricPoint {
+        metric_id: format!("{project}-{id}"),
+        name: "latency".into(),
+        kind: MetricKind::Histogram,
+        value: 3.0,
+        unit: Some("ms".into()),
+        timestamp: now - Duration::seconds(60 - secs),
+        labels: Some(json!({ "model": model })),
+        buckets: Some(json!({ "bounds": [10], "counts": [1, 2] })),
+        trace_id: None,
+        span_id: None,
+        correlation: only_project(&project),
+        received_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    store
+        .ingest(Batch {
+            metrics: vec![point("m1", 1, "a"), point("m2", 2, "b"), point("m3", 3, "a")],
+            ..Batch::default()
+        })
+        .await
+        .expect("the metric fixture must ingest");
+    let strip = |items: &[MetricPoint]| {
+        items
+            .iter()
+            .map(|m| m.metric_id.trim_start_matches(&format!("{project}-")).to_owned())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut q = mcpd_store::MetricPointQuery {
+        project: project.clone(),
+        name: Some("latency".into()),
+        limit: 2,
+        ..Default::default()
+    };
+    let first = store.list_metric_points(&q).await.expect("list metric points");
+    a.insert("metric points list newest first", strip(&first.items));
+    a.insert(
+        "metric points keep their buckets",
+        first
+            .items
+            .first()
+            .and_then(|m| m.buckets.as_ref())
+            .map(|b| b["counts"].to_string())
+            .unwrap_or_default(),
+    );
+    q.cursor = first.next_cursor.clone();
+    let second = store.list_metric_points(&q).await.expect("list the next page");
+    a.insert("metric points page on", strip(&second.items));
+    let filtered = store
+        .list_metric_points(&mcpd_store::MetricPointQuery {
+            project: project.clone(),
+            filter: vec![("model".into(), "b".into())],
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("filter metric points");
+    a.insert("metric points filter on a label", strip(&filtered.items));
+    a
+}
+
 async fn observe_retention(store: &dyn Store, project: String) -> Answers {
     let mut a = Answers::new();
     let now = OffsetDateTime::now_utc();
@@ -2418,6 +2488,7 @@ async fn every_backend_gives_the_documented_answer_to_the_same_question() {
         answers.extend(observe_discovery(store.as_ref(), unique(&format!("disc-{name}"))).await);
         answers.extend(observe_polling(store.as_ref(), unique(&format!("poll-{name}"))).await);
         answers.extend(observe_retention(store.as_ref(), unique(&format!("ret-{name}"))).await);
+        answers.extend(observe_metric_points(store.as_ref(), unique(&format!("mp-{name}"))).await);
         answers.extend(observe_themes(store.as_ref(), unique(&format!("thm-{name}"))).await);
         answers.extend(
             observe_tenancy(

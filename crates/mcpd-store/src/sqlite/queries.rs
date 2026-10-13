@@ -1160,6 +1160,76 @@ pub(super) fn list_logs_sync(conn: &Connection, q: &LogQuery) -> Result<Paged<Lo
     Ok(Paged { items: rows, next_cursor, total: None })
 }
 
+pub(super) fn list_metric_points_sync(
+    conn: &Connection,
+    q: &crate::MetricPointQuery,
+) -> Result<Paged<mcpd_core::MetricPoint>> {
+    let mut w = Where::default();
+    w.push("project = ?", q.project.clone());
+    if let Some(n) = &q.name {
+        w.push("name = ?", n.clone());
+    }
+    if let Some(t) = &q.trace_id {
+        w.push("trace_id = ?", t.clone());
+    }
+    if let Some(f) = q.from {
+        w.push("timestamp >= ?", to_nanos(f));
+    }
+    if let Some(t) = q.to {
+        w.push("timestamp < ?", to_nanos(t));
+    }
+    for (k, v) in &q.filter {
+        // The label key is a bound JSON path, never interpolated.
+        w.clauses.push("json_extract(labels, ?) = ?".to_owned());
+        w.binds.push(Box::new(format!("$.{k}")));
+        w.binds.push(Box::new(v.clone()));
+    }
+    if let Some(c) = &q.cursor {
+        let (v, id) = decode_cursor(c)?;
+        let cmp = if q.order == Order::Asc { '>' } else { '<' };
+        w.clauses.push(format!("(timestamp, metric_id) {cmp} (?, ?)"));
+        w.binds.push(Box::new(v));
+        w.binds.push(Box::new(id));
+    }
+    let dir = if q.order == Order::Asc { "ASC" } else { "DESC" };
+    let limit = q.limit.clamp(1, 10_000);
+    let sql = format!(
+        "SELECT metric_id, name, kind, value, unit, timestamp, labels, buckets, trace_id, \
+                span_id, project, environment, received_at
+         FROM metrics{} ORDER BY timestamp {dir}, metric_id {dir} LIMIT {}",
+        w.sql(),
+        limit + 1
+    );
+    let mut stmt = conn.prepare(&sql).map_err(be)?;
+    let mut rows: Vec<mcpd_core::MetricPoint> = stmt
+        .query_map(params_from_iter(w.refs()), |r| {
+            Ok(mcpd_core::MetricPoint {
+                metric_id: r.get(0)?,
+                name: r.get(1)?,
+                kind: r.get::<_, String>(2)?.parse().unwrap_or(mcpd_core::MetricKind::Gauge),
+                value: r.get(3)?,
+                unit: r.get(4)?,
+                timestamp: from_nanos(r.get(5)?),
+                labels: json_in(r.get(6)?),
+                buckets: json_in(r.get(7)?),
+                trace_id: r.get(8)?,
+                span_id: r.get(9)?,
+                correlation: mcpd_core::Correlation::for_project(r.get(10)?, r.get(11)?),
+                received_at: from_nanos(r.get(12)?),
+            })
+        })
+        .map_err(be)?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(be)?;
+    let next_cursor = if rows.len() > limit as usize {
+        rows.truncate(limit as usize);
+        rows.last().map(|m| encode_cursor(to_nanos(m.timestamp), &m.metric_id))
+    } else {
+        None
+    };
+    Ok(Paged { items: rows, next_cursor, total: None })
+}
+
 pub(super) fn list_scores_sync(conn: &Connection, q: &ScoreQuery) -> Result<Paged<Score>> {
     let mut w = Where::default();
     w.push("project = ?", q.project.clone());
