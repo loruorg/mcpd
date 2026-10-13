@@ -380,6 +380,16 @@ struct AccountFlags {
     /// needs one.
     #[arg(long, env = "MCPD_SKIP_EMAIL_VERIFICATION", global = true)]
     skip_email_verification: bool,
+
+    /// Send mail by posting it as JSON to this HTTPS endpoint, such as a
+    /// mail-sending worker, instead of through an SMTP server. Each mail is
+    /// `{"to", "subject", "text"}`; the endpoint chooses the sender.
+    #[arg(long, env = "MCPD_MAIL_HTTP_URL", global = true)]
+    mail_http_url: Option<String>,
+
+    /// The bearer token sent with each mail to --mail-http-url.
+    #[arg(long, env = "MCPD_MAIL_HTTP_TOKEN", global = true, hide_env_values = true)]
+    mail_http_token: Option<String>,
 }
 
 /// The `accounts` block of the config file.
@@ -410,7 +420,18 @@ fn account_settings(
     let enabled = f.accounts || cli.signup;
     let tls = SmtpTls::parse(f.smtp_tls.as_deref().unwrap_or("")).map_err(anyhow::Error::msg)?;
     let loopback = cli.listen.parse::<SocketAddr>().is_ok_and(|a| a.ip().is_loopback());
-    let mail = match f.smtp_host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+    let http_url = f.mail_http_url.as_deref().map(str::trim).filter(|u| !u.is_empty());
+    let smtp_host = f.smtp_host.as_deref().map(str::trim).filter(|h| !h.is_empty());
+    if http_url.is_some() && smtp_host.is_some() {
+        anyhow::bail!(
+            "--mail-http-url and --smtp-host are both set; mail goes one way, so keep one"
+        );
+    }
+    let mail = match smtp_host {
+        None if http_url.is_some() => MailConfig::Http(mcpd_server::mail::HttpMailConfig {
+            url: http_url.unwrap_or_default().to_owned(),
+            token: f.mail_http_token.clone().filter(|t| !t.is_empty()),
+        }),
         Some(host) => {
             let Some(from) = f.smtp_from.clone().filter(|f| !f.trim().is_empty()) else {
                 anyhow::bail!("--smtp-host is set with no --smtp-from; add the address mail is sent from, such as no-reply@example.com");

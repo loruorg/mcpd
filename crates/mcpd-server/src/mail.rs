@@ -91,11 +91,35 @@ impl std::fmt::Debug for SmtpConfig {
     }
 }
 
+/// An HTTP endpoint that sends mail.
+///
+/// Each mail is one `POST` with `Authorization: Bearer <token>` and the body
+/// `{"to", "subject", "text"}`. The endpoint chooses the sender; a 2xx answer
+/// means it took the mail.
+#[derive(Clone, Default)]
+pub struct HttpMailConfig {
+    /// Where mail is posted. `--mail-http-url`.
+    pub url: String,
+    /// The bearer token. `--mail-http-token`. Never printed.
+    pub token: Option<String>,
+}
+
+impl std::fmt::Debug for HttpMailConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpMailConfig")
+            .field("url", &self.url)
+            .field("token", &self.token.as_ref().map(|_| "<set>"))
+            .finish()
+    }
+}
+
 /// What to do with a mail.
 #[derive(Clone, Debug, Default)]
 pub enum MailConfig {
     /// Send it through this server.
     Smtp(SmtpConfig),
+    /// Post it as JSON to an HTTP endpoint, such as a mail-sending worker.
+    Http(HttpMailConfig),
     /// Write the link to the log at info level. For a daemon on a laptop, or a
     /// self-hosted one whose operator reads its log.
     #[default]
@@ -119,6 +143,7 @@ impl MailConfig {
                 s.tls.as_str(),
                 s.from
             ),
+            Self::Http(h) => format!("posted to {}", h.url),
             Self::Log => "no smtp server; links are written to the log".to_owned(),
             Self::Refuse => {
                 "no smtp server; sign-up, password reset and invitations are refused".to_owned()
@@ -176,6 +201,7 @@ pub struct Mailer {
     config: MailConfig,
     transport: Option<AsyncSmtpTransport<Tokio1Executor>>,
     from: Option<Mailbox>,
+    http: Option<reqwest::Client>,
 }
 
 /// A mail configuration that cannot be used, found at startup.
@@ -228,14 +254,34 @@ impl Mailer {
             }
             _ => (None, None),
         };
-        Ok(Self { config, transport, from })
+        let http = match &config {
+            MailConfig::Http(h) => {
+                if !(h.url.starts_with("https://") || h.url.starts_with("http://")) {
+                    return Err(MailError::Transport {
+                        host: h.url.clone(),
+                        reason: "--mail-http-url must start with https://".to_owned(),
+                    });
+                }
+                Some(
+                    reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(20))
+                        .build()
+                        .map_err(|e| MailError::Transport {
+                            host: h.url.clone(),
+                            reason: e.to_string(),
+                        })?,
+                )
+            }
+            _ => None,
+        };
+        Ok(Self { config, transport, from, http })
     }
 
     /// A mailer that writes links to the log. For tests and embedders that set
     /// nothing.
     #[must_use]
     pub fn log() -> Self {
-        Self { config: MailConfig::Log, transport: None, from: None }
+        Self { config: MailConfig::Log, transport: None, from: None, http: None }
     }
 
     /// Whether mail can go anywhere at all. False only for
@@ -276,6 +322,28 @@ impl Mailer {
                     link = link.unwrap_or(""),
                     "mail not sent: no smtp server"
                 );
+            }
+            MailConfig::Http(h) => {
+                let Some(client) = self.http.clone() else { return };
+                let mut request = client.post(&h.url).json(&serde_json::json!({
+                    "to": to,
+                    "subject": subject,
+                    "text": body,
+                }));
+                if let Some(token) = &h.token {
+                    request = request.bearer_auth(token);
+                }
+                let subject = subject.to_owned();
+                tasks.spawn(async move {
+                    // As with SMTP, the recipient is not logged.
+                    match request.send().await {
+                        Ok(r) if r.status().is_success() => {}
+                        Ok(r) => {
+                            tracing::error!(subject, status = r.status().as_u16(), "mail not sent")
+                        }
+                        Err(e) => tracing::error!(subject, "mail not sent: {e}"),
+                    }
+                });
             }
             MailConfig::Smtp(_) => {
                 let (Some(transport), Some(from)) = (self.transport.clone(), self.from.clone())
@@ -328,6 +396,51 @@ mod tests {
         assert_eq!(SmtpTls::parse("tls").unwrap(), SmtpTls::Tls);
         assert_eq!(SmtpTls::parse("none").unwrap(), SmtpTls::None);
         assert!(SmtpTls::parse("ssl3").unwrap_err().contains("starttls, tls or none"));
+    }
+
+    #[tokio::test]
+    async fn http_mail_is_posted_as_json_with_the_token() {
+        use axum::{extract::State, http::HeaderMap, routing::post, Json, Router};
+        type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>;
+        let seen: Seen = Seen::default();
+        let app = Router::new()
+            .route(
+                "/send",
+                post(|State(s): State<Seen>, h: HeaderMap, Json(v): Json<serde_json::Value>| async move {
+                    let auth = h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
+                    s.lock().unwrap().push((auth.to_owned(), v));
+                    "ok"
+                }),
+            )
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mailer = Mailer::new(MailConfig::Http(HttpMailConfig {
+            url: format!("http://{addr}/send"),
+            token: Some("t0ken".into()),
+        }))
+        .unwrap();
+        let tasks = tokio_util::task::TaskTracker::new();
+        mailer.send(&tasks, "ana@example.com", "Confirm", "Open this link".into(), None);
+        tasks.close();
+        tasks.wait().await;
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "Bearer t0ken");
+        assert_eq!(got[0].1["to"], "ana@example.com");
+        assert_eq!(got[0].1["subject"], "Confirm");
+        assert_eq!(got[0].1["text"], "Open this link");
+    }
+
+    #[test]
+    fn the_http_token_never_reaches_debug_output() {
+        let c = HttpMailConfig {
+            url: "https://mail.example/send".into(),
+            token: Some("s3cret-tok".into()),
+        };
+        assert!(!format!("{c:?}").contains("s3cret-tok"));
     }
 
     #[test]

@@ -20,6 +20,9 @@ rather than every commit.
 
 ### Added
 
+- **Mail over HTTPS, with `--mail-http-url` and `--mail-http-token`.** The
+  daemon posts each mail as JSON to an endpoint, such as a Cloudflare Email
+  Worker, for hosts where SMTP ports are closed.
 - **`--skip-email-verification`.** Sign-up opens the account at once, with no
   confirmation mail, for a daemon without a mail server.
 - **Prompt management.** Store prompts as numbered versions, text or chat
