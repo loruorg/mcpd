@@ -47,6 +47,7 @@
 
 pub mod client;
 pub mod context;
+pub mod experiment;
 pub mod logs;
 pub mod model_call;
 pub mod prompts;
@@ -65,6 +66,7 @@ pub use client::{
     DEFAULT_DEADLINE,
 };
 pub use context::{current, current_traceparent, SpanContext};
+pub use experiment::{RunExperiment, DATASET_ITEM_ATTRIBUTE, DEFAULT_EXPERIMENT_CONCURRENCY};
 pub use logs::{
     error_fields, log_level_from_severity, meets_level, parse_log_level, severity_number,
 };
@@ -87,11 +89,12 @@ pub use workflow::{
 /// The generated data model, shared by the server, the store and every SDK.
 pub use mcpd_core as model;
 pub use mcpd_core::{
-    AttemptStatus, Backoff, ConflictReason, CreatePromptRequest, Definition, DefinitionDocument,
-    DefinitionVersion, Effect, EntityKind, EventOutcome, FeedbackKind, LogLevel, MetricKind,
-    OnError, Prompt, PromptKind, Run, RunDetail, RunEvent, RunEventKind, RunStatus, ScoreSource,
+    AttemptStatus, Backoff, ConflictReason, CreatePromptRequest, DatasetItem, Definition,
+    DefinitionDocument, DefinitionVersion, Effect, EntityKind, EventOutcome, Experiment,
+    ExperimentResults, ExperimentStatus, FeedbackKind, LogLevel, MetricKind, OnError, Prompt,
+    PromptKind, Run, RunDetail, RunEvent, RunEventKind, RunStatus, ScoreSource, ScorerConfig,
     SpanError, SpanKind, SpanStatus, StepAttempt, StepConflict, StepError, StepErrorClass,
-    StepKind, StepLease, StepUsage, TokenUsage, WaitTimeout,
+    StepKind, StepLease, StepUsage, TokenUsage, Trajectory, WaitTimeout,
 };
 
 use std::sync::{Arc, Mutex};

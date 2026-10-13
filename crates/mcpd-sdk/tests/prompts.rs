@@ -314,6 +314,8 @@ async fn list_traces_sends_the_new_filters_and_nothing_else() {
         has_score: Some("helpfulness".to_owned()),
         score_above: Some(0.5),
         has_feedback: Some(false),
+        experiment_id: Some("exp 1".to_owned()),
+        preview: Some(true),
         ..TraceFilter::default()
     })
     .await
@@ -322,7 +324,7 @@ async fn list_traces_sends_the_new_filters_and_nothing_else() {
     assert_eq!(
         server.requests()[0].query(),
         "project=shop&max_duration_ms=5000&max_cost=0.25&min_tokens=1000&has_score=helpfulness\
-         &score_above=0.5&has_feedback=false"
+         &score_above=0.5&has_feedback=false&experiment_id=exp+1&preview=true"
     );
 }
 

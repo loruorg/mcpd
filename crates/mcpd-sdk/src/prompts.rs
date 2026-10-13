@@ -370,7 +370,7 @@ impl PromptStore {
 
 /// A path segment with everything but the unreserved characters escaped. A
 /// prompt name may contain `/`, and sent bare it would address another route.
-fn segment(s: &str) -> String {
+pub(crate) fn segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
