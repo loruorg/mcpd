@@ -3,6 +3,8 @@ import Doc from '@/layouts/Doc.astro'
 import Waterfall from '@/components/Waterfall.astro'
 import Command from '@/components/Command.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import fs from 'node:fs'
+import path from 'node:path'
 import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
 
 /* I link interni restano scritti come route inglesi e vengono localizzati qui.
@@ -11,6 +13,22 @@ import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
 const code = localeOf(Astro.url.pathname)
 const url = (route: string) =>
   urlFor(route, localesWithPage(route).includes(code) ? code : DEFAULT_LOCALE)
+
+/* Il listino integrato, letto in fase di build dal file che il daemon incorpora,
+   così i conteggi e le date qui sotto non possono discostarsi da quello con cui
+   valorizza il binario. */
+const book = JSON.parse(
+  fs.readFileSync(path.resolve(process.cwd(), '..', 'crates/mcpd-core/prices/builtin.json'), 'utf8'),
+)
+const bookTables = [
+  { name: 'models', note: 'prezzi di listino dei produttori, usati quando non si applica nessuna tabella di provider', count: Object.keys(book.models).length },
+  ...Object.entries(book.providers as Record<string, Record<string, unknown>>)
+    .map(([name, t]) => ({ name: `providers.${name}`, note: '', count: Object.keys(t).length }))
+    .sort((a, b) => b.count - a.count),
+]
+const tiered = Object.values(book.models as Record<string, { tiers?: unknown[] }>).filter((m) => m.tiers?.length).length
+const multipliers = Object.entries(book.service_tier_multipliers as Record<string, Record<string, number>>)
+  .flatMap(([p, t]) => Object.entries(t).map(([tier, m]) => ({ provider: p, tier, m })))
 
 /* Scritte qui invece che lette da un programma di esempio: sono query che chi
    legge esegue contro il proprio daemon, non codice che la CI può eseguire. */
@@ -215,6 +233,11 @@ const response = [
         <td>Addebitati a <code>output</code>.</td>
       </tr>
       <tr>
+        <td><code>image_input</code>, <code>image_output</code></td>
+        <td>Token di immagine, dove un provider li valorizza a parte rispetto al testo.</td>
+        <td>Addebitati a <code>input</code> o a <code>output</code>.</td>
+      </tr>
+      <tr>
         <td><code>reasoning</code></td>
         <td>Token di ragionamento nascosti, dove un provider li fattura a parte.</td>
         <td>
@@ -226,6 +249,32 @@ const response = [
       </tr>
     </tbody>
   </table>
+
+  <h2>Prompt lunghi e livelli di servizio</h2>
+  <p>
+    Diversi provider fanno pagare di più ogni token di un prompt lungo. La voce
+    di un modello può portare dei <code>tiers</code>, ognuno con una soglia
+    <code>above_input_tokens</code> e tariffe proprie. Il prompt si misura
+    insieme ai suoi token in cache, e quando supera una soglia l’intera
+    chiamata viene valorizzata a quel livello: un prompt da 300.000 token a
+    <code>gemini-2.5-pro</code> paga la tariffa di contesto lungo su tutti i
+    300.000. Un contatore che il livello tralascia tiene la tariffa base.
+  </p>
+  <p>
+    Una chiamata su un livello di servizio più economico, come una richiesta
+    batch, viene valorizzata con lo sconto del provider. mcpd legge il livello
+    da <code>gen_ai.response.service_tier</code>, poi da
+    <code>gen_ai.openai.response.service_tier</code>,
+    <code>mcpd.service_tier</code>, <code>llm.service_tier</code> e dagli
+    attributi di richiesta corrispondenti. <code>default</code>,
+    <code>standard</code> e <code>auto</code> valgono come livello standard. Un
+    modello può portare tariffe proprie per un livello sotto
+    <code>service_tiers</code>; altrimenti si applicano i
+    <code>service_tier_multipliers</code> del listino per quel provider. La
+    cifra registra il livello, quindi una chiamata batch archivia
+    <code>builtin+batch</code> come listino e si legge a metà prezzo per una
+    ragione precisa.
+  </p>
 
   <h2>Un token in cache si addebita una volta sola</h2>
   <p>
@@ -254,14 +303,10 @@ const response = [
     è il totale riportato meno ogni campo contato.
   </p>
   <p>
-    Una regola copre i contatori senza tariffa. Un contatore per cui il listino non
-    tiene nessuna tariffa viene addebitato solo come parte di quello che resta,
-    quindi, quando il provider ha mandato anche un conteggio <code>text</code>,
-    non viene addebitato affatto. I token di ragionamento stanno lì ogni volta
-    che il tuo listino non dà loro una tariffa propria, e dichiararne una lo
-    sistema. I token delle immagini ci stanno sempre, perché un listino non ha
-    nessuna tariffa per le immagini da dare, quindi su un carico fortemente
-    multimodale leggi la cifra come bassa, non come esatta.
+    Un contatore per cui il listino non tiene nessuna tariffa viene addebitato
+    come parte di quello che resta. Dai ai token di ragionamento o di immagine
+    una tariffa propria quando il tuo provider li fattura a parte e riporta
+    anche un conteggio <code>text</code> separato.
   </p>
 
   <h2>Un modello sconosciuto non ha costo, non ha un costo di zero</h2>
@@ -270,8 +315,8 @@ const response = [
     senza nessun campo di costo. Non archivia uno zero.
   </p>
   <p>
-    Zero è un’affermazione: questa chiamata era gratis. Assente dice che il
-    listino non tiene nessun prezzo per questa chiamata. Portano a decisioni diverse, e
+    Zero è un’affermazione: questa chiamata era gratis. Assente è un’ammissione:
+    non sappiamo quanto è costata questa chiamata. Portano a decisioni diverse, e
     uno strumento che riporta la seconda come la prima sta mentendo su una
     fattura. La stessa regola attraversa il percorso di lettura, dove
     un’esecuzione i cui span non sommano niente viene restituita senza cifra di
@@ -291,9 +336,11 @@ const response = [
   <p>
     L’id su uno span è quello che ha mandato il tuo client, e i client lo
     decorano. Un gateway ci mette davanti il fornitore, un cloud ci mette davanti
-    la regione, un provider ci appunta una data di rilascio. Un listino è
-    indicizzato su nomi di modello nudi, quindi la ricerca prova quattro cose in
-    ordine e si ferma alla prima che va a segno.
+    la regione, un provider ci appunta una data di rilascio. Quando lo span
+    nomina un provider, si cerca prima nella tabella di quel provider nel
+    listino e poi nella tabella <code>models</code> dei produttori. In ogni
+    tabella, la ricerca prova questi passi in ordine e si ferma al primo che va
+    a segno.
   </p>
 
   <table>
@@ -327,74 +374,111 @@ const response = [
 
   <p>
     Vengono riconosciuti sia i suffissi <code>-YYYY-MM-DD</code> sia i suffissi
-    <code>-YYYYMMDD</code>. Fallire tutti e quattro i passi è un esito normale e
-    non un errore: vuol dire nessun costo, come sopra.
+    <code>-YYYYMMDD</code>. Quando nessuno dei quattro trova il modello, girano
+    di nuovo sull’id senza l’etichetta di versione del cloud, così
+    <code>claude-sonnet-4-5@20250929</code> su Vertex AI e
+    <code>anthropic.claude-sonnet-4-5-20250929-v1:0</code> su Bedrock si
+    risolvono, e poi con i punti fra le cifre scritti come trattini, così
+    <code>claude-sonnet-4.5</code> trova <code>claude-sonnet-4-5</code>.
+    Nessuna corrispondenza vuol dire nessun costo, come sopra.
+  </p>
+  <p>
+    Un provider si trova nello stesso modo tollerante: il nome così com’è, un
+    alias che il listino elenca (<code>azure</code> per
+    <code>az.ai.openai</code>), e il nome senza un segmento iniziale di
+    fornitore, così <code>aws.bedrock</code> trova la tabella
+    <code>bedrock</code>.
   </p>
 
   <h2>Il listino che arriva insieme</h2>
   <p>
-    mcpd porta un piccolo listino integrato, così <code>docker run</code> produce
-    cifre vere senza nessuna configurazione. Si chiama <code>builtin</code>,
-    valorizza in USD, e ogni costo che produce registra quel nome.
+    mcpd porta un listino integrato, così <code>docker run</code> produce cifre
+    vere senza nessuna configurazione. Si chiama <code>builtin</code>, valorizza
+    in USD, e ogni costo che produce registra quel nome. Contiene i prezzi di
+    listino di tutti i principali fornitori di modelli e dei cloud e dei
+    gateway che rivendono i loro modelli, come stavano al {book.as_of}. {tiered}
+    dei suoi modelli dei produttori portano livelli di contesto lungo.
   </p>
 
-  {/* Trascritto da `builtin_book` in crates/mcpd-core/src/cost.rs. Quando lì si
-      muove una tariffa, si muove anche qui. */}
   <table>
     <thead>
-      <tr>
-        <th>Modello</th><th>Input</th><th>Output</th><th>Lettura da cache</th><th>Scrittura in cache, 5 min</th><th>Scrittura in cache, 1 ora</th>
-      </tr>
+      <tr><th>Tabella</th><th>Modelli</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>claude-opus-4</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-1</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-5</code></td><td>5.00</td><td>25.00</td><td>0.50</td><td>6.25</td><td>10.00</td></tr>
-      <tr><td><code>claude-sonnet-4</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-sonnet-4-5</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-haiku-4-5</code></td><td>1.00</td><td>5.00</td><td>0.10</td><td>1.25</td><td>2.00</td></tr>
-      <tr><td><code>claude-3-5-haiku</code></td><td>0.80</td><td>4.00</td><td>0.08</td><td>1.00</td><td>1.60</td></tr>
-      <tr><td><code>gpt-4o</code></td><td>2.50</td><td>10.00</td><td>1.25</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>gpt-4o-mini</code></td><td>0.15</td><td>0.60</td><td>0.075</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>gpt-4.1</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>gpt-4.1-mini</code></td><td>0.40</td><td>1.60</td><td>0.10</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>o3</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>o4-mini</code></td><td>1.10</td><td>4.40</td><td>0.275</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>gemini-2.5-pro</code></td><td>1.25</td><td>10.00</td><td>0.31</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>gemini-2.5-flash</code></td><td>0.30</td><td>2.50</td><td>0.075</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>text-embedding-3-small</code></td><td>0.02</td><td>0.00</td><td>a input</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>text-embedding-3-large</code></td><td>0.13</td><td>0.00</td><td>a input</td><td>a input</td><td>a input</td></tr>
+      {bookTables.map((t) => (
+        <tr><td><code>{t.name}</code>{t.note && <>: {t.note}</>}</td><td>{t.count}</td></tr>
+      ))}
+    </tbody>
+  </table>
+
+  <table>
+    <thead>
+      <tr><th>Provider</th><th>Livello di servizio</th><th>Moltiplicatore</th></tr>
+    </thead>
+    <tbody>
+      {multipliers.map((m) => (
+        <tr><td><code>{m.provider}</code></td><td><code>{m.tier}</code></td><td>{m.m}</td></tr>
+      ))}
     </tbody>
   </table>
 
   <p>
-    USD per milione di token, come stava il listino l’ultima volta che è stato
-    confrontato con un catalogo di modelli di terze parti, data che il listino
-    registra come il suo <code>as_of</code>. Le voci di Anthropic portano tutte e
-    due le tariffe di scrittura in cache perché il daemon ripiega dalla tariffa
-    da un’ora a quella da cinque minuti, e un listino che tralasciasse la più
-    lunga fatturerebbe in difetto senza dirlo. OpenAI non fa pagare niente per
-    scrivere nella sua cache, quindi lì una scrittura in cache è fatturata alla
-    tariffa di input. <code>gemini-2.5-flash</code> porta anche una tariffa di
-    input audio di 1.00; ogni altra voce valorizza l’audio alla sua tariffa di
-    testo. Non c’è nessun <code>claude-haiku-4</code>: l’id che Anthropic serve è
-    <code>claude-haiku-4-5</code>, e un id che non si risolve a niente resta
-    senza prezzo invece di essere indovinato.
+    Questi sono prezzi di listino pubblicati. Per vedere a quanto è valorizzato
+    un modello, chiedilo al binario, che usa la stessa ricerca dell’ingest:
   </p>
+
+  <Command class="not-prose my-6" command="mcpd prices show claude-sonnet-4-5 --provider aws.bedrock" />
+
+  <h2>Il tuo listino</h2>
   <p>
-    Questi sono prezzi di listino pubblicati, in dollari USA. Il daemon valorizza
-    con la tabella integrata qui sopra, e un modello che quella tabella non
-    nomina resta senza prezzo. Il listino è corto di proposito, perché uno lungo
-    invecchierebbe in più punti.
+    Carica un listino tuo con <code>--price-book</code>, o con la chiave
+    <code>price_book</code> del file di configurazione. Un listino è JSON: un
+    <code>id</code>, una <code>currency</code> ISO 4217, e le tabelle
+    <code>models</code> e <code>providers</code>, ognuna delle quali associa un
+    id di modello alle tariffe qui sopra. Con <code>"extends": "builtin"</code>
+    viene steso sopra il listino integrato, quindi gli servono solo le tariffe
+    che paghi in modo diverso:
   </p>
+
+  <pre><code>{`{
+  "id": "acme-2026-10",
+  "currency": "USD",
+  "extends": "builtin",
+  "providers": {
+    "bedrock": {
+      "anthropic.claude-sonnet-4-5-20250929-v1:0": { "input": 2.7, "output": 13.5 }
+    }
+  },
+  "models": {
+    "our-finetune": { "input": 0.5, "output": 1.5 }
+  }
+}`}</code></pre>
+
   <p>
-    Il listino fa parte dello stato del server: per sostituirlo, incorpora mcpd
-    come libreria e passane uno a
-    <code>AppState::with_price_book</code>. Un listino è un id, una valuta ISO
-    4217 e una mappa da id di modello a tariffe, e ogni cifra che produce porta
-    impresso il suo id, così due listini si possono distinguere a cose fatte. I
-    prezzi dentro un progetto condividono una valuta sola: mcpd somma gli span
-    di un’esecuzione per aritmetica e non converte fra valute.
+    mcpd controlla il listino all’avvio e rifiuta, nominando la voce, un
+    listino con una tariffa negativa, livelli fuori ordine o una valuta che non
+    è un codice di tre lettere. Le cifre prodotte dal tuo listino registrano il
+    suo id, così a cose fatte si distinguono dalle stime a prezzo di listino.
+    Le esecuzioni di un progetto sommano i propri span per aritmetica, quindi
+    tieni ogni tariffa di un listino in una sola valuta.
+  </p>
+
+  <h2>Aggiornare le tariffe</h2>
+  <p>
+    Le tariffe si muovono ogni poche settimane. <code>mcpd prices refresh</code>
+    scrive un listino a partire da un catalogo pubblico di modelli, così un
+    deployment può prendere le tariffe nuove senza una nuova release:
+  </p>
+
+  <Command class="not-prose my-6" command="mcpd prices refresh --out /etc/mcpd/prices.json" />
+
+  <p>
+    Punta <code>--price-book</code> sul file e riavvia. Un modello che il
+    listino in <code>--out</code> già valorizza e che il catalogo non elenca
+    più viene tenuto, perché il traffico verso un modello ritirato continua ad
+    arrivare; <code>--prune</code> lo toglie. <code>--source</code> legge un
+    altro catalogo, un URL o un file, nella stessa forma. Il listino integrato
+    è scritto dallo stesso comando.
   </p>
 
   <h2>Rileggere i soldi</h2>
