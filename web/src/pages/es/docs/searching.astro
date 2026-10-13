@@ -2,6 +2,7 @@
 import Doc from '@/layouts/Doc.astro'
 import SearchDemo from '@/components/SearchDemo.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 /* These samples are written here rather than read from an example program,
@@ -324,8 +325,8 @@ const locale = localeOf(Astro.url.pathname)
         <td>La ventana, medida contra la hora de inicio de la ejecución.</td>
       </tr>
       <tr>
-        <td><code>min_duration_ms</code></td>
-        <td>Ejecuciones al menos así de lentas, en milisegundos.</td>
+        <td><code>min_duration_ms</code>, <code>max_duration_ms</code></td>
+        <td>Ejecuciones al menos, o como mucho, así de lentas, en milisegundos.</td>
       </tr>
       <tr>
         <td><code>min_cost</code></td>
@@ -336,12 +337,43 @@ const locale = localeOf(Astro.url.pathname)
         </td>
       </tr>
       <tr>
+        <td><code>max_cost</code></td>
+        <td>Ejecuciones que costaron como mucho esto.</td>
+      </tr>
+      <tr>
+        <td><code>min_tokens</code></td>
+        <td>Ejecuciones que usaron al menos esta cantidad de tokens, sumando entrada y salida.</td>
+      </tr>
+      <tr>
         <td><code>has_score</code></td>
         <td>Ejecuciones que llevan una puntuación de este id de evaluador.</td>
       </tr>
       <tr>
         <td><code>score_below</code></td>
         <td>Con <code>has_score</code>: las ejecuciones que ese evaluador dejó por debajo de este valor.</td>
+      </tr>
+      <tr>
+        <td><code>score_above</code></td>
+        <td>
+          Con <code>has_score</code>: las ejecuciones que ese evaluador dejó por
+          encima de este valor. Si además va <code>score_below</code>, una misma
+          puntuación tiene que quedar entre los dos.
+        </td>
+      </tr>
+      <tr>
+        <td><code>preview</code></td>
+        <td>
+          <code>true</code> para rellenar el <code>input_preview</code> y el
+          <code>output_preview</code> de cada ejecución. Queda anotado en el
+          registro de auditoría.
+        </td>
+      </tr>
+      <tr>
+        <td><code>has_feedback</code></td>
+        <td>
+          <code>true</code> para las ejecuciones sobre las que una persona dio
+          feedback, <code>false</code> para las que no tienen ninguno.
+        </td>
       </tr>
       <tr>
         <td><code>sort</code></td>
@@ -388,9 +420,14 @@ const locale = localeOf(Astro.url.pathname)
   <p>
     No hay una segunda lista de ejecuciones más ligera, porque la primera ya lo
     es. La proyección de traza almacenada no lleva entrada, ni salida, ni
-    atributo alguno: nombres, recuentos, tiempos, costo, etiquetas y
-    correlación, y nada de lo que dijo un modelo. Lo que trae el payload es
-    abrir una ejecución.
+    atributos: nombres, recuentos, tiempos, costo, etiquetas y correlación.
+    Pide con <code>preview=true</code> y cada fila añade
+    <code>input_preview</code> y <code>output_preview</code>, el comienzo de la
+    entrada y de la salida del paso raíz como texto plano, como mucho 240
+    caracteres cada uno; para una entrada de chat, la vista previa es el último
+    mensaje del usuario. Una lectura de la lista con vistas previas lleva texto
+    que vio un modelo, así que queda anotada en el registro de auditoría. Lo que
+    trae el payload completo es abrir una ejecución.
   </p>
   <p>
     Medido sobre una ejecución realista, un agente de soporte de ocho pasos que
@@ -444,11 +481,19 @@ const locale = localeOf(Astro.url.pathname)
     <code>GET /v1/api/spans</code>, <code>/v1/api/logs</code>,
     <code>/v1/api/scores</code>, <code>/v1/api/metrics</code> y
     <code>/v1/api/feedback</code> imponen cada uno su propio vocabulario de la
-    misma manera. Dos conviene conocerlos antes de topártelos: la lista de
-    puntuaciones no acepta <code>order</code>, porque va de más nueva a más
-    antigua y su cursor solo compara en un sentido, y la lista de feedback
-    exige un <code>trace_id</code>, porque el feedback se lee ejecución a
-    ejecución.
+    misma manera. La lista de puntuaciones no acepta <code>order</code>,
+    porque va de más nueva a más antigua y su cursor solo compara en un
+    sentido. La lista de feedback lee un proyecto entero, de más nuevo a más
+    antiguo, y se acota por <code>trace_id</code>, <code>span_id</code>,
+    <code>kind</code>, <code>author_kind</code> y una ventana
+    <code>from</code> y <code>to</code>, con un cursor para la página
+    siguiente. La lista de logs filtra por la correlación de una línea:
+    <code>environment</code>, <code>service_name</code>,
+    <code>service_version</code>, <code>session_id</code>,
+    <code>thread_id</code>, <code>user_id</code>, <code>run_id</code>,
+    <code>request_id</code>, <code>experiment_id</code> y
+    <code>release</code>, cada uno una coincidencia exacta. Envía un id de
+    usuario tal como lo conoces; se le aplica el hash igual que al almacenado.
   </p>
 
   <h2 id="filling-a-filter-box">Rellenar una caja de filtro</h2>
@@ -517,6 +562,22 @@ const locale = localeOf(Astro.url.pathname)
     <code>signal=scores</code> se rechaza en vez de responderse con una página
     vacía.
   </p>
+
+  <h3>Un seguimiento en vivo</h3>
+  <p>
+    Envía la misma solicitud con <code>Accept: text/event-stream</code> y se
+    queda abierta. El daemon sondea cada segundo y envía cada lote que trae
+    filas como un evento <code>delta</code> que contiene la respuesta de
+    arriba, con el cursor posterior como id del evento. Un cliente que se cae
+    se reconecta con ese cursor y no se pierde nada. Un seguimiento se cierra a
+    los treinta minutos, y el cliente se reconecta de la misma manera.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="seguir las ejecuciones nuevas a medida que llegan"
+    command="curl -N -H 'accept: text/event-stream' 'localhost:4317/v1/api/deltas?signal=traces'"
+  />
 
   <h2>Lo que puede hacer este despliegue</h2>
   <p>
@@ -602,6 +663,7 @@ const locale = localeOf(Astro.url.pathname)
   <p>
     Acepta <code>q</code>, <code>kind</code>, <code>status</code>,
     <code>name</code>, <code>model</code>, <code>trace_id</code>,
+    <code>prompt</code>, <code>prompt_version</code>,
     <code>from</code>, <code>to</code>, <code>min_duration_ms</code>,
     <code>sort</code>, <code>order</code>, <code>limit</code> y
     <code>cursor</code>, con los mismos significados y los mismos valores por
