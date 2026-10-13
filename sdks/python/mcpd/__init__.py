@@ -81,6 +81,11 @@ from ._generated import (
     OutputTokenDetails,
     Page,
     Project,
+    CreatePromptRequest,
+    Prompt,
+    PromptKind,
+    PromptLabelRequest,
+    PromptVersionsResponse,
     RedactionMode,
     SamplingKind,
     Score,
@@ -121,6 +126,7 @@ from .logs import (
     parse_log_level,
     severity_number,
 )
+from .prompts import PromptRenderError, render_prompt
 from .runs import DefinitionsApi, EventsApi, RunFailedError, RunResult, RunsApi, StepConflictError, StepsApi
 from .sinks import ConsoleSink, RecordingSink, Sink
 from .span import Span
@@ -158,6 +164,8 @@ __all__ = [
     "new_trace_id",
     "parse_traceparent",
     "records",
+    "PromptRenderError",
+    "render_prompt",
     # The logging signal: severity numbers both ways, the level floor, and the
     # serialiser that keeps an exception from costing its batch.
     "describe_error",
@@ -255,6 +263,11 @@ __all__ = [
     "OutputTokenDetails",
     "Page",
     "Project",
+    "CreatePromptRequest",
+    "Prompt",
+    "PromptKind",
+    "PromptLabelRequest",
+    "PromptVersionsResponse",
     "RedactionMode",
     "SamplingKind",
     "Score",

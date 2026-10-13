@@ -460,6 +460,30 @@ class Span:
         return self
 
     @_guard
+    def set_prompt(self, prompt: Any) -> "Span":
+        """Link the prompt this step used, so `list_spans(prompt=...)` finds it.
+
+        Sets `mcpd.prompt.name` and, unless it is a fallback (version 0),
+        `mcpd.prompt.version`. A missing or malformed prompt sets nothing.
+        """
+        if prompt is None:
+            return self
+        if isinstance(prompt, Mapping):
+            name, version = prompt.get("name"), prompt.get("version")
+        else:
+            name, version = getattr(prompt, "name", None), getattr(prompt, "version", None)
+        # `bool` is an `int`, and `True` as a version would be a lie on the span.
+        if not isinstance(name, str) or not name:
+            return self
+        if not isinstance(version, int) or isinstance(version, bool) or version < 0:
+            return self
+        add: Dict[str, Any] = {"mcpd.prompt.name": name}
+        if version > 0:
+            add["mcpd.prompt.version"] = version
+        self._attributes = {**(self._attributes or {}), **add}
+        return self
+
+    @_guard
     def set_tags(self, tags: Sequence[str]) -> "Span":
         """Label the run. mcpd reads tags from the root span, where they label the trace."""
         self._tags = [str(t) for t in tags]
