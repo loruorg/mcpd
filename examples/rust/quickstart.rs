@@ -12,7 +12,10 @@
 //! cargo run -p mcpd-sdk --example quickstart
 //! ```
 
-use mcpd_sdk::{Config, FeedbackKind, Include, Mcpd, Scale, SpanKind, Target};
+use mcpd_sdk::{
+    render_prompt, Config, CreatePromptRequest, FeedbackKind, GetPrompt, Include, Mcpd,
+    PromptFallback, Scale, SpanKind, Target,
+};
 use serde_json::json;
 
 #[tokio::main]
@@ -30,6 +33,23 @@ async fn main() {
     // #endregion init
 
     let question = "Where is order 5512?";
+
+    // Store the prompt the agent reads below and label it `production`.
+    // Posting the same body again stores nothing, so this is safe on every start.
+    let stored = mcpd
+        .create_prompt(&CreatePromptRequest {
+            name: "support/answer".into(),
+            kind: None,
+            template: Some("Answer {{ customer }}'s question: {{question}}".into()),
+            messages: None,
+            config: None,
+            note: None,
+            labels: Some(vec!["production".into()]),
+        })
+        .await;
+    if let Err(e) = stored {
+        eprintln!("could not store the prompt: {e}");
+    }
 
     // #region trace
     // The root span is the run. The sampling decision is made here, once, and
@@ -58,6 +78,28 @@ async fn main() {
     run.event_with("fell back to email", json!({ "after": "sms gateway timeout" }));
 
     // #endregion trace
+
+    // #region prompt
+    // The version labelled `production`: moving the label releases another
+    // version with no deploy. A copy fetched once outlives a daemon outage, and
+    // the fallback covers a process that has never reached mcpd.
+    let options = GetPrompt::new()
+        .label("production")
+        .fallback(PromptFallback::Template("Answer this question: {{question}}".into()));
+    match mcpd.get_prompt("support/answer", &options).await {
+        Ok(prompt) => match render_prompt(&prompt, [("customer", "Ada"), ("question", question)]) {
+            Ok(rendered) => {
+                let call = run.child_of("draft with the prompt", SpanKind::ModelGeneration);
+                // Links the span to this version, so list_spans can find it.
+                call.set_prompt(&prompt);
+                call.set_input(rendered.text());
+                call.end();
+            }
+            Err(missing) => eprintln!("{missing}"),
+        },
+        Err(e) => eprintln!("could not fetch the prompt: {e}"),
+    }
+    // #endregion prompt
     // The model call. Token usage is what mcpd prices at ingest, so this is the
     // one field worth never leaving out.
     let answer = {

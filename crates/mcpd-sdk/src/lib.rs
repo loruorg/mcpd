@@ -49,6 +49,7 @@ pub mod client;
 pub mod context;
 pub mod logs;
 pub mod model_call;
+pub mod prompts;
 mod queue;
 pub mod runs;
 pub mod sink;
@@ -68,6 +69,10 @@ pub use logs::{
 pub use model_call::{
     response_facts, response_shape, usage_from_anthropic, usage_from_openai, ResponseFacts,
 };
+pub use prompts::{
+    render_prompt, GetPrompt, PromptFallback, PromptRenderError, Rendered, DEFAULT_PROMPT_LABEL,
+    DEFAULT_PROMPT_TTL,
+};
 pub use runs::{ClaimSteps, PublishEvent, RunFilter, RunResult, StartRun};
 pub use sink::{ConsoleSink, RecordingSink, Sink};
 pub use span::Span;
@@ -79,11 +84,11 @@ pub use workflow::{
 /// The generated data model, shared by the server, the store and every SDK.
 pub use mcpd_core as model;
 pub use mcpd_core::{
-    AttemptStatus, Backoff, ConflictReason, Definition, DefinitionDocument, DefinitionVersion,
-    Effect, EntityKind, EventOutcome, FeedbackKind, LogLevel, MetricKind, OnError, Run, RunDetail,
-    RunEvent, RunEventKind, RunStatus, ScoreSource, SpanError, SpanKind, SpanStatus, StepAttempt,
-    StepConflict, StepError, StepErrorClass, StepKind, StepLease, StepUsage, TokenUsage,
-    WaitTimeout,
+    AttemptStatus, Backoff, ConflictReason, CreatePromptRequest, Definition, DefinitionDocument,
+    DefinitionVersion, Effect, EntityKind, EventOutcome, FeedbackKind, LogLevel, MetricKind,
+    OnError, Prompt, PromptKind, Run, RunDetail, RunEvent, RunEventKind, RunStatus, ScoreSource,
+    SpanError, SpanKind, SpanStatus, StepAttempt, StepConflict, StepError, StepErrorClass,
+    StepKind, StepLease, StepUsage, TokenUsage, WaitTimeout,
 };
 
 use std::sync::{Arc, Mutex};

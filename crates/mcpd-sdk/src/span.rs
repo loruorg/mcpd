@@ -483,6 +483,25 @@ impl Span {
         self
     }
 
+    /// Link the prompt this step used, as `mcpd.prompt.name` and
+    /// `mcpd.prompt.version`, so [`Mcpd::list_spans`](crate::Mcpd::list_spans)
+    /// can find every span that used it.
+    ///
+    /// A fallback prompt has version 0, which no stored version has, so it
+    /// sets the name only. A prompt with no name sets nothing.
+    pub fn set_prompt(&self, prompt: &mcpd_core::Prompt) -> &Self {
+        if prompt.name.is_empty() {
+            return self;
+        }
+        let mut add = serde_json::Map::new();
+        add.insert("mcpd.prompt.name".to_owned(), serde_json::Value::from(prompt.name.as_str()));
+        if prompt.version > 0 {
+            add.insert("mcpd.prompt.version".to_owned(), serde_json::Value::from(prompt.version));
+        }
+        self.edit(|r| merge_attributes(r, add));
+        self
+    }
+
     /// Kind-specific structured detail.
     pub fn set_attributes(&self, attributes: serde_json::Value) -> &Self {
         self.edit(|r| r.attributes = Some(attributes));

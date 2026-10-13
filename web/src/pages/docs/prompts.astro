@@ -1,0 +1,89 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import PromptLabels from '@/components/PromptLabels.astro'
+---
+
+<Doc
+  title="Prompts"
+  description="Versioned prompts with labels such as production and staging, fetched and rendered by the SDKs, cached in the process, and linked to the steps that used them."
+  lede="Change a prompt without a deploy, and see which version wrote each answer."
+  og="docs"
+>
+  <h2>Versions and labels</h2>
+  <p>
+    A prompt is a name and a list of versions. A version is a text template or a
+    list of chat messages, with <code>{'{{variable}}'}</code> placeholders and
+    the model settings you want stored beside it. A version never changes once
+    stored; a new body is a new version, numbered by the daemon. Posting a body
+    identical to the latest version stores nothing, so a deploy that posts its
+    prompts on every start is a no-op when nothing changed.
+  </p>
+  <p>
+    A label points at one version. Your code fetches by label, usually
+    <code>production</code>, so releasing a prompt is moving the label to the
+    new version and rolling it back is moving it to the old one. Neither needs
+    a deploy. <code>latest</code> is reserved and always means the newest
+    version.
+  </p>
+
+  <PromptLabels class="not-prose my-8" />
+
+  <Command
+    class="not-prose my-6"
+    title="store a version, then release it"
+    command={`curl -X POST localhost:4317/v1/api/prompts \\
+  -H 'content-type: application/json' \\
+  -d '{"name": "support/reply", "messages": [{"role": "system", "content": "Answer {{customer}} briefly."}]}'
+curl -X PUT localhost:4317/v1/api/prompts/support%2Freply/labels/production \\
+  -H 'content-type: application/json' -d '{"version": 1}'`}
+  />
+
+  <h2>Fetching and rendering</h2>
+  <p>
+    Each SDK fetches a prompt by name and label and renders it with your
+    variables in the process; the daemon never renders one. With no label and
+    no version the SDK asks for <code>production</code>, and falls back to the
+    latest version when no version carries it. A variable the prompt names and
+    you did not pass is an error naming it.
+  </p>
+  <p>
+    Fetched prompts are cached for 60 seconds by default. After that the SDK
+    fetches again, and if the daemon does not answer it keeps serving the copy
+    it has, so an outage does not stop an agent that fetched once. Pass a
+    fallback template for the first start, before anything was fetched.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    only={['typescript', 'python', 'rust', 'go', 'kotlin', 'elixir']}
+    region="prompt"
+    title="fetch, render, link"
+  />
+
+  <h2>Linking a step to its prompt</h2>
+  <p>
+    Link the model span to the prompt it ran and the span carries
+    <code>mcpd.prompt.name</code> and <code>mcpd.prompt.version</code>.
+    <code>GET /v1/api/spans?prompt=support/reply&amp;prompt_version=2</code>
+    lists every step that ran version 2, which is how a regression after a
+    release is traced back to the change that caused it.
+  </p>
+
+  <h2>In the app</h2>
+  <p>
+    The Prompts screen lists every prompt at its latest version. Open one to
+    read each version, what changed from the one before, the labels on it and
+    the steps that ran it, to move a label, and to store a new version.
+  </p>
+
+  <h2>Endpoints</h2>
+  <ul>
+    <li><code>GET /v1/api/prompts</code>: every prompt at its latest version.</li>
+    <li><code>POST /v1/api/prompts</code>: store a version.</li>
+    <li><code>GET /v1/api/prompts/{'{name}'}</code>: one version, by <code>label</code> or <code>version</code>.</li>
+    <li><code>GET /v1/api/prompts/{'{name}'}/versions</code>: every version, newest first.</li>
+    <li><code>PUT</code> and <code>DELETE /v1/api/prompts/{'{name}'}/labels/{'{label}'}</code>: move or remove a label.</li>
+  </ul>
+</Doc>
