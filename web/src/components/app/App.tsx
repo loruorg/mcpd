@@ -1,9 +1,10 @@
 /**
  * The operator interface, and the way between its screens.
  *
- * Six screens read the same daemon: the runs explorer, one run read back as
+ * Every screen reads the same daemon: the runs explorer, one run read back as
  * the conversation its steps encode, the threads those runs group into, the
- * log stream, the spend breakdown and the durable runs. They are one
+ * log stream, the spend breakdown and the durable runs, then evaluations,
+ * datasets, metrics and monitors (`more-screens.tsx`). They are one
  * application rather than six pages because the whole interface is a static
  * bundle that the daemon serves itself, and because moving from a log line to
  * the run that wrote it should not cost a page load.
@@ -22,10 +23,20 @@ import Cost from './Cost'
 import Workflows from './Workflows'
 import Messages from './Messages'
 import Threads from './ThreadPanel'
+import { MORE_SCREENS } from './more-screens'
+import type { MoreScreenId } from './more-screens'
 
 /* `runs` is the trace explorer, the first screen and the name every link into
    it has carried; the durable runs the daemon walks are `workflows`. */
-type ScreenId = 'runs' | 'messages' | 'threads' | 'logs' | 'spend' | 'workflows' | 'account'
+type ScreenId =
+  | 'runs'
+  | 'messages'
+  | 'threads'
+  | 'logs'
+  | 'spend'
+  | 'workflows'
+  | 'account'
+  | MoreScreenId
 
 const SCREENS: { id: ScreenId; label: string }[] = [
   { id: 'runs', label: 'Runs' },
@@ -34,6 +45,7 @@ const SCREENS: { id: ScreenId; label: string }[] = [
   { id: 'logs', label: 'Logs' },
   { id: 'spend', label: 'Spend' },
   { id: 'workflows', label: 'Workflows' },
+  ...MORE_SCREENS.map(({ id, label }) => ({ id, label })),
 ]
 
 /* Only on a daemon that offers accounts, and only once logged in. */
@@ -217,6 +229,19 @@ export default function App() {
             go('runs')
           }}
         />
+      )}
+      {MORE_SCREENS.map(
+        ({ id, Screen }) =>
+          screen === id && (
+            <Screen
+              key={id}
+              endpoint={endpoint}
+              onEndpoint={setEndpoint}
+              project={project}
+              onProject={setProject}
+              onOpenTrace={(t) => go('runs', { trace: t })}
+            />
+          ),
       )}
       {screen === 'spend' && (
         <Cost

@@ -164,7 +164,7 @@ export interface ClientOptions {
   signal?: AbortSignal
 }
 
-async function request<T>(
+export async function request<T>(
   path: string,
   opts: ClientOptions = {},
   body?: unknown,

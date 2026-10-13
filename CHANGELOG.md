@@ -237,6 +237,22 @@ rather than every commit.
 
 ### Added
 
+- **Four more screens in the interface.** Evaluations lists every scorer the
+  daemon offers, the recent scores with their reasons, and scores the newest
+  runs on demand, as a dry run or stored. Datasets shows each dataset's cases
+  and compares two experiments with intervals and a regression reading per
+  scorer. Metrics draws a histogram's merged buckets with p50 to p99 per label,
+  and the stored points behind it. Monitors shows every monitor and objective,
+  its latched condition and last reading, with acknowledge beside a tripped
+  one.
+- **Histograms read back as distributions** (wire contract).
+  `GET /v1/api/metrics/histogram` adds up the buckets of every point in a
+  window, per label combination, and reads p50, p90, p95 and p99 from them.
+  Cumulative streams count only their growth. `GET /v1/api/metrics/points`
+  lists the stored points as they were sent. Both work on all three backends.
+- **OTLP metric attributes are labels you can group and filter on.** They were
+  stored as OpenTelemetry's key and value list, which `group_by` and `filter`
+  could not reach. Points sent before this version keep the old shape.
 - **Nine shipped judge rubrics and nine more code scorers** (wire contract).
   With a `judge` block configured, `faithfulness`, `hallucination`,
   `answer_relevance`, `answer_correctness`, `context_precision`,
