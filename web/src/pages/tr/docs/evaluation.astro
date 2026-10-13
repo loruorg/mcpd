@@ -145,7 +145,23 @@ const locale = localeOf(Astro.url.pathname)
     <code>score_trace_id</code> aynı fikrin diğer yarısıdır. Puanlama
     çalıştırmasının kendisini izleyin, kimliği de puanın üzerine gelsin;
     böylece her şeye düşük puan vermeye başlayan bir yargıç açılabilir,
-    okunabilir ve bozuk olduğu gösterilebilir.
+    okunabilir ve bozuk olduğu gösterilebilir. Daemon'un kendi yargıcı bunu
+    ürettiği her puan için yapar.
+  </p>
+
+  <h2>İnceleme kuyruğu</h2>
+  <p>
+    Bir insanın bakması gereken çalıştırmalar inceleme kuyruğuna girer:
+    trace kimliğiyle <code>POST /v1/api/review-queue</code>; isteğe bağlı
+    olarak adım, buna yol açan geri bildirim, bir atanan kişi ve bir not da
+    verilir. Bir öğe <code>pending</code> olarak başlar;
+    <code>PATCH /v1/api/review-queue/{'{id}'}</code> onu atar ya da inceleyenin
+    bulduklarıyla birlikte <code>reviewed</code> veya <code>dismissed</code>
+    olarak işaretler. Her değişiklik öğenin yeni bir sürümüdür, böylece kimin
+    neye ne zaman karar verdiği saklanır. <code>GET /v1/api/review-queue</code>
+    duruma ve atanan kişiye göre filtreler ve hâlâ bekleyenleri sayar.
+    Uygulamadaki İnceleme ekranı kuyruğu bununla işler ve bir çalıştırma,
+    çalıştırma panelinden kuyruğa eklenebilir.
   </p>
 
   <h2>İnsan geri bildirimi</h2>
@@ -211,6 +227,126 @@ mcpd.feedback({
     gönderdiğiniz gibi saklanır, o yüzden e-posta adresi yerine takma bir kimlik
     gönderin. Bakınız
     <a href={urlFor('/docs/privacy', locale)} class="link">Maskeleme ve saklama</a>.
+  </p>
+
+  <h2>Çalıştırmanın söylediğini değil, yaptığını puanlamak</h2>
+  <p>
+    Çoğu puanlayıcı bir çalıştırmanın yanıtını okur. <em>Bütün testleri
+    çalıştırdım ve hiç regresyon yoktu</em> diye bitiren bir ajan hepsini
+    karşılar, bir yargıç modeli de karşılar, çünkü cümle düzgün kurulmuştur ve
+    doğru şeyi söyler. Cümle, ajanın kendi işine dair anlatımıdır ve anlatım
+    kanıt değildir. Test komutu hiç çalışmadıysa, yanıtı okuyan hiçbir
+    puanlayıcı bunu size söyleyemez.
+  </p>
+  <p>
+    İki yerleşik puanlayıcı bunun yerine trace'i okur. Yanıtı tamamen yok
+    sayarlar ve çalıştırmanın ne kaydettiğine bakarlar.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Puanlayıcı</th><th>Ne zaman 1 verir</th><th>Yapılandırması</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>span_present</code></td>
+        <td>Çalıştırma, istenen türde ya da adda en az bir span kaydetti.</td>
+        <td><code>span_kind</code>, <code>span_name</code> ya da ikisi birlikte. İkisi de verilirse ikisi de sağlanmalıdır.</td>
+      </tr>
+      <tr>
+        <td><code>tool_succeeded</code></td>
+        <td>O adda bir araç span'i çalıştı ve en az bir çağrısı <code>ok</code> ile bitti.</td>
+        <td><code>tool_name</code>.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    İkisi de yapılandırma ister, bu yüzden hiçbiri varsayılan kümede çalışmaz.
+    Neye bakacağı söylenmediği için geçen bir puanlayıcı, her çalıştırmayı
+    kimsenin denetlemediği bir işi yapmış gibi bildirirdi; bu da yakalamak için
+    var olduğu hatanın ta kendisidir. Onları adlandırın ve ayarlarını verin:
+  </p>
+
+  <pre><code class="language-json">{`{
+  "trace_ids": ["4bf92f3577b34da6a3ce929d0e0e4736"],
+  "scorers": ["tool_succeeded", "span_present"],
+  "config": {
+    "tool_name": "run_tests",
+    "span_kind": "tool_call",
+    "span_name": "run_tests"
+  }
+}`}</code></pre>
+
+  <p>
+    <code>span_name</code> ve <code>tool_name</code> birebir karşılaştırılır ve
+    <code>case_sensitive</code> bunları gevşetmez. Bir span adı, düz metin değil,
+    kodunuzun seçtiği bir tanımlayıcıdır; gevşek bir karşılaştırma,
+    <code>run_tests</code> hakkındaki bir doğrulamayı tam da denetimin yazıldığı
+    çalıştırmada <code>run_tests_dry</code> ile karşılatırdı.
+    <code>tool_succeeded</code> dört araç span türünün hepsini kabul eder:
+    <code>tool_call</code>, <code>client_tool_call</code>,
+    <code>provider_tool_call</code> ve <code>mcp_tool_call</code>. Çünkü bir
+    çalıştırmanın hangisini kaydettiği aracın nerede durduğunu söyler, çalışıp
+    çalışmadığını değil.
+  </p>
+
+  <h3>Sıfır almanın iki yolu ve bunlar farklı hatalar</h3>
+  <p>
+    Hiç çalışmayan bir araç da çalışıp başarısız olan bir araç da sıfırdır ve
+    onları düzeltmek birbirine zıt işlerdir: biri ajanın atladığı bir adım,
+    diğeri bozulan bir adımdır. <code>reason</code> bunları ayırır ve kaydedilen
+    hatayı taşır, böylece puan, çalıştırmayı açmadan işe yarar.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Ne oldu</th><th><code>reason</code></th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Araç hiç çalışmadı.</td>
+        <td><code>"run_tests" never ran; the run records 2 tool call(s), named: lookup_order, send_email</code></td>
+      </tr>
+      <tr>
+        <td>Çalıştı ve başarısız oldu.</td>
+        <td><code>"run_tests" ran 1 time(s) and none ended ok; the last ended error: pytest exited 1: 3 failed</code></td>
+      </tr>
+      <tr>
+        <td>Başarısız oldu, yeniden denendi ve çalıştı.</td>
+        <td><code>"run_tests" ran 2 time(s), 1 ended ok and 1 did not</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>span_present</code> kendi sıfırı için aynısını yapar: neye baktığını,
+    ardından çalıştırmanın gerçekte ne tuttuğunu adlandırır. Çünkü yanlış bir ad
+    ile eksik enstrümantasyon, çıplak bir <em>bulunamadı</em> mesajında ayırt
+    edilemez ve düzeltme olarak hiçbir ortak yanları yoktur.
+  </p>
+
+  <h3>Bu puanlayıcılar neyi kanıtlar, neyi kanıtlamaz</h3>
+  <p>
+    Bir eylemin <strong>kaydedildiğini</strong> kanıtlarlar. Doğru olduğunu
+    kanıtlamazlar. <code>ok</code> ile biten bir <code>run_tests</code> span'i,
+    aracın hata fırlatmadan döndüğünü söyler; doğru test takımını
+    çalıştırdığını, takımın tamamını çalıştırdığını ya da sonucu bir şeyin
+    okuduğunu söylemez. Yeşil bir <code>tool_succeeded</code> değerini kodun
+    çalıştığının kanıtı saymak, cümleye güvenmekle aynı hatadır, yalnızca bir
+    adım ileride.
+  </p>
+  <p>
+    Dünyayı değil, trace'i de ölçerler. Bir span, süreciniz onu kaydettiği için
+    vardır. Hiç enstrümante etmediğiniz bir adımın içinde yapılan iş burada
+    görünmez ve hiç yapılmamış bir iş gibi okunur; bu puanlayıcıların aslında
+    hata olmayan bir hatayı bildirmesinin tek yolu budur. Biri sıfır verdiğinde,
+    ajanın yalan söylediği sonucuna varmadan önce enstrümantasyonu denetleyin.
+  </p>
+  <p>
+    İkisi de yük yakalama kapalıyken de geçerlidir. Hiçbiri bir girdi, çıktı ya
+    da tamamlama okumaz: span türünü, span adını ve span durumunu okurlar;
+    daemon bunları yakalama ayarlarınız ne olursa olsun tutar.
   </p>
 
   <h2>Kötü yanıtları bulan sorgu</h2>
