@@ -47,6 +47,7 @@ const KIND_COLOUR: Partial<Record<SpanKind, KindColour>> = {
   workflow_sleep: RUN,
   workflow_wait_event: RUN,
   processor_run: RUN,
+  handoff: RUN,
 
   model_generation: MODEL,
   model_step: MODEL,

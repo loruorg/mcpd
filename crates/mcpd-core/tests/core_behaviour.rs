@@ -523,6 +523,10 @@ fn a_reasoning_count_larger_than_the_output_total_is_read_the_same_way() {
         .into_iter()
         .collect(),
         providers: HashMap::new(),
+        provider_aliases: HashMap::new(),
+        service_tier_multipliers: HashMap::new(),
+        extends: None,
+        source: None,
     };
     let u = TokenUsage {
         output_details: Some(OutputTokenDetails { reasoning: Some(800), ..Default::default() }),
@@ -574,6 +578,10 @@ fn a_book_with_its_own_reasoning_rate_prices_the_remainder_and_the_reasoning_apa
         .into_iter()
         .collect(),
         providers: HashMap::new(),
+        provider_aliases: HashMap::new(),
+        service_tier_multipliers: HashMap::new(),
+        extends: None,
+        source: None,
     };
     let u = TokenUsage {
         output_details: Some(OutputTokenDetails {
@@ -655,6 +663,10 @@ fn a_price_book_prices_the_model_id_its_operator_wrote() {
         .into_iter()
         .collect(),
         providers: HashMap::new(),
+        provider_aliases: HashMap::new(),
+        service_tier_multipliers: HashMap::new(),
+        extends: None,
+        source: None,
     };
     assert!(
         cost::compute(&book, "Claude-Sonnet-4", &usage(Some(1000), Some(0))).is_some(),
@@ -779,6 +791,10 @@ fn image_input_tokens_are_billed_at_the_image_rate_when_the_book_prices_one() {
         .into_iter()
         .collect(),
         providers: HashMap::new(),
+        provider_aliases: HashMap::new(),
+        service_tier_multipliers: HashMap::new(),
+        extends: None,
+        source: None,
     };
     let u = input_details(
         InputTokenDetails { text: Some(600), image: Some(400), ..Default::default() },
@@ -817,6 +833,10 @@ fn image_output_tokens_are_billed_at_the_image_rate_when_the_book_prices_one() {
         .into_iter()
         .collect(),
         providers: HashMap::new(),
+        provider_aliases: HashMap::new(),
+        service_tier_multipliers: HashMap::new(),
+        extends: None,
+        source: None,
     };
     let u = TokenUsage {
         output_details: Some(OutputTokenDetails {
@@ -1092,6 +1112,10 @@ fn two_rate_book() -> PriceBook {
         .into_iter()
         .collect(),
         providers: [("bedrock".to_owned(), bedrock)].into_iter().collect(),
+        provider_aliases: HashMap::new(),
+        service_tier_multipliers: HashMap::new(),
+        extends: None,
+        source: None,
     }
 }
 

@@ -42,6 +42,9 @@ export const SpanKind = {
   ProviderToolCall: 'provider_tool_call',
   // A tool reached over the Model Context Protocol.
   McpToolCall: 'mcp_tool_call',
+  // Control passing from one agent to another. The span's name is the agent handed to;
+  // its parent is the agent handing off.
+  Handoff: 'handoff',
   // One workflow execution. Usually the root of a trace.
   WorkflowRun: 'workflow_run',
   // One step within a workflow.
@@ -95,7 +98,7 @@ export const SpanKind = {
 export type SpanKind = typeof SpanKind[keyof typeof SpanKind]
 
 /** Every `SpanKind` value, in declaration order. */
-export const ALL_SPAN_KIND: readonly SpanKind[] = ['agent_run', 'model_generation', 'model_step', 'model_inference', 'model_chunk', 'tool_call', 'client_tool_call', 'provider_tool_call', 'mcp_tool_call', 'workflow_run', 'workflow_step', 'workflow_conditional', 'workflow_conditional_eval', 'workflow_parallel', 'workflow_loop', 'workflow_sleep', 'workflow_wait_event', 'memory_operation', 'rag_ingestion', 'rag_embedding', 'rag_vector_operation', 'rag_action', 'graph_action', 'processor_run', 'scorer_run', 'scorer_step', 'guardrail', 'retrieval', 'mapping', 'skill_resolution', 'workspace_action', 'http_request', 'generic']
+export const ALL_SPAN_KIND: readonly SpanKind[] = ['agent_run', 'model_generation', 'model_step', 'model_inference', 'model_chunk', 'tool_call', 'client_tool_call', 'provider_tool_call', 'mcp_tool_call', 'handoff', 'workflow_run', 'workflow_step', 'workflow_conditional', 'workflow_conditional_eval', 'workflow_parallel', 'workflow_loop', 'workflow_sleep', 'workflow_wait_event', 'memory_operation', 'rag_ingestion', 'rag_embedding', 'rag_vector_operation', 'rag_action', 'graph_action', 'processor_run', 'scorer_run', 'scorer_step', 'guardrail', 'retrieval', 'mapping', 'skill_resolution', 'workspace_action', 'http_request', 'generic']
 
 /**
   * The outcome of an operation. */
@@ -238,6 +241,39 @@ export type ScoreSource = typeof ScoreSource[keyof typeof ScoreSource]
 
 /** Every `ScoreSource` value, in declaration order. */
 export const ALL_SCORE_SOURCE: readonly ScoreSource[] = ['live', 'offline', 'experiment', 'manual']
+
+/**
+  * How a scorer reaches its answer. */
+export const ScorerKind = {
+  // Deterministic code in the daemon. Free, and gives the same answer twice.
+  Code: 'code',
+  // A built-in rubric graded by the configured judge model, in steps: preprocess,
+  // analyze, score, reason.
+  Judge: 'judge',
+  // A criterion the operator wrote under `judge.criteria`, graded by the judge model in
+  // one call.
+  Criterion: 'criterion',
+} as const
+
+export type ScorerKind = typeof ScorerKind[keyof typeof ScorerKind]
+
+/** Every `ScorerKind` value, in declaration order. */
+export const ALL_SCORER_KIND: readonly ScorerKind[] = ['code', 'judge', 'criterion']
+
+/**
+  * Which way a scorer's value is better. A comparison reads a fall in `toxicity` as an
+  * improvement and a fall in `faithfulness` as a regression. */
+export const ScoreDirection = {
+  // A larger value is a better run.
+  HigherIsBetter: 'higher_is_better',
+  // A smaller value is a better run, as for `toxicity`, `bias` and `hallucination`.
+  LowerIsBetter: 'lower_is_better',
+} as const
+
+export type ScoreDirection = typeof ScoreDirection[keyof typeof ScoreDirection]
+
+/** Every `ScoreDirection` value, in declaration order. */
+export const ALL_SCORE_DIRECTION: readonly ScoreDirection[] = ['higher_is_better', 'lower_is_better']
 
 /**
   * The shape of a human judgement. */
@@ -1492,6 +1528,113 @@ export interface MetricSeriesPoint {
 }
 
 /**
+ * A histogram metric read back as distributions: the buckets of every point in the
+ * window added up, one distribution per label combination, with quantiles read from
+ * the merged counts. Bucketed points from OpenTelemetry are added bucket by bucket;
+ * for a cumulative stream only the growth across the window counts. Points with one
+ * value each, such as mcpd's own derived durations, give exact quantiles and are
+ * placed into OpenTelemetry's default boundaries.
+ */
+export interface MetricHistogram {
+  /**
+   * The metric read.
+   */
+  name: string
+  /**
+   * UCUM unit of the observations, for axis labelling.
+   */
+  unit?: string
+  /**
+   * How many stored points were merged.
+   */
+  points_read: number
+  /**
+   * Whether the window held more points than one read merges, so the newest ones were
+   * used and the rest left out. Narrow the window or add a filter.
+   */
+  truncated: boolean
+  /**
+   * One distribution per label combination.
+   */
+  series: HistogramSeries[]
+}
+
+/**
+ * One merged distribution.
+ */
+export interface HistogramSeries {
+  /**
+   * The `group_by` label values that identify this series. Absent when nothing was
+   * grouped.
+   */
+  labels?: unknown
+  /**
+   * Upper bound of each bucket but the last, which is unbounded above.
+   */
+  bounds: number[]
+  /**
+   * Observations per bucket: one more entry than `bounds`.
+   */
+  counts: number[]
+  /**
+   * Every observation counted.
+   */
+  count: number
+  /**
+   * Their sum.
+   */
+  sum?: number
+  /**
+   * The smallest observation, when the points recorded single values.
+   */
+  min?: number
+  /**
+   * The largest observation, when the points recorded single values.
+   */
+  max?: number
+  /**
+   * Median.
+   */
+  p50?: number
+  /**
+   * 90th percentile.
+   */
+  p90?: number
+  /**
+   * 95th percentile.
+   */
+  p95?: number
+  /**
+   * 99th percentile.
+   */
+  p99?: number
+  /**
+   * Whether the quantiles are exact, read from single observations, or interpolated
+   * linearly inside the bucket the rank falls in.
+   */
+  exact: boolean
+  /**
+   * Points left out because their bucket boundaries differ from the ones most of this
+   * series uses.
+   */
+  points_skipped: number
+}
+
+/**
+ * A page of stored metric points, as they were recorded.
+ */
+export interface MetricPointListResponse {
+  /**
+   * The matching points.
+   */
+  points: MetricPoint[]
+  /**
+   * Cursor and totals.
+   */
+  page: Page
+}
+
+/**
  * One line on a chart: a single label combination over time.
  */
 export interface MetricSeries {
@@ -1815,7 +1958,29 @@ export interface ScorerInfo {
    * cannot run without one.
    */
   needs_config: boolean
+  /**
+   * How the scorer reaches its answer.
+   */
+  kind: ScorerKind
+  /**
+   * Which way its value is better.
+   */
+  direction: ScoreDirection
+  /**
+   * The `ScorerConfig` settings it reads. Empty when it needs none.
+   */
+  config_keys: string[]
+  /**
+   * Whether this daemon can run it now. A judged scorer is unavailable until a `judge`
+   * block names an endpoint and a model.
+   */
+  available: boolean
 }
+
+/** Spec-declared defaults for `ScorerInfo`. Spread these when constructing one. */
+export const scorerInfoDefaults = {
+  available: true,
+} satisfies Partial<ScorerInfo>
 
 /**
  * Settings shared by the scorers that need them. Every field is optional; a scorer
@@ -1857,6 +2022,48 @@ export interface ScorerConfig {
    * `provider_tool_call` or `mcp_tool_call`.
    */
   tool_name?: string
+  /**
+   * Text the answer must not contain, for `excludes`. Any one of them fails the run.
+   */
+  forbidden: string[]
+  /**
+   * Words or phrases the answer should mention, for `keyword_coverage`. The score is the
+   * share that appear.
+   */
+  keywords: string[]
+  /**
+   * A regular expression the answer must match somewhere, for `matches_pattern`.
+   */
+  pattern?: string
+  /**
+   * The tools the run should call, for `tool_call_accuracy`, and the order it should
+   * call them in, for `tool_order`. Matched exactly against tool-call span names.
+   */
+  expected_tools: string[]
+  /**
+   * Tools the run must not call, for `tool_not_called`.
+   */
+  forbidden_tools: string[]
+  /**
+   * The shortest acceptable answer in characters, for `answer_length`.
+   */
+  min_chars?: number
+  /**
+   * The longest acceptable answer in characters, for `answer_length`.
+   */
+  max_chars?: number
+  /**
+   * A JSON Schema the answer must satisfy, for `json_schema`. `type`, `properties`,
+   * `required`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and
+   * `additionalProperties: false` are checked.
+   */
+  json_schema?: unknown
+  /**
+   * The passages the answer should rest on, for the judged scorers that read context.
+   * When empty, the outputs of the run's `retrieval` and `rag_vector_operation` spans
+   * are used.
+   */
+  context: string[]
   /**
    * Case sensitivity for text comparisons.
    */
@@ -1992,7 +2199,35 @@ export interface ScorerDelta {
    * finding.
    */
   decidable: boolean
+  /**
+   * Which way this scorer's value is better, from the catalogue. Scorers the daemon does
+   * not know read as higher is better.
+   */
+  direction: ScoreDirection
+  /**
+   * Lower end of the 95% confidence interval on `delta`, from Welch's t-test. Absent
+   * when either side has fewer than two observations.
+   */
+  ci_low?: number
+  /**
+   * Upper end of that interval.
+   */
+  ci_high?: number
+  /**
+   * Two-sided p-value for the difference in means.
+   */
+  p_value?: number
+  /**
+   * Whether this scorer moved the wrong way: decidable, and the whole interval on the
+   * worse side of zero.
+   */
+  regressed: boolean
 }
+
+/** Spec-declared defaults for `ScorerDelta`. Spread these when constructing one. */
+export const scorerDeltaDefaults = {
+  regressed: false,
+} satisfies Partial<ScorerDelta>
 
 /**
  * Two experiments, compared. The point of an experiment is the comparison, so this

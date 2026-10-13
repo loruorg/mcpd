@@ -61,6 +61,9 @@ const SORTS: Record<string, string> = {
   duration: 'duration',
   cost: 'cost',
   steps: 'span_count',
+  // Either token column sorts by the run's total, input and output together.
+  in: 'tokens',
+  out: 'tokens',
   score: 'score',
 }
 

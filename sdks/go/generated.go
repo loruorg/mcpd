@@ -52,6 +52,9 @@ const (
 	SpanKindProviderToolCall SpanKind = "provider_tool_call"
 	// A tool reached over the Model Context Protocol.
 	SpanKindMcpToolCall SpanKind = "mcp_tool_call"
+	// Control passing from one agent to another. The span's name is the agent handed to;
+	// its parent is the agent handing off.
+	SpanKindHandoff SpanKind = "handoff"
 	// One workflow execution. Usually the root of a trace.
 	SpanKindWorkflowRun SpanKind = "workflow_run"
 	// One step within a workflow.
@@ -103,7 +106,7 @@ const (
 )
 
 // AllSpanKinds lists every SpanKind value, in declaration order.
-var AllSpanKinds = []SpanKind{SpanKindAgentRun, SpanKindModelGeneration, SpanKindModelStep, SpanKindModelInference, SpanKindModelChunk, SpanKindToolCall, SpanKindClientToolCall, SpanKindProviderToolCall, SpanKindMcpToolCall, SpanKindWorkflowRun, SpanKindWorkflowStep, SpanKindWorkflowConditional, SpanKindWorkflowConditionalEval, SpanKindWorkflowParallel, SpanKindWorkflowLoop, SpanKindWorkflowSleep, SpanKindWorkflowWaitEvent, SpanKindMemoryOperation, SpanKindRagIngestion, SpanKindRagEmbedding, SpanKindRagVectorOperation, SpanKindRagAction, SpanKindGraphAction, SpanKindProcessorRun, SpanKindScorerRun, SpanKindScorerStep, SpanKindGuardrail, SpanKindRetrieval, SpanKindMapping, SpanKindSkillResolution, SpanKindWorkspaceAction, SpanKindHTTPRequest, SpanKindGeneric}
+var AllSpanKinds = []SpanKind{SpanKindAgentRun, SpanKindModelGeneration, SpanKindModelStep, SpanKindModelInference, SpanKindModelChunk, SpanKindToolCall, SpanKindClientToolCall, SpanKindProviderToolCall, SpanKindMcpToolCall, SpanKindHandoff, SpanKindWorkflowRun, SpanKindWorkflowStep, SpanKindWorkflowConditional, SpanKindWorkflowConditionalEval, SpanKindWorkflowParallel, SpanKindWorkflowLoop, SpanKindWorkflowSleep, SpanKindWorkflowWaitEvent, SpanKindMemoryOperation, SpanKindRagIngestion, SpanKindRagEmbedding, SpanKindRagVectorOperation, SpanKindRagAction, SpanKindGraphAction, SpanKindProcessorRun, SpanKindScorerRun, SpanKindScorerStep, SpanKindGuardrail, SpanKindRetrieval, SpanKindMapping, SpanKindSkillResolution, SpanKindWorkspaceAction, SpanKindHTTPRequest, SpanKindGeneric}
 
 // String returns the wire representation.
 func (v SpanKind) String() string { return string(v) }
@@ -356,6 +359,63 @@ func (v ScoreSource) String() string { return string(v) }
 // Valid reports whether v is a value this version of the spec defines.
 func (v ScoreSource) Valid() bool {
 	for _, c := range AllScoreSources {
+		if c == v {
+			return true
+		}
+	}
+	return false
+}
+
+// How a scorer reaches its answer.
+type ScorerKind string
+
+const (
+	// Deterministic code in the daemon. Free, and gives the same answer twice.
+	ScorerKindCode ScorerKind = "code"
+	// A built-in rubric graded by the configured judge model, in steps: preprocess,
+	// analyze, score, reason.
+	ScorerKindJudge ScorerKind = "judge"
+	// A criterion the operator wrote under `judge.criteria`, graded by the judge model in
+	// one call.
+	ScorerKindCriterion ScorerKind = "criterion"
+)
+
+// AllScorerKinds lists every ScorerKind value, in declaration order.
+var AllScorerKinds = []ScorerKind{ScorerKindCode, ScorerKindJudge, ScorerKindCriterion}
+
+// String returns the wire representation.
+func (v ScorerKind) String() string { return string(v) }
+
+// Valid reports whether v is a value this version of the spec defines.
+func (v ScorerKind) Valid() bool {
+	for _, c := range AllScorerKinds {
+		if c == v {
+			return true
+		}
+	}
+	return false
+}
+
+// Which way a scorer's value is better. A comparison reads a fall in `toxicity` as an
+// improvement and a fall in `faithfulness` as a regression.
+type ScoreDirection string
+
+const (
+	// A larger value is a better run.
+	ScoreDirectionHigherIsBetter ScoreDirection = "higher_is_better"
+	// A smaller value is a better run, as for `toxicity`, `bias` and `hallucination`.
+	ScoreDirectionLowerIsBetter ScoreDirection = "lower_is_better"
+)
+
+// AllScoreDirections lists every ScoreDirection value, in declaration order.
+var AllScoreDirections = []ScoreDirection{ScoreDirectionHigherIsBetter, ScoreDirectionLowerIsBetter}
+
+// String returns the wire representation.
+func (v ScoreDirection) String() string { return string(v) }
+
+// Valid reports whether v is a value this version of the spec defines.
+func (v ScoreDirection) Valid() bool {
+	for _, c := range AllScoreDirections {
 		if c == v {
 			return true
 		}
@@ -1827,6 +1887,67 @@ type MetricSeriesPoint struct {
 	ExemplarTraceID *string `json:"exemplar_trace_id,omitempty"`
 }
 
+// A histogram metric read back as distributions: the buckets of every point in the
+// window added up, one distribution per label combination, with quantiles read from
+// the merged counts. Bucketed points from OpenTelemetry are added bucket by bucket;
+// for a cumulative stream only the growth across the window counts. Points with one
+// value each, such as mcpd's own derived durations, give exact quantiles and are
+// placed into OpenTelemetry's default boundaries.
+type MetricHistogram struct {
+	// The metric read.
+	Name string `json:"name"`
+	// UCUM unit of the observations, for axis labelling.
+	Unit *string `json:"unit,omitempty"`
+	// How many stored points were merged.
+	PointsRead uint64 `json:"points_read"`
+	// Whether the window held more points than one read merges, so the newest ones were
+	// used and the rest left out. Narrow the window or add a filter.
+	Truncated bool `json:"truncated"`
+	// One distribution per label combination.
+	Series []HistogramSeries `json:"series"`
+}
+
+// One merged distribution.
+type HistogramSeries struct {
+	// The `group_by` label values that identify this series. Absent when nothing was
+	// grouped.
+	Labels json.RawMessage `json:"labels,omitempty"`
+	// Upper bound of each bucket but the last, which is unbounded above.
+	Bounds []float64 `json:"bounds"`
+	// Observations per bucket: one more entry than `bounds`.
+	Counts []uint64 `json:"counts"`
+	// Every observation counted.
+	Count uint64 `json:"count"`
+	// Their sum.
+	Sum *float64 `json:"sum,omitempty"`
+	// The smallest observation, when the points recorded single values.
+	Min *float64 `json:"min,omitempty"`
+	// The largest observation, when the points recorded single values.
+	Max *float64 `json:"max,omitempty"`
+	// Median.
+	P50 *float64 `json:"p50,omitempty"`
+	// 90th percentile.
+	P90 *float64 `json:"p90,omitempty"`
+	// 95th percentile.
+	P95 *float64 `json:"p95,omitempty"`
+	// 99th percentile.
+	P99 *float64 `json:"p99,omitempty"`
+	// Whether the quantiles are exact, read from single observations, or interpolated
+	// linearly inside the bucket the rank falls in.
+	Exact bool `json:"exact"`
+	// Points left out because their bucket boundaries differ from the ones most of this
+	// series uses.
+	PointsSkipped uint64 `json:"points_skipped"`
+}
+
+// A page of stored metric points, as they were recorded.
+type MetricPointListResponse struct {
+	// The matching points.
+	Points []MetricPoint `json:"points"`
+	// Cursor and totals.
+	Page Page `json:"page"`
+}
+
 // One line on a chart: a single label combination over time.
 type MetricSeries struct {
 	// The label values that identify this series.
@@ -2013,6 +2134,22 @@ type ScorerInfo struct {
 	// Whether it needs settings to mean anything. A scorer that needs an expected answer
 	// cannot run without one.
 	NeedsConfig bool `json:"needs_config"`
+	// How the scorer reaches its answer.
+	Kind ScorerKind `json:"kind"`
+	// Which way its value is better.
+	Direction ScoreDirection `json:"direction"`
+	// The `ScorerConfig` settings it reads. Empty when it needs none.
+	ConfigKeys []string `json:"config_keys"`
+	// Whether this daemon can run it now. A judged scorer is unavailable until a `judge`
+	// block names an endpoint and a model.
+	Available bool `json:"available"`
+}
+
+// NewScorerInfo returns a ScorerInfo with every spec-declared default applied.
+func NewScorerInfo() ScorerInfo {
+	return ScorerInfo{
+		Available: true,
+	}
 }
 
 // Settings shared by the scorers that need them. Every field is optional; a scorer
@@ -2037,6 +2174,30 @@ type ScorerConfig struct {
 	// against the `name` of a span whose kind is `tool_call`, `client_tool_call`,
 	// `provider_tool_call` or `mcp_tool_call`.
 	ToolName *string `json:"tool_name,omitempty"`
+	// Text the answer must not contain, for `excludes`. Any one of them fails the run.
+	Forbidden []string `json:"forbidden"`
+	// Words or phrases the answer should mention, for `keyword_coverage`. The score is the
+	// share that appear.
+	Keywords []string `json:"keywords"`
+	// A regular expression the answer must match somewhere, for `matches_pattern`.
+	Pattern *string `json:"pattern,omitempty"`
+	// The tools the run should call, for `tool_call_accuracy`, and the order it should
+	// call them in, for `tool_order`. Matched exactly against tool-call span names.
+	ExpectedTools []string `json:"expected_tools"`
+	// Tools the run must not call, for `tool_not_called`.
+	ForbiddenTools []string `json:"forbidden_tools"`
+	// The shortest acceptable answer in characters, for `answer_length`.
+	MinChars *uint32 `json:"min_chars,omitempty"`
+	// The longest acceptable answer in characters, for `answer_length`.
+	MaxChars *uint32 `json:"max_chars,omitempty"`
+	// A JSON Schema the answer must satisfy, for `json_schema`. `type`, `properties`,
+	// `required`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and
+	// `additionalProperties: false` are checked.
+	JSONSchema json.RawMessage `json:"json_schema,omitempty"`
+	// The passages the answer should rest on, for the judged scorers that read context.
+	// When empty, the outputs of the run's `retrieval` and `rag_vector_operation` spans
+	// are used.
+	Context []string `json:"context"`
 	// Case sensitivity for text comparisons.
 	CaseSensitive bool `json:"case_sensitive"`
 }
@@ -2122,6 +2283,26 @@ type ScorerDelta struct {
 	// side, mcpd says the comparison is not decidable rather than dressing noise up as a
 	// finding.
 	Decidable bool `json:"decidable"`
+	// Which way this scorer's value is better, from the catalogue. Scorers the daemon does
+	// not know read as higher is better.
+	Direction ScoreDirection `json:"direction"`
+	// Lower end of the 95% confidence interval on `delta`, from Welch's t-test. Absent
+	// when either side has fewer than two observations.
+	CiLow *float64 `json:"ci_low,omitempty"`
+	// Upper end of that interval.
+	CiHigh *float64 `json:"ci_high,omitempty"`
+	// Two-sided p-value for the difference in means.
+	PValue *float64 `json:"p_value,omitempty"`
+	// Whether this scorer moved the wrong way: decidable, and the whole interval on the
+	// worse side of zero.
+	Regressed bool `json:"regressed"`
+}
+
+// NewScorerDelta returns a ScorerDelta with every spec-declared default applied.
+func NewScorerDelta() ScorerDelta {
+	return ScorerDelta{
+		Regressed: false,
+	}
 }
 
 // Two experiments, compared. The point of an experiment is the comparison, so this

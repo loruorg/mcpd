@@ -20,9 +20,6 @@ rather than every commit.
 
 ### Added
 
-- **Your own price book, with `--price-book`.** A JSON book of your own rates
-  layers over the built-in one: a model it names takes its rate, every other
-  model keeps the built-in one.
 - **Organisations, roles, single sign-on and SCIM.** An account can create
   organisations, which own projects, invite members by email and give each a
   role (owner, admin, member or viewer, optionally replaced on one project)
@@ -142,6 +139,9 @@ rather than every commit.
 
 ### Fixed
 
+- **A page of aspect notes or snapshots on ClickHouse could repeat the last
+  row of the page before.** The cursor's timestamp went through a float and
+  rounded by a few hundred nanoseconds. It is now exact.
 - **Postgres counts runs for a run dimension.** A breakdown by name,
   environment, status, session, user or service counted steps on Postgres and
   runs on the other two backends, so the same data reported three times as many
@@ -324,6 +324,108 @@ rather than every commit.
   repeated under the same key is stored once and reported as a duplicate. The
   relay sends one with every request, so a resend is never counted twice.
 
+- **A live tail over server-sent events.** `GET /v1/api/deltas` with
+  `Accept: text/event-stream` stays open and sends each batch of new runs,
+  steps or log lines as a `delta` event whose id is the cursor to reconnect
+  with.
+- **Credentials found by their shape, not only their key.** Every string
+  value is searched for private keys, JSON Web Tokens, AWS access keys,
+  provider API keys, GitHub, Slack and Google tokens, bearer tokens and
+  passwords in URLs, and each is replaced in place before storage. Email
+  addresses are left alone.
+- **Tokens and cost by model on `/metrics`.** `mcpd_model_input_tokens_total`,
+  `mcpd_model_output_tokens_total` and `mcpd_model_cost_total`, labelled by
+  provider and model, so a Prometheus alert can watch spend per model. At
+  most 200 series; the rest are counted under `other`.
+- **Log lines keep their whole correlation, and the log list filters on it**
+  (wire contract). Service version, thread, resource, run, request,
+  experiment and release are stored with every log line on all three
+  backends, and `GET /v1/api/logs` filters on environment, service, service
+  version, session, thread, user, run, request, experiment and release.
+  SQLite and Postgres databases gain the columns on the first start of this
+  version (schema version 6) with no row rewritten; lines stored before it
+  carry none of the new fields.
+- **Sort runs by tokens.** `sort=tokens` on `GET /v1/api/traces` orders runs
+  by input and output tokens together, on all three backends, and the token
+  columns in the run list sort by it.
+- **A project's feedback, listed and filtered** (wire contract).
+  `GET /v1/api/feedback` no longer needs a `trace_id`: it lists the whole
+  project newest first, narrows by run, step, kind, author kind and window,
+  and pages with a cursor, on all three backends. The SDKs' feedback filters
+  now reach it.
+- **Model calls recorded from the provider's response, in all six SDKs.**
+  `record_response` reads an OpenAI or Anthropic response and records the
+  model, provider, token usage with cache and reasoning meters, response id,
+  finish reasons and service tier, so a batch or flex call is priced at its
+  discount. `usage_from_openai` and `usage_from_anthropic` do the mapping
+  alone. `mark_first_token` records time to first token and `set_guardrail`
+  a guardrail's outcome. Elixir offers them as `Mcpd.ModelCall`.
+- **Redaction in the process, in all six SDKs.** A `redact` client option is
+  applied to span payloads, attributes, metadata and log fields before they
+  are queued. A redactor that fails drops the field and is counted in
+  `redaction_failures`.
+- **A `handoff` span kind** (wire contract), for one agent passing control to
+  another.
+- **Four more screens in the interface.** Evaluations lists every scorer the
+  daemon offers, the recent scores with their reasons, and scores the newest
+  runs on demand, as a dry run or stored. Datasets shows each dataset's cases
+  and compares two experiments with intervals and a regression reading per
+  scorer. Metrics draws a histogram's merged buckets with p50 to p99 per label,
+  and the stored points behind it. Monitors shows every monitor and objective,
+  its latched condition and last reading, with acknowledge beside a tripped
+  one.
+- **Judge a run and keep it as a case from its header.** The run panel's
+  judge control records a reviewer's thumbs up or down with a comment, and
+  save to dataset captures the run into a dataset, optionally with its answer
+  as the expected one. A prompt or completion in the step inspector expands
+  to the height of the window.
+- **Span links in the step inspector.** A step's links are listed with their
+  kind; one inside the run opens the linked step, one into another run opens
+  that run.
+- **Histograms read back as distributions** (wire contract).
+  `GET /v1/api/metrics/histogram` adds up the buckets of every point in a
+  window, per label combination, and reads p50, p90, p95 and p99 from them.
+  Cumulative streams count only their growth. `GET /v1/api/metrics/points`
+  lists the stored points as they were sent. Both work on all three backends.
+- **OTLP metric attributes are labels you can group and filter on.** They were
+  stored as OpenTelemetry's key and value list, which `group_by` and `filter`
+  could not reach. Points sent before this version keep the old shape.
+- **Nine shipped judge rubrics and nine more code scorers** (wire contract).
+  With a `judge` block configured, `faithfulness`, `hallucination`,
+  `answer_relevance`, `answer_correctness`, `context_precision`,
+  `context_recall`, `context_relevance`, `toxicity` and `bias` run with no
+  criteria written. Each runs in steps: the run's question, answer, expected
+  answer and retrieved context are gathered in code, the model gives itemised
+  yes, no or unsure verdicts, and the score is counted from them. The verdicts,
+  the token counts and the priced cost of the call are kept on the score, and a
+  busy judge endpoint is retried. The new code scorers are `excludes`,
+  `keyword_coverage`, `similarity`, `matches_pattern`, `tool_call_accuracy`,
+  `tool_order`, `tool_not_called`, `answer_length` and `json_schema`, set
+  through new `ScorerConfig` fields. `GET /v1/api/scorers` now lists each
+  scorer's kind, direction, settings and availability, configured criteria
+  included.
+- **`mcpd eval` gates a deploy on an experiment comparison.** It asks a
+  running daemon to compare two experiments, prints every scorer with its
+  interval, and exits 1 on a regression and 2 when it cannot compare.
+- **Experiment comparison with confidence intervals** (wire contract). Each
+  scorer's delta carries a 95% interval and a p-value from Welch's t-test, and
+  `regressed` follows the scorer's direction, so a fall in `toxicity` reads as
+  an improvement. A shift inside the noise is no longer a regression.
+- **Prices for every major provider, and your own price book.** The built-in
+  book now holds list prices for OpenAI, Anthropic, Google, Mistral, xAI,
+  DeepSeek, Cohere, Perplexity, Moonshot, Z.AI, Alibaba and MiniMax, with
+  tables for Bedrock, Vertex AI, Azure, Groq, Together, Fireworks, DeepInfra,
+  Cerebras, OpenRouter and Vercel. Long prompts are priced at the provider's
+  long-context rate, and batch and flex calls at their discount, read from
+  `gen_ai.response.service_tier` and its neighbours. `--price-book` (or
+  `price_book` in the config file) loads a book of your own, alone or over the
+  built-in one with `"extends": "builtin"`. `mcpd prices refresh` writes a book
+  from a public model catalogue, and `mcpd prices show` prints what a model is
+  priced at. `mcpd config` prints a `prices` line.
+- **Span ingest prices with the provider.** A span that names its provider is
+  priced from that provider's table, so a Bedrock or Azure call is billed at
+  the cloud's rate rather than the vendor's. Vertex `@version` tags, Bedrock
+  `-v1:0` suffixes and dotted versions such as `claude-sonnet-4.5` now resolve.
 - **Open sign-up, with `--signup`** (wire contract). Anyone may create an
   account with an email and a password. Each account owns one new project and
   mints its own API keys for it, one scope each; nothing it holds reaches
@@ -946,16 +1048,6 @@ cannot outlive the bugs it describes and is the authority on what is left.
 None stand as this is written. The two that did, the Rust SDK's missing
 correlation setters and the Elixir SDK dropping `request_id` and `release`, are
 fixed, and the suite's list of known gaps is empty.
-
-One gap outside that suite is worth naming here, because the documentation used
-to hide it:
-
-- **The price book cannot be replaced.** Every deployment prices with the
-  built-in table, which holds a short list of model ids stamped with the date
-  they were checked. There is no flag, no config file key and no endpoint that
-  loads another, so negotiated rates, a model you host yourself and any
-  currency other than US dollars are out of reach, and a model the table does
-  not name is reported as unpriced rather than free.
 
 ### Security
 

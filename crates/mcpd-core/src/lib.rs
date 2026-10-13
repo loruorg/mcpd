@@ -12,17 +12,43 @@
 
 pub mod cost;
 pub mod generated;
+pub mod histogram;
 pub mod ids;
 pub mod jaeger;
+pub mod judged;
 pub mod metrics;
 pub mod otlp;
+pub mod price_catalogue;
 pub mod redact;
 pub mod sampling;
 pub mod scoring;
 pub mod sketch;
+pub mod stats;
 pub mod zipkin;
 
 pub use generated::*;
+
+impl Correlation {
+    /// A correlation naming only a project and an environment, which is all a
+    /// metric point stores.
+    #[must_use]
+    pub fn for_project(project: String, environment: Option<String>) -> Self {
+        Self {
+            project,
+            environment,
+            service_name: None,
+            service_version: None,
+            session_id: None,
+            thread_id: None,
+            user_id: None,
+            resource_id: None,
+            run_id: None,
+            request_id: None,
+            experiment_id: None,
+            release: None,
+        }
+    }
+}
 
 /// The crate version, which is also the released mcpd version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -131,6 +157,7 @@ impl SpanKind {
             Self::ClientToolCall => "Client tool",
             Self::ProviderToolCall => "Provider tool",
             Self::McpToolCall => "MCP tool",
+            Self::Handoff => "Handoff",
             Self::WorkflowRun => "Workflow",
             Self::WorkflowStep => "Step",
             Self::WorkflowConditional => "Branch",

@@ -68,15 +68,21 @@ Records a person's judgement of a run or a step. Call this from your own product
 
 <div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/feedback</code></div>
 
-The human judgements on one run, read from the trace detail. `trace_id` is required and is refused when absent: mcpd cannot yet list a whole project's feedback, and answering an empty list instead would read as though nobody had judged anything. Every other parameter is refused by name as well, so a filter this endpoint does not apply cannot come back as a plausible wrong answer.
+A project's human judgements, newest first, filtered by run, step, kind, author and time window and paged with a cursor. With no filter it is every piece of feedback the project holds.
 
 **Query parameters**
 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
 | `project` | `string` | **required** | Which project to read. Required. |
-| `trace_id` | `string` | **required** | The run whose judgements to read. Required. |
-| `limit` | `u32` | `50` | Page size. |
+| `trace_id` | `string` | · | Only feedback on this run. |
+| `limit` | `u32` | `50` | Page size, 1 to 500. |
+| `span_id` | `string` | · | Only feedback on this step. |
+| `kind` | `FeedbackKind` | · | Only this kind of judgement. |
+| `author_kind` | `string` | · | Only from this kind of author, such as `end_user` or `reviewer`. |
+| `from` | `timestamp` | · | Start of the window. |
+| `to` | `timestamp` | · | End of the window. |
+| `cursor` | `string` | · | From a previous page. Pages run newest first. |
 
 **Response:** `FeedbackListResponse`
 

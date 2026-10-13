@@ -22,7 +22,7 @@ import os
 import threading
 import weakref
 from enum import Enum
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
 
 from . import _generated as records
 from ._generated import (
@@ -101,7 +101,12 @@ class Stats:
     failed: int
     #: Spans `record` refused.
     rejected: int
+    #: Values `redact` raised on or could not use, dropped rather than sent.
+    redaction_failures: int = 0
 
+
+#: Queue signal name -> the payload fields `redact` sees (section 2.1.1).
+_REDACTED = {"span": ("input", "output", "attributes", "metadata"), "log": ("fields",)}
 
 #: Queue signal name -> the field of `IngestBatch` it belongs in.
 _BUCKET = {"span": "spans", "log": "logs", "metric": "metrics", "score": "scores",
@@ -218,6 +223,7 @@ class Mcpd:
         log_level: Optional[Union[LogLevel, str]] = None,
         transport: Optional[Transport] = None,
         sink: Optional[Sink] = None,
+        redact: Optional[Callable[[Any], Any]] = None,
     ) -> None:
         self.endpoint = (endpoint or _env("MCPD_ENDPOINT") or DEFAULT_ENDPOINT).rstrip("/")
         self.api_key = api_key or _env("MCPD_API_KEY")
@@ -263,6 +269,11 @@ class Mcpd:
         #: Where a drained batch goes. The transport, unless the caller chose
         #: a recorder or a console dump (section 2.2).
         self._sink: Sink = sink if sink is not None else TransportSink(self._transport)
+        #: Applied to every span's input, output, attributes and metadata, and
+        #: to every log line's fields, before the record is queued (section
+        #: 2.1.1). Code only: no environment variable can carry a function.
+        self._redact: Optional[Callable[[Any], Any]] = redact if callable(redact) else None
+        self._redaction_failures = 0
         self._overflow = Throttle()
         self._failure = Throttle()
         self._warning = Throttle()
@@ -372,6 +383,7 @@ class Mcpd:
             exported=self._exported,
             failed=self._failed_batches,
             rejected=self._rejected,
+            redaction_failures=self._redaction_failures,
         )
 
     # --------------------------------------------------------- the other signals
@@ -674,6 +686,8 @@ class Mcpd:
     def _put(self, signal: str, record: Any, key: Any = None) -> None:
         if not self._recording():
             return
+        if self._redact is not None:
+            record = self._redacted(signal, record)
         if not self._queue.put(signal, _encodable(signal, record), key):
             suppressed = self._overflow.check()
             if suppressed is not None:
@@ -685,6 +699,42 @@ class Mcpd:
                     self._queue.max_size, self._queue.dropped, suppressed,
                 )
         self._ensure_worker()
+
+    def _redacted(self, signal: str, record: Any) -> Any:
+        """The record with `redact` applied to its payload fields (section 2.1.1).
+
+        Works on a copy, so the caller's span keeps what it was given, and
+        fails closed field by field: a redactor that raises, or hands back a
+        non-mapping where a mapping belongs, costs that field and is counted.
+        Sending the original instead would be the worst outcome, because a
+        broken redactor is exactly when the original is most likely to leak.
+        """
+        names = _REDACTED.get(signal)
+        if not names:
+            return record
+        changes: Dict[str, Any] = {}
+        for name in names:
+            value = getattr(record, name)
+            if value is None:
+                continue
+            try:
+                kept = self._redact(value)  # type: ignore[misc]
+                if kept is not None and name not in ("input", "output") \
+                        and not isinstance(kept, Mapping):
+                    raise TypeError(f"redact returned {type(kept).__name__} for {name}, "
+                                    "where a mapping belongs")
+            except Exception as exc:  # noqa: BLE001 - B1, and fail closed
+                kept = None
+                self._redaction_failures += 1
+                self._instrumentation_failed("redact", exc)
+            if kept is not None and name == "fields":
+                # Log fields were made JSON-safe before this; what the
+                # redactor returned has not been.
+                kept = encode_fields(dict(kept))
+            elif kept is not None and name in ("attributes", "metadata"):
+                kept = dict(kept)
+            changes[name] = kept
+        return dataclasses.replace(record, **changes) if changes else record
 
     def _ensure_worker(self) -> None:
         """Start the exporter thread on first use, not on construction.

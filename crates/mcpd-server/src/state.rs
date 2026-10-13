@@ -943,9 +943,70 @@ pub struct SelfMetrics {
     /// worth alerting on: a read served with no record of it is the thing the
     /// audit log exists to prevent.
     pub audit_write_failures: AtomicU64,
+    /// Tokens and cost by provider, model and currency, from every span stored.
+    ///
+    /// Bounded at [`MODEL_SERIES_MAX`] series: the model name is whatever a
+    /// producer sent, so an unbounded map is a way for one sender to grow the
+    /// scrape without limit. Spans past the bound are added to one `other`
+    /// series rather than dropped, so the totals stay true.
+    pub model_usage:
+        std::sync::Mutex<std::collections::BTreeMap<(String, String, String), [f64; 3]>>,
+}
+
+/// The most provider and model series `/metrics` keeps before the rest are
+/// counted under `other`.
+pub const MODEL_SERIES_MAX: usize = 200;
+
+/// A Prometheus label value, escaped as the exposition format requires.
+fn label(v: &str) -> String {
+    v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
 }
 
 impl SelfMetrics {
+    /// What a batch's spans add to the per-model counters, read before the
+    /// batch is handed to the store and applied with [`Self::add_models`] once
+    /// it is written, so a failed write counts nothing.
+    #[must_use]
+    pub fn model_tally(spans: &[mcpd_core::Span]) -> Vec<((String, String, String), [f64; 3])> {
+        let mut out = Vec::new();
+        for s in spans {
+            let Some(model) = s.model.as_deref() else { continue };
+            let usage = s.usage.as_ref();
+            let input = usage.and_then(|u| u.input_tokens).unwrap_or(0) as f64;
+            let output = usage.and_then(|u| u.output_tokens).unwrap_or(0) as f64;
+            let (cost, currency) = s
+                .cost
+                .as_ref()
+                .and_then(|c| c.total_cost.map(|t| (t, c.currency.clone())))
+                .unwrap_or((0.0, String::new()));
+            if input == 0.0 && output == 0.0 && cost == 0.0 {
+                continue;
+            }
+            out.push((
+                (s.provider.clone().unwrap_or_default(), model.to_owned(), currency),
+                [input, output, cost],
+            ));
+        }
+        out
+    }
+
+    /// Add a tally from [`Self::model_tally`] to the per-model counters.
+    pub fn add_models(&self, tally: Vec<((String, String, String), [f64; 3])>) {
+        if tally.is_empty() {
+            return;
+        }
+        let Ok(mut map) = self.model_usage.lock() else { return };
+        for (mut key, v) in tally {
+            if !map.contains_key(&key) && map.len() >= MODEL_SERIES_MAX {
+                key = ("other".to_owned(), "other".to_owned(), key.2);
+            }
+            let e = map.entry(key).or_insert([0.0; 3]);
+            e[0] += v[0];
+            e[1] += v[1];
+            e[2] += v[2];
+        }
+    }
+
     /// Render in Prometheus text exposition format.
     #[must_use]
     pub fn render(&self, uptime_seconds: u64) -> String {
@@ -1055,6 +1116,36 @@ impl SelfMetrics {
             "gauge",
             uptime_seconds,
         );
+        if let Ok(map) = self.model_usage.lock() {
+            if !map.is_empty() {
+                for (i, (name, help)) in [
+                    ("mcpd_model_input_tokens_total", "Input tokens on stored spans, by model."),
+                    ("mcpd_model_output_tokens_total", "Output tokens on stored spans, by model."),
+                    (
+                        "mcpd_model_cost_total",
+                        "Priced cost of stored spans, by model and currency.",
+                    ),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n"));
+                    for ((provider, model, currency), v) in map.iter() {
+                        let cur = if i == 2 {
+                            format!(",currency=\"{}\"", label(currency))
+                        } else {
+                            String::new()
+                        };
+                        s.push_str(&format!(
+                            "{name}{{provider=\"{}\",model=\"{}\"{cur}}} {}\n",
+                            label(provider),
+                            label(model),
+                            v[i]
+                        ));
+                    }
+                }
+            }
+        }
         s
     }
 }

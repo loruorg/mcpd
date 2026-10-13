@@ -45,6 +45,10 @@
           "doc": "A tool reached over the Model Context Protocol."
         },
         {
+          "name": "handoff",
+          "doc": "Control passing from one agent to another. The span's name is the agent handed to; its parent is the agent handing off."
+        },
+        {
           "name": "workflow_run",
           "doc": "One workflow execution. Usually the root of a trace."
         },
@@ -308,6 +312,36 @@
         {
           "name": "manual",
           "doc": "Entered by a person, through the API or the UI."
+        }
+      ]
+    },
+    "ScorerKind": {
+      "doc": "How a scorer reaches its answer.",
+      "values": [
+        {
+          "name": "code",
+          "doc": "Deterministic code in the daemon. Free, and gives the same answer twice."
+        },
+        {
+          "name": "judge",
+          "doc": "A built-in rubric graded by the configured judge model, in steps: preprocess, analyze, score, reason."
+        },
+        {
+          "name": "criterion",
+          "doc": "A criterion the operator wrote under `judge.criteria`, graded by the judge model in one call."
+        }
+      ]
+    },
+    "ScoreDirection": {
+      "doc": "Which way a scorer's value is better. A comparison reads a fall in `toxicity` as an improvement and a fall in `faithfulness` as a regression.",
+      "values": [
+        {
+          "name": "higher_is_better",
+          "doc": "A larger value is a better run."
+        },
+        {
+          "name": "lower_is_better",
+          "doc": "A smaller value is a better run, as for `toxicity`, `bias` and `hallucination`."
         }
       ]
     },
@@ -1590,6 +1624,121 @@
         }
       ]
     },
+    "MetricHistogram": {
+      "doc": "A histogram metric read back as distributions: the buckets of every point in the window added up, one distribution per label combination, with quantiles read from the merged counts.\n\nBucketed points from OpenTelemetry are added bucket by bucket; for a cumulative stream only the growth across the window counts. Points with one value each, such as mcpd's own derived durations, give exact quantiles and are placed into OpenTelemetry's default boundaries.",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The metric read."
+        },
+        {
+          "name": "unit",
+          "type": "string?",
+          "doc": "UCUM unit of the observations, for axis labelling."
+        },
+        {
+          "name": "points_read",
+          "type": "u64",
+          "doc": "How many stored points were merged."
+        },
+        {
+          "name": "truncated",
+          "type": "bool",
+          "doc": "Whether the window held more points than one read merges, so the newest ones were used and the rest left out. Narrow the window or add a filter."
+        },
+        {
+          "name": "series",
+          "type": "HistogramSeries[]",
+          "doc": "One distribution per label combination."
+        }
+      ]
+    },
+    "HistogramSeries": {
+      "doc": "One merged distribution.",
+      "fields": [
+        {
+          "name": "labels",
+          "type": "json?",
+          "doc": "The `group_by` label values that identify this series. Absent when nothing was grouped."
+        },
+        {
+          "name": "bounds",
+          "type": "f64[]",
+          "doc": "Upper bound of each bucket but the last, which is unbounded above."
+        },
+        {
+          "name": "counts",
+          "type": "u64[]",
+          "doc": "Observations per bucket: one more entry than `bounds`."
+        },
+        {
+          "name": "count",
+          "type": "u64",
+          "doc": "Every observation counted."
+        },
+        {
+          "name": "sum",
+          "type": "f64?",
+          "doc": "Their sum."
+        },
+        {
+          "name": "min",
+          "type": "f64?",
+          "doc": "The smallest observation, when the points recorded single values."
+        },
+        {
+          "name": "max",
+          "type": "f64?",
+          "doc": "The largest observation, when the points recorded single values."
+        },
+        {
+          "name": "p50",
+          "type": "f64?",
+          "doc": "Median."
+        },
+        {
+          "name": "p90",
+          "type": "f64?",
+          "doc": "90th percentile."
+        },
+        {
+          "name": "p95",
+          "type": "f64?",
+          "doc": "95th percentile."
+        },
+        {
+          "name": "p99",
+          "type": "f64?",
+          "doc": "99th percentile."
+        },
+        {
+          "name": "exact",
+          "type": "bool",
+          "doc": "Whether the quantiles are exact, read from single observations, or interpolated linearly inside the bucket the rank falls in."
+        },
+        {
+          "name": "points_skipped",
+          "type": "u64",
+          "doc": "Points left out because their bucket boundaries differ from the ones most of this series uses."
+        }
+      ]
+    },
+    "MetricPointListResponse": {
+      "doc": "A page of stored metric points, as they were recorded.",
+      "fields": [
+        {
+          "name": "points",
+          "type": "MetricPoint[]",
+          "doc": "The matching points."
+        },
+        {
+          "name": "page",
+          "type": "Page",
+          "doc": "Cursor and totals."
+        }
+      ]
+    },
     "MetricSeries": {
       "doc": "One line on a chart: a single label combination over time.",
       "fields": [
@@ -1944,6 +2093,27 @@
           "name": "needs_config",
           "type": "bool",
           "doc": "Whether it needs settings to mean anything. A scorer that needs an expected answer cannot run without one."
+        },
+        {
+          "name": "kind",
+          "type": "ScorerKind",
+          "doc": "How the scorer reaches its answer."
+        },
+        {
+          "name": "direction",
+          "type": "ScoreDirection",
+          "doc": "Which way its value is better."
+        },
+        {
+          "name": "config_keys",
+          "type": "string[]",
+          "doc": "The `ScorerConfig` settings it reads. Empty when it needs none."
+        },
+        {
+          "name": "available",
+          "type": "bool",
+          "doc": "Whether this daemon can run it now. A judged scorer is unavailable until a `judge` block names an endpoint and a model.",
+          "default": true
         }
       ]
     },
@@ -1989,6 +2159,51 @@
           "name": "tool_name",
           "type": "string?",
           "doc": "The tool that must have run and ended `ok`, for `tool_succeeded`. Matched exactly against the `name` of a span whose kind is `tool_call`, `client_tool_call`, `provider_tool_call` or `mcp_tool_call`."
+        },
+        {
+          "name": "forbidden",
+          "type": "string[]",
+          "doc": "Text the answer must not contain, for `excludes`. Any one of them fails the run."
+        },
+        {
+          "name": "keywords",
+          "type": "string[]",
+          "doc": "Words or phrases the answer should mention, for `keyword_coverage`. The score is the share that appear."
+        },
+        {
+          "name": "pattern",
+          "type": "string?",
+          "doc": "A regular expression the answer must match somewhere, for `matches_pattern`."
+        },
+        {
+          "name": "expected_tools",
+          "type": "string[]",
+          "doc": "The tools the run should call, for `tool_call_accuracy`, and the order it should call them in, for `tool_order`. Matched exactly against tool-call span names."
+        },
+        {
+          "name": "forbidden_tools",
+          "type": "string[]",
+          "doc": "Tools the run must not call, for `tool_not_called`."
+        },
+        {
+          "name": "min_chars",
+          "type": "u32?",
+          "doc": "The shortest acceptable answer in characters, for `answer_length`."
+        },
+        {
+          "name": "max_chars",
+          "type": "u32?",
+          "doc": "The longest acceptable answer in characters, for `answer_length`."
+        },
+        {
+          "name": "json_schema",
+          "type": "json?",
+          "doc": "A JSON Schema the answer must satisfy, for `json_schema`. `type`, `properties`, `required`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and `additionalProperties: false` are checked."
+        },
+        {
+          "name": "context",
+          "type": "string[]",
+          "doc": "The passages the answer should rest on, for the judged scorers that read context. When empty, the outputs of the run's `retrieval` and `rag_vector_operation` spans are used."
         },
         {
           "name": "case_sensitive",
@@ -2126,6 +2341,32 @@
           "name": "decidable",
           "type": "bool",
           "doc": "Whether the sample is large enough for the delta to mean anything. A deliberately blunt rule rather than a significance test: below twenty observations on either side, mcpd says the comparison is not decidable rather than dressing noise up as a finding."
+        },
+        {
+          "name": "direction",
+          "type": "ScoreDirection",
+          "doc": "Which way this scorer's value is better, from the catalogue. Scorers the daemon does not know read as higher is better."
+        },
+        {
+          "name": "ci_low",
+          "type": "f64?",
+          "doc": "Lower end of the 95% confidence interval on `delta`, from Welch's t-test. Absent when either side has fewer than two observations."
+        },
+        {
+          "name": "ci_high",
+          "type": "f64?",
+          "doc": "Upper end of that interval."
+        },
+        {
+          "name": "p_value",
+          "type": "f64?",
+          "doc": "Two-sided p-value for the difference in means."
+        },
+        {
+          "name": "regressed",
+          "type": "bool",
+          "doc": "Whether this scorer moved the wrong way: decidable, and the whole interval on the worse side of zero.",
+          "default": false
         }
       ]
     },
@@ -6657,7 +6898,7 @@
         {
           "name": "sort",
           "type": "string?",
-          "doc": "One of `start_time`, `duration`, `cost`, `span_count`, `score`. Defaults to `start_time`.",
+          "doc": "One of `start_time`, `duration`, `cost`, `span_count`, `tokens`, `score`. Defaults to `start_time`.",
           "default": "start_time"
         },
         {
@@ -6791,7 +7032,7 @@
       "method": "GET",
       "path": "/v1/api/deltas",
       "summary": "What has arrived since you last looked",
-      "doc": "Refresh a list in place instead of running its query again. Hold the cursor from the last poll, send it back, and get the rows that have arrived since, oldest first. The watermark is a row's arrival time and its id together, because a batch writes every row in it with one timestamp and a watermark that could only say 'after this nanosecond' would either replay the whole batch or skip the rest of it. A row written with an arrival time behind the watermark, which a sender can cause by setting `received_at` itself, is not returned; that is the cost of a watermark and no cursor shape avoids it.",
+      "doc": "Refresh a list in place instead of running its query again. Hold the cursor from the last poll, send it back, and get the rows that have arrived since, oldest first. The watermark is a row's arrival time and its id together, because a batch writes every row in it with one timestamp and a watermark that could only say 'after this nanosecond' would either replay the whole batch or skip the rest of it. A row written with an arrival time behind the watermark, which a sender can cause by setting `received_at` itself, is not returned; that is the cost of a watermark and no cursor shape avoids it. Sent with `Accept: text/event-stream`, the same request becomes a live tail: the daemon polls every second and sends each batch that brings rows as one `delta` event carrying this response, with the cursor after it as the event id, so a client that reconnects with that cursor misses nothing. A tail closes after thirty minutes and the client reconnects.",
       "query": [
         {
           "name": "project",
@@ -6977,6 +7218,56 @@
           "name": "cursor",
           "type": "string?",
           "doc": "Opaque cursor."
+        },
+        {
+          "name": "environment",
+          "type": "string?",
+          "doc": "Only logs from this environment."
+        },
+        {
+          "name": "service_name",
+          "type": "string?",
+          "doc": "Only logs from this service."
+        },
+        {
+          "name": "service_version",
+          "type": "string?",
+          "doc": "Only logs from this service version."
+        },
+        {
+          "name": "session_id",
+          "type": "string?",
+          "doc": "Only logs from this session."
+        },
+        {
+          "name": "thread_id",
+          "type": "string?",
+          "doc": "Only logs from this thread."
+        },
+        {
+          "name": "user_id",
+          "type": "string?",
+          "doc": "Only logs about this user. Send the plain id; it is hashed the way the stored one was."
+        },
+        {
+          "name": "run_id",
+          "type": "string?",
+          "doc": "Only logs from this durable run."
+        },
+        {
+          "name": "request_id",
+          "type": "string?",
+          "doc": "Only logs from this request."
+        },
+        {
+          "name": "experiment_id",
+          "type": "string?",
+          "doc": "Only logs recorded by this experiment."
+        },
+        {
+          "name": "release",
+          "type": "string?",
+          "doc": "Only logs from this release."
         }
       ],
       "response": {
@@ -7036,6 +7327,111 @@
       ],
       "response": {
         "type": "MetricSeriesResponse"
+      },
+      "auth": "read"
+    },
+    {
+      "id": "metric_histogram",
+      "tag": "Metrics",
+      "method": "GET",
+      "path": "/v1/api/metrics/histogram",
+      "summary": "Read a histogram metric as distributions",
+      "doc": "Merges the buckets of every point of a histogram metric in the window into one distribution per label combination, and reads p50, p90, p95 and p99 from the merged counts. Use it for latency and size distributions, where a mean of bucket sums answers nothing.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "Which project to read. Required."
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "Metric name. Required."
+        },
+        {
+          "name": "from",
+          "type": "timestamp?",
+          "doc": "Start of the window. The last hour when omitted."
+        },
+        {
+          "name": "to",
+          "type": "timestamp?",
+          "doc": "End of the window. Now when omitted."
+        },
+        {
+          "name": "group_by",
+          "type": "string[]?",
+          "doc": "Label keys to split the distributions on."
+        },
+        {
+          "name": "filter",
+          "type": "string?",
+          "doc": "Label equality filters, as `key:value` pairs joined by commas, as on `/v1/api/metrics`."
+        }
+      ],
+      "response": {
+        "type": "MetricHistogram"
+      },
+      "auth": "read"
+    },
+    {
+      "id": "list_metric_points",
+      "tag": "Metrics",
+      "method": "GET",
+      "path": "/v1/api/metrics/points",
+      "summary": "List stored metric points",
+      "doc": "The raw points behind a chart, newest first, with their labels, buckets and exemplar links. Use it to see exactly what a producer sent.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "Which project to read. Required."
+        },
+        {
+          "name": "name",
+          "type": "string?",
+          "doc": "Only this metric."
+        },
+        {
+          "name": "from",
+          "type": "timestamp?",
+          "doc": "Start of the window."
+        },
+        {
+          "name": "to",
+          "type": "timestamp?",
+          "doc": "End of the window."
+        },
+        {
+          "name": "filter",
+          "type": "string?",
+          "doc": "Label equality filters, as `key:value` pairs joined by commas."
+        },
+        {
+          "name": "trace_id",
+          "type": "string?",
+          "doc": "Only points whose exemplar names this run."
+        },
+        {
+          "name": "order",
+          "type": "string?",
+          "doc": "`asc` or `desc`.",
+          "default": "desc"
+        },
+        {
+          "name": "limit",
+          "type": "u32?",
+          "doc": "Page size, 1 to 1000.",
+          "default": 100
+        },
+        {
+          "name": "cursor",
+          "type": "string?",
+          "doc": "From a previous page."
+        }
+      ],
+      "response": {
+        "type": "MetricPointListResponse"
       },
       "auth": "read"
     },
@@ -7145,7 +7541,7 @@
       "method": "GET",
       "path": "/v1/api/feedback",
       "summary": "List human feedback",
-      "doc": "The human judgements on one run, read from the trace detail. `trace_id` is required and is refused when absent: mcpd cannot yet list a whole project's feedback, and answering an empty list instead would read as though nobody had judged anything. Every other parameter is refused by name as well, so a filter this endpoint does not apply cannot come back as a plausible wrong answer.",
+      "doc": "A project's human judgements, newest first, filtered by run, step, kind, author and time window and paged with a cursor. With no filter it is every piece of feedback the project holds.",
       "query": [
         {
           "name": "project",
@@ -7154,14 +7550,44 @@
         },
         {
           "name": "trace_id",
-          "type": "string",
-          "doc": "The run whose judgements to read. Required."
+          "type": "string?",
+          "doc": "Only feedback on this run."
         },
         {
           "name": "limit",
           "type": "u32?",
-          "doc": "Page size.",
+          "doc": "Page size, 1 to 500.",
           "default": 50
+        },
+        {
+          "name": "span_id",
+          "type": "string?",
+          "doc": "Only feedback on this step."
+        },
+        {
+          "name": "kind",
+          "type": "FeedbackKind?",
+          "doc": "Only this kind of judgement."
+        },
+        {
+          "name": "author_kind",
+          "type": "string?",
+          "doc": "Only from this kind of author, such as `end_user` or `reviewer`."
+        },
+        {
+          "name": "from",
+          "type": "timestamp?",
+          "doc": "Start of the window."
+        },
+        {
+          "name": "to",
+          "type": "timestamp?",
+          "doc": "End of the window."
+        },
+        {
+          "name": "cursor",
+          "type": "string?",
+          "doc": "From a previous page. Pages run newest first."
         }
       ],
       "response": {

@@ -44,6 +44,7 @@ Mcpd(
   capture_payloads: bool    = env MCPD_CAPTURE_PAYLOADS ?? true
   log_level:       LogLevel = env MCPD_LOG_LEVEL ?? debug
   sink:            Sink     = the HTTP transport
+  redact:          fn?      = none
 )
 ```
 
@@ -91,6 +92,27 @@ direction; the override applies to that span only. Server-side redaction is the
 other end of the same wire, and the wrong end for a team that must not send the
 bytes at all.
 
+### 2.1.1 Redaction in the process
+
+`redact` is a function the client applies to every span's `input`, `output`,
+`attributes` and `metadata`, and to every log line's `fields`, before the record
+reaches the queue. It receives the value and returns the value to keep, so a
+team can mask an account number or drop a field without sending the bytes. It
+is code only: no environment variable can carry a function.
+
+Two rules hold in every language.
+
+- **It fails closed.** A `redact` that throws drops that value (the field
+  becomes absent) and counts it in `stats().redaction_failures`. So does a
+  result for `attributes`, `metadata` or `fields` that is not a map, because it
+  cannot be stored as one. A null result drops the field without counting:
+  that is the redactor choosing to remove it. A span sent on start and again on
+  end (B8) is redacted each time, so a failure on its input counts once per record. It never raises into the caller (B1), and it
+  never lets the unredacted value through, because a broken redactor is the
+  case where sending the original does the most harm.
+- **It runs after `capture_payloads`.** A payload capture has already
+  stripped is never handed to `redact`.
+
 ### 2.2 Sinks
 
 The exporter drains the queue into an `IngestBatch` and hands it to the
@@ -121,8 +143,9 @@ received. A sink is chosen in code only; it has no environment variable.
 
 `stats()` answers what the client has done since it was built: `queued`
 (signals waiting), `dropped` (evicted by B3), `capacity`, `exported` (signals
-handed to the sink), `failed` (batches the sink refused) and `rejected` (spans
-`record` refused). The same six names in every language.
+handed to the sink), `failed` (batches the sink refused), `rejected` (spans
+`record` refused) and `redaction_failures` (values `redact` could not process,
+section 2.1.1). The same seven names in every language.
 
 ### 2.4 Flush and shutdown deadlines
 
@@ -219,6 +242,71 @@ span automatically and records an error if the block raised:
 Context propagation uses the language's natural mechanism: `context.Context` in
 Go, `contextvars` in Python, `AsyncLocalStorage` in TypeScript, coroutine
 context in Kotlin, a task-local in Rust.
+
+### 3.1 Model calls
+
+A model call is the span most worth recording well, and recording it by hand
+is four calls and a mapping table per provider. Every SDK ships the mapping:
+
+```
+usage_from_openai(response)    -> TokenUsage?   # chat completions or responses
+usage_from_anthropic(response) -> TokenUsage?   # messages
+span.record_response(response, provider?)       # model, usage, id, finish reason, tier
+span.mark_first_token()                         # time to first token
+span.set_guardrail(tripped, reason?)            # a guardrail span's outcome
+```
+
+`response` is the provider's response as the language holds it: the parsed
+JSON object, a map, or the provider SDK's own object where the language can
+read its fields generically. Nothing here imports a provider SDK.
+
+**OpenAI.** Chat completions report `usage.prompt_tokens`, with
+`prompt_tokens_details.cached_tokens` and `audio_tokens`, and
+`completion_tokens` with `completion_tokens_details.reasoning_tokens` and
+`audio_tokens`. The responses API reports `usage.input_tokens` with
+`input_tokens_details.cached_tokens`, and `output_tokens` with
+`output_tokens_details.reasoning_tokens`. The prompt total is gross, so
+`input_details.text` is the total less the cached and audio tokens.
+
+**Anthropic.** `usage.input_tokens` is net of the cache. `cache_read_input_tokens`
+and `cache_creation_input_tokens` are reported beside it, and
+`cache_creation.ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`
+split the write by lifetime when present. So `input_details.text` is
+`input_tokens`, the cache meters are copied, and `input_tokens` on the record is
+the sum of all three, the size of the prompt.
+
+`record_response` detects the shape (a `type` of `message`, or `input_tokens`
+beside `cache_read_input_tokens`, is Anthropic; `prompt_tokens`, or
+`input_tokens_details`, is OpenAI) and then:
+
+- sets the model from `response.model`, and the provider from the argument or
+  else `openai` or `anthropic` by shape;
+- sets the usage from the mapping above;
+- sets the attributes `gen_ai.response.id` (the response's `id`),
+  `gen_ai.response.finish_reasons` (a list: each choice's `finish_reason`, or
+  Anthropic's `stop_reason`, or the responses API's `status`) and
+  `gen_ai.response.service_tier` (`service_tier`, or Anthropic's
+  `usage.service_tier`), each only when present. The daemon prices a batch or
+  flex call from the last one.
+
+It never sets `input` or `output`: the text is the caller's to record or not,
+under `capture_payloads`. An unknown shape, a missing field or a wrong type is
+not an error: what can be read is recorded, the rest is left absent, and
+nothing raises (B1).
+
+`mark_first_token` records `mcpd.time_to_first_token_ms`, the milliseconds
+from the span's start to the call, as an attribute. Only the first call counts,
+so it can sit inside a streaming loop.
+
+`set_guardrail` records `mcpd.guardrail.tripped`, a boolean, and
+`mcpd.guardrail.reason` when given. A guardrail that tripped is not an error
+by itself; the caller decides whether to also call `set_error`.
+
+Elixir has no mutable span handle, so it offers the same pieces as functions
+that return span options: `Mcpd.ModelCall.usage_from_openai/1`,
+`usage_from_anthropic/1`, `options/2` (the `model:`, `provider:`, `usage:` and
+`attributes:` that `record_response` would set), `first_token/1` (the attribute
+from a start time) and `guardrail/2`.
 
 ## 4. The other four signals
 

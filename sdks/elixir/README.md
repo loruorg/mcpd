@@ -105,7 +105,8 @@ Mcpd.span mcpd, "plan", kind: :model_generation, do: :ok
 A sink of your own implements `Mcpd.Sink` (`export/3`) and is given as
 `{module, opts}`. One that raises is a failed batch, counted and reported
 through the worker's throttle, never raised to the caller. `Mcpd.stats/1`
-answers `queued`, `dropped`, `capacity`, `exported`, `failed` and `rejected`.
+answers `queued`, `dropped`, `capacity`, `exported`, `failed`, `rejected` and
+`redaction_failures`.
 
 `Mcpd.flush/2` and `Mcpd.shutdown/2` return within their timeout, 10 seconds
 by default, even when the daemon never answers. A flush that ran out of time

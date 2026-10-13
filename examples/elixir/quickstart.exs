@@ -30,15 +30,33 @@ require Mcpd
 # run is active on this process, so the tree assembles itself.
 
 plan_answer = fn mcpd, question ->
-  Mcpd.span mcpd, "plan_answer",
-    kind: :model_generation,
-    model: "gpt-4o",
-    provider: "openai",
-    input: [%{"role" => "user", "content" => question}],
-    output: "Let me check on that.",
-    usage: %{"input_tokens" => 1_180, "output_tokens" => 96} do
-    Process.sleep(40)
-    "Let me check on that."
+  started = System.monotonic_time()
+  # Where a real provider call goes. This is the shape Anthropic answers in.
+  Process.sleep(40)
+  first_token = Mcpd.ModelCall.first_token(started)
+  answer = "Let me check on that."
+
+  response = %{
+    "id" => "msg_01",
+    "type" => "message",
+    "model" => "claude-sonnet-4-5",
+    "stop_reason" => "end_turn",
+    "content" => [%{"type" => "text", "text" => answer}],
+    "usage" => %{"input_tokens" => 172, "cache_read_input_tokens" => 640, "output_tokens" => 37}
+  }
+
+  # The model, the token counts mcpd prices, the response id and the finish
+  # reason, read from the response in one call.
+  opts =
+    [
+      kind: :model_generation,
+      input: [%{"role" => "user", "content" => question}],
+      output: answer,
+      attributes: first_token
+    ] ++ Mcpd.ModelCall.options(response)
+
+  Mcpd.span mcpd, "plan_answer", opts do
+    answer
   end
 end
 

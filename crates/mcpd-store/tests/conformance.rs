@@ -39,8 +39,8 @@
 use std::collections::BTreeMap;
 
 use mcpd_core::{
-    Correlation, Cost, EntityKind, LogLevel, LogRecord, MetricKind, MetricPoint, Span, SpanKind,
-    SpanStatus, TokenUsage, Trace,
+    Correlation, Cost, EntityKind, Feedback, FeedbackKind, LogLevel, LogRecord, MetricKind,
+    MetricPoint, Span, SpanKind, SpanStatus, TokenUsage, Trace,
 };
 use mcpd_store::{
     Batch, ClickHouseConfig, ClickHouseStore, Delta, DeltaQuery, DeltaSignal, Discovered,
@@ -561,6 +561,26 @@ fn documented_answers() -> Answers {
     );
     e.insert("a policy with no window keeps everything", "0,1".into());
     e.insert("expiring runs removes them", "0".into());
+
+    // A log line keeps its whole correlation, and the list filters on it.
+    e.insert("a log keeps its thread, run and release", "t-1,r-1,v2".into());
+    e.insert("logs filter on thread", "l1".into());
+    e.insert("logs filter on run and release together", "l1".into());
+
+    // Runs sorted by the tokens they used, input and output together.
+    e.insert("runs sort by tokens", "big,mid,small".into());
+
+    // A project's feedback, newest first, filtered and keyset paged.
+    e.insert("feedback lists newest first", "f3,f2".into());
+    e.insert("feedback pages on", "f1".into());
+    e.insert("feedback filters on kind", "f2".into());
+    e.insert("feedback filters on run", "f1,f3".into());
+
+    // Metric points read back as they were written, keyset paged.
+    e.insert("metric points list newest first", "m3,m2".into());
+    e.insert("metric points page on", "m1".into());
+    e.insert("metric points keep their buckets", "[1,2]".into());
+    e.insert("metric points filter on a label", "m2".into());
 
     e
 }
@@ -2094,6 +2114,234 @@ async fn observe_themes(store: &dyn Store, project: String) -> Answers {
     a
 }
 
+async fn observe_log_correlation(store: &dyn Store, project: String) -> Answers {
+    let mut a = Answers::new();
+    let now = OffsetDateTime::now_utc();
+    let line = |id: &str, thread: Option<&str>, run: Option<&str>| {
+        let mut correlation = only_project(&project);
+        correlation.thread_id = thread.map(str::to_owned);
+        correlation.run_id = run.map(str::to_owned);
+        correlation.release = Some("v2".into());
+        LogRecord {
+            log_id: format!("{project}-{id}"),
+            trace_id: None,
+            span_id: None,
+            timestamp: now,
+            level: LogLevel::Info,
+            message: "a correlated line".into(),
+            fields: None,
+            logger: None,
+            correlation,
+            received_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    };
+    store
+        .ingest(Batch {
+            logs: vec![line("l1", Some("t-1"), Some("r-1")), line("l2", Some("t-2"), None)],
+            ..Batch::default()
+        })
+        .await
+        .expect("the log fixture must ingest");
+    let strip = |items: &[LogRecord]| {
+        items
+            .iter()
+            .map(|l| l.log_id.trim_start_matches(&format!("{project}-")).to_owned())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let q = |pairs: &[(&str, &str)]| LogQuery {
+        project: project.clone(),
+        correlation: pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
+        limit: 10,
+        ..Default::default()
+    };
+    let by_thread = store.list_logs(&q(&[("thread_id", "t-1")])).await.expect("filter by thread");
+    a.insert("logs filter on thread", strip(&by_thread.items));
+    let c = by_thread.items.first().map(|l| l.correlation.clone());
+    a.insert(
+        "a log keeps its thread, run and release",
+        c.map(|c| {
+            format!(
+                "{},{},{}",
+                c.thread_id.unwrap_or_default(),
+                c.run_id.unwrap_or_default(),
+                c.release.unwrap_or_default()
+            )
+        })
+        .unwrap_or_default(),
+    );
+    let both = store
+        .list_logs(&q(&[("run_id", "r-1"), ("release", "v2")]))
+        .await
+        .expect("filter by run and release");
+    a.insert("logs filter on run and release together", strip(&both.items));
+    a
+}
+
+async fn observe_token_sort(store: &dyn Store, project: String) -> Answers {
+    let mut a = Answers::new();
+    let now = OffsetDateTime::now_utc();
+    let spans: Vec<Span> = [("small", 10, 5), ("big", 900, 100), ("mid", 300, 0)]
+        .iter()
+        .enumerate()
+        .map(|(i, (label, input, output))| {
+            let mut s = root(
+                &project,
+                label,
+                now - Duration::seconds(i as i64 + 1),
+                only_project(&project),
+            );
+            s.usage = Some(tokens(*input, *output));
+            s
+        })
+        .collect();
+    store.ingest(Batch { spans, ..Batch::default() }).await.expect("the token fixture must ingest");
+    let page = store
+        .list_traces(&TraceQuery {
+            project: project.clone(),
+            sort: mcpd_store::TraceSort::Tokens,
+            order: mcpd_store::Order::Desc,
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("list runs by tokens");
+    let names: Vec<String> = page.items.iter().map(|t| t.name.clone()).collect();
+    a.insert("runs sort by tokens", names.join(","));
+    a
+}
+
+async fn observe_feedback_list(store: &dyn Store, project: String) -> Answers {
+    let mut a = Answers::new();
+    let now = OffsetDateTime::now_utc();
+    let run = trace_id(&project, "fb");
+    let item = |id: &str, secs: i64, kind: FeedbackKind, on_run: bool| Feedback {
+        feedback_id: format!("{project}-{id}"),
+        trace_id: on_run.then(|| run.clone()),
+        span_id: None,
+        kind,
+        value: json!(true),
+        comment: None,
+        author_id: None,
+        author_kind: Some("reviewer".into()),
+        timestamp: now - Duration::seconds(60 - secs),
+        metadata: None,
+        correlation: only_project(&project),
+    };
+    store
+        .ingest(Batch {
+            feedback: vec![
+                item("f1", 1, FeedbackKind::Thumbs, true),
+                item("f2", 2, FeedbackKind::Rating, false),
+                item("f3", 3, FeedbackKind::Thumbs, true),
+            ],
+            ..Batch::default()
+        })
+        .await
+        .expect("the feedback fixture must ingest");
+    let strip = |items: &[Feedback]| {
+        items
+            .iter()
+            .map(|f| f.feedback_id.trim_start_matches(&format!("{project}-")).to_owned())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut q =
+        mcpd_store::FeedbackQuery { project: project.clone(), limit: 2, ..Default::default() };
+    let first = store.list_feedback(&q).await.expect("list feedback");
+    a.insert("feedback lists newest first", strip(&first.items));
+    q.cursor = first.next_cursor.clone();
+    let second = store.list_feedback(&q).await.expect("list the next page");
+    a.insert("feedback pages on", strip(&second.items));
+    let rated = store
+        .list_feedback(&mcpd_store::FeedbackQuery {
+            project: project.clone(),
+            kind: Some("rating".into()),
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("filter feedback by kind");
+    a.insert("feedback filters on kind", strip(&rated.items));
+    let mut on_run = store
+        .list_feedback(&mcpd_store::FeedbackQuery {
+            project: project.clone(),
+            trace_id: Some(run.clone()),
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("filter feedback by run")
+        .items;
+    on_run.sort_by(|x, y| x.feedback_id.cmp(&y.feedback_id));
+    a.insert("feedback filters on run", strip(&on_run));
+    a
+}
+
+async fn observe_metric_points(store: &dyn Store, project: String) -> Answers {
+    let mut a = Answers::new();
+    let now = OffsetDateTime::now_utc();
+    let point = |id: &str, secs: i64, model: &str| MetricPoint {
+        metric_id: format!("{project}-{id}"),
+        name: "latency".into(),
+        kind: MetricKind::Histogram,
+        value: 3.0,
+        unit: Some("ms".into()),
+        timestamp: now - Duration::seconds(60 - secs),
+        labels: Some(json!({ "model": model })),
+        buckets: Some(json!({ "bounds": [10], "counts": [1, 2] })),
+        trace_id: None,
+        span_id: None,
+        correlation: only_project(&project),
+        received_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    store
+        .ingest(Batch {
+            metrics: vec![point("m1", 1, "a"), point("m2", 2, "b"), point("m3", 3, "a")],
+            ..Batch::default()
+        })
+        .await
+        .expect("the metric fixture must ingest");
+    let strip = |items: &[MetricPoint]| {
+        items
+            .iter()
+            .map(|m| m.metric_id.trim_start_matches(&format!("{project}-")).to_owned())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut q = mcpd_store::MetricPointQuery {
+        project: project.clone(),
+        name: Some("latency".into()),
+        limit: 2,
+        ..Default::default()
+    };
+    let first = store.list_metric_points(&q).await.expect("list metric points");
+    a.insert("metric points list newest first", strip(&first.items));
+    a.insert(
+        "metric points keep their buckets",
+        first
+            .items
+            .first()
+            .and_then(|m| m.buckets.as_ref())
+            .map(|b| b["counts"].to_string())
+            .unwrap_or_default(),
+    );
+    q.cursor = first.next_cursor.clone();
+    let second = store.list_metric_points(&q).await.expect("list the next page");
+    a.insert("metric points page on", strip(&second.items));
+    let filtered = store
+        .list_metric_points(&mcpd_store::MetricPointQuery {
+            project: project.clone(),
+            filter: vec![("model".into(), "b".into())],
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("filter metric points");
+    a.insert("metric points filter on a label", strip(&filtered.items));
+    a
+}
+
 async fn observe_retention(store: &dyn Store, project: String) -> Answers {
     let mut a = Answers::new();
     let now = OffsetDateTime::now_utc();
@@ -2418,6 +2666,11 @@ async fn every_backend_gives_the_documented_answer_to_the_same_question() {
         answers.extend(observe_discovery(store.as_ref(), unique(&format!("disc-{name}"))).await);
         answers.extend(observe_polling(store.as_ref(), unique(&format!("poll-{name}"))).await);
         answers.extend(observe_retention(store.as_ref(), unique(&format!("ret-{name}"))).await);
+        answers.extend(observe_metric_points(store.as_ref(), unique(&format!("mp-{name}"))).await);
+        answers.extend(observe_feedback_list(store.as_ref(), unique(&format!("fb-{name}"))).await);
+        answers.extend(observe_token_sort(store.as_ref(), unique(&format!("tok-{name}"))).await);
+        answers
+            .extend(observe_log_correlation(store.as_ref(), unique(&format!("lc-{name}"))).await);
         answers.extend(observe_themes(store.as_ref(), unique(&format!("thm-{name}"))).await);
         answers.extend(
             observe_tenancy(

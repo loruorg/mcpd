@@ -104,13 +104,13 @@ func handleTicket(ctx context.Context, m *mcpd.Client, question string) string {
 	}
 	return run.TraceID()
 }
+
 // #endregion trace
 
 // draftAnswer stands in for a model call.
 func draftAnswer(ctx context.Context, m *mcpd.Client, question string) string {
 	ctx, span := m.Start(ctx, "draft_answer",
 		mcpd.WithSpanKind(mcpd.SpanKindModelGeneration),
-		mcpd.WithModel("gpt-4o-mini", "openai"),
 		mcpd.WithInput(map[string]any{
 			"messages": []map[string]string{
 				{"role": "system", "content": "You are a billing support agent."},
@@ -120,19 +120,28 @@ func draftAnswer(ctx context.Context, m *mcpd.Client, question string) string {
 	)
 	defer span.End()
 
+	// Where a real provider call goes. This is the shape Anthropic answers in.
+	time.Sleep(40 * time.Millisecond)
+	span.MarkFirstToken()
 	answer := "You were charged twice on 3 March. The duplicate is refunded today."
-	time.Sleep(40 * time.Millisecond) // the provider round trip
+	response := map[string]any{
+		"id":          "msg_01",
+		"type":        "message",
+		"model":       "claude-sonnet-4-5",
+		"stop_reason": "end_turn",
+		"content":     []map[string]any{{"type": "text", "text": answer}},
+		"usage": map[string]any{
+			"input_tokens": 172, "cache_read_input_tokens": 640, "output_tokens": 96,
+		},
+	}
 
 	span.SetOutput(answer)
-	// Token counts are what mcpd prices the span from, at ingest.
-	span.SetUsage(mcpd.TokenUsage{
-		InputTokens:  ptr(uint64(812)),
-		OutputTokens: ptr(uint64(96)),
-		InputDetails: &mcpd.InputTokenDetails{CacheRead: ptr(uint64(640))},
-	})
+	// The model, the token counts mcpd prices, the response id and the
+	// finish reason, read from the response in one call.
+	span.RecordResponse(response, "")
 	m.Metric(ctx, "support.answer_tokens", 96, mcpd.MetricKindHistogram,
 		mcpd.MetricUnit("{token}"),
-		mcpd.MetricLabels(map[string]any{"model": "gpt-4o-mini"}),
+		mcpd.MetricLabels(map[string]any{"model": "claude-sonnet-4-5"}),
 	)
 	return answer
 }
@@ -152,12 +161,9 @@ func sendReply(ctx context.Context, m *mcpd.Client, answer string) error {
 	return err
 }
 
-
 func duration(ns *uint64) time.Duration {
 	if ns == nil {
 		return 0
 	}
 	return time.Duration(*ns)
 }
-
-func ptr[T any](v T) *T { return &v }

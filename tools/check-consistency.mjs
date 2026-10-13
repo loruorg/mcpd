@@ -442,7 +442,6 @@ function checkDeployEnv() {
  */
 const CONFIG_LINE_OF = {
   '--listen': 'listen',
-  '--price-book': 'price book',
   '--data': 'storage',
   '--clickhouse-url': 'storage',
   '--clickhouse-database': 'storage',
@@ -493,6 +492,7 @@ const CONFIG_LINE_OF = {
   '--spool-max-bytes': 'forwarding',
   '--upstream': 'relay',
   '--upstream-key': 'relay',
+  '--price-book': 'prices',
   monitors: 'monitors',
   monitor_interval_seconds: 'monitors',
   slos: 'objectives',
@@ -505,6 +505,7 @@ const CONFIG_LINE_OF = {
   derived_metrics: 'derived',
   aspects: 'aspects',
   accounts: 'signup',
+  price_book: 'prices',
 }
 
 /** The translated page trees: every two-letter directory under the pages. */

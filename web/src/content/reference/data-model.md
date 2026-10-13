@@ -27,6 +27,7 @@ What an operation *is*. The kind drives how a span is rendered in the waterfall,
 | `client_tool_call` | A tool the calling client executes. The server records the marker; the client returns the detail. |
 | `provider_tool_call` | A tool the model provider executes server-side, such as hosted web search or code execution. |
 | `mcp_tool_call` | A tool reached over the Model Context Protocol. |
+| `handoff` | Control passing from one agent to another. The span's name is the agent handed to; its parent is the agent handing off. |
 | `workflow_run` | One workflow execution. Usually the root of a trace. |
 | `workflow_step` | One step within a workflow. |
 | `workflow_conditional` | A branch point, with the conditions it evaluated. |
@@ -132,6 +133,25 @@ Where a score came from. Kept separate from the scorer's identity so the same sc
 | `offline` | Produced later, by scoring stored traces. |
 | `experiment` | Produced by an experiment run against a dataset. |
 | `manual` | Entered by a person, through the API or the UI. |
+
+### ScorerKind
+
+How a scorer reaches its answer.
+
+| Value | Meaning |
+| --- | --- |
+| `code` | Deterministic code in the daemon. Free, and gives the same answer twice. |
+| `judge` | A built-in rubric graded by the configured judge model, in steps: preprocess, analyze, score, reason. |
+| `criterion` | A criterion the operator wrote under `judge.criteria`, graded by the judge model in one call. |
+
+### ScoreDirection
+
+Which way a scorer's value is better. A comparison reads a fall in `toxicity` as an improvement and a fall in `faithfulness` as a regression.
+
+| Value | Meaning |
+| --- | --- |
+| `higher_is_better` | A larger value is a better run. |
+| `lower_is_better` | A smaller value is a better run, as for `toxicity`, `bias` and `hallucination`. |
 
 ### FeedbackKind
 
@@ -726,6 +746,49 @@ One bucket of an aggregated series.
 | `count` | `u64` | How many raw observations fell in this bucket. Distinguishes a genuine zero from no data. |
 | `exemplar_trace_id` | `string` | A trace that contributed to this bucket, so a spike on the chart opens the run that caused it. |
 
+### MetricHistogram
+
+A histogram metric read back as distributions: the buckets of every point in the window added up, one distribution per label combination, with quantiles read from the merged counts.
+
+Bucketed points from OpenTelemetry are added bucket by bucket; for a cumulative stream only the growth across the window counts. Points with one value each, such as mcpd's own derived durations, give exact quantiles and are placed into OpenTelemetry's default boundaries.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | `string` <span class="req">required</span> | The metric read. |
+| `unit` | `string` | UCUM unit of the observations, for axis labelling. |
+| `points_read` | `u64` <span class="req">required</span> | How many stored points were merged. |
+| `truncated` | `bool` <span class="req">required</span> | Whether the window held more points than one read merges, so the newest ones were used and the rest left out. Narrow the window or add a filter. |
+| `series` | [`HistogramSeries`](#histogramseries)[] <span class="req">required</span> | One distribution per label combination. |
+
+### HistogramSeries
+
+One merged distribution.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `labels` | `json` | The `group_by` label values that identify this series. Absent when nothing was grouped. |
+| `bounds` | `f64`[] <span class="req">required</span> | Upper bound of each bucket but the last, which is unbounded above. |
+| `counts` | `u64`[] <span class="req">required</span> | Observations per bucket: one more entry than `bounds`. |
+| `count` | `u64` <span class="req">required</span> | Every observation counted. |
+| `sum` | `f64` | Their sum. |
+| `min` | `f64` | The smallest observation, when the points recorded single values. |
+| `max` | `f64` | The largest observation, when the points recorded single values. |
+| `p50` | `f64` | Median. |
+| `p90` | `f64` | 90th percentile. |
+| `p95` | `f64` | 95th percentile. |
+| `p99` | `f64` | 99th percentile. |
+| `exact` | `bool` <span class="req">required</span> | Whether the quantiles are exact, read from single observations, or interpolated linearly inside the bucket the rank falls in. |
+| `points_skipped` | `u64` <span class="req">required</span> | Points left out because their bucket boundaries differ from the ones most of this series uses. |
+
+### MetricPointListResponse
+
+A page of stored metric points, as they were recorded.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `points` | [`MetricPoint`](#metricpoint)[] <span class="req">required</span> | The matching points. |
+| `page` | [`Page`](#page) <span class="req">required</span> | Cursor and totals. |
+
 ### MetricSeries
 
 One line on a chart: a single label combination over time.
@@ -868,6 +931,10 @@ One scorer mcpd can run, as described to a caller.
 | `id` | `string` <span class="req">required</span> | Stable identifier, recorded on every score it produces. |
 | `description` | `string` <span class="req">required</span> | What it measures, in one line. |
 | `needs_config` | `bool` <span class="req">required</span> | Whether it needs settings to mean anything. A scorer that needs an expected answer cannot run without one. |
+| `kind` | [`ScorerKind`](#scorerkind) <span class="req">required</span> | How the scorer reaches its answer. |
+| `direction` | [`ScoreDirection`](#scoredirection) <span class="req">required</span> | Which way its value is better. |
+| `config_keys` | `string`[] <span class="req">required</span> | The `ScorerConfig` settings it reads. Empty when it needs none. |
+| `available` | `bool` <span class="req">required</span> | Whether this daemon can run it now. A judged scorer is unavailable until a `judge` block names an endpoint and a model. |
 
 ### ScorerConfig
 
@@ -883,6 +950,15 @@ Settings shared by the scorers that need them. Every field is optional; a scorer
 | `span_kind` | [`SpanKind`](#spankind) | The kind of span that must be present in the run, for `span_present`. |
 | `span_name` | `string` | The span name that must be present in the run, for `span_present`. Matched exactly against `Span.name`. |
 | `tool_name` | `string` | The tool that must have run and ended `ok`, for `tool_succeeded`. Matched exactly against the `name` of a span whose kind is `tool_call`, `client_tool_call`, `provider_tool_call` or `mcp_tool_call`. |
+| `forbidden` | `string`[] <span class="req">required</span> | Text the answer must not contain, for `excludes`. Any one of them fails the run. |
+| `keywords` | `string`[] <span class="req">required</span> | Words or phrases the answer should mention, for `keyword_coverage`. The score is the share that appear. |
+| `pattern` | `string` | A regular expression the answer must match somewhere, for `matches_pattern`. |
+| `expected_tools` | `string`[] <span class="req">required</span> | The tools the run should call, for `tool_call_accuracy`, and the order it should call them in, for `tool_order`. Matched exactly against tool-call span names. |
+| `forbidden_tools` | `string`[] <span class="req">required</span> | Tools the run must not call, for `tool_not_called`. |
+| `min_chars` | `u32` | The shortest acceptable answer in characters, for `answer_length`. |
+| `max_chars` | `u32` | The longest acceptable answer in characters, for `answer_length`. |
+| `json_schema` | `json` | A JSON Schema the answer must satisfy, for `json_schema`. `type`, `properties`, `required`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and `additionalProperties: false` are checked. |
+| `context` | `string`[] <span class="req">required</span> | The passages the answer should rest on, for the judged scorers that read context. When empty, the outputs of the run's `retrieval` and `rag_vector_operation` spans are used. |
 | `case_sensitive` | `bool` <span class="req">required</span> | Case sensitivity for text comparisons. |
 
 ### ScoreRunRequest
@@ -936,6 +1012,11 @@ How one scorer moved between two experiments.
 | `candidate_n` | `u64` <span class="req">required</span> | Number of candidate observations. |
 | `delta` | `f64` | Candidate minus baseline. |
 | `decidable` | `bool` <span class="req">required</span> | Whether the sample is large enough for the delta to mean anything. A deliberately blunt rule rather than a significance test: below twenty observations on either side, mcpd says the comparison is not decidable rather than dressing noise up as a finding. |
+| `direction` | [`ScoreDirection`](#scoredirection) <span class="req">required</span> | Which way this scorer's value is better, from the catalogue. Scorers the daemon does not know read as higher is better. |
+| `ci_low` | `f64` | Lower end of the 95% confidence interval on `delta`, from Welch's t-test. Absent when either side has fewer than two observations. |
+| `ci_high` | `f64` | Upper end of that interval. |
+| `p_value` | `f64` | Two-sided p-value for the difference in means. |
+| `regressed` | `bool` <span class="req">required</span> | Whether this scorer moved the wrong way: decidable, and the whole interval on the worse side of zero. |
 
 ### ExperimentComparison
 

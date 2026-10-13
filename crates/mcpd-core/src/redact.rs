@@ -39,6 +39,9 @@ pub struct Redactor {
     /// Longest string kept verbatim. Longer ones are truncated with a marker,
     /// which bounds the damage a runaway prompt does to storage.
     max_string: usize,
+    /// Whether string values are searched for credential shapes, whatever key
+    /// they sit under. See [`find_secrets`].
+    detect_values: bool,
 }
 
 impl Default for Redactor {
@@ -63,6 +66,7 @@ impl Redactor {
             token: String::new(),
             max_depth: 32,
             max_string: usize::MAX,
+            detect_values: false,
         }
     }
 
@@ -117,6 +121,7 @@ impl Redactor {
             token: "[redacted]".to_owned(),
             max_depth: 32,
             max_string: 128 * 1024,
+            detect_values: true,
         }
     }
 
@@ -191,10 +196,18 @@ impl Redactor {
         Value::String(format!("{}… [{} bytes truncated]", &s[..end], s.len() - end))
     }
 
+    /// Turn the search of string values for credential shapes on or off. On by
+    /// default with the default rules.
+    #[must_use]
+    pub fn with_value_detection(mut self, on: bool) -> Self {
+        self.detect_values = on;
+        self
+    }
+
     /// Redact a JSON document in place, returning the redacted copy.
     #[must_use]
     pub fn redact(&self, value: &Value) -> Value {
-        if self.rules.is_empty() && self.max_string == usize::MAX {
+        if self.rules.is_empty() && self.max_string == usize::MAX && !self.detect_values {
             return value.clone();
         }
         self.walk(value, 0, None)
@@ -239,6 +252,10 @@ impl Redactor {
             }
             Value::String(s) => match inherited {
                 Some(m) => self.apply_to_string(m, s),
+                None if self.detect_values => match find_secrets(s) {
+                    Some(clean) => self.truncate(&clean),
+                    None => self.truncate(s),
+                },
                 None => self.truncate(s),
             },
             // A scalar under a secret key is still a secret. This arm used to
@@ -302,6 +319,67 @@ impl Redactor {
     #[must_use]
     pub fn redact_opt(&self, value: &Option<Value>) -> Option<Value> {
         value.as_ref().map(|v| self.redact(v))
+    }
+}
+
+/// The credential shapes searched for in every string value, with the label
+/// each is replaced by.
+///
+/// A key rule only works when the secret sits under a key that names it. A
+/// prompt that pastes a token into a sentence, a URL with a password in it and
+/// a log field called `header` all carry a secret under a key that names
+/// nothing, so these are matched by their shape instead. Each pattern needs a
+/// long, high-entropy run with a fixed prefix, so ordinary prose does not
+/// match; an email address is not on the list, because a prompt about a
+/// customer's email is the common case and masking it would destroy the run.
+fn secret_patterns() -> &'static [(regex::Regex, &'static str)] {
+    static P: std::sync::OnceLock<Vec<(regex::Regex, &'static str)>> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        [
+            (
+                r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+                "private key",
+            ),
+            (r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}", "jwt"),
+            (r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", "aws key"),
+            (r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}", "api key"),
+            (r"\bgh[pousr]_[A-Za-z0-9]{36,}\b", "github token"),
+            (r"\bxox[abposr]-[A-Za-z0-9-]{10,}", "slack token"),
+            (r"\bAIza[0-9A-Za-z_-]{35}\b", "google key"),
+            (r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}", "bearer token"),
+            (r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", "url credentials"),
+        ]
+        .into_iter()
+        .filter_map(|(p, label)| regex::Regex::new(p).ok().map(|r| (r, label)))
+        .collect()
+    })
+}
+
+/// The string with every credential shape replaced, or `None` when it holds
+/// none, so the common case allocates nothing.
+fn find_secrets(s: &str) -> Option<String> {
+    // A cheap screen first: every pattern needs one of these somewhere in the
+    // string, and nearly every string has none of them.
+    const HINTS: [&str; 10] =
+        ["PRIVATE KEY", "eyJ", "AKIA", "ASIA", "sk-", "gh", "xox", "AIza", "earer", "://"];
+    if !HINTS.iter().any(|h| s.contains(h)) {
+        return None;
+    }
+    let mut out = std::borrow::Cow::Borrowed(s);
+    for (re, label) in secret_patterns() {
+        if !re.is_match(&out) {
+            continue;
+        }
+        let replaced = if *label == "url credentials" {
+            re.replace_all(&out, "${1}[redacted]@").into_owned()
+        } else {
+            re.replace_all(&out, format!("[redacted {label}]").as_str()).into_owned()
+        };
+        out = std::borrow::Cow::Owned(replaced);
+    }
+    match out {
+        std::borrow::Cow::Owned(o) => Some(o),
+        std::borrow::Cow::Borrowed(_) => None,
     }
 }
 
@@ -489,5 +567,38 @@ mod scalar_tests {
         assert!(!s.contains("123456"), "numeric password survived: {s}");
         assert!(!s.contains("4111111111111111"), "numeric card survived: {s}");
         assert!(s.contains("kept"), "an ordinary field must be untouched: {s}");
+    }
+
+    #[test]
+    fn a_credential_in_prose_is_found_by_its_shape() {
+        let r = Redactor::with_defaults();
+        let text = "use key sk-ant-REDACTEDREDACTEDREDACTED1234 and token \
+                    eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N \
+                    against https://admin:hunter2@db.example.com/x with AKIAABCDEFGHIJKLMNOP";
+        let out = r.redact_text(text);
+        for gone in ["sk-ant-REDACTED", "eyJhbGci", "hunter2", "AKIAABCDEFGHIJKLMNOP"] {
+            assert!(!out.contains(gone), "{gone} survived: {out}");
+        }
+        assert!(
+            out.contains("[redacted api key]") && out.contains("https://[redacted]@db"),
+            "{out}"
+        );
+        assert!(out.contains("[redacted jwt]") && out.contains("[redacted aws key]"), "{out}");
+    }
+
+    #[test]
+    fn ordinary_prose_and_an_email_are_left_alone() {
+        let r = Redactor::with_defaults();
+        let text = "Ship order A-7741 to jane@example.com via https://example.com/track";
+        assert_eq!(r.redact_text(text), text);
+        let off = Redactor::with_defaults().with_value_detection(false);
+        assert_eq!(
+            off.redact_text("sk-ant-REDACTEDREDACTEDREDACTED1234"),
+            "sk-ant-REDACTEDREDACTEDREDACTED1234"
+        );
+        assert_eq!(
+            Redactor::disabled().redact_text("Bearer abcdefghijklmnopqrstuvwxyz"),
+            "Bearer abcdefghijklmnopqrstuvwxyz"
+        );
     }
 }

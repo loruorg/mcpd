@@ -155,8 +155,11 @@ pub(super) fn write_batch(conn: &mut Connection, batch: Batch) -> Result<IngestR
             .prepare_cached(
                 "INSERT OR REPLACE INTO logs (
                     log_id, trace_id, span_id, timestamp, level, severity, message, fields,
-                    logger, project, environment, service_name, session_id, user_id, received_at
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                    logger, project, environment, service_name, session_id, user_id, received_at,
+                    service_version, thread_id, resource_id, run_id, request_id, experiment_id,
+                    release
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,
+                           ?16,?17,?18,?19,?20,?21,?22)",
             )
             .map_err(be)?;
         let mut ins_log_fts = tx
@@ -204,6 +207,13 @@ pub(super) fn write_batch(conn: &mut Connection, batch: Batch) -> Result<IngestR
                     c.session_id,
                     c.user_id,
                     to_nanos(log.received_at),
+                    c.service_version,
+                    c.thread_id,
+                    c.resource_id,
+                    c.run_id,
+                    c.request_id,
+                    c.experiment_id,
+                    c.release,
                 ])
                 .map_err(be)?;
             del_log_fts.execute(rusqlite::params![log.log_id, c.project]).map_err(be)?;
@@ -867,6 +877,7 @@ pub(super) fn list_traces_sync(conn: &Connection, q: &TraceQuery) -> Result<Page
         TraceSort::Duration => "COALESCE(t.duration_ns, 0)",
         TraceSort::Cost => "t.total_cost",
         TraceSort::SpanCount => "t.span_count",
+        TraceSort::Tokens => "(t.input_tokens + t.output_tokens)",
         TraceSort::Score => "COALESCE(t.min_score, 0)",
     };
     let dir = match q.order {
@@ -1114,6 +1125,13 @@ pub(super) fn list_logs_sync(conn: &Connection, q: &LogQuery) -> Result<Paged<Lo
     if let Some(s) = &q.span_id {
         w.push("span_id = ?", s.clone());
     }
+    for (field, value) in &q.correlation {
+        // Only a name from the fixed list reaches the SQL, so the column is
+        // never caller text.
+        if let Some(col) = crate::LOG_CORRELATION_FILTERS.iter().find(|c| **c == field.as_str()) {
+            w.push(&format!("{col} = ?"), value.clone());
+        }
+    }
     if let Some(f) = q.from {
         w.push("timestamp >= ?", to_nanos(f));
     }
@@ -1154,6 +1172,128 @@ pub(super) fn list_logs_sync(conn: &Connection, q: &LogQuery) -> Result<Paged<Lo
     let next_cursor = if rows.len() > limit as usize {
         rows.truncate(limit as usize);
         rows.last().map(|l| encode_cursor(to_nanos(l.timestamp), &l.log_id))
+    } else {
+        None
+    };
+    Ok(Paged { items: rows, next_cursor, total: None })
+}
+
+pub(super) fn list_feedback_sync(
+    conn: &Connection,
+    q: &crate::FeedbackQuery,
+) -> Result<Paged<Feedback>> {
+    let mut w = Where::default();
+    w.push("project = ?", q.project.clone());
+    if let Some(t) = &q.trace_id {
+        w.push("trace_id = ?", t.clone());
+    }
+    if let Some(s) = &q.span_id {
+        w.push("span_id = ?", s.clone());
+    }
+    if let Some(k) = &q.kind {
+        w.push("kind = ?", k.clone());
+    }
+    if let Some(a) = &q.author_kind {
+        w.push("author_kind = ?", a.clone());
+    }
+    if let Some(f) = q.from {
+        w.push("timestamp >= ?", to_nanos(f));
+    }
+    if let Some(t) = q.to {
+        w.push("timestamp < ?", to_nanos(t));
+    }
+    if let Some(c) = &q.cursor {
+        let (v, id) = decode_cursor(c)?;
+        w.clauses.push("(timestamp, feedback_id) < (?, ?)".to_owned());
+        w.binds.push(Box::new(v));
+        w.binds.push(Box::new(id));
+    }
+    let limit = q.limit.clamp(1, 500);
+    let sql = format!(
+        "SELECT {FEEDBACK_COLUMNS} FROM feedback{} ORDER BY timestamp DESC, feedback_id DESC \
+         LIMIT {}",
+        w.sql(),
+        limit + 1
+    );
+    let mut stmt = conn.prepare(&sql).map_err(be)?;
+    let mut rows: Vec<Feedback> = stmt
+        .query_map(params_from_iter(w.refs()), row_to_feedback)
+        .map_err(be)?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(be)?;
+    let next_cursor = if rows.len() > limit as usize {
+        rows.truncate(limit as usize);
+        rows.last().map(|f| encode_cursor(to_nanos(f.timestamp), &f.feedback_id))
+    } else {
+        None
+    };
+    Ok(Paged { items: rows, next_cursor, total: None })
+}
+
+pub(super) fn list_metric_points_sync(
+    conn: &Connection,
+    q: &crate::MetricPointQuery,
+) -> Result<Paged<mcpd_core::MetricPoint>> {
+    let mut w = Where::default();
+    w.push("project = ?", q.project.clone());
+    if let Some(n) = &q.name {
+        w.push("name = ?", n.clone());
+    }
+    if let Some(t) = &q.trace_id {
+        w.push("trace_id = ?", t.clone());
+    }
+    if let Some(f) = q.from {
+        w.push("timestamp >= ?", to_nanos(f));
+    }
+    if let Some(t) = q.to {
+        w.push("timestamp < ?", to_nanos(t));
+    }
+    for (k, v) in &q.filter {
+        // The label key is a bound JSON path, never interpolated.
+        w.clauses.push("json_extract(labels, ?) = ?".to_owned());
+        w.binds.push(Box::new(format!("$.{k}")));
+        w.binds.push(Box::new(v.clone()));
+    }
+    if let Some(c) = &q.cursor {
+        let (v, id) = decode_cursor(c)?;
+        let cmp = if q.order == Order::Asc { '>' } else { '<' };
+        w.clauses.push(format!("(timestamp, metric_id) {cmp} (?, ?)"));
+        w.binds.push(Box::new(v));
+        w.binds.push(Box::new(id));
+    }
+    let dir = if q.order == Order::Asc { "ASC" } else { "DESC" };
+    let limit = q.limit.clamp(1, 10_000);
+    let sql = format!(
+        "SELECT metric_id, name, kind, value, unit, timestamp, labels, buckets, trace_id, \
+                span_id, project, environment, received_at
+         FROM metrics{} ORDER BY timestamp {dir}, metric_id {dir} LIMIT {}",
+        w.sql(),
+        limit + 1
+    );
+    let mut stmt = conn.prepare(&sql).map_err(be)?;
+    let mut rows: Vec<mcpd_core::MetricPoint> = stmt
+        .query_map(params_from_iter(w.refs()), |r| {
+            Ok(mcpd_core::MetricPoint {
+                metric_id: r.get(0)?,
+                name: r.get(1)?,
+                kind: r.get::<_, String>(2)?.parse().unwrap_or(mcpd_core::MetricKind::Gauge),
+                value: r.get(3)?,
+                unit: r.get(4)?,
+                timestamp: from_nanos(r.get(5)?),
+                labels: json_in(r.get(6)?),
+                buckets: json_in(r.get(7)?),
+                trace_id: r.get(8)?,
+                span_id: r.get(9)?,
+                correlation: mcpd_core::Correlation::for_project(r.get(10)?, r.get(11)?),
+                received_at: from_nanos(r.get(12)?),
+            })
+        })
+        .map_err(be)?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(be)?;
+    let next_cursor = if rows.len() > limit as usize {
+        rows.truncate(limit as usize);
+        rows.last().map(|m| encode_cursor(to_nanos(m.timestamp), &m.metric_id))
     } else {
         None
     };

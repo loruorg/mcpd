@@ -150,14 +150,6 @@ struct Cli {
     #[arg(long, env = "MCPD_REDACT_MAX_STRING", global = true)]
     redact_max_string: Option<usize>,
 
-    /// A JSON price book with your own rates, such as negotiated prices or a
-    /// model the built-in book does not name. Its rates layer over the built-in
-    /// book: an entry here wins, and every model it leaves out keeps the
-    /// built-in rate. A book in another currency replaces the built-in one.
-    /// Its `id` is recorded on every cost it prices.
-    #[arg(long = "price-book", env = "MCPD_PRICE_BOOK", global = true)]
-    price_book: Option<String>,
-
     /// A browser origin allowed to call the query API from another site, such
     /// as `https://console.example`. Repeat for several. With none, no
     /// cross-origin browser request is answered with the headers it needs, so
@@ -319,6 +311,12 @@ struct Cli {
     /// Accounts without public sign-up, and the mail they send.
     #[command(flatten)]
     account_flags: AccountFlags,
+
+    /// A price book to cost model calls with, as JSON. With
+    /// `"extends": "builtin"` it is laid over the built-in book, so it needs
+    /// only the rates that differ. Write one with `mcpd prices refresh`.
+    #[arg(long, env = "MCPD_PRICE_BOOK", global = true)]
+    price_book: Option<String>,
 }
 
 /// Accounts without public sign-up, the mail they send, and the defaults an
@@ -521,6 +519,9 @@ struct FileConfig {
     /// declares with their owners, projects, single sign-on and SCIM token.
     #[serde(default)]
     accounts: Option<FileAccounts>,
+    /// A price book file. `--price-book` beats it.
+    #[serde(default)]
+    price_book: Option<String>,
 }
 
 /// The knobs the run store's ticks read, as a config file spells them: whole
@@ -760,6 +761,12 @@ enum Command {
     /// Run as an edge collector: accept every ingest door, spool each request
     /// to disk, and ship it to the daemons --upstream names, in order.
     Relay,
+    /// Write a price book from a model catalogue, or show what a model is
+    /// priced at.
+    Prices(prices::Args),
+    /// Compare two experiments on a running daemon. Exits 1 on a regression,
+    /// so a CI job can gate a deploy on it.
+    Eval(eval_cli::Args),
 }
 
 #[tokio::main]
@@ -773,6 +780,11 @@ async fn main() -> Result<()> {
     // tracing events inside the server are no-ops rather than corruption.
     if let Some(Command::Mcp(args)) = &cli.command {
         return mcp::run(args, &cli.project).await;
+    }
+    // A client of a running daemon, like `mcp`: it reads no config and opens
+    // no store, and its output is the comparison, not log lines.
+    if let Some(Command::Eval(args)) = &cli.command {
+        return eval_cli::run(args, &cli.project).await;
     }
 
     let filter = EnvFilter::try_from_env("MCPD_LOG")
@@ -794,6 +806,18 @@ async fn main() -> Result<()> {
         }
         None => FileConfig::default(),
     };
+
+    // The book is read before anything else uses it, so a broken file stops
+    // `mcpd config` and `mcpd doctor` as well as the daemon, with the file
+    // named, rather than pricing with a book the operator did not mean.
+    let price_book_path = cli.price_book.clone().or_else(|| file.price_book.clone());
+    let price_book = match &price_book_path {
+        Some(path) => prices::load(std::path::Path::new(path))?,
+        None => mcpd_core::cost::builtin_book(),
+    };
+    if let Some(Command::Prices(args)) = &cli.command {
+        return prices::run(args, &price_book).await;
+    }
 
     // A ceiling larger than the counter can hold would be clamped without
     // saying so, and the daemon would enforce a number nobody chose. The flag
@@ -991,7 +1015,8 @@ async fn main() -> Result<()> {
     config.drop_blank_keys();
 
     if matches!(cli.command, Some(Command::Config)) {
-        for line in config_lines(&cli, &config, &redact_keys) {
+        let prices_line = prices::describe(&price_book, price_book_path.as_deref());
+        for line in config_lines(&cli, &config, &redact_keys, &prices_line) {
             println!("{line}");
         }
         return Ok(());
@@ -1087,8 +1112,16 @@ async fn main() -> Result<()> {
     // probe, and before AppState, the monitor spawn and the retention timer, so
     // it does not start background work it will never use.
     if let Some(Command::Doctor(args)) = &cli.command {
-        return doctor::run(args, &config, blank_lists, &store, run_store.as_ref(), &cli.listen)
-            .await;
+        return doctor::run(
+            args,
+            &config,
+            blank_lists,
+            &store,
+            run_store.as_ref(),
+            &cli.listen,
+            &price_book,
+        )
+        .await;
     }
 
     // The configuration-only half of that report, on every start.
@@ -1153,10 +1186,9 @@ async fn main() -> Result<()> {
         r
     };
 
-    let mut state = AppState::new(Arc::clone(&store), config.clone()).with_redactor(redactor);
-    if let Some(path) = &cli.price_book {
-        state = state.with_price_book(load_price_book(path)?);
-    }
+    let mut state = AppState::new(Arc::clone(&store), config.clone())
+        .with_redactor(redactor)
+        .with_price_book(price_book);
     if let Some(runs) = run_store.clone() {
         state = state.with_run_store(runs);
     }
@@ -1478,7 +1510,12 @@ fn human_bytes(bytes: usize) -> String {
 /// without a line fails `make check` rather than being impossible to read back.
 /// Nothing secret is printed: keys are counted, passwords are `set` or `unset`,
 /// and every URL goes through `doctor::without_credentials`.
-fn config_lines(cli: &Cli, config: &ServerConfig, redact_keys: &[String]) -> Vec<String> {
+fn config_lines(
+    cli: &Cli,
+    config: &ServerConfig,
+    redact_keys: &[String],
+    prices: &str,
+) -> Vec<String> {
     let mut out = Vec::new();
     let mut row = |label: &str, value: String| out.push(format!("{label:<16}{value}"));
 
@@ -1722,13 +1759,6 @@ fn config_lines(cli: &Cli, config: &ServerConfig, redact_keys: &[String]) -> Vec
             line
         },
     );
-    row(
-        "price book",
-        cli.price_book.as_ref().map_or_else(
-            || "built in".to_owned(),
-            |p| format!("{p}, layered over the built-in book"),
-        ),
-    );
     // Whether a hashing key was given, never the key. The built-in one is in
     // the source, so a digest made with it can be reversed by guessing.
     row(
@@ -1763,6 +1793,7 @@ fn config_lines(cli: &Cli, config: &ServerConfig, redact_keys: &[String]) -> Vec
             config.max_batch_signals
         ),
     );
+    row("prices", prices.to_owned());
     row(
         "derived",
         match (config.derived_metrics.durations, config.derived_metrics.tokens) {
@@ -1904,8 +1935,10 @@ async fn shutdown_signal() {
 
 mod demo;
 mod doctor;
+mod eval_cli;
 mod forwarding;
 mod mcp;
+mod prices;
 
 #[cfg(test)]
 mod tests {
@@ -2023,73 +2056,5 @@ mod tests {
         let refused = read(Some(1)).expect_err("one is refused");
         assert!(refused.to_string().contains("max_step_repeats"), "{refused}");
         assert!(refused.to_string().contains("at least 2"), "{refused}");
-    }
-}
-
-/// Read `--price-book` and layer it over the built-in book.
-fn load_price_book(path: &str) -> anyhow::Result<mcpd_core::cost::PriceBook> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading the price book at {path}"))?;
-    let own: mcpd_core::cost::PriceBook =
-        serde_json::from_str(&text).with_context(|| format!("{path} is not a valid price book"))?;
-    let mut book = mcpd_core::cost::builtin_book();
-    // A book in another currency replaces the built-in one rather than mixing
-    // two currencies in one table.
-    if own.currency != book.currency {
-        return Ok(own);
-    }
-    book.id = own.id;
-    book.currency = own.currency;
-    if own.as_of.is_some() {
-        book.as_of = own.as_of;
-    }
-    book.models.extend(own.models);
-    for (provider, rates) in own.providers {
-        book.providers.entry(provider).or_default().extend(rates);
-    }
-    Ok(book)
-}
-
-#[cfg(test)]
-mod price_book_tests {
-    use super::load_price_book;
-
-    fn write(text: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static N: AtomicU32 = AtomicU32::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "mcpd-price-book-{}-{}.json",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::write(&path, text).expect("written");
-        path
-    }
-
-    #[test]
-    fn a_book_layers_over_the_built_in_one() {
-        let builtin = mcpd_core::cost::builtin_book();
-        let kept = builtin.models.keys().next().expect("a built-in model").clone();
-        let f = write(
-            r#"{"id":"acme","currency":"USD","models":{"acme-model":{"input":1.0,"output":2.0}}}"#,
-        );
-        let book = load_price_book(f.to_str().unwrap()).expect("loads");
-        assert_eq!(book.id, "acme");
-        assert!(book.models.contains_key("acme-model"));
-        assert!(book.models.contains_key(&kept), "a model it leaves out keeps the built-in rate");
-    }
-
-    #[test]
-    fn a_book_in_another_currency_replaces_the_built_in_one() {
-        let f = write(r#"{"id":"eu","currency":"EUR","models":{"m":{"input":1.0,"output":2.0}}}"#);
-        let book = load_price_book(f.to_str().unwrap()).expect("loads");
-        assert_eq!(book.models.len(), 1);
-    }
-
-    #[test]
-    fn a_bad_book_names_the_file() {
-        let f = write("not json");
-        let err = load_price_book(f.to_str().unwrap()).unwrap_err();
-        assert!(format!("{err:#}").contains("not a valid price book"));
     }
 }

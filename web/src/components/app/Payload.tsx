@@ -102,6 +102,9 @@ export function Payload({
   const [form, setForm] = useState<Form | null>(null)
   const [own, setOwn] = useState('')
   const [chunks, setChunks] = useState(1)
+  // Tall lifts the box's height cap to most of the window, for a long prompt
+  // that is read rather than skimmed.
+  const [tall, setTall] = useState(false)
   const pre = useRef<HTMLDivElement>(null)
 
   const { escaped, pretty, messages } = useMemo(() => formsOf(value), [value])
@@ -201,6 +204,13 @@ export function Payload({
           >
             escaped
           </Action>
+          <Action
+            onClick={() => setTall((t) => !t)}
+            pressed={tall}
+            title={tall ? 'Back to the short box' : 'Read it at the height of the window'}
+          >
+            {tall ? 'shrink' : 'expand'}
+          </Action>
           <CopyValue value={full} className="legend text-[0.5625rem] text-ink-3 hover:text-ink">
             <span className="legend text-[0.5625rem]">copy</span>
           </CopyValue>
@@ -222,7 +232,7 @@ export function Payload({
       )}
 
       {active === 'messages' && messages ? (
-        <div ref={pre} className="mt-2 max-h-80 overflow-y-auto pr-1">
+        <div ref={pre} className={`mt-2 ${tall ? 'max-h-[80vh]' : 'max-h-80'} overflow-y-auto pr-1`}>
           <div className="space-y-2">
             {bubbles.map((b, i) => (
               <div key={i} className="well rounded-[2px] p-2.5">
@@ -237,7 +247,7 @@ export function Payload({
       ) : (
         <div
           ref={pre}
-          className={`well data mt-2 max-h-80 overflow-auto rounded-[2px] p-2.5 text-[0.75rem] leading-relaxed text-ink ${
+          className={`well data mt-2 ${tall ? 'max-h-[80vh]' : 'max-h-80'} overflow-auto rounded-[2px] p-2.5 text-[0.75rem] leading-relaxed text-ink ${
             active === 'escaped' ? 'whitespace-pre-wrap break-all' : 'scroll-x whitespace-pre'
           }`}
         >

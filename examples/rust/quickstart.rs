@@ -12,7 +12,7 @@
 //! cargo run -p mcpd-sdk --example quickstart
 //! ```
 
-use mcpd_sdk::{Config, FeedbackKind, Include, Mcpd, Scale, SpanKind, Target, TokenUsage};
+use mcpd_sdk::{Config, FeedbackKind, Include, Mcpd, Scale, SpanKind, Target};
 use serde_json::json;
 
 #[tokio::main]
@@ -62,22 +62,29 @@ async fn main() {
     // one field worth never leaving out.
     let answer = {
         let generation = run.child_of("answer the customer", SpanKind::ModelGeneration);
-        generation.set_model("claude-sonnet-4", "anthropic");
         generation.set_input(json!([
             { "role": "system", "content": "You are a support agent." },
             { "role": "user", "content": question },
         ]));
+        // Where a real provider call goes. This is the shape Anthropic answers in.
+        generation.mark_first_token();
         let answer = format!(
             "Your order shipped with {} and arrives {}.",
             order["carrier"].as_str().unwrap_or("the carrier"),
             order["eta"].as_str().unwrap_or("soon"),
         );
-        generation.set_output(&answer);
-        generation.set_usage(TokenUsage {
-            input_tokens: Some(412),
-            output_tokens: Some(96),
-            ..TokenUsage::default()
+        let response = json!({
+            "id": "msg_01",
+            "type": "message",
+            "model": "claude-sonnet-4-5",
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": answer }],
+            "usage": { "input_tokens": 172, "cache_read_input_tokens": 640, "output_tokens": 37 },
         });
+        generation.set_output(&answer);
+        // The model, the token counts mcpd prices, the response id and the
+        // finish reason, read from the response in one call.
+        generation.record_response(&response, None);
         answer
         // `generation` is dropped here, which ends the span. Calling `end()`
         // yourself does the same thing; the guard is there so an early return

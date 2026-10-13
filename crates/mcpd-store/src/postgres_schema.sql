@@ -533,3 +533,16 @@ CREATE INDEX IF NOT EXISTS theme_members_examples ON theme_members
 CREATE INDEX IF NOT EXISTS theme_members_flow ON theme_members
     (snapshot_id, aspect, trace_id);
 CREATE INDEX IF NOT EXISTS theme_members_trace ON theme_members (trace_id);
+
+-- Version 6: the rest of the correlation on a log line.
+ALTER TABLE logs ADD COLUMN IF NOT EXISTS service_version TEXT;
+ALTER TABLE logs ADD COLUMN IF NOT EXISTS thread_id TEXT;
+ALTER TABLE logs ADD COLUMN IF NOT EXISTS resource_id TEXT;
+ALTER TABLE logs ADD COLUMN IF NOT EXISTS run_id TEXT;
+ALTER TABLE logs ADD COLUMN IF NOT EXISTS request_id TEXT;
+ALTER TABLE logs ADD COLUMN IF NOT EXISTS experiment_id TEXT;
+ALTER TABLE logs ADD COLUMN IF NOT EXISTS release TEXT;
+CREATE INDEX IF NOT EXISTS logs_thread ON logs (project, thread_id, timestamp)
+    WHERE thread_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS logs_run ON logs (project, run_id, timestamp)
+    WHERE run_id IS NOT NULL;

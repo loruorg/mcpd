@@ -106,6 +106,13 @@ from .context import (
     new_trace_id,
     parse_traceparent,
 )
+from .model_call import (
+    ResponseFacts,
+    response_facts,
+    response_shape,
+    usage_from_anthropic,
+    usage_from_openai,
+)
 from .logs import (
     describe_error,
     encode_fields,
@@ -159,6 +166,12 @@ __all__ = [
     "meets_level",
     "parse_log_level",
     "severity_number",
+    # Model calls: provider responses mapped onto a span (contract 3.1).
+    "ResponseFacts",
+    "response_facts",
+    "response_shape",
+    "usage_from_anthropic",
+    "usage_from_openai",
     # The run surface: the builder, the worker, and the client namespaces.
     "BranchBuilder",
     "DefinitionsApi",

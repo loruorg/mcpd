@@ -195,8 +195,28 @@ pub const SPAN_PARAMS: &[&str] = &[
 ];
 
 /// Every parameter `GET /v1/api/logs` accepts.
-pub const LOG_PARAMS: &[&str] =
-    &["project", "q", "level", "trace_id", "span_id", "from", "to", "order", "limit", "cursor"];
+pub const LOG_PARAMS: &[&str] = &[
+    "project",
+    "q",
+    "level",
+    "trace_id",
+    "span_id",
+    "from",
+    "to",
+    "order",
+    "limit",
+    "cursor",
+    "environment",
+    "service_name",
+    "service_version",
+    "session_id",
+    "thread_id",
+    "user_id",
+    "run_id",
+    "request_id",
+    "experiment_id",
+    "release",
+];
 
 /// Every parameter `GET /v1/api/scores` accepts.
 pub const SCORE_PARAMS: &[&str] = &[
@@ -217,8 +237,16 @@ pub const SCORE_PARAMS: &[&str] = &[
 pub const METRIC_PARAMS: &[&str] =
     &["project", "name", "from", "to", "bucket", "agg", "group_by", "filter"];
 
+/// Every parameter `GET /v1/api/metrics/histogram` accepts.
+pub const HISTOGRAM_PARAMS: &[&str] = &["project", "name", "from", "to", "group_by", "filter"];
+
+/// Every parameter `GET /v1/api/metrics/points` accepts.
+pub const METRIC_POINT_PARAMS: &[&str] =
+    &["project", "name", "from", "to", "filter", "trace_id", "order", "limit", "cursor"];
+
 /// Every parameter `GET /v1/api/feedback` accepts.
-pub const FEEDBACK_PARAMS: &[&str] = &["project", "trace_id", "limit"];
+pub const FEEDBACK_PARAMS: &[&str] =
+    &["project", "trace_id", "limit", "span_id", "kind", "author_kind", "from", "to", "cursor"];
 
 /// Values mcpd records on every trace and cannot yet filter a list by.
 ///
@@ -551,6 +579,7 @@ pub async fn list_traces(
         sort: match get(&p, "sort") {
             Some("duration") => TraceSort::Duration,
             Some("cost") => TraceSort::Cost,
+            Some("tokens") => TraceSort::Tokens,
             Some("span_count") => TraceSort::SpanCount,
             // The lowest score the run was given. A run nothing has scored yet
             // ranks as a zero, so `order=asc` is "worst first" with the
@@ -562,7 +591,7 @@ pub async fn list_traces(
                     field: "sort".to_owned(),
                     message: format!(
                         "{other:?} is not sortable; use start_time, duration, cost, \
-                         span_count or score"
+                         span_count, tokens or score"
                     ),
                 })
             }
@@ -719,6 +748,20 @@ pub async fn list_logs(
                 )?,
                 trace_id: get(&p, "trace_id").map(str::to_owned),
                 span_id: get(&p, "span_id").map(str::to_owned),
+                correlation: mcpd_store::LOG_CORRELATION_FILTERS
+                    .iter()
+                    .filter_map(|f| {
+                        let v = get(&p, f)?;
+                        // A user id is stored hashed, so the value asked for
+                        // is hashed the same way before it is compared.
+                        let v = if *f == "user_id" {
+                            state.redactor.hash_identifier(Some(v)).unwrap_or_default()
+                        } else {
+                            v.to_owned()
+                        };
+                        Some(((*f).to_owned(), v))
+                    })
+                    .collect(),
                 from: parse_time(&p, "from")?,
                 to: parse_time(&p, "to")?,
                 order: order(&p),
@@ -802,6 +845,128 @@ pub async fn query_metrics(
             .unwrap_or_default(),
     };
     Ok(Json(state.store.query_metrics(&q).await?))
+}
+
+/// `key:value,key:value`, the label filter grammar every metric door shares.
+fn label_filter(p: &Params) -> Vec<(String, String)> {
+    get(p, "filter")
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|pair| pair.split_once(':'))
+                .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
+                .filter(|(k, _)| !k.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The most points one histogram read merges. Past it the newest are used
+/// and the reply says it was cut, rather than holding an unbounded window in
+/// memory.
+pub const HISTOGRAM_POINTS_MAX: u32 = 50_000;
+
+/// `GET /v1/api/metrics/histogram`
+pub async fn metric_histogram(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(p): Query<Params>,
+) -> ApiResult<Json<mcpd_core::MetricHistogram>> {
+    let project = project(&p, &state, &headers);
+    authorize_project(&state, &headers, Scope::Read, &project)?;
+    only(&p, "GET /v1/api/metrics/histogram", HISTOGRAM_PARAMS, &[])?;
+    state.metrics.query_requests.fetch_add(1, AtomicOrdering::Relaxed);
+    let name = get(&p, "name").ok_or_else(|| ApiError::BadParam {
+        field: "name".to_owned(),
+        message: "a metric name is required".to_owned(),
+    })?;
+    let from = parse_time(&p, "from")?
+        .unwrap_or_else(|| OffsetDateTime::now_utc() - time::Duration::hours(1));
+    let to = parse_time(&p, "to")?.unwrap_or_else(OffsetDateTime::now_utc);
+    if to <= from {
+        return Err(ApiError::BadParam {
+            field: "to".to_owned(),
+            message: "the end of the window must be after its start".to_owned(),
+        });
+    }
+    let group_by: Vec<String> = get(&p, "group_by")
+        .map(|s| s.split(',').map(|k| k.trim().to_owned()).filter(|k| !k.is_empty()).collect())
+        .unwrap_or_default();
+    let mut q = mcpd_store::MetricPointQuery {
+        project,
+        name: Some(name.to_owned()),
+        from: Some(from),
+        to: Some(to),
+        filter: label_filter(&p),
+        trace_id: None,
+        order: Order::Desc,
+        limit: 10_000,
+        cursor: None,
+    };
+    let mut points = Vec::new();
+    let mut truncated = false;
+    loop {
+        let page = state.store.list_metric_points(&q).await?;
+        points.extend(page.items);
+        match page.next_cursor {
+            Some(c) if points.len() < HISTOGRAM_POINTS_MAX as usize => q.cursor = Some(c),
+            Some(_) => {
+                truncated = true;
+                break;
+            }
+            None => break,
+        }
+    }
+    let unit = points.iter().find_map(|m| m.unit.clone());
+    let series = mcpd_core::histogram::merge(&points, &group_by)
+        .into_iter()
+        .map(|(labels, d, skipped)| mcpd_core::HistogramSeries {
+            labels,
+            p50: d.quantile(0.50),
+            p90: d.quantile(0.90),
+            p95: d.quantile(0.95),
+            p99: d.quantile(0.99),
+            bounds: d.bounds,
+            counts: d.counts,
+            count: d.count,
+            sum: d.sum,
+            min: d.min,
+            max: d.max,
+            exact: d.exact,
+            points_skipped: skipped,
+        })
+        .collect();
+    Ok(Json(mcpd_core::MetricHistogram {
+        name: name.to_owned(),
+        unit,
+        points_read: points.len() as u64,
+        truncated,
+        series,
+    }))
+}
+
+/// `GET /v1/api/metrics/points`
+pub async fn list_metric_points(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(p): Query<Params>,
+) -> ApiResult<Json<mcpd_core::MetricPointListResponse>> {
+    let project = project(&p, &state, &headers);
+    authorize_project(&state, &headers, Scope::Read, &project)?;
+    only(&p, "GET /v1/api/metrics/points", METRIC_POINT_PARAMS, &[])?;
+    state.metrics.query_requests.fetch_add(1, AtomicOrdering::Relaxed);
+    let q = mcpd_store::MetricPointQuery {
+        project,
+        name: get(&p, "name").map(str::to_owned),
+        from: parse_time(&p, "from")?,
+        to: parse_time(&p, "to")?,
+        filter: label_filter(&p),
+        trace_id: get(&p, "trace_id").map(str::to_owned),
+        order: order(&p),
+        limit: parse::<u32>(&p, "limit")?.unwrap_or(100).clamp(1, 1000),
+        cursor: page_cursor(&p, false)?,
+    };
+    let paged = state.store.list_metric_points(&q).await?;
+    Ok(Json(mcpd_core::MetricPointListResponse { page: page_of(&paged), points: paged.items }))
 }
 
 /// Parse `30s`, `5m`, `1h`, `1d` into seconds.
@@ -996,39 +1161,37 @@ pub async fn list_feedback(
     // and not the project, so a key scoped to one team could read another team's
     // reviewer comments by naming their project.
     // Validated before the row, for the reason `audited_valid` gives.
-    let (trace_id, limit) = audited_valid(
+    let q = audited_valid(
         &state,
         &headers,
         peer.0,
         authorize_project(&state, &headers, Scope::Read, &project),
         || {
             only(&p, "GET /v1/api/feedback", FEEDBACK_PARAMS, &[])?;
-            let trace_id = get(&p, "trace_id").ok_or_else(|| ApiError::BadParam {
-                field: "trace_id".to_owned(),
-                message: "name the run whose judgements you want. This endpoint reads the \
-                          feedback attached to one run, and mcpd cannot yet list a whole \
-                          project's feedback, so an answer with no trace_id would be an empty \
-                          list that reads as though nobody had judged anything."
-                    .to_owned(),
-            })?;
-            let limit = parse::<u32>(&p, "limit")?.unwrap_or(50).clamp(1, 500) as usize;
-            Ok((trace_id, limit))
+            let kind = parse_enum::<mcpd_core::FeedbackKind>(
+                &p,
+                "kind",
+                "thumbs, rating, correction, tag, comment",
+            )?;
+            Ok(mcpd_store::FeedbackQuery {
+                project: project.clone(),
+                trace_id: get(&p, "trace_id").map(str::to_owned),
+                span_id: get(&p, "span_id").map(str::to_owned),
+                kind: kind.map(|k| k.as_str().to_owned()),
+                author_kind: get(&p, "author_kind").map(str::to_owned),
+                from: parse_time(&p, "from")?,
+                to: parse_time(&p, "to")?,
+                limit: parse::<u32>(&p, "limit")?.unwrap_or(50).clamp(1, 500),
+                cursor: page_cursor(&p, false)?,
+            })
         },
         "list_feedback",
         &project,
         get(&p, "trace_id"),
     )
     .await?;
-    let detail = state
-        .store
-        .get_trace(&project, trace_id, &Include { feedback: true, ..Include::default() })
-        .await?;
-    let mut items = detail.feedback.unwrap_or_default();
-    items.truncate(limit);
-    Ok(Json(FeedbackListResponse {
-        page: Page { next_cursor: None, has_more: false, total: Some(items.len() as u64) },
-        feedback: items,
-    }))
+    let paged = state.store.list_feedback(&q).await?;
+    Ok(Json(FeedbackListResponse { page: page_of(&paged), feedback: paged.items }))
 }
 
 /// `GET /v1/api/analytics/summary`
@@ -1170,7 +1333,7 @@ pub async fn list_scorers(
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<crate::eval::ScorerInfo>>> {
     authorize(&state, &headers, Scope::Read)?;
-    Ok(Json(crate::eval::catalogue()))
+    Ok(Json(crate::eval::catalogue(state.config.judge.as_ref())))
 }
 
 /// `POST /v1/api/score` — run scorers over stored runs.
@@ -2146,7 +2309,7 @@ pub async fn poll_deltas(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(p): Query<Params>,
-) -> ApiResult<Json<DeltaResponse>> {
+) -> ApiResult<axum::response::Response> {
     let project = project(&p, &state, &headers);
     authorize_project(&state, &headers, Scope::Read, &project)?;
     require(
@@ -2171,8 +2334,71 @@ pub async fn poll_deltas(
         since: parse_time(&p, "since")?,
         limit: parse::<u32>(&p, "limit")?.unwrap_or(100),
     };
-    let delta = state.store.poll(&q).await?;
+    use axum::response::IntoResponse;
+    let wants_stream = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("text/event-stream"));
+    if !wants_stream {
+        let delta = state.store.poll(&q).await?;
+        return Ok(Json(delta_response(signal, delta)).into_response());
+    }
 
+    // A live tail. The same poll, run on the daemon's side every second, and
+    // each batch that brings something sent as one `delta` event whose id is
+    // the cursor after it. A client that drops reconnects with that cursor and
+    // misses nothing, exactly as a polling client would.
+    let store = Arc::clone(&state.store);
+    let shutdown = state.shutdown.clone();
+    let started = std::time::Instant::now();
+    let stream = futures::stream::unfold(q, move |mut q| {
+        let store = Arc::clone(&store);
+        let shutdown = shutdown.clone();
+        async move {
+            loop {
+                // Bounded, so a forgotten tab does not hold a connection and a
+                // store read every second for ever; the browser reconnects.
+                if started.elapsed() > LIVE_TAIL_MAX || shutdown.is_cancelled() {
+                    return None;
+                }
+                let delta = match store.poll(&q).await {
+                    Ok(d) => d,
+                    Err(_) => return None,
+                };
+                let cursor = delta.cursor.clone();
+                q.cursor = Some(cursor.clone());
+                let more = delta.has_more;
+                if !delta.items.is_empty() {
+                    let out = delta_response(signal, delta);
+                    let data = serde_json::to_string(&out).unwrap_or_default();
+                    let event =
+                        axum::response::sse::Event::default().id(cursor).event("delta").data(data);
+                    return Some((Ok::<_, std::convert::Infallible>(event), q));
+                }
+                if more {
+                    continue;
+                }
+                tokio::select! {
+                    () = shutdown.cancelled() => return None,
+                    () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                }
+            }
+        }
+    });
+    Ok(axum::response::sse::Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response())
+}
+
+/// How long one live tail stays open before the client reconnects.
+const LIVE_TAIL_MAX: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// A store poll as the wire shape: each row sorted into the array its signal
+/// names, the other two absent.
+fn delta_response(
+    signal: DeltaSignal,
+    delta: mcpd_store::Delta<mcpd_store::PolledSignal>,
+) -> DeltaResponse {
     // Sorted into the array its signal names, and the other two stay absent.
     // The store hands back one enum per row so the trait can stay object safe,
     // and a caller that asked for logs should not have to read a tag on every
@@ -2223,7 +2449,7 @@ pub async fn poll_deltas(
             );
         }
     }
-    Ok(Json(out))
+    out
 }
 
 // ------------------------------------------------------- intelligence ---

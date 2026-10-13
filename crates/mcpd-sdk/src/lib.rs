@@ -48,6 +48,7 @@
 pub mod client;
 pub mod context;
 pub mod logs;
+pub mod model_call;
 mod queue;
 pub mod runs;
 pub mod sink;
@@ -63,6 +64,9 @@ pub use client::{
 pub use context::{current, current_traceparent, SpanContext};
 pub use logs::{
     error_fields, log_level_from_severity, meets_level, parse_log_level, severity_number,
+};
+pub use model_call::{
+    response_facts, response_shape, usage_from_anthropic, usage_from_openai, ResponseFacts,
 };
 pub use runs::{ClaimSteps, PublishEvent, RunFilter, RunResult, StartRun};
 pub use sink::{ConsoleSink, RecordingSink, Sink};
@@ -198,7 +202,20 @@ pub struct Config {
     /// that talks to a daemon. A [`RecordingSink`] keeps batches in memory
     /// for a test; a [`ConsoleSink`] prints them. Chosen in code only.
     pub sink: Option<Arc<dyn Sink>>,
+    /// Applied to every span's `input`, `output`, `attributes` and
+    /// `metadata`, and to every log line's `fields`, before the record is
+    /// queued. It returns the value to keep; `Value::Null` drops the field. A
+    /// redactor that panics, or returns something other than an object for
+    /// `attributes`, `metadata` or `fields`, drops that value and counts it in
+    /// [`Stats::redaction_failures`]: a broken redactor never lets the
+    /// original through (SDK contract 2.1.1). Set in code only, with
+    /// [`Config::with_redact`].
+    pub redact: Option<Redactor>,
 }
+
+/// A function that rewrites a payload before it leaves the process. See
+/// [`Config::redact`].
+pub type Redactor = Arc<dyn Fn(serde_json::Value) -> serde_json::Value + Send + Sync>;
 
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -218,6 +235,7 @@ impl std::fmt::Debug for Config {
             .field("capture_payloads", &self.capture_payloads)
             .field("log_level", &self.log_level)
             .field("sink", &self.sink.as_ref().map(|_| "<custom>"))
+            .field("redact", &self.redact.as_ref().map(|_| "<set>"))
             .finish()
     }
 }
@@ -240,6 +258,7 @@ impl Default for Config {
             capture_payloads: true,
             log_level: LogLevel::Debug,
             sink: None,
+            redact: None,
         }
     }
 }
@@ -371,6 +390,17 @@ impl Config {
     #[must_use]
     pub fn with_sink(mut self, sink: Arc<dyn Sink>) -> Self {
         self.sink = Some(sink);
+        self
+    }
+
+    /// Rewrite payloads before they are queued: mask an account number, drop
+    /// a field. See [`Config::redact`] for what it covers and how it fails.
+    #[must_use]
+    pub fn with_redact(
+        mut self,
+        redact: impl Fn(serde_json::Value) -> serde_json::Value + Send + Sync + 'static,
+    ) -> Self {
+        self.redact = Some(Arc::new(redact));
         self
     }
 }

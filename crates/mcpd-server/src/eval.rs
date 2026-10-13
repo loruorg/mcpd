@@ -6,9 +6,11 @@
 //! never fail the user's request.
 
 use crate::error::{ApiError, ApiResult};
+use crate::judge::JudgeConfig;
 use crate::state::AppState;
+use mcpd_core::judged::Judged;
 use mcpd_core::scoring::{Builtin, Target};
-use mcpd_core::{Score, ScoreSource, ScorerDelta, SkippedScorer, Span};
+use mcpd_core::{Score, ScoreDirection, ScoreSource, ScorerDelta, ScorerKind, SkippedScorer, Span};
 use mcpd_store::{Batch, Include, TraceQuery};
 use std::sync::Arc;
 
@@ -17,17 +19,60 @@ use std::sync::Arc;
 pub use mcpd_core::{ExperimentComparison, ScoreRunRequest, ScoreRunResult, ScorerInfo};
 use time::OffsetDateTime;
 
-/// Every scorer mcpd ships.
+/// Every scorer this daemon knows: the code scorers, the judged library, and
+/// the criteria the operator configured. A judged scorer is listed whether or
+/// not a judge is configured, marked unavailable when none is, so a caller
+/// can see what turning one on would give them.
 #[must_use]
-pub fn catalogue() -> Vec<ScorerInfo> {
-    Builtin::ALL
+pub fn catalogue(judge: Option<&JudgeConfig>) -> Vec<ScorerInfo> {
+    let keys = |k: &[&str]| k.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let mut out: Vec<ScorerInfo> = Builtin::ALL
         .iter()
         .map(|b| ScorerInfo {
             id: b.id().to_owned(),
             description: b.description().to_owned(),
             needs_config: b.needs_config(),
+            kind: ScorerKind::Code,
+            direction: ScoreDirection::HigherIsBetter,
+            config_keys: keys(b.config_keys()),
+            available: true,
         })
-        .collect()
+        .collect();
+    out.extend(Judged::ALL.iter().map(|j| ScorerInfo {
+        id: j.id().to_owned(),
+        description: j.description().to_owned(),
+        needs_config: j.config_keys().contains(&"expected"),
+        kind: ScorerKind::Judge,
+        direction: j.direction(),
+        config_keys: keys(j.config_keys()),
+        available: judge.is_some(),
+    }));
+    if let Some(j) = judge {
+        out.extend(j.criteria.iter().filter(|(id, _)| !is_shipped(id)).map(|(id, text)| {
+            ScorerInfo {
+                id: id.clone(),
+                description: text.clone(),
+                needs_config: false,
+                kind: ScorerKind::Criterion,
+                direction: ScoreDirection::HigherIsBetter,
+                config_keys: Vec::new(),
+                available: true,
+            }
+        }));
+    }
+    out
+}
+
+/// Whether an id names a scorer mcpd ships, code or judged.
+fn is_shipped(id: &str) -> bool {
+    Builtin::from_id(id).is_some() || Judged::from_id(id).is_some()
+}
+
+/// Which way a scorer's value is better. A scorer mcpd does not ship reads as
+/// higher is better, which is what a criterion asks for.
+#[must_use]
+pub fn direction_of(scorer_id: &str) -> ScoreDirection {
+    Judged::from_id(scorer_id).map_or(ScoreDirection::HigherIsBetter, |j| j.direction())
 }
 
 /// The scorers a request runs when it names none.
@@ -61,10 +106,21 @@ pub async fn run_scorers(state: &Arc<AppState>, req: ScoreRunRequest) -> ApiResu
         .iter()
         .filter(|id| {
             Builtin::from_id(id).is_none()
-                && state.config.judge.as_ref().is_some_and(|j| j.criteria.contains_key(*id))
+                && (Judged::from_id(id).is_some()
+                    || state.config.judge.as_ref().is_some_and(|j| j.criteria.contains_key(*id)))
         })
         .cloned()
         .collect();
+    if !judged.is_empty() && state.config.judge.is_none() {
+        return Err(ApiError::BadParam {
+            field: "scorers".to_owned(),
+            message: format!(
+                "{} grade with a model, and no judge is configured; add a `judge` block with \
+                 an endpoint and a model to the config file",
+                judged.join(", ")
+            ),
+        });
+    }
 
     let chosen: Vec<Builtin> = if req.scorers.is_empty() {
         default_set()
@@ -79,6 +135,7 @@ pub async fn run_scorers(state: &Arc<AppState>, req: ScoreRunRequest) -> ApiResu
                 None => {
                     let mut known: Vec<String> =
                         Builtin::ALL.iter().map(|b| b.id().to_owned()).collect();
+                    known.extend(Judged::ALL.iter().map(|j| j.id().to_owned()));
                     if let Some(j) = state.config.judge.as_ref() {
                         known.extend(j.criteria.keys().cloned());
                     }
@@ -94,6 +151,15 @@ pub async fn run_scorers(state: &Arc<AppState>, req: ScoreRunRequest) -> ApiResu
         }
         out
     };
+
+    // A setting that can never work is the request's fault, not each run's.
+    let config = req.config.clone().unwrap_or_default();
+    for scorer in &chosen {
+        scorer.check_config(&config).map_err(|message| ApiError::BadParam {
+            field: "config".to_owned(),
+            message: format!("{}: {message}", scorer.id()),
+        })?;
+    }
 
     // How many of the newest runs to read when no ids are named.
     let mut limit = req.limit.unwrap_or(100).clamp(1, 500);
@@ -148,7 +214,6 @@ pub async fn run_scorers(state: &Arc<AppState>, req: ScoreRunRequest) -> ApiResu
     // stored runs, not by watching them happen.
     let source = req.source.unwrap_or(ScoreSource::Offline);
 
-    let config = req.config.clone().unwrap_or_default();
     let now = OffsetDateTime::now_utc();
     let mut result = ScoreRunResult {
         traces_scored: 0,
@@ -219,16 +284,41 @@ pub async fn run_scorers(state: &Arc<AppState>, req: ScoreRunRequest) -> ApiResu
         // stands, so a pass that ran out of time stored nothing and every
         // model call it had made was paid for and lost.
         for id in &judged {
-            let graded = crate::judge::grade(
-                state,
-                id,
-                &target,
-                &trace_id,
-                correlation.clone(),
-                now,
-                judge_by,
-            )
-            .await;
+            let graded = match Judged::from_id(id) {
+                // A criterion the operator wrote under the same id as a
+                // shipped rubric is theirs to keep: the configured text wins.
+                Some(j)
+                    if !state
+                        .config
+                        .judge
+                        .as_ref()
+                        .is_some_and(|c| c.criteria.contains_key(id.as_str())) =>
+                {
+                    crate::judge::grade_judged(
+                        state,
+                        j,
+                        &config,
+                        &target,
+                        &trace_id,
+                        correlation.clone(),
+                        now,
+                        judge_by,
+                    )
+                    .await
+                }
+                _ => {
+                    crate::judge::grade(
+                        state,
+                        id,
+                        &target,
+                        &trace_id,
+                        correlation.clone(),
+                        now,
+                        judge_by,
+                    )
+                    .await
+                }
+            };
             match graded {
                 Ok(score) => keep(state, &project, req.dry_run, vec![score], &mut result).await?,
                 Err(declined) => result.skipped.push(SkippedScorer {
@@ -360,6 +450,12 @@ fn over_judged_cap(state: &AppState, judged: usize, cap: usize, asked: usize) ->
 const MIN_SAMPLE: u64 = 20;
 
 /// Compare the scores recorded under two experiment ids.
+///
+/// Each scorer's means are compared with Welch's t-test, which does not
+/// assume the two experiments vary alike. A scorer regressed when both sides
+/// have at least [`MIN_SAMPLE`] observations and the whole 95% interval on the
+/// difference lies on the worse side of zero, where "worse" follows the
+/// scorer's direction: a fall in `toxicity` is an improvement.
 #[must_use]
 pub fn compare(
     baseline: &str,
@@ -369,37 +465,44 @@ pub fn compare(
 ) -> ExperimentComparison {
     use std::collections::BTreeMap;
 
-    let mut acc: BTreeMap<String, ([f64; 2], [u64; 2])> = BTreeMap::new();
+    let mut acc: BTreeMap<String, [Vec<f64>; 2]> = BTreeMap::new();
     for (i, set) in [base, cand].into_iter().enumerate() {
         for s in set {
-            let e = acc.entry(s.scorer_id.clone()).or_insert(([0.0, 0.0], [0, 0]));
-            e.0[i] += s.value;
-            e.1[i] += 1;
+            acc.entry(s.scorer_id.clone()).or_default()[i].push(s.value);
         }
     }
 
-    let mut regressed = false;
+    let mut regressed_any = false;
     let scorers = acc
         .into_iter()
-        .map(|(scorer_id, (sums, counts))| {
-            let bm = (counts[0] > 0).then(|| sums[0] / counts[0] as f64);
-            let cm = (counts[1] > 0).then(|| sums[1] / counts[1] as f64);
+        .map(|(scorer_id, [b, c])| {
+            let direction = direction_of(&scorer_id);
+            let (bm, cm) = (mean(&b), mean(&c));
             let delta = match (bm, cm) {
                 (Some(b), Some(c)) => Some(c - b),
                 _ => None,
             };
-            let decidable = counts[0] >= MIN_SAMPLE && counts[1] >= MIN_SAMPLE;
-            if decidable && delta.is_some_and(|d| d < -0.01) {
-                regressed = true;
-            }
+            let welch = mcpd_core::stats::welch(&b, &c);
+            let decidable = b.len() as u64 >= MIN_SAMPLE && c.len() as u64 >= MIN_SAMPLE;
+            let regressed = decidable
+                && welch.is_some_and(|w| match direction {
+                    ScoreDirection::HigherIsBetter => w.ci_high < 0.0,
+                    ScoreDirection::LowerIsBetter => w.ci_low > 0.0,
+                });
+            regressed_any |= regressed;
             ScorerDelta {
                 scorer_id,
                 baseline_mean: bm,
-                baseline_n: counts[0],
+                baseline_n: b.len() as u64,
                 candidate_mean: cm,
-                candidate_n: counts[1],
+                candidate_n: c.len() as u64,
                 delta,
                 decidable,
+                direction,
+                ci_low: welch.map(|w| w.ci_low),
+                ci_high: welch.map(|w| w.ci_high),
+                p_value: welch.map(|w| w.p_value),
+                regressed,
             }
         })
         .collect();
@@ -408,8 +511,12 @@ pub fn compare(
         baseline: baseline.to_owned(),
         candidate: candidate.to_owned(),
         scorers,
-        regressed,
+        regressed: regressed_any,
     }
+}
+
+fn mean(xs: &[f64]) -> Option<f64> {
+    (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64)
 }
 
 #[cfg(test)]
@@ -452,8 +559,9 @@ mod tests {
 
     #[test]
     fn the_catalogue_lists_every_scorer() {
-        let c = catalogue();
-        assert_eq!(c.len(), Builtin::ALL.len());
+        let c = catalogue(None);
+        assert_eq!(c.len(), Builtin::ALL.len() + Judged::ALL.len());
+        assert!(c.iter().filter(|s| s.kind == ScorerKind::Judge).all(|s| !s.available));
         assert!(c.iter().any(|s| s.id == "no_tool_loop"));
         assert!(c.iter().any(|s| s.needs_config));
     }
@@ -466,7 +574,7 @@ mod tests {
         let ids: Vec<&str> = default_set().iter().map(|b| b.id()).collect();
         for id in ["span_present", "tool_succeeded"] {
             assert!(!ids.contains(&id), "{id} must not run without being configured");
-            let row = catalogue()
+            let row = catalogue(None)
                 .into_iter()
                 .find(|s| s.id == id)
                 .unwrap_or_else(|| panic!("{id} is missing from the catalogue"));
@@ -522,5 +630,29 @@ mod tests {
         let c = compare("a", "b", &base, &cand);
         assert_eq!(c.scorers.len(), 2);
         assert!(c.scorers.iter().all(|r| r.delta.is_none()));
+    }
+
+    #[test]
+    fn a_fall_in_a_lower_is_better_scorer_is_an_improvement() {
+        let base: Vec<Score> =
+            (0..40).map(|i| score("toxicity", 0.5 + f64::from(i % 2) * 0.01)).collect();
+        let cand: Vec<Score> =
+            (0..40).map(|i| score("toxicity", 0.1 + f64::from(i % 2) * 0.01)).collect();
+        let c = compare("a", "b", &base, &cand);
+        assert_eq!(c.scorers[0].direction, ScoreDirection::LowerIsBetter);
+        assert!(!c.regressed, "less toxic is better");
+        let c = compare("a", "b", &cand, &base);
+        assert!(c.regressed, "more toxic is a regression");
+        assert!(c.scorers[0].ci_low.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn a_shift_inside_the_noise_is_not_a_regression() {
+        let base: Vec<Score> =
+            (0..40).map(|i| score("relevance", if i % 2 == 0 { 0.0 } else { 1.0 })).collect();
+        let cand: Vec<Score> =
+            (0..40).map(|i| score("relevance", if i % 2 == 0 { 0.0 } else { 0.95 })).collect();
+        let c = compare("a", "b", &base, &cand);
+        assert!(c.scorers[0].decidable && !c.regressed, "{:?}", c.scorers[0]);
     }
 }

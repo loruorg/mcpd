@@ -160,6 +160,8 @@ fn api_router(config: &ServerConfig) -> Router<Arc<AppState>> {
         .route("/v1/api/spans", get(query::list_spans))
         .route("/v1/api/logs", get(query::list_logs))
         .route("/v1/api/metrics", get(query::query_metrics))
+        .route("/v1/api/metrics/histogram", get(query::metric_histogram))
+        .route("/v1/api/metrics/points", get(query::list_metric_points))
         .route("/v1/api/scores", get(query::list_scores))
         .route("/v1/api/scores", post(query::create_score))
         .route("/v1/api/feedback", get(query::list_feedback))

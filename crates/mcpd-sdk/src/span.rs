@@ -20,6 +20,7 @@ use mcpd_core::{
 };
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use time::OffsetDateTime;
 
 /// One step of an agent run.
@@ -88,6 +89,9 @@ struct State {
     usage_sink: Option<UsageSink>,
     /// A span reports its usage upward once, at its end.
     usage_reported: bool,
+    /// The monotonic start, for a time to first token a wall-clock step
+    /// cannot bend.
+    started: Instant,
 }
 
 impl std::fmt::Debug for State {
@@ -169,6 +173,7 @@ impl Span {
                     capture: client.config.capture_payloads,
                     usage_sink: None,
                     usage_reported: false,
+                    started: Instant::now(),
                 }),
             })),
         };
@@ -410,6 +415,71 @@ impl Span {
     /// ```
     pub fn set_model_parameters(&self, parameters: ModelParameters) -> &Self {
         self.edit(|r| r.model_parameters = Some(parameters));
+        self
+    }
+
+    /// Record what an OpenAI- or Anthropic-shaped response says about its
+    /// call: the model, the provider, the token usage with its cache and
+    /// reasoning meters, and the response id, finish reasons and service tier
+    /// as `gen_ai.response.*` attributes. The daemon prices a batch or flex
+    /// call from the tier.
+    ///
+    /// `provider` overrides the one the shape implies, for a model served
+    /// through a gateway or a cloud. It never records the text: set it with
+    /// [`Span::set_output`] if you want it kept. An unknown shape records what
+    /// it can and reports nothing.
+    pub fn record_response(&self, response: &serde_json::Value, provider: Option<&str>) -> &Self {
+        if self.inner.is_none() {
+            return self;
+        }
+        let facts = crate::model_call::response_facts(response, provider);
+        self.edit(|r| {
+            if let Some(model) = facts.model {
+                r.model = Some(model);
+            }
+            if let Some(provider) = facts.provider {
+                r.provider = Some(provider);
+            }
+            if let Some(usage) = facts.usage {
+                r.usage = Some(usage);
+            }
+            merge_attributes(r, facts.attributes);
+        });
+        self
+    }
+
+    /// Record the time to first token, from this span's start to now, as
+    /// `mcpd.time_to_first_token_ms`. Only the first call counts, so it can sit
+    /// inside a streaming loop.
+    pub fn mark_first_token(&self) -> &Self {
+        self.edit_state(|state| {
+            let seen = state
+                .record
+                .attributes
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|a| a.contains_key(TIME_TO_FIRST_TOKEN));
+            if seen {
+                return;
+            }
+            let ms = state.started.elapsed().as_secs_f64() * 1000.0;
+            let mut add = serde_json::Map::new();
+            add.insert(TIME_TO_FIRST_TOKEN.to_owned(), serde_json::Value::from(ms));
+            merge_attributes(&mut state.record, add);
+        });
+        self
+    }
+
+    /// Record a guardrail's outcome as `mcpd.guardrail.tripped` and, when
+    /// given, `mcpd.guardrail.reason`. Tripping is not an error by itself;
+    /// call [`Span::set_error`] as well if it should fail the span.
+    pub fn set_guardrail(&self, tripped: bool, reason: Option<&str>) -> &Self {
+        let mut add = serde_json::Map::new();
+        add.insert("mcpd.guardrail.tripped".to_owned(), serde_json::Value::Bool(tripped));
+        if let Some(reason) = reason {
+            add.insert("mcpd.guardrail.reason".to_owned(), serde_json::Value::from(reason));
+        }
+        self.edit(|r| merge_attributes(r, add));
         self
     }
 
@@ -673,6 +743,21 @@ impl Span {
         if let Some((Some(sink), Some(usage), model, provider)) = report {
             sink(&usage, model.as_deref(), provider.as_deref());
         }
+    }
+}
+
+/// The attribute [`Span::mark_first_token`] writes.
+const TIME_TO_FIRST_TOKEN: &str = "mcpd.time_to_first_token_ms";
+
+/// Add keys to a span's attributes, keeping the ones already set. Attributes
+/// that are not an object are replaced, since there is nothing to merge into.
+fn merge_attributes(r: &mut SpanRecord, add: serde_json::Map<String, serde_json::Value>) {
+    if add.is_empty() {
+        return;
+    }
+    match &mut r.attributes {
+        Some(serde_json::Value::Object(existing)) => existing.extend(add),
+        slot => *slot = Some(serde_json::Value::Object(add)),
     }
 }
 

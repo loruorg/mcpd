@@ -221,7 +221,7 @@ const MIGRATION_LOCK: i64 = 0x6d63_7064_0001;
 /// `CREATE TABLE IF NOT EXISTS` cannot apply, so `migrate` drops the old table
 /// inside the migrating transaction and rebuilds every row from the spans. That
 /// is safe only because every column of `traces` is derived.
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 
 /// The first version whose `traces` table is keyed by project as well.
 const TRACES_BY_PROJECT: i32 = 5;
@@ -625,7 +625,8 @@ fn row_to_trace(r: &Row) -> Trace {
 
 const LOG_COLUMNS: &str = "\
     log_id, trace_id, span_id, timestamp, level, message, fields, logger, \
-    project, environment, service_name, session_id, user_id, received_at";
+    project, environment, service_name, session_id, user_id, received_at, \
+    service_version, thread_id, resource_id, run_id, request_id, experiment_id, release";
 
 fn row_to_log(r: &Row) -> LogRecord {
     LogRecord {
@@ -641,15 +642,15 @@ fn row_to_log(r: &Row) -> LogRecord {
             project: r.get(8),
             environment: r.get(9),
             service_name: r.get(10),
-            service_version: None,
+            service_version: r.get(14),
             session_id: r.get(11),
-            thread_id: None,
+            thread_id: r.get(15),
             user_id: r.get(12),
-            resource_id: None,
-            run_id: None,
-            request_id: None,
-            experiment_id: None,
-            release: None,
+            resource_id: r.get(16),
+            run_id: r.get(17),
+            request_id: r.get(18),
+            experiment_id: r.get(19),
+            release: r.get(20),
         },
         received_at: from_nanos(r.get(13)),
     }
@@ -1556,8 +1557,10 @@ impl Store for PostgresStore {
                 .execute(
                     "INSERT INTO logs (log_id, trace_id, span_id, timestamp, level, severity,
                     message, fields, logger, project, environment, service_name, session_id,
-                    user_id, received_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                    user_id, received_at, service_version, thread_id, resource_id, run_id,
+                    request_id, experiment_id, release)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+                         $16,$17,$18,$19,$20,$21,$22)
                  ON CONFLICT (log_id) DO UPDATE SET project = EXCLUDED.project
                  WHERE logs.project = EXCLUDED.project",
                     &[
@@ -1576,6 +1579,13 @@ impl Store for PostgresStore {
                         &l.correlation.session_id,
                         &l.correlation.user_id,
                         &now,
+                        &l.correlation.service_version,
+                        &l.correlation.thread_id,
+                        &l.correlation.resource_id,
+                        &l.correlation.run_id,
+                        &l.correlation.request_id,
+                        &l.correlation.experiment_id,
+                        &l.correlation.release,
                     ],
                 )
                 .await
@@ -1949,6 +1959,7 @@ impl Store for PostgresStore {
             TraceSort::Duration => "COALESCE(t.duration_ns, 0)",
             TraceSort::Cost => "t.total_cost",
             TraceSort::SpanCount => "t.span_count",
+            TraceSort::Tokens => "(t.input_tokens + t.output_tokens)",
             TraceSort::Score => "COALESCE(t.min_score, 0)",
         };
         let dir = match q.order {
@@ -2518,6 +2529,13 @@ impl Store for PostgresStore {
         if let Some(s) = &q.span_id {
             w.push("span_id = {}", s.clone());
         }
+        for (field, value) in &q.correlation {
+            // Only a name from the fixed list reaches the SQL.
+            if let Some(col) = crate::LOG_CORRELATION_FILTERS.iter().find(|c| **c == field.as_str())
+            {
+                w.push(&format!("{col} = {{}}"), value.clone());
+            }
+        }
         if let Some(t) = q.from {
             w.push("timestamp >= {}", to_nanos(t));
         }
@@ -2552,6 +2570,122 @@ impl Store for PostgresStore {
         let next_cursor = if items.len() > limit as usize {
             items.truncate(limit as usize);
             items.last().map(|l| encode_cursor(to_nanos(l.timestamp), &l.log_id))
+        } else {
+            None
+        };
+        Ok(Paged { items, next_cursor, total: None })
+    }
+
+    async fn list_feedback(&self, q: &crate::FeedbackQuery) -> Result<Paged<Feedback>> {
+        let conn = self.conn().await?;
+        let mut w = Where::default();
+        w.push("project = {}", q.project.clone());
+        if let Some(t) = &q.trace_id {
+            w.push("trace_id = {}", t.clone());
+        }
+        if let Some(s) = &q.span_id {
+            w.push("span_id = {}", s.clone());
+        }
+        if let Some(k) = &q.kind {
+            w.push("kind = {}", k.clone());
+        }
+        if let Some(a) = &q.author_kind {
+            w.push("author_kind = {}", a.clone());
+        }
+        if let Some(t) = q.from {
+            w.push("timestamp >= {}", to_nanos(t));
+        }
+        if let Some(t) = q.to {
+            w.push("timestamp < {}", to_nanos(t));
+        }
+        if let Some(c) = &q.cursor {
+            let (v, id) = decode_cursor(c)?;
+            let n = w.next();
+            w.push_raw(format!("(timestamp, feedback_id) < (${n}::bigint, ${})", n + 1));
+            w.bind(v);
+            w.bind(id);
+        }
+        let limit = q.limit.clamp(1, 500);
+        let sql = format!(
+            "SELECT {FEEDBACK_COLUMNS} FROM feedback{} ORDER BY timestamp DESC, feedback_id DESC \
+             LIMIT {}",
+            w.sql(),
+            limit + 1
+        );
+        let rows = conn.query(&sql, &w.params()).await.map_err(be)?;
+        let mut items: Vec<Feedback> = rows.iter().map(row_to_feedback).collect();
+        let next_cursor = if items.len() > limit as usize {
+            items.truncate(limit as usize);
+            items.last().map(|f| encode_cursor(to_nanos(f.timestamp), &f.feedback_id))
+        } else {
+            None
+        };
+        Ok(Paged { items, next_cursor, total: None })
+    }
+
+    async fn list_metric_points(
+        &self,
+        q: &crate::MetricPointQuery,
+    ) -> Result<Paged<mcpd_core::MetricPoint>> {
+        let conn = self.conn().await?;
+        let mut w = Where::default();
+        w.push("project = {}", q.project.clone());
+        if let Some(n) = &q.name {
+            w.push("name = {}", n.clone());
+        }
+        if let Some(t) = &q.trace_id {
+            w.push("trace_id = {}", t.clone());
+        }
+        if let Some(t) = q.from {
+            w.push("timestamp >= {}", to_nanos(t));
+        }
+        if let Some(t) = q.to {
+            w.push("timestamp < {}", to_nanos(t));
+        }
+        for (k, v) in &q.filter {
+            let n = w.next();
+            w.push_raw(format!("labels::jsonb ->> ${n} = ${}", n + 1));
+            w.bind(k.clone());
+            w.bind(v.clone());
+        }
+        if let Some(c) = &q.cursor {
+            let (v, id) = decode_cursor(c)?;
+            let cmp = if q.order == Order::Asc { '>' } else { '<' };
+            let n = w.next();
+            w.push_raw(format!("(timestamp, metric_id) {cmp} (${n}::bigint, ${})", n + 1));
+            w.bind(v);
+            w.bind(id);
+        }
+        let dir = if q.order == Order::Asc { "ASC" } else { "DESC" };
+        let limit = q.limit.clamp(1, 10_000);
+        let sql = format!(
+            "SELECT metric_id, name, kind, value, unit, timestamp, labels, buckets, trace_id, \
+                    span_id, project, environment, received_at
+             FROM metrics{} ORDER BY timestamp {dir}, metric_id {dir} LIMIT {}",
+            w.sql(),
+            limit + 1
+        );
+        let rows = conn.query(&sql, &w.params()).await.map_err(be)?;
+        let mut items: Vec<mcpd_core::MetricPoint> = rows
+            .iter()
+            .map(|r| mcpd_core::MetricPoint {
+                metric_id: r.get(0),
+                name: r.get(1),
+                kind: r.get::<_, &str>(2).parse().unwrap_or(mcpd_core::MetricKind::Gauge),
+                value: r.get(3),
+                unit: r.get(4),
+                timestamp: from_nanos(r.get(5)),
+                labels: json_in(r.get(6)),
+                buckets: json_in(r.get(7)),
+                trace_id: r.get(8),
+                span_id: r.get(9),
+                correlation: mcpd_core::Correlation::for_project(r.get(10), r.get(11)),
+                received_at: from_nanos(r.get(12)),
+            })
+            .collect();
+        let next_cursor = if items.len() > limit as usize {
+            items.truncate(limit as usize);
+            items.last().map(|m| encode_cursor(to_nanos(m.timestamp), &m.metric_id))
         } else {
             None
         };

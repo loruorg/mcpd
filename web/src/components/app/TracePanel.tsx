@@ -26,6 +26,7 @@ import {
 } from '@/lib/api'
 import { useCapabilities } from './capabilities'
 import { SpanInspector } from './SpanInspector'
+import { TraceActions } from './TraceActions'
 import { Legend, Waterfall } from './Waterfall'
 import {
   buildHaystack,
@@ -333,6 +334,7 @@ export function TracePanel({
           )}
           <div className="ml-auto flex flex-wrap items-center gap-1.5">
             {headerAction}
+            <TraceActions traceId={traceId} project={project} endpoint={endpoint} apiKey={apiKey} />
             {/* Only where the panel owns the data. A host that passed its own
                 detail refreshes it on its own terms, and a follow control that
                 could not write into that detail would be a control that does

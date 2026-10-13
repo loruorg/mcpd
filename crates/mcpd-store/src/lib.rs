@@ -137,6 +137,8 @@ pub enum TraceSort {
     Cost,
     /// How many steps it had.
     SpanCount,
+    /// How many tokens it used, input and output together.
+    Tokens,
     /// The lowest score the run received.
     ///
     /// Read from the `min_score` column of the trace projection, which is
@@ -166,6 +168,11 @@ impl TraceSort {
             Self::Duration => trace.duration_ns.unwrap_or(0).to_string(),
             Self::Cost => trace.cost.as_ref().and_then(|c| c.total_cost).unwrap_or(0.0).to_string(),
             Self::SpanCount => trace.span_count.to_string(),
+            Self::Tokens => trace
+                .usage
+                .as_ref()
+                .map_or(0, |u| u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0))
+                .to_string(),
             Self::Score => min_score.to_string(),
         }
     }
@@ -307,6 +314,10 @@ pub struct LogQuery {
     pub trace_id: Option<String>,
     /// Only logs from this step.
     pub span_id: Option<String>,
+    /// Correlation equality filters, as `(field, value)`. The field is one of
+    /// [`LOG_CORRELATION_FILTERS`]; a user id is compared as stored, so the
+    /// caller hashes it first.
+    pub correlation: Vec<(String, String)>,
     /// Window start.
     pub from: Option<OffsetDateTime>,
     /// Window end.
@@ -318,6 +329,20 @@ pub struct LogQuery {
     /// Opaque cursor.
     pub cursor: Option<String>,
 }
+
+/// The correlation fields a log list filters on, each a column of `logs`.
+pub const LOG_CORRELATION_FILTERS: [&str; 10] = [
+    "environment",
+    "service_name",
+    "service_version",
+    "session_id",
+    "thread_id",
+    "user_id",
+    "run_id",
+    "request_id",
+    "experiment_id",
+    "release",
+];
 
 /// Filters for a metric query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,6 +365,52 @@ pub struct MetricQuery {
     /// model is far cheaper than returning every series and discarding most of
     /// them in the client.
     pub filter: Vec<(String, String)>,
+}
+
+/// Filters for listing a project's feedback.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FeedbackQuery {
+    /// The project to read.
+    pub project: String,
+    /// Only feedback on this run.
+    pub trace_id: Option<String>,
+    /// Only feedback on this step.
+    pub span_id: Option<String>,
+    /// Only this kind: `thumbs`, `rating`, `correction`, `tag` or `comment`.
+    pub kind: Option<String>,
+    /// Only from this kind of author, such as `end_user` or `reviewer`.
+    pub author_kind: Option<String>,
+    /// Window start.
+    pub from: Option<OffsetDateTime>,
+    /// Window end.
+    pub to: Option<OffsetDateTime>,
+    /// Page size.
+    pub limit: u32,
+    /// Opaque cursor. Pages run newest first.
+    pub cursor: Option<String>,
+}
+
+/// Filters for listing stored metric points.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetricPointQuery {
+    /// The project to read.
+    pub project: String,
+    /// Only this metric.
+    pub name: Option<String>,
+    /// Window start.
+    pub from: Option<OffsetDateTime>,
+    /// Window end.
+    pub to: Option<OffsetDateTime>,
+    /// Label equality filters.
+    pub filter: Vec<(String, String)>,
+    /// Only points whose exemplar names this run.
+    pub trace_id: Option<String>,
+    /// Sort direction, by timestamp.
+    pub order: Order,
+    /// Page size.
+    pub limit: u32,
+    /// Opaque cursor.
+    pub cursor: Option<String>,
 }
 
 /// How to combine the raw observations in a bucket.
@@ -1627,6 +1698,14 @@ pub trait Store: Send + Sync + 'static {
 
     /// Query a metric as an aggregated time series.
     async fn query_metrics(&self, q: &MetricQuery) -> Result<MetricSeriesResponse>;
+
+    /// List a project's feedback, newest first, keyset paged on
+    /// `(timestamp, feedback_id)`.
+    async fn list_feedback(&self, q: &FeedbackQuery) -> Result<Paged<Feedback>>;
+
+    /// List stored metric points as they were recorded, keyset paged on
+    /// `(timestamp, metric_id)`.
+    async fn list_metric_points(&self, q: &MetricPointQuery) -> Result<Paged<MetricPoint>>;
 
     /// List scores.
     async fn list_scores(&self, q: &ScoreQuery) -> Result<Paged<Score>>;

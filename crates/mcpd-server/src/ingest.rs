@@ -156,7 +156,9 @@ pub(crate) async fn finish_pinned(
     let derived_count = derived.len() as u32;
     batch.metrics.extend(derived);
 
+    let tally = crate::state::SelfMetrics::model_tally(&batch.spans);
     let mut result = state.store.ingest(batch).await?;
+    state.metrics.add_models(tally);
 
     // The sender is told about the batch it sent, not about the batch that was
     // written. Rows the daemon derived for itself are subtracted back out
@@ -684,6 +686,11 @@ fn otlp_metrics_decode(
                 let name = m.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed").to_owned();
                 let unit = m.get("unit").and_then(|v| v.as_str()).map(str::to_owned);
 
+                // A cumulative histogram carries everything since its stream
+                // began, so a reader adds only its growth; recorded beside the
+                // buckets for that reason.
+                let temporality =
+                    m.get("histogram").and_then(|h| h.get("aggregationTemporality")).cloned();
                 let (kind, points) = if let Some(s) = m.get("sum") {
                     (MetricKind::Counter, s.get("dataPoints"))
                 } else if let Some(g) = m.get("gauge") {
@@ -730,12 +737,19 @@ fn otlp_metrics_decode(
                         .filter(|s| ids::validate_trace_id(s).is_ok())
                         .map(str::to_owned);
 
-                    let labels = p.get("attributes").cloned();
+                    // Flattened like a span's attributes, so a label is a key
+                    // that `group_by`, `filter` and the cardinality filter can
+                    // reach, rather than an entry in OTLP's key/value list.
+                    let labels = p
+                        .get("attributes")
+                        .map(|a| serde_json::Value::Object(mcpd_core::otlp::flatten_attributes(a)))
+                        .filter(|v| v.as_object().is_some_and(|m| !m.is_empty()));
                     let buckets = (kind == MetricKind::Histogram).then(|| {
                         serde_json::json!({
                             "bounds": p.get("explicitBounds"),
                             "counts": p.get("bucketCounts"),
                             "count": p.get("count"),
+                            "temporality": temporality,
                         })
                     });
 

@@ -15,7 +15,8 @@ use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use mcpd_server::query::{
-    FEEDBACK_PARAMS, LOG_PARAMS, METRIC_PARAMS, SCORE_PARAMS, SPAN_PARAMS, TRACE_PARAMS,
+    FEEDBACK_PARAMS, HISTOGRAM_PARAMS, LOG_PARAMS, METRIC_PARAMS, METRIC_POINT_PARAMS,
+    SCORE_PARAMS, SPAN_PARAMS, TRACE_PARAMS,
 };
 use mcpd_server::{router, AppState, ServerConfig};
 use mcpd_store::sqlite::SqliteStore;
@@ -135,6 +136,8 @@ fn every_list_accepts_exactly_what_the_spec_documents() {
         ("list_logs", LOG_PARAMS),
         ("list_scores", SCORE_PARAMS),
         ("query_metrics", METRIC_PARAMS),
+        ("metric_histogram", HISTOGRAM_PARAMS),
+        ("list_metric_points", METRIC_POINT_PARAMS),
         ("list_feedback", FEEDBACK_PARAMS),
     ] {
         let enforced: BTreeSet<String> = enforced.iter().map(|s| (*s).to_owned()).collect();
@@ -146,46 +149,33 @@ fn every_list_accepts_exactly_what_the_spec_documents() {
     }
 }
 
-/// The filters five SDKs send to the feedback door and the daemon never
-/// applied. `kind`, `from`, `to` and `cursor` are serialised by the TypeScript,
-/// Python, Go, Kotlin and Rust clients, and the request succeeded and answered
-/// a different question. They are refused now, which is the answer that lets
-/// somebody find out.
+/// The filters the SDKs send to the feedback door are applied now, so a value
+/// the daemon cannot read is refused by name rather than dropped, which would
+/// answer a different question with a 200.
 #[tokio::test]
-async fn the_feedback_door_refuses_the_filters_it_never_applied() {
+async fn the_feedback_door_refuses_a_filter_value_it_cannot_read() {
     let app = app().await;
-    for name in ["kind", "from", "to", "cursor"] {
-        let res = get(&app, &format!("/v1/api/feedback?trace_id=abc&{name}=x")).await;
+    for name in ["kind", "from", "to"] {
+        let res = get(&app, &format!("/v1/api/feedback?{name}=not-a-value")).await;
         assert_eq!(
             res.status,
             StatusCode::BAD_REQUEST,
-            "the feedback list accepted and dropped {name}: {}",
+            "the feedback list accepted {name}=not-a-value: {}",
             res.text()
         );
         assert_eq!(res.json()["field"], name);
     }
 }
 
-/// Without a run named, the older behaviour was an empty list with a 200, which
-/// reads as "nobody has judged anything in this project". mcpd cannot list a
-/// project's feedback, and saying so is the only honest answer.
+/// With no run named, the door lists the whole project's feedback.
 #[tokio::test]
-async fn the_feedback_door_refuses_rather_than_answering_an_empty_list() {
+async fn the_feedback_door_lists_a_whole_project() {
     let app = app().await;
-    let res = get(&app, "/v1/api/feedback").await;
-    assert_eq!(
-        res.status,
-        StatusCode::BAD_REQUEST,
-        "a project-wide feedback list answered as though there were none: {}",
-        res.text()
-    );
+    let res = get(&app, "/v1/api/feedback?kind=thumbs&limit=10").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.text());
     let body = res.json();
-    assert_eq!(body["field"], "trace_id");
-    let message = body["message"].as_str().unwrap_or_default();
-    assert!(
-        message.contains("cannot yet list"),
-        "the refusal should say the whole-project list is not served: {message}"
-    );
+    assert!(body["feedback"].is_array(), "{body}");
+    assert_eq!(body["page"]["has_more"], false);
 }
 
 /// Every documented parameter, sent one at a time with a value it can read.

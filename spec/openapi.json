@@ -30,6 +30,7 @@
           "client_tool_call",
           "provider_tool_call",
           "mcp_tool_call",
+          "handoff",
           "workflow_run",
           "workflow_step",
           "workflow_conditional",
@@ -65,6 +66,7 @@
           "client_tool_call": "A tool the calling client executes. The server records the marker; the client returns the detail.",
           "provider_tool_call": "A tool the model provider executes server-side, such as hosted web search or code execution.",
           "mcp_tool_call": "A tool reached over the Model Context Protocol.",
+          "handoff": "Control passing from one agent to another. The span's name is the agent handed to; its parent is the agent handing off.",
           "workflow_run": "One workflow execution. Usually the root of a trace.",
           "workflow_step": "One step within a workflow.",
           "workflow_conditional": "A branch point, with the conditions it evaluated.",
@@ -209,6 +211,32 @@
           "offline": "Produced later, by scoring stored traces.",
           "experiment": "Produced by an experiment run against a dataset.",
           "manual": "Entered by a person, through the API or the UI."
+        }
+      },
+      "ScorerKind": {
+        "type": "string",
+        "description": "How a scorer reaches its answer.",
+        "enum": [
+          "code",
+          "judge",
+          "criterion"
+        ],
+        "x-enumDescriptions": {
+          "code": "Deterministic code in the daemon. Free, and gives the same answer twice.",
+          "judge": "A built-in rubric graded by the configured judge model, in steps: preprocess, analyze, score, reason.",
+          "criterion": "A criterion the operator wrote under `judge.criteria`, graded by the judge model in one call."
+        }
+      },
+      "ScoreDirection": {
+        "type": "string",
+        "description": "Which way a scorer's value is better. A comparison reads a fall in `toxicity` as an improvement and a fall in `faithfulness` as a regression.",
+        "enum": [
+          "higher_is_better",
+          "lower_is_better"
+        ],
+        "x-enumDescriptions": {
+          "higher_is_better": "A larger value is a better run.",
+          "lower_is_better": "A smaller value is a better run, as for `toxicity`, `bias` and `hallucination`."
         }
       },
       "FeedbackKind": {
@@ -1366,6 +1394,148 @@
           "value"
         ]
       },
+      "MetricHistogram": {
+        "type": "object",
+        "description": "A histogram metric read back as distributions: the buckets of every point in the window added up, one distribution per label combination, with quantiles read from the merged counts.\n\nBucketed points from OpenTelemetry are added bucket by bucket; for a cumulative stream only the growth across the window counts. Points with one value each, such as mcpd's own derived durations, give exact quantiles and are placed into OpenTelemetry's default boundaries.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The metric read."
+          },
+          "unit": {
+            "type": "string",
+            "description": "UCUM unit of the observations, for axis labelling."
+          },
+          "points_read": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "How many stored points were merged."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Whether the window held more points than one read merges, so the newest ones were used and the rest left out. Narrow the window or add a filter."
+          },
+          "series": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistogramSeries"
+            },
+            "description": "One distribution per label combination."
+          }
+        },
+        "required": [
+          "name",
+          "points_read",
+          "truncated",
+          "series"
+        ]
+      },
+      "HistogramSeries": {
+        "type": "object",
+        "description": "One merged distribution.",
+        "properties": {
+          "labels": {
+            "description": "The `group_by` label values that identify this series. Absent when nothing was grouped."
+          },
+          "bounds": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "description": "Upper bound of each bucket but the last, which is unbounded above."
+          },
+          "counts": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Observations per bucket: one more entry than `bounds`."
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Every observation counted."
+          },
+          "sum": {
+            "type": "number",
+            "format": "double",
+            "description": "Their sum."
+          },
+          "min": {
+            "type": "number",
+            "format": "double",
+            "description": "The smallest observation, when the points recorded single values."
+          },
+          "max": {
+            "type": "number",
+            "format": "double",
+            "description": "The largest observation, when the points recorded single values."
+          },
+          "p50": {
+            "type": "number",
+            "format": "double",
+            "description": "Median."
+          },
+          "p90": {
+            "type": "number",
+            "format": "double",
+            "description": "90th percentile."
+          },
+          "p95": {
+            "type": "number",
+            "format": "double",
+            "description": "95th percentile."
+          },
+          "p99": {
+            "type": "number",
+            "format": "double",
+            "description": "99th percentile."
+          },
+          "exact": {
+            "type": "boolean",
+            "description": "Whether the quantiles are exact, read from single observations, or interpolated linearly inside the bucket the rank falls in."
+          },
+          "points_skipped": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Points left out because their bucket boundaries differ from the ones most of this series uses."
+          }
+        },
+        "required": [
+          "bounds",
+          "counts",
+          "count",
+          "exact",
+          "points_skipped"
+        ]
+      },
+      "MetricPointListResponse": {
+        "type": "object",
+        "description": "A page of stored metric points, as they were recorded.",
+        "properties": {
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricPoint"
+            },
+            "description": "The matching points."
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page",
+            "description": "Cursor and totals."
+          }
+        },
+        "required": [
+          "points",
+          "page"
+        ]
+      },
       "MetricSeries": {
         "type": "object",
         "description": "One line on a chart: a single label combination over time.",
@@ -1790,12 +1960,36 @@
           "needs_config": {
             "type": "boolean",
             "description": "Whether it needs settings to mean anything. A scorer that needs an expected answer cannot run without one."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ScorerKind",
+            "description": "How the scorer reaches its answer."
+          },
+          "direction": {
+            "$ref": "#/components/schemas/ScoreDirection",
+            "description": "Which way its value is better."
+          },
+          "config_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The `ScorerConfig` settings it reads. Empty when it needs none."
+          },
+          "available": {
+            "type": "boolean",
+            "description": "Whether this daemon can run it now. A judged scorer is unavailable until a `judge` block names an endpoint and a model.",
+            "default": true
           }
         },
         "required": [
           "id",
           "description",
-          "needs_config"
+          "needs_config",
+          "kind",
+          "direction",
+          "config_keys",
+          "available"
         ]
       },
       "ScorerConfig": {
@@ -1838,6 +2032,60 @@
             "type": "string",
             "description": "The tool that must have run and ended `ok`, for `tool_succeeded`. Matched exactly against the `name` of a span whose kind is `tool_call`, `client_tool_call`, `provider_tool_call` or `mcp_tool_call`."
           },
+          "forbidden": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Text the answer must not contain, for `excludes`. Any one of them fails the run."
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Words or phrases the answer should mention, for `keyword_coverage`. The score is the share that appear."
+          },
+          "pattern": {
+            "type": "string",
+            "description": "A regular expression the answer must match somewhere, for `matches_pattern`."
+          },
+          "expected_tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The tools the run should call, for `tool_call_accuracy`, and the order it should call them in, for `tool_order`. Matched exactly against tool-call span names."
+          },
+          "forbidden_tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tools the run must not call, for `tool_not_called`."
+          },
+          "min_chars": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "The shortest acceptable answer in characters, for `answer_length`."
+          },
+          "max_chars": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "The longest acceptable answer in characters, for `answer_length`."
+          },
+          "json_schema": {
+            "description": "A JSON Schema the answer must satisfy, for `json_schema`. `type`, `properties`, `required`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and `additionalProperties: false` are checked."
+          },
+          "context": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The passages the answer should rest on, for the judged scorers that read context. When empty, the outputs of the run's `retrieval` and `rag_vector_operation` spans are used."
+          },
           "case_sensitive": {
             "type": "boolean",
             "description": "Case sensitivity for text comparisons.",
@@ -1845,6 +2093,11 @@
           }
         },
         "required": [
+          "forbidden",
+          "keywords",
+          "expected_tools",
+          "forbidden_tools",
+          "context",
           "case_sensitive"
         ]
       },
@@ -2000,13 +2253,39 @@
           "decidable": {
             "type": "boolean",
             "description": "Whether the sample is large enough for the delta to mean anything. A deliberately blunt rule rather than a significance test: below twenty observations on either side, mcpd says the comparison is not decidable rather than dressing noise up as a finding."
+          },
+          "direction": {
+            "$ref": "#/components/schemas/ScoreDirection",
+            "description": "Which way this scorer's value is better, from the catalogue. Scorers the daemon does not know read as higher is better."
+          },
+          "ci_low": {
+            "type": "number",
+            "format": "double",
+            "description": "Lower end of the 95% confidence interval on `delta`, from Welch's t-test. Absent when either side has fewer than two observations."
+          },
+          "ci_high": {
+            "type": "number",
+            "format": "double",
+            "description": "Upper end of that interval."
+          },
+          "p_value": {
+            "type": "number",
+            "format": "double",
+            "description": "Two-sided p-value for the difference in means."
+          },
+          "regressed": {
+            "type": "boolean",
+            "description": "Whether this scorer moved the wrong way: decidable, and the whole interval on the worse side of zero.",
+            "default": false
           }
         },
         "required": [
           "scorer_id",
           "baseline_n",
           "candidate_n",
-          "decidable"
+          "decidable",
+          "direction",
+          "regressed"
         ]
       },
       "ExperimentComparison": {
@@ -7241,7 +7520,7 @@
             "name": "sort",
             "in": "query",
             "required": false,
-            "description": "One of `start_time`, `duration`, `cost`, `span_count`, `score`. Defaults to `start_time`.",
+            "description": "One of `start_time`, `duration`, `cost`, `span_count`, `tokens`, `score`. Defaults to `start_time`.",
             "schema": {
               "type": "string",
               "default": "start_time"
@@ -7543,7 +7822,7 @@
           "Discovery"
         ],
         "summary": "What has arrived since you last looked",
-        "description": "Refresh a list in place instead of running its query again. Hold the cursor from the last poll, send it back, and get the rows that have arrived since, oldest first. The watermark is a row's arrival time and its id together, because a batch writes every row in it with one timestamp and a watermark that could only say 'after this nanosecond' would either replay the whole batch or skip the rest of it. A row written with an arrival time behind the watermark, which a sender can cause by setting `received_at` itself, is not returned; that is the cost of a watermark and no cursor shape avoids it.",
+        "description": "Refresh a list in place instead of running its query again. Hold the cursor from the last poll, send it back, and get the rows that have arrived since, oldest first. The watermark is a row's arrival time and its id together, because a batch writes every row in it with one timestamp and a watermark that could only say 'after this nanosecond' would either replay the whole batch or skip the rest of it. A row written with an arrival time behind the watermark, which a sender can cause by setting `received_at` itself, is not returned; that is the cost of a watermark and no cursor shape avoids it. Sent with `Accept: text/event-stream`, the same request becomes a live tail: the daemon polls every second and sends each batch that brings rows as one `delta` event carrying this response, with the cursor after it as the event id, so a client that reconnects with that cursor misses nothing. A tail closes after thirty minutes and the client reconnects.",
         "parameters": [
           {
             "name": "project",
@@ -7904,6 +8183,96 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "environment",
+            "in": "query",
+            "required": false,
+            "description": "Only logs from this environment.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "service_name",
+            "in": "query",
+            "required": false,
+            "description": "Only logs from this service.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "service_version",
+            "in": "query",
+            "required": false,
+            "description": "Only logs from this service version.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "description": "Only logs from this session.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "thread_id",
+            "in": "query",
+            "required": false,
+            "description": "Only logs from this thread.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "description": "Only logs about this user. Send the plain id; it is hashed the way the stored one was.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "query",
+            "required": false,
+            "description": "Only logs from this durable run.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": false,
+            "description": "Only logs from this request.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "experiment_id",
+            "in": "query",
+            "required": false,
+            "description": "Only logs recorded by this experiment.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "release",
+            "in": "query",
+            "required": false,
+            "description": "Only logs from this release.",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -8031,6 +8400,230 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MetricSeriesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/metrics/histogram": {
+      "get": {
+        "operationId": "metric_histogram",
+        "tags": [
+          "Metrics"
+        ],
+        "summary": "Read a histogram metric as distributions",
+        "description": "Merges the buckets of every point of a histogram metric in the window into one distribution per label combination, and reads p50, p90, p95 and p99 from the merged counts. Use it for latency and size distributions, where a mean of bucket sums answers nothing.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": true,
+            "description": "Which project to read. Required.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": true,
+            "description": "Metric name. Required.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "description": "Start of the window. The last hour when omitted.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "description": "End of the window. Now when omitted.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "group_by",
+            "in": "query",
+            "required": false,
+            "description": "Label keys to split the distributions on.",
+            "style": "form",
+            "explode": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "required": false,
+            "description": "Label equality filters, as `key:value` pairs joined by commas, as on `/v1/api/metrics`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricHistogram"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/metrics/points": {
+      "get": {
+        "operationId": "list_metric_points",
+        "tags": [
+          "Metrics"
+        ],
+        "summary": "List stored metric points",
+        "description": "The raw points behind a chart, newest first, with their labels, buckets and exemplar links. Use it to see exactly what a producer sent.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": true,
+            "description": "Which project to read. Required.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "description": "Only this metric.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "description": "Start of the window.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "description": "End of the window.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "required": false,
+            "description": "Label equality filters, as `key:value` pairs joined by commas.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "trace_id",
+            "in": "query",
+            "required": false,
+            "description": "Only points whose exemplar names this run.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "description": "`asc` or `desc`.",
+            "schema": {
+              "type": "string",
+              "default": "desc"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 1000.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0,
+              "default": 100
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "From a previous page.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricPointListResponse"
                 }
               }
             }
@@ -8291,7 +8884,7 @@
           "Evaluation"
         ],
         "summary": "List human feedback",
-        "description": "The human judgements on one run, read from the trace detail. `trace_id` is required and is refused when absent: mcpd cannot yet list a whole project's feedback, and answering an empty list instead would read as though nobody had judged anything. Every other parameter is refused by name as well, so a filter this endpoint does not apply cannot come back as a plausible wrong answer.",
+        "description": "A project's human judgements, newest first, filtered by run, step, kind, author and time window and paged with a cursor. With no filter it is every piece of feedback the project holds.",
         "parameters": [
           {
             "name": "project",
@@ -8305,8 +8898,8 @@
           {
             "name": "trace_id",
             "in": "query",
-            "required": true,
-            "description": "The run whose judgements to read. Required.",
+            "required": false,
+            "description": "Only feedback on this run.",
             "schema": {
               "type": "string"
             }
@@ -8315,12 +8908,68 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Page size.",
+            "description": "Page size, 1 to 500.",
             "schema": {
               "type": "integer",
               "format": "int32",
               "minimum": 0,
               "default": 50
+            }
+          },
+          {
+            "name": "span_id",
+            "in": "query",
+            "required": false,
+            "description": "Only feedback on this step.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "description": "Only this kind of judgement.",
+            "schema": {
+              "$ref": "#/components/schemas/FeedbackKind"
+            }
+          },
+          {
+            "name": "author_kind",
+            "in": "query",
+            "required": false,
+            "description": "Only from this kind of author, such as `end_user` or `reviewer`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "description": "Start of the window.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "description": "End of the window.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "From a previous page. Pages run newest first.",
+            "schema": {
+              "type": "string"
             }
           }
         ],

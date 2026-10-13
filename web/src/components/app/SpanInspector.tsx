@@ -323,6 +323,44 @@ export function SpanInspector({
       <Payload label="Attributes" value={span.attributes} traceQuery={query} spanId={span.span_id} />
       <Payload label="Metadata" value={span.metadata} traceQuery={query} spanId={span.span_id} />
 
+      {(span.links?.length ?? 0) > 0 && (
+        <div className="mt-5">
+          <h4 className="legend text-ink-3">Links</h4>
+          {/* A link inside this run opens the step; one into another run opens
+              that run, through the URL, so the back button returns here. */}
+          <ul className="mt-2 space-y-1">
+            {span.links!.map((l, i) => {
+              const here = l.trace_id === span.trace_id
+              const target = here && l.span_id ? detail.spans.find((s) => s.span_id === l.span_id) : undefined
+              const href = (() => {
+                if (typeof window === 'undefined') return '#'
+                const p = new URLSearchParams(location.search)
+                p.set('screen', 'runs')
+                p.set('trace', l.trace_id)
+                return `${location.pathname}?${p}`
+              })()
+              return (
+                <li key={i} className="text-[0.75rem] leading-snug">
+                  <span className="data text-ink-3">{l.kind ?? 'linked'}</span>{' '}
+                  {target ? (
+                    <button type="button" className="link" onClick={() => onSelect(target.span_id)}>
+                      {target.name}
+                    </button>
+                  ) : here ? (
+                    <span className="data text-ink-2">{l.span_id ?? 'this run'}</span>
+                  ) : (
+                    <a className="link data" href={href}>
+                      run {l.trace_id.slice(0, 12)}
+                      {l.span_id ? `, step ${l.span_id.slice(0, 8)}` : ''}
+                    </a>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      )}
+
       {logs.length > 0 && (
         <div className="mt-5">
           <h4 className="legend text-ink-3">Logs</h4>

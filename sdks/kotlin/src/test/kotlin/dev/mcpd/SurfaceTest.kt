@@ -332,7 +332,7 @@ class SurfaceTest {
         FakeMcpd().use { server ->
             val mcpd = client(server) { it.copy(maxQueue = 2) }
             val stats0 = mcpd.stats()
-            assertEquals(Stats(queued = 0, dropped = 0, capacity = 2, exported = 0, failed = 0, rejected = 0), stats0)
+            assertEquals(Stats(queued = 0, dropped = 0, capacity = 2, exported = 0, failed = 0, rejected = 0, redactionFailures = 0), stats0)
             repeat(3) { mcpd.trace("t$it").end() }
             assertEquals(2, mcpd.stats().queued)
             assertEquals(1, mcpd.stats().dropped)

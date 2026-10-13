@@ -212,7 +212,8 @@ defmodule Mcpd do
 
   @doc """
   What the client has done since it started: `queued`, `dropped`, `capacity`,
-  `exported`, `failed` and `rejected`. The same six names in every SDK.
+  `exported`, `failed`, `rejected` and `redaction_failures`. The same seven
+  names in every SDK.
   """
   @spec stats(pid()) :: %{
           queued: non_neg_integer(),
@@ -220,7 +221,8 @@ defmodule Mcpd do
           capacity: non_neg_integer(),
           exported: non_neg_integer(),
           failed: non_neg_integer(),
-          rejected: non_neg_integer()
+          rejected: non_neg_integer(),
+          redaction_failures: non_neg_integer()
         }
   defdelegate stats(client), to: Worker
 
@@ -708,6 +710,7 @@ defmodule Mcpd do
       "provider" => o[:provider],
       "usage" => o[:usage],
       "model_parameters" => model_parameters(o[:model_parameters]),
+      "attributes" => attributes(o),
       "metadata" => o[:metadata],
       "tags" => if(span.parent_span_id == nil, do: o[:tags]),
       "correlation" => span.correlation
@@ -793,6 +796,24 @@ defmodule Mcpd do
   # Anything else, including a caller who passed a number or a string by
   # mistake, records nothing rather than raising in the middle of their run.
   defp model_parameters(_other), do: nil
+
+  # Kind-specific detail, such as what `Mcpd.ModelCall` reads off a response.
+  # Every `attributes:` in the options is merged, later ones winning, so
+  # `[attributes: Mcpd.ModelCall.guardrail(true)] ++ Mcpd.ModelCall.options(r)`
+  # keeps both rather than the first silently hiding the second. A value that
+  # is not a map is ignored: a mistake in the options costs the field, never a
+  # raise in the caller's run.
+  defp attributes(opts) do
+    merged =
+      opts
+      |> Keyword.get_values(:attributes)
+      |> Enum.reduce(%{}, fn
+        %{} = attrs, acc -> Map.merge(acc, attrs)
+        _other, acc -> acc
+      end)
+
+    if map_size(merged) > 0, do: merged
+  end
 
   # Contract behaviour B10 on the wire: the class under `kind`, which is the
   # field the spec names, and a message that is never blank. An exception

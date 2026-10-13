@@ -66,7 +66,24 @@ use queries::*;
 /// every row from the spans after it. That is safe only because every column
 /// of `traces` is derived; a step that changes a table holding data a sender
 /// wrote needs a copy, not a rebuild.
-const SCHEMA_VERSION: u32 = 5;
+///
+/// 6 gives `logs` the rest of the correlation: service version, thread,
+/// resource, run, request, experiment and release. Added by `ALTER TABLE` in
+/// `migrate` rather than in `schema.sql`, which a released database has
+/// already run; each column is nullable, so no row is rewritten.
+const SCHEMA_VERSION: u32 = 6;
+
+/// The columns version 6 adds to `logs`, in the order every log query reads
+/// them after the original fourteen.
+const LOG_CORRELATION_COLUMNS: [&str; 7] = [
+    "service_version",
+    "thread_id",
+    "resource_id",
+    "run_id",
+    "request_id",
+    "experiment_id",
+    "release",
+];
 
 /// The first version whose `traces` table is keyed by project as well.
 const TRACES_BY_PROJECT: u32 = 5;
@@ -834,6 +851,25 @@ impl Store for SqliteStore {
 
             conn.execute_batch(SCHEMA)
                 .map_err(|e| Error::Migration { version: SCHEMA_VERSION, reason: e.to_string() })?;
+            // A column that is already there is the expected answer on a
+            // database a crashed start half migrated, so that one error is not
+            // a failure. Every other one is.
+            for col in LOG_CORRELATION_COLUMNS {
+                match conn.execute(&format!("ALTER TABLE logs ADD COLUMN {col} TEXT"), []) {
+                    Ok(_) => {}
+                    Err(e) if e.to_string().contains("duplicate column name") => {}
+                    Err(e) => {
+                        return Err(Error::Migration { version: 6, reason: e.to_string() });
+                    }
+                }
+            }
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS logs_thread ON logs (project, thread_id, timestamp)
+                     WHERE thread_id IS NOT NULL;
+                 CREATE INDEX IF NOT EXISTS logs_run ON logs (project, run_id, timestamp)
+                     WHERE run_id IS NOT NULL;",
+            )
+            .map_err(|e| Error::Migration { version: 6, reason: e.to_string() })?;
             if rebuild {
                 let rebuilt = rebuild_traces(conn).map_err(|e| Error::Migration {
                     version: TRACES_BY_PROJECT,
@@ -983,6 +1019,19 @@ impl Store for SqliteStore {
     async fn query_metrics(&self, q: &MetricQuery) -> Result<MetricSeriesResponse> {
         let q = q.clone();
         self.with_read(move |conn| query_metrics_sync(conn, &q)).await
+    }
+
+    async fn list_feedback(&self, q: &crate::FeedbackQuery) -> Result<Paged<Feedback>> {
+        let q = q.clone();
+        self.with_read(move |conn| list_feedback_sync(conn, &q)).await
+    }
+
+    async fn list_metric_points(
+        &self,
+        q: &crate::MetricPointQuery,
+    ) -> Result<Paged<mcpd_core::MetricPoint>> {
+        let q = q.clone();
+        self.with_read(move |conn| list_metric_points_sync(conn, &q)).await
     }
 
     async fn list_scores(&self, q: &ScoreQuery) -> Result<Paged<Score>> {

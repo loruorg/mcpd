@@ -337,3 +337,12 @@ CREATE TABLE IF NOT EXISTS mcpd.theme_members (
     INDEX idx_trace trace_id TYPE bloom_filter GRANULARITY 4
 ) ENGINE = ReplacingMergeTree
 ORDER BY (project, snapshot_id, aspect, theme_id, note_id);
+
+-- The rest of the correlation on a log line.
+ALTER TABLE mcpd.logs ADD COLUMN IF NOT EXISTS service_version String DEFAULT '';
+ALTER TABLE mcpd.logs ADD COLUMN IF NOT EXISTS thread_id String DEFAULT '';
+ALTER TABLE mcpd.logs ADD COLUMN IF NOT EXISTS resource_id String DEFAULT '';
+ALTER TABLE mcpd.logs ADD COLUMN IF NOT EXISTS run_id String DEFAULT '';
+ALTER TABLE mcpd.logs ADD COLUMN IF NOT EXISTS request_id String DEFAULT '';
+ALTER TABLE mcpd.logs ADD COLUMN IF NOT EXISTS experiment_id String DEFAULT '';
+ALTER TABLE mcpd.logs ADD COLUMN IF NOT EXISTS release String DEFAULT '';

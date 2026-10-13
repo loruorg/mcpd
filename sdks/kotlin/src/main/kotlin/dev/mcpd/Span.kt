@@ -229,6 +229,54 @@ class ActiveSpan internal constructor(
     private companion object {
         /** Stored when a caller records a failure but gives no message. */
         const val NO_MESSAGE = "no message given"
+
+        /** The attribute [markFirstToken] writes. */
+        const val FIRST_TOKEN = "mcpd.time_to_first_token_ms"
+    }
+
+    /**
+     * Record what an OpenAI- or Anthropic-shaped response says about its call:
+     * the model, the provider, the token usage with its cache and reasoning
+     * meters, and the response id, finish reasons and service tier as
+     * `gen_ai.response.*` attributes. The daemon prices a batch or flex call
+     * from the tier.
+     *
+     * [response] is a [JsonElement] or a `Map<String, Any?>`. It never records
+     * the text: set it with [setOutput] if you want it kept. An unknown shape
+     * records what it can and throws nothing.
+     */
+    fun recordResponse(response: Any?, provider: String? = null): ActiveSpan {
+        // Read outside the span lock: converting a large map is the caller's
+        // cost, and no other thread should wait on it.
+        val facts = client.guard("span-record-response") { responseFacts(response, provider) } ?: return this
+        return mutate {
+            facts.model?.let { model = it }
+            facts.provider?.let { this.provider = it }
+            facts.usage?.let { usage = it }
+            attributes.putAll(facts.attributes)
+        }
+    }
+
+    /**
+     * Record the time to first token, from this span's start to now, as
+     * `mcpd.time_to_first_token_ms`. Only the first call counts, so it can sit
+     * inside a streaming loop.
+     */
+    fun markFirstToken(): ActiveSpan {
+        val elapsed = System.nanoTime() - startedAtNanos
+        return mutate {
+            if (!attributes.containsKey(FIRST_TOKEN)) attributes[FIRST_TOKEN] = JsonPrimitive(elapsed / 1e6)
+        }
+    }
+
+    /**
+     * Record a guardrail's outcome as `mcpd.guardrail.tripped` and, when given,
+     * `mcpd.guardrail.reason`. Tripping is not an error by itself; call
+     * [setError] as well if it should fail the span.
+     */
+    fun setGuardrail(tripped: Boolean, reason: String? = null): ActiveSpan = mutate {
+        attributes["mcpd.guardrail.tripped"] = JsonPrimitive(tripped)
+        if (reason != null) attributes["mcpd.guardrail.reason"] = JsonPrimitive(reason)
     }
 
     /** Attach one piece of kind-specific structured detail. */
