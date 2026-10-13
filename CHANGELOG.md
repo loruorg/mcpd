@@ -20,6 +20,9 @@ rather than every commit.
 
 ### Added
 
+- **Your own price book, with `--price-book`.** A JSON book of your own rates
+  layers over the built-in one: a model it names takes its rate, every other
+  model keeps the built-in one.
 - **Organisations, roles, single sign-on and SCIM.** An account can create
   organisations, which own projects, invite members by email and give each a
   role (owner, admin, member or viewer, optionally replaced on one project)

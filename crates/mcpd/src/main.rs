@@ -150,6 +150,14 @@ struct Cli {
     #[arg(long, env = "MCPD_REDACT_MAX_STRING", global = true)]
     redact_max_string: Option<usize>,
 
+    /// A JSON price book with your own rates, such as negotiated prices or a
+    /// model the built-in book does not name. Its rates layer over the built-in
+    /// book: an entry here wins, and every model it leaves out keeps the
+    /// built-in rate. A book in another currency replaces the built-in one.
+    /// Its `id` is recorded on every cost it prices.
+    #[arg(long = "price-book", env = "MCPD_PRICE_BOOK", global = true)]
+    price_book: Option<String>,
+
     /// A browser origin allowed to call the query API from another site, such
     /// as `https://console.example`. Repeat for several. With none, no
     /// cross-origin browser request is answered with the headers it needs, so
@@ -1089,6 +1097,9 @@ async fn main() -> Result<()> {
     };
 
     let mut state = AppState::new(Arc::clone(&store), config.clone()).with_redactor(redactor);
+    if let Some(path) = &cli.price_book {
+        state = state.with_price_book(load_price_book(path)?);
+    }
     if let Some(runs) = run_store.clone() {
         state = state.with_run_store(runs);
     }
@@ -1957,5 +1968,73 @@ mod tests {
         let refused = read(Some(1)).expect_err("one is refused");
         assert!(refused.to_string().contains("max_step_repeats"), "{refused}");
         assert!(refused.to_string().contains("at least 2"), "{refused}");
+    }
+}
+
+/// Read `--price-book` and layer it over the built-in book.
+fn load_price_book(path: &str) -> anyhow::Result<mcpd_core::cost::PriceBook> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading the price book at {path}"))?;
+    let own: mcpd_core::cost::PriceBook =
+        serde_json::from_str(&text).with_context(|| format!("{path} is not a valid price book"))?;
+    let mut book = mcpd_core::cost::builtin_book();
+    // A book in another currency replaces the built-in one rather than mixing
+    // two currencies in one table.
+    if own.currency != book.currency {
+        return Ok(own);
+    }
+    book.id = own.id;
+    book.currency = own.currency;
+    if own.as_of.is_some() {
+        book.as_of = own.as_of;
+    }
+    book.models.extend(own.models);
+    for (provider, rates) in own.providers {
+        book.providers.entry(provider).or_default().extend(rates);
+    }
+    Ok(book)
+}
+
+#[cfg(test)]
+mod price_book_tests {
+    use super::load_price_book;
+
+    fn write(text: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "mcpd-price-book-{}-{}.json",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, text).expect("written");
+        path
+    }
+
+    #[test]
+    fn a_book_layers_over_the_built_in_one() {
+        let builtin = mcpd_core::cost::builtin_book();
+        let kept = builtin.models.keys().next().expect("a built-in model").clone();
+        let f = write(
+            r#"{"id":"acme","currency":"USD","models":{"acme-model":{"input":1.0,"output":2.0}}}"#,
+        );
+        let book = load_price_book(f.to_str().unwrap()).expect("loads");
+        assert_eq!(book.id, "acme");
+        assert!(book.models.contains_key("acme-model"));
+        assert!(book.models.contains_key(&kept), "a model it leaves out keeps the built-in rate");
+    }
+
+    #[test]
+    fn a_book_in_another_currency_replaces_the_built_in_one() {
+        let f = write(r#"{"id":"eu","currency":"EUR","models":{"m":{"input":1.0,"output":2.0}}}"#);
+        let book = load_price_book(f.to_str().unwrap()).expect("loads");
+        assert_eq!(book.models.len(), 1);
+    }
+
+    #[test]
+    fn a_bad_book_names_the_file() {
+        let f = write("not json");
+        let err = load_price_book(f.to_str().unwrap()).unwrap_err();
+        assert!(format!("{err:#}").contains("not a valid price book"));
     }
 }
