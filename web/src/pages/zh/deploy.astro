@@ -471,6 +471,7 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
       { out: 'identity        off' },
       { out: 'client ip       peer address' },
       { out: 'sampling        keep everything' },
+      { out: 'tail sampling   off' },
       { out: 'quota           unlimited' },
       { out: 'redaction       on' },
       { out: 'redact key      set', tone: 'ok' },
@@ -583,13 +584,20 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
     Secret 的名字，同时照样设置 type：选择后端的是 type，而不是 URL。
   </p>
   <p>
-    这样会把信号移走，但磁盘上还留着一个文件：运行存储。不管信号存储是什么，它都
-    是内嵌的 SQLite。<code>runs.enabled</code> 为 true（默认值）时，chart 把它
-    留在卷上，并运行一个副本。要运行多个 Pod，就关掉运行功能。这时 chart 会运行
-    <code>replicaCount</code> 个 Pod，从 <code>Recreate</code> 切换到滚动更新，
-    并去掉那个 PersistentVolumeClaim，因为本地已经没有可争抢的东西，而守护进程会
-    对运行相关的端点返回一个说明这一点的 503。运行功能开着时，chart 会拒绝大于 1
-    的 <code>replicaCount</code>，而不是启动一批各自持有一份运行存储的 Pod。
+    这样会把信号移走，但磁盘上还留着一个文件：运行存储，它默认是内嵌的 SQLite。
+    <code>runs.enabled</code> 为 true（默认值）时，chart 把它留在卷上，并运行一个
+    副本。要运行多个 Pod，就把运行也移到 Postgres：把 <code>runs.store</code> 设为
+    <code>postgres</code>，并把连接字符串写进 <code>runs.postgresUrl</code>，它可以
+    指向同一个数据库。这时 chart 会运行 <code>replicaCount</code> 个 Pod，从
+    <code>Recreate</code> 切换到滚动更新，并去掉那个 PersistentVolumeClaim，因为
+    本地已经没有可争抢的东西。每个 Pod 都从同一个存储提供运行。在 chart 之外，
+    同样的设置是 <code>--runs-data postgres://...</code>。
+  </p>
+  <p>
+    用 <code>runs.enabled=false</code> 关掉运行功能，也能以同样的方式横向扩展，
+    这时守护进程会对运行相关的端点返回一个说明这一点的 503。运行放在内嵌文件里时，
+    chart 会拒绝大于 1 的 <code>replicaCount</code>，而不是启动一批各自持有一份
+    运行存储的 Pod。
   </p>
 
   <pre><code class="language-bash">{`helm install mcpd ./deploy/helm/mcpd \\
@@ -597,7 +605,8 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
   --set keys.read=$READ_KEY \\
   --set externalStore.type=postgres \\
   --set externalStore.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
-  --set runs.enabled=false \\
+  --set runs.store=postgres \\
+  --set runs.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
   --set replicaCount=3`}</code></pre>
 
   <p>
