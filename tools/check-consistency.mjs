@@ -442,6 +442,7 @@ function checkDeployEnv() {
  */
 const CONFIG_LINE_OF = {
   '--listen': 'listen',
+  '--price-book': 'price book',
   '--data': 'storage',
   '--clickhouse-url': 'storage',
   '--clickhouse-database': 'storage',

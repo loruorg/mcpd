@@ -1662,6 +1662,13 @@ fn config_lines(cli: &Cli, config: &ServerConfig, redact_keys: &[String]) -> Vec
             line
         },
     );
+    row(
+        "price book",
+        cli.price_book.as_ref().map_or_else(
+            || "built in".to_owned(),
+            |p| format!("{p}, layered over the built-in book"),
+        ),
+    );
     // Whether a hashing key was given, never the key. The built-in one is in
     // the source, so a digest made with it can be reversed by guessing.
     row(
