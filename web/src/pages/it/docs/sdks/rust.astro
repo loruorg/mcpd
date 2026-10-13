@@ -52,6 +52,14 @@ generation.set_usage(TokenUsage {
 // Oppure, quando il dettaglio non conta:
 generation.set_tokens(412, 96);
 
+// Come è stato chiamato il modello. Impostazioni, non payload: restano con la cattura spenta.
+generation.set_model_parameters(ModelParameters {
+    temperature: Some(0.0),
+    seed: Some(0),
+    max_tokens: Some(1024),
+    ..ModelParameters::default()
+});
+
 // Il messaggio è obbligatorio. "Qualcosa è fallito" non dice che cosa fare.
 tool.set_error("sms gateway timed out after 5s");
 
@@ -195,6 +203,18 @@ async fn main() {
     a <code>error</code>, così i due non possono mai contraddirsi, e il messaggio
     è un argomento obbligatorio e non un’opzione.
   </p>
+  <p>
+    <code>set_model_parameters</code> registra le impostazioni con cui è stata
+    fatta la chiamata: <code>temperature</code>, <code>top_p</code>,
+    <code>top_k</code>, <code>max_tokens</code>, <code>seed</code>,
+    <code>stop_sequences</code> e <code>has_response_format</code>. Sono
+    impostazioni e non payload, quindi sopravvivono a
+    <code>with_capture_payloads(false)</code>, che è il caso che conta: sono
+    quello che deve riprodurre chi rifà l’esecuzione. <code>None</code> è
+    assente e <code>Some(0)</code> è un valore, quindi un seed zero è un seed.
+    Lo schema dietro <code>has_response_format</code> non viene registrato,
+    solo se ce n’era uno in vigore.
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -211,11 +231,33 @@ async fn main() {
     uno span si può riempire da qualunque punto in cui è preso in prestito.
   </p>
 
+  <h3>Chiamate in streaming</h3>
+  <p>
+    Passa lo stream del provider a <code>span.record_stream</code> e leggi
+    invece lo stream che ti restituisce. I suoi elementi sono
+    <code>Result</code>, e i chunk possono essere chunk di chat completion di
+    OpenAI o eventi dei messaggi di Anthropic, ognuno un
+    <code>serde_json::Value</code> o un tipo qualsiasi che si serializza in
+    uno. Ogni elemento passa invariato. Il primo chunk con testo o con una
+    chiamata a uno strumento segna il tempo fino al primo token. Il wrapper
+    possiede lo span: quando lo stream finisce, produce un <code>Err</code> o
+    viene rilasciato prima, lo span riceve quello che
+    <code>record_response</code> avrebbe registrato per la stessa chiamata
+    senza streaming, con il testo come output, e si chiude. Un
+    <code>Err</code> segna lo span con il suo testo <code>Display</code> e ti
+    arriva comunque. Il testo tenuto ha un tetto di 32.768 caratteri, e
+    <code>mcpd.stream.truncated</code> viene impostato quando il tetto è stato
+    raggiunto.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="stream" title="una chiamata in streaming" />
+
   <h2>Payload, sink e span già conclusi</h2>
   <p>
     <code>Config::with_capture_payloads(false)</code> tiene i prompt e le
     completion dentro il processo: gli span portano lo stesso i loro tempi, lo
-    stato, il consumo, il modello, la correlazione e gli errori, e
+    stato, il consumo, il modello, i parametri del modello, la correlazione e
+    gli errori, e
     <code>input</code> e <code>output</code> vengono scartati prima di arrivare
     alla coda. Uno span sovrascrive il client per sé con
     <code>span.capture_payloads(..)</code>, in tutte e due le direzioni.
@@ -231,6 +273,21 @@ async fn main() {
     <code>queued</code>, <code>dropped</code>, <code>capacity</code>,
     <code>exported</code>, <code>failed</code> e <code>rejected</code>.
   </p>
+  <p>
+    <code>mcpd_sdk::testing::TestClient</code> avvolge un client che registra
+    in memoria. Passa <code>test.client()</code> ovunque il tuo codice prenda
+    un <code>&amp;Mcpd</code>, poi rileggi quello che ha registrato:
+    <code>spans(name, kind)</code>, <code>span(name)</code> per l’unico span
+    che deve esistere, <code>trees()</code> per ogni esecuzione come albero,
+    <code>logs()</code>, <code>metrics()</code>, <code>scores()</code>,
+    <code>recorded_feedback()</code> e <code>reset()</code>. Ogni accessor fa
+    prima un flush. Quello che tiene è passato per campionamento, cattura dei
+    payload e <code>redact</code> come farebbe sulla strada verso un daemon, e
+    <code>TestClient::new()</code> resta acceso quando per i test è impostato
+    <code>MCPD_ENABLED=false</code>.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="testing" title="uno unit test" />
   <p>
     <code>mcpd.record(span)</code> mette in coda uno span già concluso, con
     identificatori, padre, inizio e fine compresi, così come li ha un adattatore
