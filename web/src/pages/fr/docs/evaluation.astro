@@ -146,7 +146,23 @@ const locale = localeOf(Astro.url.pathname)
     <code>score_trace_id</code> est l’autre moitié de la même idée. Tracez
     l’exécution de notation elle-même et son identifiant se pose sur le score,
     de sorte qu’un juge qui s’est mis à tout dévaluer peut être ouvert, lu, et
-    montré comme défectueux.
+    montré comme défectueux. Le juge intégré au daemon le fait pour chaque
+    score qu’il produit.
+  </p>
+
+  <h2>La file de revue</h2>
+  <p>
+    Les exécutions qu’une personne doit examiner vont dans la file de revue :
+    <code>POST /v1/api/review-queue</code> avec l’identifiant de trace et, en
+    option, l’étape, le retour qui l’a motivée, une personne assignée et une
+    note. Un élément commence en <code>pending</code> ;
+    <code>PATCH /v1/api/review-queue/{'{id}'}</code> l’assigne, ou le marque
+    <code>reviewed</code> ou <code>dismissed</code> avec ce que la personne a
+    constaté. Chaque modification crée une nouvelle version de l’élément, donc
+    qui a décidé quoi, et quand, est conservé. <code>GET /v1/api/review-queue</code>
+    filtre par statut et par personne assignée, et compte ce qui reste en
+    attente. L’écran Revue de l’application parcourt cette file, et une
+    exécution peut y être placée depuis le panneau d’exécution.
   </p>
 
   <h2>Les retours humains</h2>
@@ -212,6 +228,132 @@ mcpd.feedback({
     est stocké tel que vous l’envoyez : envoyez donc un identifiant pseudonyme
     plutôt qu’une adresse e-mail. Voir
     <a href={urlFor('/docs/privacy', locale)} class="link">Masquage et conservation</a>.
+  </p>
+
+  <h2>Noter ce que l’exécution a fait, pas ce qu’elle a dit</h2>
+  <p>
+    La plupart des scorers lisent la réponse d’une exécution. Un agent qui
+    termine par <em>J’ai lancé tous les tests et il n’y a aucune
+    régression</em> les satisfait tous, et satisfait aussi un modèle juge,
+    parce que la phrase est bien formée et dit ce qu’il faut. La phrase est le
+    compte rendu que l’agent fait de son propre travail, et un compte rendu
+    n’est pas une preuve. Si la commande de test n’a jamais tourné, aucun
+    scorer qui lit la réponse ne peut vous le dire.
+  </p>
+  <p>
+    Deux scorers intégrés lisent la trace à la place. Ils ignorent entièrement
+    la réponse et regardent ce que l’exécution a enregistré.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Scorer</th><th>Note 1 quand</th><th>Configuré avec</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>span_present</code></td>
+        <td>L’exécution a enregistré au moins un span du type ou du nom exigé.</td>
+        <td><code>span_kind</code>, <code>span_name</code>, ou les deux ensemble. Avec les deux, les deux doivent être vrais.</td>
+      </tr>
+      <tr>
+        <td><code>tool_succeeded</code></td>
+        <td>Un span d’outil portant ce nom s’est exécuté, et au moins un de ses appels s’est terminé <code>ok</code>.</td>
+        <td><code>tool_name</code>.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Les deux ont besoin d’une configuration, donc aucun ne fait partie du jeu
+    par défaut. Un scorer qui réussirait parce que personne ne lui a dit quoi
+    chercher signalerait chaque exécution comme ayant fait un travail que
+    personne n’a vérifié, ce qui est précisément l’échec qu’il doit détecter.
+    Nommez-les, et donnez-leur leurs réglages :
+  </p>
+
+  <pre><code class="language-json">{`{
+  "trace_ids": ["4bf92f3577b34da6a3ce929d0e0e4736"],
+  "scorers": ["tool_succeeded", "span_present"],
+  "config": {
+    "tool_name": "run_tests",
+    "span_kind": "tool_call",
+    "span_name": "run_tests"
+  }
+}`}</code></pre>
+
+  <p>
+    <code>span_name</code> et <code>tool_name</code> sont comparés à
+    l’identique, et <code>case_sensitive</code> ne les assouplit pas. Un nom de
+    span est un identifiant choisi par votre code, pas de la prose, et une
+    comparaison souple laisserait <code>run_tests_dry</code> satisfaire une
+    assertion sur <code>run_tests</code>, précisément sur l’exécution pour
+    laquelle la vérification a été écrite. <code>tool_succeeded</code> accepte
+    les quatre types de span d’outil, <code>tool_call</code>,
+    <code>client_tool_call</code>, <code>provider_tool_call</code> et
+    <code>mcp_tool_call</code>, parce que celui qu’une exécution enregistre dit
+    où vit l’outil, pas s’il a tourné.
+  </p>
+
+  <h3>Deux façons d’obtenir zéro, et ce sont deux bugs différents</h3>
+  <p>
+    Un outil qui n’a jamais tourné et un outil qui a tourné puis échoué donnent
+    tous deux zéro, et les corriger sont deux tâches opposées : l’un est une
+    étape que l’agent a sautée, l’autre une étape qui a cassé. Le
+    <code>reason</code> les distingue, et porte l’erreur enregistrée pour que
+    le score soit exploitable sans ouvrir l’exécution.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Ce qui s’est passé</th><th><code>reason</code></th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>L’outil n’a jamais tourné.</td>
+        <td><code>"run_tests" never ran; the run records 2 tool call(s), named: lookup_order, send_email</code></td>
+      </tr>
+      <tr>
+        <td>Il a tourné et a échoué.</td>
+        <td><code>"run_tests" ran 1 time(s) and none ended ok; the last ended error: pytest exited 1: 3 failed</code></td>
+      </tr>
+      <tr>
+        <td>Il a échoué, a été relancé, et a fonctionné.</td>
+        <td><code>"run_tests" ran 2 time(s), 1 ended ok and 1 did not</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>span_present</code> fait de même pour son propre zéro : il nomme ce
+    qu’il cherchait, puis ce que l’exécution contient réellement, parce qu’un
+    mauvais nom et une instrumentation absente ne se distinguent pas derrière
+    un simple <em>introuvable</em> et n’ont rien en commun comme corrections.
+  </p>
+
+  <h3>Ce que ces scorers prouvent, et ce qu’ils ne prouvent pas</h3>
+  <p>
+    Ils prouvent qu’une action a été <strong>enregistrée</strong>. Ils ne
+    prouvent pas qu’elle était correcte. Un span <code>run_tests</code> terminé
+    <code>ok</code> dit que l’outil a rendu la main sans lever d’exception, pas
+    qu’il a lancé la bonne suite, pas qu’il a lancé toute la suite, et pas que
+    quoi que ce soit a lu le résultat. Prendre un <code>tool_succeeded</code>
+    au vert pour la preuve que le code fonctionne est la même erreur que se
+    fier à la phrase, une étape plus loin.
+  </p>
+  <p>
+    Ils mesurent aussi la trace plutôt que le monde. Un span existe parce que
+    votre processus en a enregistré un. Un travail fait à l’intérieur d’une
+    étape que vous n’avez jamais instrumentée est invisible ici, et se lit
+    exactement comme un travail qui n’a jamais eu lieu : c’est la seule façon
+    dont ces scorers signalent un échec qui n’en est pas un. Quand l’un d’eux
+    donne zéro, vérifiez l’instrumentation avant de conclure que l’agent a
+    menti.
+  </p>
+  <p>
+    Les deux tiennent même quand la capture des payloads est désactivée. Aucun
+    ne lit une entrée, une sortie ou une complétion : ils lisent le type, le
+    nom et le statut des spans, que le daemon conserve quels que soient vos
+    réglages de capture.
   </p>
 
   <h2>La requête qui trouve les mauvaises réponses</h2>
