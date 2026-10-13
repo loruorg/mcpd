@@ -41,6 +41,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 const payload = `span.SetModel("gpt-4o-mini", "openai")
 span.SetTokens(812, 96)
 
+// モデルをどう呼び出したか。ペイロードではなく設定なので、取り込みを切っても残る。
+span.SetModelParameters(mcpd.ModelParameters{
+    Temperature: ptr(0.0),
+    Seed:        ptr(int64(0)),
+    MaxTokens:   ptr(uint64(1024)),
+})
+
 // あるいは内訳ごと。キャッシュされたプロンプトは、そのまま
 // キャッシュされたプロンプトとして値付けされる。
 span.SetUsage(mcpd.TokenUsage{
@@ -129,7 +136,7 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
   <p>
     <code>WithCapturePayloads(false)</code> にすると、プロンプトと補完は
     プロセスの中に留まります。スパンは所要時間、ステータス、使用量、モデル、
-    相関、エラーを持ったままで、<code>input</code> と <code>output</code> は
+    モデルパラメーター、相関、エラーを持ったままで、<code>input</code> と <code>output</code> は
     キューに入る前に捨てられます。個々のスパンは
     <code>WithSpanCapturePayloads</code> で別の扱いにでき、有効にも無効にも
     できます。
@@ -146,6 +153,24 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     エラーとして返ることはありません。<code>WithExternalParent</code> は、別の
     トレーシングシステムの親を相関のためだけに運びます。
   </p>
+
+  <p>
+    自分のユニットテストには <code>mcpdtest.New</code> を使います。これは
+    <code>mcpd.New</code> と同じオプションを受け取り、レコーダーを返します。その
+    <code>Client</code> フィールドは、メモリに記録する <code>*mcpd.Client</code>
+    です。あなたのコードがクライアントを受け取る場所にそのクライアントを渡し、
+    記録された内容を読み返してください。名前や種別で引く <code>Spans</code>、
+    必ず存在するはずの 1 つのスパンを引く <code>Span(name)</code>
+    （<code>MustSpan(t, name)</code> はテストを失敗させるところまで行います）、
+    実行ごとのツリーを返す <code>Trees</code>、そして <code>Logs</code>、
+    <code>Metrics</code>、<code>Scores</code>、<code>RecordedFeedback</code>、
+    <code>Reset</code> です。どのアクセサーも先にフラッシュします。保持される内容は、
+    デーモンへ向かうときと同じようにサンプリング、ペイロードの取り込み、
+    <code>WithRedact</code> を通っており、テストの実行に
+    <code>MCPD_ENABLED=false</code> が設定されていても有効なままです。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="testing" title="ユニットテスト" />
 
   <h2>実行の記録</h2>
   <p>
@@ -201,6 +226,17 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     これによります。そのあと <code>End</code> は、ステータスとして
     <code>ok</code> ではなく <code>error</code> を記録します。
   </p>
+  <p>
+    <code>SetModelParameters</code> は、呼び出しに使った設定を記録します。
+    <code>Temperature</code>、<code>TopP</code>、<code>TopK</code>、
+    <code>MaxTokens</code>、<code>Seed</code>、<code>StopSequences</code>、
+    <code>HasResponseFormat</code> です。これらはペイロードではなく設定なので、
+    <code>WithCapturePayloads(false)</code> でも残ります。そして大事なのはまさに
+    その場合です。実行を再現する人が合わせなければならないのは、これらの値だから
+    です。nil のフィールドは存在せず、ゼロへのポインターは値なので、ゼロの
+    <code>Seed</code> もシードです。<code>HasResponseFormat</code> の背後にある
+    スキーマは記録されず、それが有効だったかどうかだけが記録されます。
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -216,6 +252,25 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     <code>Event</code>、<code>EndWithStatus</code> です。同じフィールドは、
     <code>With...</code> オプションでスパンの開始時にも設定できます。
   </p>
+
+  <h3>ストリーミングの呼び出し</h3>
+  <p>
+    スパンとプロバイダーのストリームを <code>mcpd.RecordStream</code> に渡し、
+    代わりに返ってきたストリームを読んでください。公式の OpenAI と Anthropic の
+    Go SDK が返す <code>ssestream.Stream</code> と同じ <code>Next</code>、
+    <code>Current</code>、<code>Err</code>、<code>Close</code> のメソッドを持ち、
+    OpenAI の chat completion のチャンクと Anthropic の message イベントを受け取り、
+    すべてのチャンクはそのまま通ります。テキストかツール呼び出しを持つ最初の
+    チャンクが、最初のトークンまでの時間を記録します。<code>Next</code> が false を
+    返したとき、または終わりの前に <code>Close</code> を呼んだときに、スパンは、
+    同じ呼び出しをストリーミングなしで行った場合に <code>RecordResponse</code> が
+    記録する内容と、出力としてのテキストを受け取り、終了します。ストリームからの
+    エラーはスパンに記録され、<code>Err</code> を通してそのままあなたに届きます。
+    保持するテキストは 32,768 文字までで、上限に達したときは
+    <code>mcpd.stream.truncated</code> が設定されます。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="stream" title="ストリーミングの呼び出し" />
 
   <h2>永続実行</h2>
   <p>
