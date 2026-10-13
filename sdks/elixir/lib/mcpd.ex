@@ -375,14 +375,28 @@ defmodule Mcpd do
 
   # ------------------------------------------------------------- reads -------
 
+  # The query parameters each list endpoint documents. The daemon answers 400
+  # to any other, so a key outside these is refused here, before the request,
+  # with the list a caller can pick from.
+  @trace_filters ~w(project q status kind name tags session_id thread_id user_id environment
+                    model from to min_duration_ms max_duration_ms min_cost max_cost min_tokens
+                    has_score score_below score_above has_feedback sort order limit cursor)a
+  @span_filters ~w(project q kind status name model trace_id prompt prompt_version from to
+                   min_duration_ms sort order limit cursor)a
+
   @doc """
   A page of runs. Filters are the HTTP API's query parameters, as a keyword
-  list: `status`, `kind`, `name`, `tags`, `session_id`, `from`, `to`, `limit`,
-  `cursor` and the rest. `from` and `to` take a `DateTime` or a shorthand such
-  as `"-1h"`.
+  list: `status`, `kind`, `name`, `tags`, `session_id`, `from`, `to`,
+  `min_duration_ms`, `max_duration_ms`, `min_cost`, `max_cost`, `min_tokens`,
+  `has_score` with `score_below` or `score_above`, `has_feedback` (a boolean),
+  `limit`, `cursor` and the rest. `from` and `to` take a `DateTime` or a
+  shorthand such as `"-1h"`. A key the endpoint does not take raises
+  `ArgumentError` before a request is made.
   """
   @spec list_traces(pid(), keyword()) :: {:ok, Mcpd.TraceListResponse.t()} | {:error, term()}
-  def list_traces(client, filters \\ []), do: read(client, "/traces", filters, Mcpd.TraceListResponse)
+  def list_traces(client, filters \\ []) do
+    read(client, "/traces", documented!(filters, @trace_filters, "list_traces"), Mcpd.TraceListResponse)
+  end
 
   @doc "Read one stored run back, with its spans. `include: [\"logs\", \"scores\", \"feedback\"]` adds the signals attached to it."
   @spec get_trace(pid(), String.t(), keyword()) :: {:ok, Mcpd.TraceDetail.t()} | {:error, term()}
@@ -391,9 +405,27 @@ defmodule Mcpd do
     read(client, "/traces/" <> trace_id, filters, Mcpd.TraceDetail)
   end
 
-  @doc "A page of steps, across runs."
+  @doc """
+  A page of steps, across runs. `prompt:` and `prompt_version:` find the spans
+  linked to a prompt with `Mcpd.Prompts.attributes/1`. A key the endpoint does
+  not take raises `ArgumentError` before a request is made.
+  """
   @spec list_spans(pid(), keyword()) :: {:ok, Mcpd.SpanListResponse.t()} | {:error, term()}
-  def list_spans(client, filters \\ []), do: read(client, "/spans", filters, Mcpd.SpanListResponse)
+  def list_spans(client, filters \\ []) do
+    read(client, "/spans", documented!(filters, @span_filters, "list_spans"), Mcpd.SpanListResponse)
+  end
+
+  defp documented!(filters, allowed, call) do
+    case Enum.reject(Keyword.keys(filters), &(&1 in allowed)) do
+      [] ->
+        filters
+
+      unknown ->
+        raise ArgumentError,
+              "#{call} does not take #{Enum.map_join(unknown, ", ", &inspect/1)}; " <>
+                "it takes #{Enum.map_join(allowed, ", ", &inspect/1)}"
+    end
+  end
 
   @doc "A page of log records. Filtering by level is always `>=`."
   @spec list_logs(pid(), keyword()) :: {:ok, Mcpd.LogListResponse.t()} | {:error, term()}
@@ -521,6 +553,25 @@ defmodule Mcpd do
       config -> fetch(config, String.trim_trailing(config.endpoint, "/") <> "/healthz", Mcpd.HealthStatus)
     end
   end
+
+  # ------------------------------------------------------------- prompts ----
+
+  # The prompt surface, in full in `Mcpd.Prompts` (contract section 5.1).
+
+  @doc "One version of a prompt, cached. See `Mcpd.Prompts.get_prompt/3`."
+  defdelegate get_prompt(client, name, opts \\ []), to: Mcpd.Prompts
+
+  @doc "Store a new version of a prompt. See `Mcpd.Prompts.create_prompt/3`."
+  defdelegate create_prompt(client, attrs, opts \\ []), to: Mcpd.Prompts
+
+  @doc "Point a label at a version. See `Mcpd.Prompts.set_prompt_label/5`."
+  defdelegate set_prompt_label(client, name, label, version, opts \\ []), to: Mcpd.Prompts
+
+  @doc "Fill a prompt's variables. See `Mcpd.Prompts.render/2`."
+  defdelegate render_prompt(prompt, variables \\ %{}), to: Mcpd.Prompts, as: :render
+
+  @doc "`render_prompt/2`, raising `Mcpd.PromptRenderError`. See `Mcpd.Prompts.render!/2`."
+  defdelegate render_prompt!(prompt, variables \\ %{}), to: Mcpd.Prompts, as: :render!
 
   @doc false
   # Exposed for the test that pins the wire timestamp format. The daemon rejects

@@ -144,6 +144,38 @@ end
 
 # #endregion query
 
+# Store the prompt the next region reads. Posting the same body again stores
+# nothing new, so a deploy script can run this on every start.
+{:ok, _stored} =
+  Mcpd.create_prompt(mcpd,
+    name: "support-reply",
+    template: "You answer for {{ customer }}. Reply in two sentences: {{question}}",
+    labels: ["production"]
+  )
+
+# #region prompt
+# The version `production` points at, cached for a minute. The fallback is
+# used only when the daemon cannot be reached and nothing was fetched yet.
+{:ok, prompt} =
+  Mcpd.get_prompt(mcpd, "support-reply",
+    label: "production",
+    fallback: "Reply in two sentences: {{question}}"
+  )
+
+# A variable the template names and the map lacks raises, rather than sending
+# a prompt with a hole in it. Extra variables are ignored.
+text = Mcpd.Prompts.render!(prompt, %{question: question, customer: "Ada"})
+
+# The prompt's name and version go on the span, so a trace shows which version
+# produced the answer, and `Mcpd.list_spans(mcpd, prompt: "support-reply")`
+# finds every call that used it.
+Mcpd.span mcpd, "reply", kind: :model_generation, input: text,
+  attributes: Mcpd.Prompts.attributes(prompt) do
+  "Your order 41 shipped on Tuesday."
+end
+
+# #endregion prompt
+
 # Send anything still queued and stop the worker. Without this, a process that
 # exits quickly loses its last batch.
 :ok = Mcpd.shutdown(mcpd)
