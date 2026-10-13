@@ -391,7 +391,7 @@ What is collected, by chunk shape:
 
 | Shape | Recognised by | Collected |
 | --- | --- | --- |
-| OpenAI chat completions | a `choices` list | `id`, `model`, `service_tier` (first non-empty wins); text from `choices[0].delta.content`; tool calls from `choices[0].delta.tool_calls`, keyed by `index`, with `id` and `function.name` set once and `function.arguments` appended; each choice's `finish_reason`, by choice index; `usage` from the chunk that carries one (the final chunk under `stream_options.include_usage`) |
+| OpenAI chat completions | a `choices` key holding a list, or null (a typed chunk with no choices can serialise them that way) | `id`, `model`, `service_tier` (first non-empty wins); text from `choices[0].delta.content`; tool calls from `choices[0].delta.tool_calls`, keyed by `index`, with `id` and `function.name` set once and `function.arguments` appended; each choice's `finish_reason`, by choice index; `usage` from the chunk that carries one (the final chunk under `stream_options.include_usage`) |
 | Anthropic messages | a `type` of `message_start`, `content_block_start`, `content_block_delta` or `message_delta` | `id`, `model` and `usage` from `message_start.message`; a `tool_use` block from `content_block_start`, keyed by `index`; text from a `text_delta` and arguments from an `input_json_delta`; `stop_reason` from `message_delta.delta`; and each usage field in `message_delta.usage` replaces the one from `message_start` |
 
 The response handed to `record_response` is shaped like the provider's own:

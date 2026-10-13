@@ -58,7 +58,8 @@ export class StreamAccumulator {
   add(chunk: unknown): boolean {
     const c = obj(chunk)
     if (c === undefined) return false
-    if (Array.isArray(c.choices)) return this.#openai(c)
+    // A typed chunk with no choices can serialise them as null, as Go does.
+    if (Array.isArray(c.choices) || ('choices' in c && c.choices === null)) return this.#openai(c)
     if (typeof c.type === 'string' && ANTHROPIC_EVENTS.has(c.type)) return this.#anthropic(c)
     return false
   }
@@ -71,7 +72,7 @@ export class StreamAccumulator {
     const usage = obj(c.usage)
     if (usage !== undefined) this.#usage = usage
     let content = false
-    const choices = c.choices as unknown[]
+    const choices = (c.choices ?? []) as unknown[]
     choices.forEach((raw, position) => {
       const choice = obj(raw)
       if (choice === undefined) return

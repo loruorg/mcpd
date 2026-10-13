@@ -49,6 +49,8 @@ defmodule Mcpd.StreamAccumulator do
     cond do
       c == nil -> {acc, false}
       is_list(get(c, :choices)) -> openai(acc, c)
+      # A typed chunk with no choices can serialise them as null.
+      null_choices?(c) -> openai(acc, c)
       name(get(c, :type)) in @anthropic_events -> anthropic(acc, c, name(get(c, :type)))
       true -> {acc, false}
     end
@@ -69,7 +71,7 @@ defmodule Mcpd.StreamAccumulator do
         usage -> %{acc | usage: usage}
       end
 
-    get(c, :choices)
+    (get(c, :choices) || [])
     |> Enum.with_index()
     |> Enum.reduce({acc, false}, fn {raw, position}, {acc, content} ->
       case obj(raw) do
@@ -306,6 +308,10 @@ defmodule Mcpd.StreamAccumulator do
   end
 
   defp get(_, _), do: nil
+
+  defp null_choices?(c) do
+    Enum.any?([:choices, "choices"], &(Map.has_key?(c, &1) and Map.get(c, &1) == nil))
+  end
 
   # An event or block type, written as a string or as an atom.
   defp name(v) when is_binary(v), do: v

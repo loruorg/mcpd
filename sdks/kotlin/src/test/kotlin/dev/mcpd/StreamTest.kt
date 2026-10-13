@@ -79,6 +79,20 @@ class StreamTest {
     private fun attrs(span: Span): JsonObject = span.attributes as? JsonObject ?: JsonObject(emptyMap())
 
     @Test
+    fun `the usage is read from a chunk whose choices are null`() = runBlocking {
+        val test = TestClient()
+        val span = test.client.trace("call")
+        val chunk = json(
+            """{"model":"gpt-4o","choices":null,""" +
+                """"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}""",
+        )
+        span.recordStream(from(listOf(chunk))).toList()
+        val s = test.span("call")
+        assertEquals(1, s.usage?.outputTokens)
+        assertEquals("openai", s.provider)
+    }
+
+    @Test
     fun `an OpenAI stream records what recordResponse would, and every chunk passes through`() = runBlocking {
         val test = TestClient()
         val span = test.client.trace("call", SpanKind.MODEL_GENERATION)

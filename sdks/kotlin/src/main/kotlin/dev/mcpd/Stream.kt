@@ -95,7 +95,8 @@ internal class StreamAccumulator {
     /** Fold one chunk in. Answers whether it carried text or a tool-call delta. */
     fun add(chunk: Any?): Boolean {
         val c = chunkObject(chunk) ?: return false
-        if (c["choices"] is JsonArray) return openai(c)
+        // A typed chunk with no choices can serialise them as null.
+        if (c["choices"] is JsonArray || c["choices"] is JsonNull) return openai(c)
         val type = streamStr(c["type"])
         if (type != null && type in ANTHROPIC_EVENTS) return anthropic(c, type)
         return false
@@ -108,7 +109,7 @@ internal class StreamAccumulator {
         if (tier == null) tier = streamStr(c["service_tier"])
         streamObj(c["usage"])?.let { usage = it }
         var content = false
-        (c["choices"] as JsonArray).forEachIndexed { position, raw ->
+        ((c["choices"] as? JsonArray) ?: JsonArray(emptyList())).forEachIndexed { position, raw ->
             val choice = streamObj(raw) ?: return@forEachIndexed
             val at = streamIndex(choice["index"], position)
             streamStr(choice["finish_reason"])?.let { finish[at] = it }

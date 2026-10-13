@@ -105,6 +105,15 @@ class OpenAIStreamTest(unittest.TestCase):
             self.assertIs(a, b)
         self.check_openai(mcpd)
 
+    def test_usage_from_a_chunk_whose_choices_are_null(self):
+        mcpd = client()
+        span = mcpd.trace("call")
+        usage = {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
+        list(span.record_stream(iter([{"model": "gpt-4o", "choices": None, "usage": usage}])))
+        s = mcpd.recorded_span("call")
+        self.assertEqual(s.usage.output_tokens, 1)
+        self.assertEqual(s.provider, "openai")
+
     def test_async_stream_records_and_passes_every_chunk(self):
         mcpd = client()
         span = mcpd.trace("call", kind="model_generation")

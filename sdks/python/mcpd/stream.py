@@ -46,6 +46,10 @@ def _list(value: Any) -> Optional[List[Any]]:
     return list(value) if isinstance(value, (list, tuple)) else None
 
 
+def _has(obj: Any, key: str) -> bool:
+    return key in obj if isinstance(obj, Mapping) else hasattr(obj, key)
+
+
 def _dict(value: Any) -> Optional[Dict[str, Any]]:
     """A plain dict of the value's fields, so usage from two events can be merged."""
     obj = _obj(value)
@@ -89,7 +93,11 @@ class StreamAccumulator:
         c = _obj(chunk)
         if c is None:
             return False
-        choices = _list(_field(c, "choices"))
+        raw = _field(c, "choices")
+        choices = _list(raw)
+        # A typed chunk with no choices can serialise them as null.
+        if choices is None and raw is None and _has(c, "choices"):
+            choices = []
         if choices is not None:
             return self._openai(c, choices)
         kind = _field(c, "type")

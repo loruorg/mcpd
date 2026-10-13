@@ -107,6 +107,16 @@ describe('recordStream', () => {
     expect(s.output).toEqual({ content: '', tool_calls: [{ id: 'call_1', name: 'lookup', arguments: '{"a":1}' }] })
   })
 
+  it('reads the usage from a chunk whose choices are null', async () => {
+    const mcpd = new TestClient()
+    const span = mcpd.trace('call')
+    const usage = { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 }
+    await drain(span.recordStream(from([{ model: 'gpt-4o', choices: null, usage }])))
+    const s = await mcpd.span('call')
+    expect(s.usage?.outputTokens).toBe(1)
+    expect(s.provider).toBe('openai')
+  })
+
   it('marks the first token once, at the first content chunk', async () => {
     const mcpd = new TestClient()
     const span = mcpd.trace('call')

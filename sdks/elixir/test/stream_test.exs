@@ -66,6 +66,16 @@ defmodule Mcpd.StreamTest do
     end)
   end
 
+  test "reads the usage from a chunk whose choices are null" do
+    t = testing()
+    usage = %{"prompt_tokens" => 3, "completion_tokens" => 1, "total_tokens" => 4}
+    chunk = %{"model" => "gpt-4o", "choices" => nil, "usage" => usage}
+    t.client |> ModelCall.record_stream([chunk], "call") |> Enum.to_list()
+    s = Testing.span(t, "call")
+    assert s["usage"]["output_tokens"] == 1
+    assert s["provider"] == "openai"
+  end
+
   test "records an OpenAI stream as options/2 would, and passes every chunk through" do
     t = testing()
     chunks = @openai_chunks ++ ["not a chunk", 42]
