@@ -1205,6 +1205,9 @@ async fn main() -> Result<()> {
     // Monitors run in the background for the life of the process. `spawn` is a
     // no-op when none are configured, so this costs nothing by default.
     mcpd_server::monitor::spawn(Arc::clone(&state));
+    // Live scoring. Its rules are data written through the API, so it always
+    // runs, and a pass with no enabled rule reads one list per project.
+    mcpd_server::live::spawn(Arc::clone(&state));
     // The run store's deadline tick and its span outbox drain. A no-op when
     // the daemon serves no runs.
     mcpd_server::runs::spawn(Arc::clone(&state));

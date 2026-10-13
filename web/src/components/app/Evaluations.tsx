@@ -8,7 +8,8 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import type { Score, ScoreRunResult, ScorerInfo } from '@/generated/types'
+import type { EvaluationRule, Score, ScoreRunResult, ScorerDefinition, ScorerInfo } from '@/generated/types'
+import { evalSetup, LiveRules, ScorerDefinitions } from './EvalSetup'
 import { Disconnected } from './Explorer'
 import { useConnection } from './shell'
 import { Empty, Failure, fixed, message, more, Section, Toolbar, when } from './screen-kit'
@@ -18,6 +19,8 @@ export default function Evaluations({ endpoint, onEndpoint, project, onProject, 
   const { conn, projects, retry } = useConnection(endpoint, onEndpoint)
   const [scorers, setScorers] = useState<ScorerInfo[] | null>(null)
   const [scores, setScores] = useState<Score[] | null>(null)
+  const [rules, setRules] = useState<EvaluationRule[] | null>(null)
+  const [definitions, setDefinitions] = useState<ScorerDefinition[] | null>(null)
   const [scorerFilter, setScorerFilter] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [nonce, setNonce] = useState(0)
@@ -28,12 +31,16 @@ export default function Evaluations({ endpoint, onEndpoint, project, onProject, 
     const o = { endpoint, signal: ac.signal }
     setError(null)
     Promise.all([
-      more.scorers(o),
+      more.scorers(o, project),
       more.scores({ project, scorer_id: scorerFilter || undefined, limit: 100 }, o),
+      evalSetup.rules(project, o),
+      evalSetup.definitions(project, o),
     ])
-      .then(([c, s]) => {
+      .then(([c, s, r, d]) => {
         setScorers(c)
         setScores(s.scores)
+        setRules(r)
+        setDefinitions(d)
       })
       .catch((e) => {
         if ((e as Error).name !== 'AbortError') setError(message(e))
@@ -100,6 +107,30 @@ export default function Evaluations({ endpoint, onEndpoint, project, onProject, 
           )}
         </Section>
 
+        <Section title="Live scoring">
+          {scorers && (
+            <LiveRules
+              endpoint={endpoint}
+              project={project}
+              rules={rules}
+              scorers={scorers}
+              onChanged={() => setNonce((n) => n + 1)}
+            />
+          )}
+        </Section>
+
+        <Section title="Scorers this project defined">
+          {scorers && (
+            <ScorerDefinitions
+              endpoint={endpoint}
+              project={project}
+              definitions={definitions}
+              scorers={scorers}
+              onChanged={() => setNonce((n) => n + 1)}
+            />
+          )}
+        </Section>
+
         <Section title="Means over the scores read">
           {summary.length === 0 ? (
             <Empty>No score recorded in this project yet.</Empty>
@@ -156,6 +187,19 @@ export default function Evaluations({ endpoint, onEndpoint, project, onProject, 
                           <button type="button" className="link" onClick={() => onOpenTrace(s.trace_id!)}>
                             open
                           </button>
+                        )}
+                        {s.score_trace_id && (
+                          <>
+                            {' '}
+                            <button
+                              type="button"
+                              className="link text-ink-3"
+                              title="The judge's own call: the prompt it was sent and the reply it wrote"
+                              onClick={() => onOpenTrace(s.score_trace_id!)}
+                            >
+                              judge call
+                            </button>
+                          </>
                         )}
                       </td>
                     </tr>

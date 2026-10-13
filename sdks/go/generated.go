@@ -378,10 +378,13 @@ const (
 	// A criterion the operator wrote under `judge.criteria`, graded by the judge model in
 	// one call.
 	ScorerKindCriterion ScorerKind = "criterion"
+	// A scorer definition stored in the project through the API: a judge prompt, or a code
+	// scorer with its settings. Versioned, and the version is on every score it produces.
+	ScorerKindCustom ScorerKind = "custom"
 )
 
 // AllScorerKinds lists every ScorerKind value, in declaration order.
-var AllScorerKinds = []ScorerKind{ScorerKindCode, ScorerKindJudge, ScorerKindCriterion}
+var AllScorerKinds = []ScorerKind{ScorerKindCode, ScorerKindJudge, ScorerKindCriterion, ScorerKindCustom}
 
 // String returns the wire representation.
 func (v ScorerKind) String() string { return string(v) }
@@ -1620,6 +1623,34 @@ func (v PromptKind) String() string { return string(v) }
 // Valid reports whether v is a value this version of the spec defines.
 func (v PromptKind) Valid() bool {
 	for _, c := range AllPromptKinds {
+		if c == v {
+			return true
+		}
+	}
+	return false
+}
+
+// How a stored scorer definition reaches its answer.
+type ScorerDefinitionKind string
+
+const (
+	// The configured judge model grades the run against the definition's `prompt`, in one
+	// call.
+	ScorerDefinitionKindJudge ScorerDefinitionKind = "judge"
+	// One of the daemon's code scorers, named in `builtin`, with the settings in `config`
+	// fixed. Free, and gives the same answer twice.
+	ScorerDefinitionKindCode ScorerDefinitionKind = "code"
+)
+
+// AllScorerDefinitionKinds lists every ScorerDefinitionKind value, in declaration order.
+var AllScorerDefinitionKinds = []ScorerDefinitionKind{ScorerDefinitionKindJudge, ScorerDefinitionKindCode}
+
+// String returns the wire representation.
+func (v ScorerDefinitionKind) String() string { return string(v) }
+
+// Valid reports whether v is a value this version of the spec defines.
+func (v ScorerDefinitionKind) Valid() bool {
+	for _, c := range AllScorerDefinitionKinds {
 		if c == v {
 			return true
 		}
@@ -3958,6 +3989,65 @@ type PromptVersionsResponse struct {
 	Versions []Prompt `json:"versions"`
 }
 
+// A new version of a scorer definition. A body identical to the latest version is not
+// stored again.
+type CreateScorerDefinitionRequest struct {
+	// The definition's id. A new id creates it at version 1.
+	ID string `json:"id"`
+	// `judge` or `code`.
+	Kind ScorerDefinitionKind `json:"kind"`
+	// What it measures, in a sentence.
+	Description string `json:"description"`
+	// Which way is better. Defaults to `higher_is_better`.
+	Direction *ScoreDirection `json:"direction,omitempty"`
+	// For `judge`: the criterion.
+	Prompt *string `json:"prompt,omitempty"`
+	// For `code`: the code scorer to run.
+	Builtin *string `json:"builtin,omitempty"`
+	// For `code`: its settings.
+	Config *ScorerConfig `json:"config,omitempty"`
+	// What changed.
+	Note *string `json:"note,omitempty"`
+}
+
+// Every version of one scorer definition, newest first.
+type ScorerDefinitionVersions struct {
+	// The definition's id.
+	ID string `json:"id"`
+	// Its versions, newest first.
+	Versions []ScorerDefinition `json:"versions"`
+}
+
+// A new version of a live scoring rule. Posting the same body as the latest version
+// stores nothing new.
+type CreateEvaluationRuleRequest struct {
+	// The rule's id: lower-case letters, digits, `-` and `_`, up to 64.
+	ID string `json:"id"`
+	// Whether it runs. Defaults to `false`, so a rule is read back and checked before it
+	// spends anything.
+	Enabled *bool `json:"enabled,omitempty"`
+	// The scorers to run. At least one.
+	Scorers []string `json:"scorers"`
+	// The share of matching runs to score, from 0 to 1. Defaults to 1.
+	SampleRate *float64 `json:"sample_rate,omitempty"`
+	// Only runs whose root step has this name.
+	Name *string `json:"name,omitempty"`
+	// Only runs whose root step is this kind.
+	Kind *SpanKind `json:"kind,omitempty"`
+	// Only runs from this environment.
+	Environment *string `json:"environment,omitempty"`
+	// Only runs carrying all of these tags.
+	Tags []string `json:"tags,omitempty"`
+	// Only runs with this outcome.
+	Status *SpanStatus `json:"status,omitempty"`
+	// Settings for the code scorers that need them.
+	Config *ScorerConfig `json:"config,omitempty"`
+	// The most judged scores per minute. Defaults to 30.
+	MaxJudgedPerMinute *uint32 `json:"max_judged_per_minute,omitempty"`
+	// What changed.
+	Note *string `json:"note,omitempty"`
+}
+
 // One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback
 // all hang off a span or a trace.
 // Stored in the spans table.
@@ -4773,3 +4863,88 @@ type Prompt struct {
 
 // Table is the storage table Prompt lives in.
 func (Prompt) Table() string { return "documents" }
+
+// A scorer the project defined: a judge prompt written for this agent, or a code
+// scorer with its settings fixed. Stored as numbered versions; a version never
+// changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the latest
+// version or `id@3` for version 3.
+// Stored in the documents table.
+type ScorerDefinition struct {
+	// Which project owns it.
+	Project string `json:"project"`
+	// Its id, unique in the project: lower-case letters, digits and `_`, up to 64. It
+	// cannot be the id of a scorer mcpd ships.
+	ID string `json:"id"`
+	// Its version, from 1, assigned by the daemon.
+	Version uint32 `json:"version"`
+	// Judged by the model, or computed by code.
+	Kind ScorerDefinitionKind `json:"kind"`
+	// What it measures, in a sentence. Shown in the scorer catalogue.
+	Description string `json:"description"`
+	// Which way is better. Comparisons and live alerts read it.
+	Direction ScoreDirection `json:"direction"`
+	// For a `judge` definition: the criterion the model grades against, such as `The
+	// answer cites the refund policy by section number.` The daemon adds the run's input
+	// and output and asks for a value from 0 to 1 with a one-sentence reason.
+	Prompt *string `json:"prompt,omitempty"`
+	// For a `code` definition: the code scorer it runs, such as `keyword_coverage`.
+	Builtin *string `json:"builtin,omitempty"`
+	// For a `code` definition: the settings the code scorer runs with.
+	Config *ScorerConfig `json:"config,omitempty"`
+	// What changed in this version.
+	Note *string `json:"note,omitempty"`
+	// Which key or account stored it.
+	CreatedBy *string `json:"created_by,omitempty"`
+	// When this version was stored.
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Table is the storage table ScorerDefinition lives in.
+func (ScorerDefinition) Table() string { return "documents" }
+
+// A rule for live scoring: which finished runs to score, with which scorers, and how
+// many of them. The daemon reads finished runs as they arrive and scores the sampled
+// ones in the background, so a quality drop shows up in minutes rather than at the
+// next offline pass. Scores it writes have source `live`.
+// Stored in the documents table.
+type EvaluationRule struct {
+	// Which project it scores.
+	Project string `json:"project"`
+	// Its id, unique in the project.
+	ID string `json:"id"`
+	// Its version, from 1. Each change is a new version.
+	Version uint32 `json:"version"`
+	// Whether it runs. A rule is stored disabled unless the request says otherwise.
+	Enabled bool `json:"enabled"`
+	// The scorers to run: shipped ids, criteria from the config file, or stored
+	// definitions as `id` or `id@version`.
+	Scorers []string `json:"scorers"`
+	// The share of matching runs to score, from 0 to 1. Chosen by a hash of the trace id,
+	// so the same run is in or out on every replica and every restart.
+	SampleRate float64 `json:"sample_rate"`
+	// Only runs whose root step has this name.
+	Name *string `json:"name,omitempty"`
+	// Only runs whose root step is this kind.
+	Kind *SpanKind `json:"kind,omitempty"`
+	// Only runs from this environment.
+	Environment *string `json:"environment,omitempty"`
+	// Only runs carrying all of these tags.
+	Tags []string `json:"tags"`
+	// Only runs with this outcome.
+	Status *SpanStatus `json:"status,omitempty"`
+	// Settings for the code scorers that need them.
+	Config *ScorerConfig `json:"config,omitempty"`
+	// The most judged scores the rule may produce in one minute, across the daemon. Each
+	// one is a model call, so this caps what the rule can spend. Runs over it are skipped,
+	// not queued.
+	MaxJudgedPerMinute uint32 `json:"max_judged_per_minute"`
+	// What changed in this version.
+	Note *string `json:"note,omitempty"`
+	// Which key or account stored it.
+	CreatedBy *string `json:"created_by,omitempty"`
+	// When this version was stored.
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Table is the storage table EvaluationRule lives in.
+func (EvaluationRule) Table() string { return "documents" }

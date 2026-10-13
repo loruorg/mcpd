@@ -492,12 +492,13 @@ defmodule Mcpd.ScorerKind do
   How a scorer reaches its answer.
   """
 
-  @type t :: :code | :judge | :criterion
+  @type t :: :code | :judge | :criterion | :custom
 
   @values [
     :code,
     :judge,
     :criterion,
+    :custom,
   ]
 
   @doc "Every value, in declaration order."
@@ -509,6 +510,7 @@ defmodule Mcpd.ScorerKind do
   def to_wire(:code), do: "code"
   def to_wire(:judge), do: "judge"
   def to_wire(:criterion), do: "criterion"
+  def to_wire(:custom), do: "custom"
 
   @doc """
   Parse a wire value.
@@ -521,6 +523,7 @@ defmodule Mcpd.ScorerKind do
   def from_wire("code"), do: {:ok, :code}
   def from_wire("judge"), do: {:ok, :judge}
   def from_wire("criterion"), do: {:ok, :criterion}
+  def from_wire("custom"), do: {:ok, :custom}
   def from_wire(_), do: :error
 end
 
@@ -2044,6 +2047,40 @@ defmodule Mcpd.PromptKind do
   @spec from_wire(String.t()) :: {:ok, t()} | :error
   def from_wire("text"), do: {:ok, :text}
   def from_wire("chat"), do: {:ok, :chat}
+  def from_wire(_), do: :error
+end
+
+defmodule Mcpd.ScorerDefinitionKind do
+  @moduledoc """
+  How a stored scorer definition reaches its answer.
+  """
+
+  @type t :: :judge | :code
+
+  @values [
+    :judge,
+    :code,
+  ]
+
+  @doc "Every value, in declaration order."
+  @spec values() :: [t()]
+  def values, do: @values
+
+  @doc "The wire representation of a value."
+  @spec to_wire(t()) :: String.t()
+  def to_wire(:judge), do: "judge"
+  def to_wire(:code), do: "code"
+
+  @doc """
+  Parse a wire value.
+
+  Returns `:error` on an unknown value rather than raising: a newer daemon
+  may send a value this build has never heard of, and an SDK that crashes on
+  one it does not recognise breaks the agent it is meant to be observing.
+  """
+  @spec from_wire(String.t()) :: {:ok, t()} | :error
+  def from_wire("judge"), do: {:ok, :judge}
+  def from_wire("code"), do: {:ok, :code}
   def from_wire(_), do: :error
 end
 
@@ -5210,6 +5247,89 @@ defmodule Mcpd.PromptVersionsResponse do
   ]
 end
 
+defmodule Mcpd.CreateScorerDefinitionRequest do
+  @moduledoc """
+  A new version of a scorer definition. A body identical to the latest version is not stored again.
+  """
+
+  @type t :: %__MODULE__{
+          id: String.t(),
+          kind: Mcpd.ScorerDefinitionKind.t(),
+          description: String.t(),
+          direction: Mcpd.ScoreDirection.t() | nil,
+          prompt: String.t() | nil,
+          builtin: String.t() | nil,
+          config: Mcpd.ScorerConfig.t() | nil,
+          note: String.t() | nil
+        }
+
+  @enforce_keys [:id, :kind, :description]
+  defstruct [
+    id: nil,
+    kind: nil,
+    description: nil,
+    direction: nil,
+    prompt: nil,
+    builtin: nil,
+    config: nil,
+    note: nil,
+  ]
+end
+
+defmodule Mcpd.ScorerDefinitionVersions do
+  @moduledoc """
+  Every version of one scorer definition, newest first.
+  """
+
+  @type t :: %__MODULE__{
+          id: String.t(),
+          versions: [Mcpd.ScorerDefinition.t()]
+        }
+
+  @enforce_keys [:id, :versions]
+  defstruct [
+    id: nil,
+    versions: [],
+  ]
+end
+
+defmodule Mcpd.CreateEvaluationRuleRequest do
+  @moduledoc """
+  A new version of a live scoring rule. Posting the same body as the latest version stores nothing new.
+  """
+
+  @type t :: %__MODULE__{
+          id: String.t(),
+          scorers: [String.t()],
+          enabled: boolean() | nil,
+          sample_rate: float() | nil,
+          name: String.t() | nil,
+          kind: Mcpd.SpanKind.t() | nil,
+          environment: String.t() | nil,
+          tags: [String.t()] | nil,
+          status: Mcpd.SpanStatus.t() | nil,
+          config: Mcpd.ScorerConfig.t() | nil,
+          max_judged_per_minute: non_neg_integer() | nil,
+          note: String.t() | nil
+        }
+
+  @enforce_keys [:id, :scorers]
+  defstruct [
+    id: nil,
+    scorers: [],
+    enabled: nil,
+    sample_rate: nil,
+    name: nil,
+    kind: nil,
+    environment: nil,
+    tags: [],
+    status: nil,
+    config: nil,
+    max_judged_per_minute: nil,
+    note: nil,
+  ]
+end
+
 defmodule Mcpd.Span do
   @moduledoc """
   One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.
@@ -6174,5 +6294,107 @@ defmodule Mcpd.Prompt do
   @doc "The primary key, as declared in the spec."
   @spec primary_key() :: [String.t()]
   def primary_key, do: ["project", "name", "version"]
+end
+
+defmodule Mcpd.ScorerDefinition do
+  @moduledoc """
+  A scorer the project defined: a judge prompt written for this agent, or a code scorer with its settings fixed. Stored as numbered versions; a version never changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the latest version or `id@3` for version 3.
+
+  Stored in the `documents` table.
+  """
+
+  @type t :: %__MODULE__{
+          project: String.t(),
+          id: String.t(),
+          version: non_neg_integer(),
+          kind: Mcpd.ScorerDefinitionKind.t(),
+          description: String.t(),
+          direction: Mcpd.ScoreDirection.t(),
+          created_at: DateTime.t(),
+          prompt: String.t() | nil,
+          builtin: String.t() | nil,
+          config: Mcpd.ScorerConfig.t() | nil,
+          note: String.t() | nil,
+          created_by: String.t() | nil
+        }
+
+  @enforce_keys [:project, :id, :version, :kind, :description, :direction, :created_at]
+  defstruct [
+    project: nil,
+    id: nil,
+    version: nil,
+    kind: nil,
+    description: nil,
+    direction: nil,
+    created_at: nil,
+    prompt: nil,
+    builtin: nil,
+    config: nil,
+    note: nil,
+    created_by: nil,
+  ]
+
+  @doc "The storage table this entity lives in."
+  @spec table() :: String.t()
+  def table, do: "documents"
+
+  @doc "The primary key, as declared in the spec."
+  @spec primary_key() :: [String.t()]
+  def primary_key, do: ["project", "id", "version"]
+end
+
+defmodule Mcpd.EvaluationRule do
+  @moduledoc """
+  A rule for live scoring: which finished runs to score, with which scorers, and how many of them. The daemon reads finished runs as they arrive and scores the sampled ones in the background, so a quality drop shows up in minutes rather than at the next offline pass. Scores it writes have source `live`.
+
+  Stored in the `documents` table.
+  """
+
+  @type t :: %__MODULE__{
+          project: String.t(),
+          id: String.t(),
+          version: non_neg_integer(),
+          enabled: boolean(),
+          scorers: [String.t()],
+          sample_rate: float(),
+          tags: [String.t()],
+          max_judged_per_minute: non_neg_integer(),
+          created_at: DateTime.t(),
+          name: String.t() | nil,
+          kind: Mcpd.SpanKind.t() | nil,
+          environment: String.t() | nil,
+          status: Mcpd.SpanStatus.t() | nil,
+          config: Mcpd.ScorerConfig.t() | nil,
+          note: String.t() | nil,
+          created_by: String.t() | nil
+        }
+
+  @enforce_keys [:project, :id, :version, :enabled, :scorers, :sample_rate, :tags, :max_judged_per_minute, :created_at]
+  defstruct [
+    project: nil,
+    id: nil,
+    version: nil,
+    enabled: nil,
+    scorers: [],
+    sample_rate: nil,
+    tags: [],
+    max_judged_per_minute: nil,
+    created_at: nil,
+    name: nil,
+    kind: nil,
+    environment: nil,
+    status: nil,
+    config: nil,
+    note: nil,
+    created_by: nil,
+  ]
+
+  @doc "The storage table this entity lives in."
+  @spec table() :: String.t()
+  def table, do: "documents"
+
+  @doc "The primary key, as declared in the spec."
+  @spec primary_key() :: [String.t()]
+  def primary_key, do: ["project", "id", "version"]
 end
 

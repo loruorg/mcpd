@@ -21,6 +21,7 @@
 pub mod accounts;
 pub mod aspects;
 pub mod auth;
+pub mod definitions;
 pub mod derive;
 pub mod error;
 pub mod eval;
@@ -29,6 +30,7 @@ pub mod grpc;
 pub mod identity;
 pub mod ingest;
 pub mod judge;
+pub mod live;
 pub mod layers;
 pub mod mail;
 pub mod monitor;
@@ -183,6 +185,15 @@ fn api_router(config: &ServerConfig) -> Router<Arc<AppState>> {
         .route("/v1/api/deltas", get(query::poll_deltas))
         .route("/v1/api/scorers", get(query::list_scorers))
         .route("/v1/api/score", post(query::score_runs))
+        .route("/v1/api/scorer-definitions", get(definitions::list_scorer_definitions))
+        .route("/v1/api/scorer-definitions", post(definitions::create_scorer_definition))
+        .route("/v1/api/scorer-definitions/{id}", get(definitions::get_scorer_definition))
+        .route(
+            "/v1/api/scorer-definitions/{id}/versions",
+            get(definitions::list_scorer_definition_versions),
+        )
+        .route("/v1/api/evaluation-rules", get(definitions::list_evaluation_rules))
+        .route("/v1/api/evaluation-rules", post(definitions::create_evaluation_rule))
         .route("/v1/api/experiments/compare", get(query::compare_experiments))
         .route("/v1/api/datasets", get(query::list_datasets))
         .route("/v1/api/datasets", post(query::create_dataset))

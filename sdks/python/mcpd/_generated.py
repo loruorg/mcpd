@@ -201,6 +201,8 @@ class ScorerKind(str, Enum):
     """A built-in rubric graded by the configured judge model, in steps: preprocess, analyze, score, reason."""
     CRITERION = "criterion"
     """A criterion the operator wrote under `judge.criteria`, graded by the judge model in one call."""
+    CUSTOM = "custom"
+    """A scorer definition stored in the project through the API: a judge prompt, or a code scorer with its settings. Versioned, and the version is on every score it produces."""
 
 class ScoreDirection(str, Enum):
     """Which way a scorer's value is better. A comparison reads a fall in `toxicity` as an improvement and a fall in `faithfulness` as a regression."""
@@ -655,6 +657,14 @@ class PromptKind(str, Enum):
     """One template string, for a completion-style call."""
     CHAT = "chat"
     """An ordered list of messages, each with a `role` and a `content` template, for a chat-style call."""
+
+class ScorerDefinitionKind(str, Enum):
+    """How a stored scorer definition reaches its answer."""
+
+    JUDGE = "judge"
+    """The configured judge model grades the run against the definition's `prompt`, in one call."""
+    CODE = "code"
+    """One of the daemon's code scorers, named in `builtin`, with the settings in `config` fixed. Free, and gives the same answer twice."""
 
 @dataclass(**_SLOTS)
 class InputTokenDetails:
@@ -2839,6 +2849,68 @@ class PromptVersionsResponse:
     """Its versions, newest first, each with the labels that point at it."""
 
 @dataclass(**_SLOTS)
+class CreateScorerDefinitionRequest:
+    """A new version of a scorer definition. A body identical to the latest version is not stored again.
+    """
+
+    id: str
+    """The definition's id. A new id creates it at version 1."""
+    kind: ScorerDefinitionKind
+    """`judge` or `code`."""
+    description: str
+    """What it measures, in a sentence."""
+    direction: ScoreDirection | None = None
+    """Which way is better. Defaults to `higher_is_better`."""
+    prompt: str | None = None
+    """For `judge`: the criterion."""
+    builtin: str | None = None
+    """For `code`: the code scorer to run."""
+    config: ScorerConfig | None = None
+    """For `code`: its settings."""
+    note: str | None = None
+    """What changed."""
+
+@dataclass(**_SLOTS)
+class ScorerDefinitionVersions:
+    """Every version of one scorer definition, newest first.
+    """
+
+    id: str
+    """The definition's id."""
+    versions: list[ScorerDefinition] = field(default_factory=list)
+    """Its versions, newest first."""
+
+@dataclass(**_SLOTS)
+class CreateEvaluationRuleRequest:
+    """A new version of a live scoring rule. Posting the same body as the latest version stores nothing new.
+    """
+
+    id: str
+    """The rule's id: lower-case letters, digits, `-` and `_`, up to 64."""
+    scorers: list[str] = field(default_factory=list)
+    """The scorers to run. At least one."""
+    enabled: bool | None = None
+    """Whether it runs. Defaults to `false`, so a rule is read back and checked before it spends anything."""
+    sample_rate: float | None = None
+    """The share of matching runs to score, from 0 to 1. Defaults to 1."""
+    name: str | None = None
+    """Only runs whose root step has this name."""
+    kind: SpanKind | None = None
+    """Only runs whose root step is this kind."""
+    environment: str | None = None
+    """Only runs from this environment."""
+    tags: list[str] | None = None
+    """Only runs carrying all of these tags."""
+    status: SpanStatus | None = None
+    """Only runs with this outcome."""
+    config: ScorerConfig | None = None
+    """Settings for the code scorers that need them."""
+    max_judged_per_minute: int | None = None
+    """The most judged scores per minute. Defaults to 30."""
+    note: str | None = None
+    """What changed."""
+
+@dataclass(**_SLOTS)
 class Span:
     """One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.
 
@@ -3539,6 +3611,82 @@ class Prompt:
     """Model settings stored with the prompt, such as `model` and `temperature`. The daemon stores them and does not read them."""
     note: str | None = None
     """What changed in this version, written by whoever stored it."""
+    created_by: str | None = None
+    """Which key or account stored it."""
+
+    TABLE = "documents"
+
+@dataclass(**_SLOTS)
+class ScorerDefinition:
+    """A scorer the project defined: a judge prompt written for this agent, or a code scorer with its settings fixed. Stored as numbered versions; a version never changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the latest version or `id@3` for version 3.
+
+    Stored in the `documents` table.
+    """
+
+    project: str
+    """Which project owns it."""
+    id: str
+    """Its id, unique in the project: lower-case letters, digits and `_`, up to 64. It cannot be the id of a scorer mcpd ships."""
+    version: int
+    """Its version, from 1, assigned by the daemon."""
+    kind: ScorerDefinitionKind
+    """Judged by the model, or computed by code."""
+    description: str
+    """What it measures, in a sentence. Shown in the scorer catalogue."""
+    direction: ScoreDirection
+    """Which way is better. Comparisons and live alerts read it."""
+    created_at: datetime
+    """When this version was stored."""
+    prompt: str | None = None
+    """For a `judge` definition: the criterion the model grades against, such as `The answer cites the refund policy by section number.` The daemon adds the run's input and output and asks for a value from 0 to 1 with a one-sentence reason."""
+    builtin: str | None = None
+    """For a `code` definition: the code scorer it runs, such as `keyword_coverage`."""
+    config: ScorerConfig | None = None
+    """For a `code` definition: the settings the code scorer runs with."""
+    note: str | None = None
+    """What changed in this version."""
+    created_by: str | None = None
+    """Which key or account stored it."""
+
+    TABLE = "documents"
+
+@dataclass(**_SLOTS)
+class EvaluationRule:
+    """A rule for live scoring: which finished runs to score, with which scorers, and how many of them. The daemon reads finished runs as they arrive and scores the sampled ones in the background, so a quality drop shows up in minutes rather than at the next offline pass. Scores it writes have source `live`.
+
+    Stored in the `documents` table.
+    """
+
+    project: str
+    """Which project it scores."""
+    id: str
+    """Its id, unique in the project."""
+    version: int
+    """Its version, from 1. Each change is a new version."""
+    enabled: bool
+    """Whether it runs. A rule is stored disabled unless the request says otherwise."""
+    sample_rate: float
+    """The share of matching runs to score, from 0 to 1. Chosen by a hash of the trace id, so the same run is in or out on every replica and every restart."""
+    max_judged_per_minute: int
+    """The most judged scores the rule may produce in one minute, across the daemon. Each one is a model call, so this caps what the rule can spend. Runs over it are skipped, not queued."""
+    created_at: datetime
+    """When this version was stored."""
+    scorers: list[str] = field(default_factory=list)
+    """The scorers to run: shipped ids, criteria from the config file, or stored definitions as `id` or `id@version`."""
+    tags: list[str] = field(default_factory=list)
+    """Only runs carrying all of these tags."""
+    name: str | None = None
+    """Only runs whose root step has this name."""
+    kind: SpanKind | None = None
+    """Only runs whose root step is this kind."""
+    environment: str | None = None
+    """Only runs from this environment."""
+    status: SpanStatus | None = None
+    """Only runs with this outcome."""
+    config: ScorerConfig | None = None
+    """Settings for the code scorers that need them."""
+    note: str | None = None
+    """What changed in this version."""
     created_by: str | None = None
     """Which key or account stored it."""
 

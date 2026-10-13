@@ -329,6 +329,10 @@
         {
           "name": "criterion",
           "doc": "A criterion the operator wrote under `judge.criteria`, graded by the judge model in one call."
+        },
+        {
+          "name": "custom",
+          "doc": "A scorer definition stored in the project through the API: a judge prompt, or a code scorer with its settings. Versioned, and the version is on every score it produces."
         }
       ]
     },
@@ -1129,6 +1133,19 @@
         {
           "name": "chat",
           "doc": "An ordered list of messages, each with a `role` and a `content` template, for a chat-style call."
+        }
+      ]
+    },
+    "ScorerDefinitionKind": {
+      "doc": "How a stored scorer definition reaches its answer.",
+      "values": [
+        {
+          "name": "judge",
+          "doc": "The configured judge model grades the run against the definition's `prompt`, in one call."
+        },
+        {
+          "name": "code",
+          "doc": "One of the daemon's code scorers, named in `builtin`, with the settings in `config` fixed. Free, and gives the same answer twice."
         }
       ]
     }
@@ -5169,6 +5186,131 @@
           "doc": "Its versions, newest first, each with the labels that point at it."
         }
       ]
+    },
+    "CreateScorerDefinitionRequest": {
+      "doc": "A new version of a scorer definition. A body identical to the latest version is not stored again.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The definition's id. A new id creates it at version 1."
+        },
+        {
+          "name": "kind",
+          "type": "ScorerDefinitionKind",
+          "doc": "`judge` or `code`."
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "doc": "What it measures, in a sentence."
+        },
+        {
+          "name": "direction",
+          "type": "ScoreDirection?",
+          "doc": "Which way is better. Defaults to `higher_is_better`."
+        },
+        {
+          "name": "prompt",
+          "type": "string?",
+          "doc": "For `judge`: the criterion."
+        },
+        {
+          "name": "builtin",
+          "type": "string?",
+          "doc": "For `code`: the code scorer to run."
+        },
+        {
+          "name": "config",
+          "type": "ScorerConfig?",
+          "doc": "For `code`: its settings."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed."
+        }
+      ]
+    },
+    "ScorerDefinitionVersions": {
+      "doc": "Every version of one scorer definition, newest first.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The definition's id."
+        },
+        {
+          "name": "versions",
+          "type": "ScorerDefinition[]",
+          "doc": "Its versions, newest first."
+        }
+      ]
+    },
+    "CreateEvaluationRuleRequest": {
+      "doc": "A new version of a live scoring rule. Posting the same body as the latest version stores nothing new.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The rule's id: lower-case letters, digits, `-` and `_`, up to 64."
+        },
+        {
+          "name": "enabled",
+          "type": "bool?",
+          "doc": "Whether it runs. Defaults to `false`, so a rule is read back and checked before it spends anything."
+        },
+        {
+          "name": "scorers",
+          "type": "string[]",
+          "doc": "The scorers to run. At least one."
+        },
+        {
+          "name": "sample_rate",
+          "type": "f64?",
+          "doc": "The share of matching runs to score, from 0 to 1. Defaults to 1."
+        },
+        {
+          "name": "name",
+          "type": "string?",
+          "doc": "Only runs whose root step has this name."
+        },
+        {
+          "name": "kind",
+          "type": "SpanKind?",
+          "doc": "Only runs whose root step is this kind."
+        },
+        {
+          "name": "environment",
+          "type": "string?",
+          "doc": "Only runs from this environment."
+        },
+        {
+          "name": "tags",
+          "type": "string[]?",
+          "doc": "Only runs carrying all of these tags."
+        },
+        {
+          "name": "status",
+          "type": "SpanStatus?",
+          "doc": "Only runs with this outcome."
+        },
+        {
+          "name": "config",
+          "type": "ScorerConfig?",
+          "doc": "Settings for the code scorers that need them."
+        },
+        {
+          "name": "max_judged_per_minute",
+          "type": "u32?",
+          "doc": "The most judged scores per minute. Defaults to 30."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed."
+        }
+      ]
     }
   },
   "entities": {
@@ -6806,6 +6948,168 @@
         "name",
         "version"
       ]
+    },
+    "ScorerDefinition": {
+      "doc": "A scorer the project defined: a judge prompt written for this agent, or a code scorer with its settings fixed. Stored as numbered versions; a version never changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the latest version or `id@3` for version 3.",
+      "table": "documents",
+      "fields": [
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "Which project owns it."
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "Its id, unique in the project: lower-case letters, digits and `_`, up to 64. It cannot be the id of a scorer mcpd ships."
+        },
+        {
+          "name": "version",
+          "type": "u32",
+          "doc": "Its version, from 1, assigned by the daemon."
+        },
+        {
+          "name": "kind",
+          "type": "ScorerDefinitionKind",
+          "doc": "Judged by the model, or computed by code."
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "doc": "What it measures, in a sentence. Shown in the scorer catalogue."
+        },
+        {
+          "name": "direction",
+          "type": "ScoreDirection",
+          "doc": "Which way is better. Comparisons and live alerts read it."
+        },
+        {
+          "name": "prompt",
+          "type": "string?",
+          "doc": "For a `judge` definition: the criterion the model grades against, such as `The answer cites the refund policy by section number.` The daemon adds the run's input and output and asks for a value from 0 to 1 with a one-sentence reason."
+        },
+        {
+          "name": "builtin",
+          "type": "string?",
+          "doc": "For a `code` definition: the code scorer it runs, such as `keyword_coverage`."
+        },
+        {
+          "name": "config",
+          "type": "ScorerConfig?",
+          "doc": "For a `code` definition: the settings the code scorer runs with."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed in this version."
+        },
+        {
+          "name": "created_by",
+          "type": "string?",
+          "doc": "Which key or account stored it."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When this version was stored."
+        }
+      ],
+      "primaryKey": [
+        "project",
+        "id",
+        "version"
+      ]
+    },
+    "EvaluationRule": {
+      "doc": "A rule for live scoring: which finished runs to score, with which scorers, and how many of them. The daemon reads finished runs as they arrive and scores the sampled ones in the background, so a quality drop shows up in minutes rather than at the next offline pass. Scores it writes have source `live`.",
+      "table": "documents",
+      "fields": [
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "Which project it scores."
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "Its id, unique in the project."
+        },
+        {
+          "name": "version",
+          "type": "u32",
+          "doc": "Its version, from 1. Each change is a new version."
+        },
+        {
+          "name": "enabled",
+          "type": "bool",
+          "doc": "Whether it runs. A rule is stored disabled unless the request says otherwise."
+        },
+        {
+          "name": "scorers",
+          "type": "string[]",
+          "doc": "The scorers to run: shipped ids, criteria from the config file, or stored definitions as `id` or `id@version`."
+        },
+        {
+          "name": "sample_rate",
+          "type": "f64",
+          "doc": "The share of matching runs to score, from 0 to 1. Chosen by a hash of the trace id, so the same run is in or out on every replica and every restart."
+        },
+        {
+          "name": "name",
+          "type": "string?",
+          "doc": "Only runs whose root step has this name."
+        },
+        {
+          "name": "kind",
+          "type": "SpanKind?",
+          "doc": "Only runs whose root step is this kind."
+        },
+        {
+          "name": "environment",
+          "type": "string?",
+          "doc": "Only runs from this environment."
+        },
+        {
+          "name": "tags",
+          "type": "string[]",
+          "doc": "Only runs carrying all of these tags."
+        },
+        {
+          "name": "status",
+          "type": "SpanStatus?",
+          "doc": "Only runs with this outcome."
+        },
+        {
+          "name": "config",
+          "type": "ScorerConfig?",
+          "doc": "Settings for the code scorers that need them."
+        },
+        {
+          "name": "max_judged_per_minute",
+          "type": "u32",
+          "doc": "The most judged scores the rule may produce in one minute, across the daemon. Each one is a model call, so this caps what the rule can spend. Runs over it are skipped, not queued."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed in this version."
+        },
+        {
+          "name": "created_by",
+          "type": "string?",
+          "doc": "Which key or account stored it."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When this version was stored."
+        }
+      ],
+      "primaryKey": [
+        "project",
+        "id",
+        "version"
+      ]
     }
   },
   "endpoints": [
@@ -7868,12 +8172,19 @@
       "tag": "Evaluation",
       "method": "GET",
       "path": "/v1/api/scorers",
-      "summary": "List the built-in scorers",
-      "doc": "Every scorer mcpd ships, with what it measures and whether it needs configuration. Scorers are deterministic code, not model calls, so they cost nothing to run and give the same answer twice.",
+      "summary": "List the scorers",
+      "doc": "Every scorer this daemon can run: the code scorers, the judged rubrics, the criteria in the config file, and, with `project`, the definitions that project stored. Code scorers are deterministic, cost nothing and give the same answer twice; judged ones make one model call per run.",
       "response": {
         "type": "ScorerInfo[]"
       },
-      "auth": "read"
+      "auth": "read",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Also list the scorer definitions this project stored, each at its latest version."
+        }
+      ]
     },
     {
       "id": "score_runs",
@@ -7881,12 +8192,161 @@
       "method": "POST",
       "path": "/v1/api/score",
       "summary": "Run scorers over stored runs",
-      "doc": "Scores runs that are already stored, and records the results. Naming a scorer that does not exist fails the request before any work happens; a scorer that cannot answer on a given run is reported in `skipped` rather than failing it.",
+      "doc": "Scores runs that are already stored, and records the results. Naming a scorer that does not exist fails the request before any work happens; a scorer that cannot answer on a given run is reported in `skipped` rather than failing it. A stored definition is named as `id` or `id@version`. Each judged score is recorded with the trace of its own model call, in `score_trace_id`: a `scorer_run` span holding the prompt, the reply, the tokens and the cost.",
       "request": {
         "type": "ScoreRunRequest"
       },
       "response": {
         "type": "ScoreRunResult"
+      },
+      "auth": "write"
+    },
+    {
+      "id": "list_scorer_definitions",
+      "tag": "Evaluation",
+      "method": "GET",
+      "path": "/v1/api/scorer-definitions",
+      "summary": "List scorer definitions",
+      "doc": "The latest version of every scorer the project defined, sorted by id.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "response": {
+        "type": "ScorerDefinition[]"
+      },
+      "auth": "read"
+    },
+    {
+      "id": "create_scorer_definition",
+      "tag": "Evaluation",
+      "method": "POST",
+      "path": "/v1/api/scorer-definitions",
+      "summary": "Store a scorer definition",
+      "doc": "Stores a new version of a scorer definition. A `judge` definition needs `prompt` and a judge in the config file to run; a `code` definition needs `builtin`, and its `config` is checked against that scorer before anything is stored.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "request": {
+        "type": "CreateScorerDefinitionRequest"
+      },
+      "response": {
+        "type": "ScorerDefinition"
+      },
+      "auth": "write"
+    },
+    {
+      "id": "get_scorer_definition",
+      "tag": "Evaluation",
+      "method": "GET",
+      "path": "/v1/api/scorer-definitions/{id}",
+      "summary": "Get a scorer definition",
+      "doc": "One version of a definition, the latest when `version` is absent.",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The definition's id."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        },
+        {
+          "name": "version",
+          "type": "u32?",
+          "doc": "Which version. Absent means the latest."
+        }
+      ],
+      "response": {
+        "type": "ScorerDefinition"
+      },
+      "responses": {
+        "404": {
+          "doc": "No definition with that id, or no such version."
+        }
+      },
+      "auth": "read"
+    },
+    {
+      "id": "list_scorer_definition_versions",
+      "tag": "Evaluation",
+      "method": "GET",
+      "path": "/v1/api/scorer-definitions/{id}/versions",
+      "summary": "List a scorer definition's versions",
+      "doc": "Every version of one definition, newest first.",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The definition's id."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "response": {
+        "type": "ScorerDefinitionVersions"
+      },
+      "responses": {
+        "404": {
+          "doc": "No definition with that id."
+        }
+      },
+      "auth": "read"
+    },
+    {
+      "id": "list_evaluation_rules",
+      "tag": "Evaluation",
+      "method": "GET",
+      "path": "/v1/api/evaluation-rules",
+      "summary": "List live scoring rules",
+      "doc": "The latest version of every live scoring rule in the project.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "response": {
+        "type": "EvaluationRule[]"
+      },
+      "auth": "read"
+    },
+    {
+      "id": "create_evaluation_rule",
+      "tag": "Evaluation",
+      "method": "POST",
+      "path": "/v1/api/evaluation-rules",
+      "summary": "Store a live scoring rule",
+      "doc": "Stores a new version of a rule; the daemon applies the latest version of each rule from the next run that finishes. Every named scorer is resolved before anything is stored, and a judged scorer is refused when no judge is configured. Turn a rule off by posting it with `enabled: false`.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "request": {
+        "type": "CreateEvaluationRuleRequest"
+      },
+      "response": {
+        "type": "EvaluationRule"
       },
       "auth": "write"
     },

@@ -327,6 +327,12 @@ enum class ScorerKind(val wire: String) {
      * in one call.
      */
     @SerialName("criterion") CRITERION("criterion"),
+    /**
+     * A scorer definition stored in the project through the API: a judge prompt, or a
+     * code scorer with its settings. Versioned, and the version is on every score it
+     * produces.
+     */
+    @SerialName("custom") CUSTOM("custom"),
     ;
 
     override fun toString(): String = wire
@@ -1438,6 +1444,29 @@ enum class PromptKind(val wire: String) {
     companion object {
         /** Parse a wire value, or null when this version of the spec does not define it. */
         fun fromWire(s: String): PromptKind? = entries.firstOrNull { it.wire == s }
+    }
+}
+
+/** How a stored scorer definition reaches its answer. */
+@Serializable
+enum class ScorerDefinitionKind(val wire: String) {
+    /**
+     * The configured judge model grades the run against the definition's `prompt`, in
+     * one call.
+     */
+    @SerialName("judge") JUDGE("judge"),
+    /**
+     * One of the daemon's code scorers, named in `builtin`, with the settings in
+     * `config` fixed. Free, and gives the same answer twice.
+     */
+    @SerialName("code") CODE("code"),
+    ;
+
+    override fun toString(): String = wire
+
+    companion object {
+        /** Parse a wire value, or null when this version of the spec does not define it. */
+        fun fromWire(s: String): ScorerDefinitionKind? = entries.firstOrNull { it.wire == s }
     }
 }
 
@@ -4476,6 +4505,77 @@ data class PromptVersionsResponse(
 }
 
 /**
+ * A new version of a scorer definition. A body identical to the latest version is
+ * not stored again.
+ */
+@Serializable
+data class CreateScorerDefinitionRequest(
+    /** The definition's id. A new id creates it at version 1. */
+    @SerialName("id") val id: String,
+    /** `judge` or `code`. */
+    @SerialName("kind") val kind: ScorerDefinitionKind,
+    /** What it measures, in a sentence. */
+    @SerialName("description") val description: String,
+    /** Which way is better. Defaults to `higher_is_better`. */
+    @SerialName("direction") val direction: ScoreDirection? = null,
+    /** For `judge`: the criterion. */
+    @SerialName("prompt") val prompt: String? = null,
+    /** For `code`: the code scorer to run. */
+    @SerialName("builtin") val builtin: String? = null,
+    /** For `code`: its settings. */
+    @SerialName("config") val config: ScorerConfig? = null,
+    /** What changed. */
+    @SerialName("note") val note: String? = null
+) {
+}
+
+/** Every version of one scorer definition, newest first. */
+@Serializable
+data class ScorerDefinitionVersions(
+    /** The definition's id. */
+    @SerialName("id") val id: String,
+    /** Its versions, newest first. */
+    @SerialName("versions") val versions: List<ScorerDefinition>
+) {
+}
+
+/**
+ * A new version of a live scoring rule. Posting the same body as the latest
+ * version stores nothing new.
+ */
+@Serializable
+data class CreateEvaluationRuleRequest(
+    /** The rule's id: lower-case letters, digits, `-` and `_`, up to 64. */
+    @SerialName("id") val id: String,
+    /** The scorers to run. At least one. */
+    @SerialName("scorers") val scorers: List<String>,
+    /**
+     * Whether it runs. Defaults to `false`, so a rule is read back and checked before
+     * it spends anything.
+     */
+    @SerialName("enabled") val enabled: Boolean? = null,
+    /** The share of matching runs to score, from 0 to 1. Defaults to 1. */
+    @SerialName("sample_rate") val sampleRate: Double? = null,
+    /** Only runs whose root step has this name. */
+    @SerialName("name") val name: String? = null,
+    /** Only runs whose root step is this kind. */
+    @SerialName("kind") val kind: SpanKind? = null,
+    /** Only runs from this environment. */
+    @SerialName("environment") val environment: String? = null,
+    /** Only runs carrying all of these tags. */
+    @SerialName("tags") val tags: List<String>? = null,
+    /** Only runs with this outcome. */
+    @SerialName("status") val status: SpanStatus? = null,
+    /** Settings for the code scorers that need them. */
+    @SerialName("config") val config: ScorerConfig? = null,
+    /** The most judged scores per minute. Defaults to 30. */
+    @SerialName("max_judged_per_minute") val maxJudgedPerMinute: Int? = null,
+    /** What changed. */
+    @SerialName("note") val note: String? = null
+) {
+}
+
+/**
  * One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and
  * feedback all hang off a span or a trace. Stored in the `spans` table.
  */
@@ -5511,6 +5611,110 @@ data class Prompt(
      */
     @SerialName("config") val config: JsonElement? = null,
     /** What changed in this version, written by whoever stored it. */
+    @SerialName("note") val note: String? = null,
+    /** Which key or account stored it. */
+    @SerialName("created_by") val createdBy: String? = null
+) {
+    companion object {
+        /** The storage table this entity lives in. */
+        const val TABLE = "documents"
+    }
+}
+
+/**
+ * A scorer the project defined: a judge prompt written for this agent, or a code
+ * scorer with its settings fixed. Stored as numbered versions; a version never
+ * changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the
+ * latest version or `id@3` for version 3. Stored in the `documents` table.
+ */
+@Serializable
+data class ScorerDefinition(
+    /** Which project owns it. */
+    @SerialName("project") val project: String,
+    /**
+     * Its id, unique in the project: lower-case letters, digits and `_`, up to 64. It
+     * cannot be the id of a scorer mcpd ships.
+     */
+    @SerialName("id") val id: String,
+    /** Its version, from 1, assigned by the daemon. */
+    @SerialName("version") val version: Int,
+    /** Judged by the model, or computed by code. */
+    @SerialName("kind") val kind: ScorerDefinitionKind,
+    /** What it measures, in a sentence. Shown in the scorer catalogue. */
+    @SerialName("description") val description: String,
+    /** Which way is better. Comparisons and live alerts read it. */
+    @SerialName("direction") val direction: ScoreDirection,
+    /** When this version was stored. */
+    @SerialName("created_at") val createdAt: Instant,
+    /**
+     * For a `judge` definition: the criterion the model grades against, such as `The
+     * answer cites the refund policy by section number.` The daemon adds the run's
+     * input and output and asks for a value from 0 to 1 with a one-sentence reason.
+     */
+    @SerialName("prompt") val prompt: String? = null,
+    /** For a `code` definition: the code scorer it runs, such as `keyword_coverage`. */
+    @SerialName("builtin") val builtin: String? = null,
+    /** For a `code` definition: the settings the code scorer runs with. */
+    @SerialName("config") val config: ScorerConfig? = null,
+    /** What changed in this version. */
+    @SerialName("note") val note: String? = null,
+    /** Which key or account stored it. */
+    @SerialName("created_by") val createdBy: String? = null
+) {
+    companion object {
+        /** The storage table this entity lives in. */
+        const val TABLE = "documents"
+    }
+}
+
+/**
+ * A rule for live scoring: which finished runs to score, with which scorers, and
+ * how many of them. The daemon reads finished runs as they arrive and scores the
+ * sampled ones in the background, so a quality drop shows up in minutes rather
+ * than at the next offline pass. Scores it writes have source `live`. Stored in
+ * the `documents` table.
+ */
+@Serializable
+data class EvaluationRule(
+    /** Which project it scores. */
+    @SerialName("project") val project: String,
+    /** Its id, unique in the project. */
+    @SerialName("id") val id: String,
+    /** Its version, from 1. Each change is a new version. */
+    @SerialName("version") val version: Int,
+    /** Whether it runs. A rule is stored disabled unless the request says otherwise. */
+    @SerialName("enabled") val enabled: Boolean,
+    /**
+     * The scorers to run: shipped ids, criteria from the config file, or stored
+     * definitions as `id` or `id@version`.
+     */
+    @SerialName("scorers") val scorers: List<String>,
+    /**
+     * The share of matching runs to score, from 0 to 1. Chosen by a hash of the trace
+     * id, so the same run is in or out on every replica and every restart.
+     */
+    @SerialName("sample_rate") val sampleRate: Double,
+    /** Only runs carrying all of these tags. */
+    @SerialName("tags") val tags: List<String>,
+    /**
+     * The most judged scores the rule may produce in one minute, across the daemon.
+     * Each one is a model call, so this caps what the rule can spend. Runs over it are
+     * skipped, not queued.
+     */
+    @SerialName("max_judged_per_minute") val maxJudgedPerMinute: Int,
+    /** When this version was stored. */
+    @SerialName("created_at") val createdAt: Instant,
+    /** Only runs whose root step has this name. */
+    @SerialName("name") val name: String? = null,
+    /** Only runs whose root step is this kind. */
+    @SerialName("kind") val kind: SpanKind? = null,
+    /** Only runs from this environment. */
+    @SerialName("environment") val environment: String? = null,
+    /** Only runs with this outcome. */
+    @SerialName("status") val status: SpanStatus? = null,
+    /** Settings for the code scorers that need them. */
+    @SerialName("config") val config: ScorerConfig? = null,
+    /** What changed in this version. */
     @SerialName("note") val note: String? = null,
     /** Which key or account stored it. */
     @SerialName("created_by") val createdBy: String? = null

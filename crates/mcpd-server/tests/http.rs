@@ -56,6 +56,8 @@ const READ_ROUTES: &[&str] = &[
     "/v1/api/datasets/some-dataset/items",
     "/v1/api/experiments",
     "/v1/api/prompts",
+    "/v1/api/scorer-definitions",
+    "/v1/api/evaluation-rules",
     "/v1/api/monitors",
     "/v1/api/slos",
 ];

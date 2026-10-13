@@ -275,7 +275,67 @@ import Waterfall from '@/components/Waterfall.astro'
     Two scores from two different judges are not comparable, and that field is
     what says so on the record.
   </p>
+  <p>
+    Every judged score also names the run of its own model call in
+    <code>score_trace_id</code>. That run is one <code>scorer_run</code> span
+    holding the prompt the judge was sent, the reply it wrote, its tokens and
+    its cost, with a link to the run it scored. A score that looks wrong is
+    opened and read like any other model call; in the app, the
+    <em>judge call</em> link beside the score opens it.
+  </p>
 
+  <h2>Scorers you define</h2>
+  <p>
+    A project stores its own scorers with <code>POST /v1/api/scorer-definitions</code>.
+    A <code>judge</code> definition is a criterion written for your agent, such
+    as <q>The answer names the section of the refund policy it relies on</q>,
+    graded from 0 to 1 by the configured judge. A <code>code</code> definition
+    is one of the scorers above with its settings fixed, such as
+    <code>keyword_coverage</code> with the keywords your answers must mention.
+  </p>
+  <p>
+    Each save is a new version, and an identical body is not stored again. Name
+    a definition wherever a scorer id is taken: <code>cites_policy</code> runs
+    the latest version and <code>cites_policy@2</code> runs version 2. The
+    version goes on every score, so changing a prompt never changes what an old
+    score meant. A definition cannot take the id of a scorer mcpd ships or of a
+    criterion in the config file. <code>GET /v1/api/scorers?project=</code>
+    lists a project&rsquo;s definitions beside the shipped scorers, with kind
+    <code>custom</code>. The Evaluations screen in the app creates and edits
+    them.
+  </p>
+
+  <h2>Live scoring</h2>
+  <p>
+    An evaluation rule scores runs as they finish, in the background, and
+    writes scores with source <code>live</code>. It names the scorers to run,
+    the share of runs to score, and which runs it is for: a root step name, a
+    kind, an environment, an outcome, tags. Store one with
+    <code>POST /v1/api/evaluation-rules</code>.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="score a tenth of checkout runs as they finish"
+    command={`curl -X POST 'localhost:4317/v1/api/evaluation-rules?project=support-desk' \\
+  -H 'content-type: application/json' \\
+  -d '{"id": "checkout-quality", "enabled": true, "scorers": ["answered", "cites_policy"],
+       "sample_rate": 0.1, "name": "checkout"}'`}
+  />
+
+  <p>
+    A rule is stored off unless the request turns it on, and every scorer it
+    names is resolved when it is stored. Which runs are sampled is decided by a
+    hash of the rule id and the trace id, so the same run is in or out on every
+    replica and after every restart, and two rules at 10% score different
+    tenths. Each run is scored by a rule once. <code>max_judged_per_minute</code>,
+    30 by default, caps the model calls a rule makes; a run over the cap is
+    skipped, not queued. A change to a rule is a new version and applies from
+    the next pass, every 15 seconds. Post the rule with
+    <code>"enabled": false</code> to stop it.
+  </p>
+
+  <h2>Scoring happens after the fact</h2>
   <h2>Scoring happens after the fact</h2>
   <p>
     <code>POST /v1/api/score</code> runs scorers over runs that are already

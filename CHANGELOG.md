@@ -36,6 +36,18 @@ rather than every commit.
   the root step's input and output as plain text, and the run list shows them
   as Input and Output columns. Wire-contract change: two `Trace` fields and
   five query parameters.
+- **Live scoring, scorer definitions and judge runs.** Evaluation rules
+  (`/v1/api/evaluation-rules`) score runs as they finish, in the background,
+  with the scorers they name, on a sampled share of the runs they match, with
+  a cap on model calls a minute; their scores have source `live`. Projects
+  store their own scorers (`/v1/api/scorer-definitions`): judge prompts and
+  code scorers with fixed settings, versioned, named as `id` or `id@3`,
+  with the version on every score. Every judged score now names the run of
+  its own model call in `score_trace_id`, a `scorer_run` span with the
+  prompt, the reply, the tokens and the cost. The Evaluations screen manages
+  rules and definitions. Wire-contract change: two entities, six endpoints,
+  the `custom` scorer kind and a `project` parameter on
+  `GET /v1/api/scorers`.
 - **Organisations, roles, single sign-on and SCIM.** An account can create
   organisations, which own projects, invite members by email and give each a
   role (owner, admin, member or viewer, optionally replaced on one project)

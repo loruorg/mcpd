@@ -253,12 +253,15 @@ export const ScorerKind = {
   // A criterion the operator wrote under `judge.criteria`, graded by the judge model in
   // one call.
   Criterion: 'criterion',
+  // A scorer definition stored in the project through the API: a judge prompt, or a code
+  // scorer with its settings. Versioned, and the version is on every score it produces.
+  Custom: 'custom',
 } as const
 
 export type ScorerKind = typeof ScorerKind[keyof typeof ScorerKind]
 
 /** Every `ScorerKind` value, in declaration order. */
-export const ALL_SCORER_KIND: readonly ScorerKind[] = ['code', 'judge', 'criterion']
+export const ALL_SCORER_KIND: readonly ScorerKind[] = ['code', 'judge', 'criterion', 'custom']
 
 /**
   * Which way a scorer's value is better. A comparison reads a fall in `toxicity` as an
@@ -1058,6 +1061,22 @@ export type PromptKind = typeof PromptKind[keyof typeof PromptKind]
 
 /** Every `PromptKind` value, in declaration order. */
 export const ALL_PROMPT_KIND: readonly PromptKind[] = ['text', 'chat']
+
+/**
+  * How a stored scorer definition reaches its answer. */
+export const ScorerDefinitionKind = {
+  // The configured judge model grades the run against the definition's `prompt`, in one
+  // call.
+  Judge: 'judge',
+  // One of the daemon's code scorers, named in `builtin`, with the settings in `config`
+  // fixed. Free, and gives the same answer twice.
+  Code: 'code',
+} as const
+
+export type ScorerDefinitionKind = typeof ScorerDefinitionKind[keyof typeof ScorerDefinitionKind]
+
+/** Every `ScorerDefinitionKind` value, in declaration order. */
+export const ALL_SCORER_DEFINITION_KIND: readonly ScorerDefinitionKind[] = ['judge', 'code']
 
 /**
  * Input tokens broken down by how the provider billed them. Every field is optional;
@@ -4977,6 +4996,115 @@ export interface PromptVersionsResponse {
 }
 
 /**
+ * A new version of a scorer definition. A body identical to the latest version is not
+ * stored again.
+ */
+export interface CreateScorerDefinitionRequest {
+  /**
+   * The definition's id. A new id creates it at version 1.
+   */
+  id: string
+  /**
+   * `judge` or `code`.
+   */
+  kind: ScorerDefinitionKind
+  /**
+   * What it measures, in a sentence.
+   */
+  description: string
+  /**
+   * Which way is better. Defaults to `higher_is_better`.
+   */
+  direction?: ScoreDirection
+  /**
+   * For `judge`: the criterion.
+   */
+  prompt?: string
+  /**
+   * For `code`: the code scorer to run.
+   */
+  builtin?: string
+  /**
+   * For `code`: its settings.
+   */
+  config?: ScorerConfig
+  /**
+   * What changed.
+   */
+  note?: string
+}
+
+/**
+ * Every version of one scorer definition, newest first.
+ */
+export interface ScorerDefinitionVersions {
+  /**
+   * The definition's id.
+   */
+  id: string
+  /**
+   * Its versions, newest first.
+   */
+  versions: ScorerDefinition[]
+}
+
+/**
+ * A new version of a live scoring rule. Posting the same body as the latest version
+ * stores nothing new.
+ */
+export interface CreateEvaluationRuleRequest {
+  /**
+   * The rule's id: lower-case letters, digits, `-` and `_`, up to 64.
+   */
+  id: string
+  /**
+   * Whether it runs. Defaults to `false`, so a rule is read back and checked before it
+   * spends anything.
+   */
+  enabled?: boolean
+  /**
+   * The scorers to run. At least one.
+   */
+  scorers: string[]
+  /**
+   * The share of matching runs to score, from 0 to 1. Defaults to 1.
+   */
+  sample_rate?: number
+  /**
+   * Only runs whose root step has this name.
+   */
+  name?: string
+  /**
+   * Only runs whose root step is this kind.
+   */
+  kind?: SpanKind
+  /**
+   * Only runs from this environment.
+   */
+  environment?: string
+  /**
+   * Only runs carrying all of these tags.
+   */
+  tags?: string[]
+  /**
+   * Only runs with this outcome.
+   */
+  status?: SpanStatus
+  /**
+   * Settings for the code scorers that need them.
+   */
+  config?: ScorerConfig
+  /**
+   * The most judged scores per minute. Defaults to 30.
+   */
+  max_judged_per_minute?: number
+  /**
+   * What changed.
+   */
+  note?: string
+}
+
+/**
  * One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback
  * all hang off a span or a trace.
  * Stored in the `spans` table.
@@ -6264,6 +6392,145 @@ export interface Prompt {
   labels: string[]
   /**
    * What changed in this version, written by whoever stored it.
+   */
+  note?: string
+  /**
+   * Which key or account stored it.
+   */
+  created_by?: string
+  /**
+   * When this version was stored.
+   */
+  created_at: string
+}
+
+/**
+ * A scorer the project defined: a judge prompt written for this agent, or a code
+ * scorer with its settings fixed. Stored as numbered versions; a version never
+ * changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the latest
+ * version or `id@3` for version 3.
+ * Stored in the `documents` table.
+ */
+export interface ScorerDefinition {
+  /**
+   * Which project owns it.
+   */
+  project: string
+  /**
+   * Its id, unique in the project: lower-case letters, digits and `_`, up to 64. It
+   * cannot be the id of a scorer mcpd ships.
+   */
+  id: string
+  /**
+   * Its version, from 1, assigned by the daemon.
+   */
+  version: number
+  /**
+   * Judged by the model, or computed by code.
+   */
+  kind: ScorerDefinitionKind
+  /**
+   * What it measures, in a sentence. Shown in the scorer catalogue.
+   */
+  description: string
+  /**
+   * Which way is better. Comparisons and live alerts read it.
+   */
+  direction: ScoreDirection
+  /**
+   * For a `judge` definition: the criterion the model grades against, such as `The
+   * answer cites the refund policy by section number.` The daemon adds the run's input
+   * and output and asks for a value from 0 to 1 with a one-sentence reason.
+   */
+  prompt?: string
+  /**
+   * For a `code` definition: the code scorer it runs, such as `keyword_coverage`.
+   */
+  builtin?: string
+  /**
+   * For a `code` definition: the settings the code scorer runs with.
+   */
+  config?: ScorerConfig
+  /**
+   * What changed in this version.
+   */
+  note?: string
+  /**
+   * Which key or account stored it.
+   */
+  created_by?: string
+  /**
+   * When this version was stored.
+   */
+  created_at: string
+}
+
+/**
+ * A rule for live scoring: which finished runs to score, with which scorers, and how
+ * many of them. The daemon reads finished runs as they arrive and scores the sampled
+ * ones in the background, so a quality drop shows up in minutes rather than at the
+ * next offline pass. Scores it writes have source `live`.
+ * Stored in the `documents` table.
+ */
+export interface EvaluationRule {
+  /**
+   * Which project it scores.
+   */
+  project: string
+  /**
+   * Its id, unique in the project.
+   */
+  id: string
+  /**
+   * Its version, from 1. Each change is a new version.
+   */
+  version: number
+  /**
+   * Whether it runs. A rule is stored disabled unless the request says otherwise.
+   */
+  enabled: boolean
+  /**
+   * The scorers to run: shipped ids, criteria from the config file, or stored
+   * definitions as `id` or `id@version`.
+   */
+  scorers: string[]
+  /**
+   * The share of matching runs to score, from 0 to 1. Chosen by a hash of the trace id,
+   * so the same run is in or out on every replica and every restart.
+   */
+  sample_rate: number
+  /**
+   * Only runs whose root step has this name.
+   */
+  name?: string
+  /**
+   * Only runs whose root step is this kind.
+   */
+  kind?: SpanKind
+  /**
+   * Only runs from this environment.
+   */
+  environment?: string
+  /**
+   * Only runs carrying all of these tags.
+   */
+  tags: string[]
+  /**
+   * Only runs with this outcome.
+   */
+  status?: SpanStatus
+  /**
+   * Settings for the code scorers that need them.
+   */
+  config?: ScorerConfig
+  /**
+   * The most judged scores the rule may produce in one minute, across the daemon. Each
+   * one is a model call, so this caps what the rule can spend. Runs over it are skipped,
+   * not queued.
+   */
+  max_judged_per_minute: number
+  /**
+   * What changed in this version.
    */
   note?: string
   /**

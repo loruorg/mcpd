@@ -1345,9 +1345,26 @@ pub async fn self_metrics(
 pub async fn list_scorers(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(p): Query<Params>,
 ) -> ApiResult<Json<Vec<crate::eval::ScorerInfo>>> {
-    authorize(&state, &headers, Scope::Read)?;
-    Ok(Json(crate::eval::catalogue(state.config.judge.as_ref())))
+    only(&p, "GET /v1/api/scorers", &["project"], &[])?;
+    let defined = match get(&p, "project") {
+        Some(project) => {
+            authorize_project(&state, &headers, Scope::Read, project)?;
+            state
+                .store
+                .list_documents(project, mcpd_store::DocKind::Scorer, None)
+                .await?
+                .iter()
+                .map(crate::definitions::to_definition)
+                .collect()
+        }
+        None => {
+            authorize(&state, &headers, Scope::Read)?;
+            Vec::new()
+        }
+    };
+    Ok(Json(crate::eval::catalogue(state.config.judge.as_ref(), &defined)))
 }
 
 /// `POST /v1/api/score` — run scorers over stored runs.
@@ -1411,7 +1428,17 @@ pub async fn compare_experiments(
 
     let base = fetch(baseline.to_owned()).await?;
     let cand = fetch(candidate.to_owned()).await?;
-    Ok(Json(crate::eval::compare(baseline, candidate, &base.items, &cand.items)))
+    let defined = state
+        .store
+        .list_documents(&project, mcpd_store::DocKind::Scorer, None)
+        .await?
+        .iter()
+        .map(|d| {
+            let d = crate::definitions::to_definition(d);
+            (d.id, d.direction)
+        })
+        .collect();
+    Ok(Json(crate::eval::compare_with(baseline, candidate, &base.items, &cand.items, &defined)))
 }
 
 // ---------------------------------------------- datasets and experiments ---
