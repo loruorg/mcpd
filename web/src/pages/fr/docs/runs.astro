@@ -13,7 +13,7 @@ const link = (route: string) => urlFor(route, loc)
 
 <Doc
   title="Exécutions"
-  description="Une exécution durable dans mcpd : la démarrer de façon idempotente, le journal et comment le suivre, événements et attentes, annulation, timers et limites, et sa place dans sa trace."
+  description="Une exécution durable dans mcpd : la démarrer de façon idempotente, le journal, événements et attentes, annulation, timers et limites, pourquoi une étape a échoué et quelle étape au vert en est la cause, et l’exécution dans sa trace."
   lede="Une exécution est une ligne, un curseur, un journal de tentatives, un jeu d’échéances et un jeu de suspensions. Cette page dit ce que vous pouvez lui faire, et ce qu’elle vous répond."
   og="docs"
 >
@@ -127,6 +127,105 @@ const link = (route: string) => urlFor(route, loc)
     budget de l’exécution dès qu’elle se termine.
   </p>
 
+  <h2>Pourquoi une étape a échoué</h2>
+  <p>
+    Les templates d’une définition sont des arêtes déclarées. Quand l’entrée
+    d’une étape lit <code>{'${steps.classify.output.kind}'}</code>, elle nomme
+    la sortie d’une autre étape, dans la version du document que cette
+    exécution a épinglée au démarrage, et le daemon doit résoudre cette
+    référence pour pouvoir évaluer l’entrée. Le daemon peut donc dire, pour une
+    étape d’une exécution, quelles sorties d’ancêtres cette étape a consommées,
+    directement et à travers les étapes intermédiaires.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="expliquer une étape"
+    command={`curl -G http://localhost:4317/v1/api/runs/run_1c4f9b02e7d3a856/cause \\
+  -H 'authorization: Bearer $MCPD_API_KEY' \\
+  --data-urlencode 'step=charge'`}
+  />
+
+  <p>
+    La réponse vaut d’être lue pour ce qu’elle trouve. L’étape qui a produit la
+    mauvaise valeur a le plus souvent <strong>réussi</strong> : un classifieur a
+    rendu une liste vide plutôt qu’une erreur, l’étape suivante a transmis la
+    liste vide sans s’en apercevoir, et l’étape d’après a échoué faute de
+    matière. Chaque statut sur ce chemin est <code>succeeded</code> sauf le
+    dernier, donc aucune recherche par statut n’atteint l’étape responsable.
+    Chaque maillon de la chaîne porte le chemin de template par lequel la
+    valeur a transité et <code>silent_producer</code>, qui vaut true quand cet
+    ancêtre s’est terminé en <code>succeeded</code> et que chaque étape entre
+    lui et l’échec aussi. C’est la lecture qu’un code de statut ne peut pas
+    vous donner : cette étape est au vert, et c’est d’elle que vient votre
+    problème.
+  </p>
+  <p>
+    <code>value_kind</code> et <code>value_empty</code> rapportent la forme de
+    ce qui a transité par le chemin, jamais la valeur. Un ancêtre terminé en
+    <code>succeeded</code> qui a transmis un tableau vide est le cas pour lequel
+    l’endpoint entier existe, et la forme suffit à le voir sans que le daemon
+    détienne quoi que ce soit qui appartienne à l’appelant.
+  </p>
+  <p>
+    La clé d’étape est un paramètre de requête et non un segment de chemin,
+    parce qu’une clé peut contenir une barre oblique : <code>refund/issue</code>
+    est une branche d’un <code>parallel</code>, et une barre oblique encodée
+    dans un segment de chemin est réécrite ou refusée par assez de proxys pour
+    en faire un mauvais contrat. Les clés avec un indice fonctionnent de la même
+    façon : <code>classify[3]</code> est un élément de <code>foreach</code> et
+    <code>poll[7]/classify</code> une itération de boucle. Une étape imbriquée
+    porte aussi ce que son conteneur a lu, parce que c’est le conteneur qui l’a
+    décidée : un élément de <code>foreach</code> nomme l’étape d’où vient le
+    tableau sur lequel il s’est déployé, ce qui explique que cet élément existe.
+    Un <code>subworkflow</code> est un seul maillon, lu dans la ligne propre de
+    l’exécution fille ; la raison de l’échec d’une étape de la fille est la
+    réponse propre de la fille, demandée avec l’identifiant d’exécution de la
+    fille. Un template qui lit <code>input</code> ne nomme aucun ancêtre, et la
+    chaîne est alors vide plutôt qu’inventée.
+  </p>
+  <p>
+    <code>max_depth</code> borne le parcours et vaut 32 par défaut, ce qui est
+    aussi son plafond. Un parcours arrêté avec des ancêtres non visités pose
+    <code>truncated</code>, si bien qu’une chaîne courte n’est jamais prise pour
+    une chaîne complète. Rien ici ne lit un prompt, une complétion ou un
+    modèle : la réponse vient du journal et de la définition, elle est donc la
+    même quand la capture des payloads de spans est désactivée.
+  </p>
+
+  <h2>Une exécution qui se répète</h2>
+  <p>
+    Une exécution dont la même clé d’étape échoue sans cesse avec une entrée
+    évaluée identique ne progresse pas. La clé d’étape intègre la branche,
+    l’élément et l’itération, donc une clé identique est une position identique
+    dans le graphe, et une entrée identique par-dessus signifie que le contexte
+    à partir duquel elle est évaluée n’a pas bougé non plus. Le daemon compte
+    ces échecs et met fin à l’exécution quand ils atteignent
+    <code>max_step_repeats</code>, en nommant l’étape et le compte, comme le
+    fait un <code>max_steps</code> épuisé.
+  </p>
+  <p>
+    <code>retry.max_attempts</code> ne couvre pas ce cas, et c’est pourquoi ce
+    plafond existe. Deux chemins réessaient sans dépenser aucun budget de
+    tentatives : un échec classé <code>unservable</code> revient au bout d’une
+    durée de bail, indéfiniment, parce que le worker a dit que l’étape n’était
+    pas à lui de servir plutôt qu’elle avait échoué, et un bail récupéré est
+    remis en file gratuitement, parce que le daemon a perdu le contact et
+    qu’imputer cela à l’étape laisserait un seul déploiement mettre fin à
+    toutes les exécutions. Une exécution coincée sur l’un ou l’autre réessaie
+    le même travail jusqu’à ce que quelque chose d’autre l’arrête.
+  </p>
+  <p>
+    Le plafond appartient au daemon, pas à une définition : il se règle avec le
+    reste des délais du stockage des exécutions dans le bloc <code>runs</code>
+    du fichier de configuration et vaut 16 par défaut. Zéro le désactive. Il
+    compte les entrées identiques et non les échecs, donc une étape dont
+    l’entrée change d’une tentative à l’autre, parce qu’une branche parallèle à
+    côté d’elle s’est terminée, est laissée tranquille. Il se place devant une
+    nouvelle tentative et nulle part ailleurs, si bien qu’un échec qui allait
+    mettre fin à l’exécution ou la laisser continuer garde sa propre erreur.
+  </p>
+
   <h2>L’exécution dans sa trace</h2>
   <p>
     Toute exécution est aussi une trace. Le daemon ouvre un span racine pour
@@ -180,6 +279,15 @@ const link = (route: string) => urlFor(route, loc)
     entièrement la surface des exécutions, et chaque endpoint d’exécution répond
     alors 503. Sauvegardez ce fichier avec le stockage des traces ;
     <code>mcpd doctor</code> le note comme un groupe à part.
+  </p>
+  <p>
+    <code>--runs-data postgres://...</code> les garde plutôt dans Postgres, et
+    plusieurs réplicas servent alors les exécutions depuis un même stockage.
+    Chaque transaction du stockage des exécutions y est
+    <code>SERIALIZABLE</code>, si bien que deux réplicas qui réclament la même
+    étape, ou déclenchent la même échéance, finissent comme le ferait un seul
+    daemon faisant les deux l’un après l’autre. Les règles ci-dessus valent sur
+    les deux stockages : une même suite de conformité tourne contre les deux.
   </p>
   <p>
     Le stockage des exécutions garde les payloads tels qu’ils ont été envoyés.
