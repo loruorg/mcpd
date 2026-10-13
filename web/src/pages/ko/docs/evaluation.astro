@@ -139,7 +139,22 @@ const locale = localeOf(Astro.url.pathname)
   <p>
     <code>score_trace_id</code>는 같은 생각의 나머지 절반입니다. 채점 실행 자체에
     트레이스를 남기면 그 id가 점수에 붙습니다. 그래서 모든 것을 낮게 매기기
-    시작한 판정 모델은 열어서 읽고, 고장 났음을 보여 줄 수 있습니다.
+    시작한 판정 모델은 열어서 읽고, 고장 났음을 보여 줄 수 있습니다. 데몬의
+    자체 판정 모델은 자기가 내는 모든 점수에 이렇게 합니다.
+  </p>
+
+  <h2>검토 대기열</h2>
+  <p>
+    사람이 봐야 할 실행은 검토 대기열에 넣습니다.
+    <code>POST /v1/api/review-queue</code>에 트레이스 id를 보내고, 원하면 단계,
+    계기가 된 피드백, 담당자, 메모를 함께 보냅니다. 항목은
+    <code>pending</code>으로 시작합니다.
+    <code>PATCH /v1/api/review-queue/{'{id}'}</code>는 항목을 배정하거나, 검토자가
+    찾은 내용과 함께 <code>reviewed</code>나 <code>dismissed</code>로 표시합니다.
+    바뀔 때마다 항목의 새 버전이 생기므로, 누가 언제 무엇을 정했는지 남습니다.
+    <code>GET /v1/api/review-queue</code>는 상태와 담당자로 거르고, 아직
+    대기 중인 항목을 셉니다. 앱의 검토 화면이 이 대기열을 처리하며,
+    실행 패널에서 실행을 대기열에 넣을 수 있습니다.
   </p>
 
   <h2>사람의 피드백</h2>
@@ -204,6 +219,126 @@ mcpd.feedback({
     가명 id를 보내십시오.
     <a href={urlFor('/docs/privacy', locale)} class="link">마스킹과 보존 기간</a>을
     보십시오.
+  </p>
+
+  <h2>실행이 말한 것이 아니라 한 일을 채점하기</h2>
+  <p>
+    대부분의 스코어러는 실행의 답을 읽습니다. <em>모든 테스트를 돌렸고 회귀는
+    없었습니다</em>로 끝나는 에이전트는 그 스코어러를 모두 통과하고, 판정 모델도
+    통과합니다. 문장이 잘 짜여 있고 맞는 말을 하기 때문입니다. 그 문장은
+    에이전트가 자기 일에 대해 하는 설명이고, 설명은 증거가 아닙니다. 테스트
+    명령이 한 번도 돌지 않았다면, 답을 읽는 스코어러는 그 사실을 알려 줄 수
+    없습니다.
+  </p>
+  <p>
+    내장 스코어러 둘은 대신 트레이스를 읽습니다. 답은 아예 보지 않고, 실행이
+    무엇을 기록했는지 묻습니다.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>스코어러</th><th>1점을 주는 경우</th><th>설정</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>span_present</code></td>
+        <td>실행이 요구한 종류나 이름의 스팬을 하나 이상 기록했습니다.</td>
+        <td><code>span_kind</code>, <code>span_name</code>, 또는 둘 다입니다. 둘 다 정하면 둘 다 맞아야 합니다.</td>
+      </tr>
+      <tr>
+        <td><code>tool_succeeded</code></td>
+        <td>그 이름의 도구 스팬이 돌았고, 그 호출 중 하나 이상이 <code>ok</code>로 끝났습니다.</td>
+        <td><code>tool_name</code>입니다.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    둘 다 설정이 필요하므로 어느 것도 기본 묶음에서 돌지 않습니다. 무엇을 볼지
+    아무도 알려 주지 않아서 통과한 스코어러는, 아무도 확인하지 않은 일을 모든
+    실행이 했다고 보고하게 됩니다. 그것이 바로 이 스코어러가 잡으려는 실패입니다.
+    이름을 지목하고 설정을 주십시오.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "trace_ids": ["4bf92f3577b34da6a3ce929d0e0e4736"],
+  "scorers": ["tool_succeeded", "span_present"],
+  "config": {
+    "tool_name": "run_tests",
+    "span_kind": "tool_call",
+    "span_name": "run_tests"
+  }
+}`}</code></pre>
+
+  <p>
+    <code>span_name</code>과 <code>tool_name</code>은 정확히 비교하며,
+    <code>case_sensitive</code>도 이 비교를 느슨하게 하지 않습니다. 스팬 이름은
+    글이 아니라 코드가 정한 식별자입니다. 느슨하게 비교하면
+    <code>run_tests_dry</code>가 <code>run_tests</code>에 대한 확인을 통과하게
+    되고, 그것도 바로 그 확인이 겨냥한 실행에서 그렇게 됩니다.
+    <code>tool_succeeded</code>는 도구 스팬 종류 넷,
+    <code>tool_call</code>, <code>client_tool_call</code>,
+    <code>provider_tool_call</code>, <code>mcp_tool_call</code>을 모두 받습니다.
+    실행이 그중 무엇을 기록하는지는 도구가 어디에 있는지를 말할 뿐, 도구가
+    돌았는지를 말하지 않기 때문입니다.
+  </p>
+
+  <h3>0점이 되는 두 가지 길은 서로 다른 버그입니다</h3>
+  <p>
+    돌지 않은 도구와 돌았지만 실패한 도구는 둘 다 0점이지만, 고치는 일은
+    정반대입니다. 하나는 에이전트가 건너뛴 단계이고, 다른 하나는 깨진
+    단계입니다. <code>reason</code>이 둘을 가르고, 기록된 오류를 함께 실어서
+    실행을 열지 않아도 점수만으로 손을 쓸 수 있게 합니다.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>일어난 일</th><th><code>reason</code></th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>도구가 한 번도 돌지 않았습니다.</td>
+        <td><code>"run_tests" never ran; the run records 2 tool call(s), named: lookup_order, send_email</code></td>
+      </tr>
+      <tr>
+        <td>돌았고 실패했습니다.</td>
+        <td><code>"run_tests" ran 1 time(s) and none ended ok; the last ended error: pytest exited 1: 3 failed</code></td>
+      </tr>
+      <tr>
+        <td>실패했고, 재시도했고, 성공했습니다.</td>
+        <td><code>"run_tests" ran 2 time(s), 1 ended ok and 1 did not</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>span_present</code>도 자기 0점에 같은 일을 합니다. 무엇을 찾았는지,
+    그리고 실행이 실제로 무엇을 담고 있는지를 밝힙니다. 잘못된 이름과 빠진 계측은
+    맨 <em>찾지 못함</em>만으로는 구별되지 않지만, 고치는 방법에는 공통점이
+    없기 때문입니다.
+  </p>
+
+  <h3>이 스코어러가 증명하는 것과 증명하지 않는 것</h3>
+  <p>
+    이 스코어러는 동작이 <strong>기록되었다</strong>는 것을 증명합니다. 그 동작이
+    옳았다는 것은 증명하지 않습니다. <code>ok</code>로 끝난
+    <code>run_tests</code> 스팬은 도구가 예외 없이 돌아왔다는 뜻입니다. 맞는
+    테스트 묶음을 돌렸다는 뜻도, 묶음 전체를 돌렸다는 뜻도, 누가 그 결과를
+    읽었다는 뜻도 아닙니다. 초록색 <code>tool_succeeded</code>를 코드가 동작한다는
+    증거로 여기는 것은 문장을 믿는 것과 같은 실수를 한 걸음 더 나아가 하는
+    것입니다.
+  </p>
+  <p>
+    이 스코어러는 세상이 아니라 트레이스를 잽니다. 스팬은 프로세스가 기록했기
+    때문에 있습니다. 계측하지 않은 단계 안에서 일어난 일은 여기서 보이지 않고,
+    일어나지 않은 일과 똑같이 읽힙니다. 이 스코어러가 실패가 아닌 것을 실패로
+    보고하는 길은 이것 하나입니다. 0점이 나오면 에이전트가 거짓말을 했다고
+    결론 내리기 전에 계측부터 확인하십시오.
+  </p>
+  <p>
+    둘 다 페이로드 수집이 꺼져 있어도 동작합니다. 어느 쪽도 입력, 출력, 완성을
+    읽지 않습니다. 스팬 종류, 스팬 이름, 스팬 상태를 읽으며, 데몬은 수집 설정이
+    무엇이든 이 값을 가지고 있습니다.
   </p>
 
   <h2>나쁜 답을 찾아내는 질의</h2>
