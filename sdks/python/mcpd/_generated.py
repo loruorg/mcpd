@@ -201,6 +201,8 @@ class ScorerKind(str, Enum):
     """A built-in rubric graded by the configured judge model, in steps: preprocess, analyze, score, reason."""
     CRITERION = "criterion"
     """A criterion the operator wrote under `judge.criteria`, graded by the judge model in one call."""
+    CUSTOM = "custom"
+    """A scorer definition stored in the project through the API: a judge prompt, or a code scorer with its settings. Versioned, and the version is on every score it produces."""
 
 class ScoreDirection(str, Enum):
     """Which way a scorer's value is better. A comparison reads a fall in `toxicity` as an improvement and a fall in `faithfulness` as a regression."""
@@ -647,6 +649,32 @@ class SsoProvider(str, Enum):
     """Any OpenID Connect provider, such as Google, Microsoft Entra ID, Okta or Auth0, found through its issuer's discovery document. Authorization code flow with PKCE, state and nonce."""
     GITHUB = "github"
     """GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub user id and the email is the primary verified address GitHub reports."""
+
+class PromptKind(str, Enum):
+    """The shape of a prompt's body."""
+
+    TEXT = "text"
+    """One template string, for a completion-style call."""
+    CHAT = "chat"
+    """An ordered list of messages, each with a `role` and a `content` template, for a chat-style call."""
+
+class ScorerDefinitionKind(str, Enum):
+    """How a stored scorer definition reaches its answer."""
+
+    JUDGE = "judge"
+    """The configured judge model grades the run against the definition's `prompt`, in one call."""
+    CODE = "code"
+    """One of the daemon's code scorers, named in `builtin`, with the settings in `config` fixed. Free, and gives the same answer twice."""
+
+class ReviewStatus(str, Enum):
+    """Where an item in the review queue has got to."""
+
+    PENDING = "pending"
+    """Waiting for a person."""
+    REVIEWED = "reviewed"
+    """A person looked at it and recorded what they found."""
+    DISMISSED = "dismissed"
+    """A person looked at it and it needed nothing."""
 
 @dataclass(**_SLOTS)
 class InputTokenDetails:
@@ -1209,6 +1237,10 @@ class ScorerConfig:
     """The tool that must have run and ended `ok`, for `tool_succeeded`. Matched exactly against the `name` of a span whose kind is `tool_call`, `client_tool_call`, `provider_tool_call` or `mcp_tool_call`."""
     pattern: str | None = None
     """A regular expression the answer must match somewhere, for `matches_pattern`."""
+    trajectory_match: str | None = None
+    """How `trajectory` compares the tools the run called with `expected_tools`: `strict` for the same calls in the same order and nothing else, `ordered` for the expected calls in order with others allowed between them, `unordered` for every expected call in any order. Defaults to `ordered`."""
+    max_steps: int | None = None
+    """The most steps a healthy run takes, for `trajectory`. A step is a tool call, a model generation or a handoff."""
     min_chars: int | None = None
     """The shortest acceptable answer in characters, for `answer_length`."""
     max_chars: int | None = None
@@ -2793,6 +2825,290 @@ class SsoCallbackRequest:
     """The binding from the start of the flow."""
 
 @dataclass(**_SLOTS)
+class CreatePromptRequest:
+    """A new version of a prompt. Posting a body identical to the latest version stores nothing new and returns that version, so a deploy that posts its prompts on every start is a no-op when nothing changed.
+    """
+
+    name: str
+    """The prompt's name. A new name creates the prompt at version 1."""
+    kind: PromptKind | None = None
+    """`text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`."""
+    template: str | None = None
+    """The template, for a `text` prompt."""
+    messages: Any | None = None
+    """The messages, for a `chat` prompt."""
+    config: Any | None = None
+    """Model settings to store with it."""
+    note: str | None = None
+    """What changed."""
+    labels: list[str] | None = None
+    """Labels to point at the stored version once it is stored, such as `staging`."""
+
+@dataclass(**_SLOTS)
+class PromptLabelRequest:
+    """Which version a label should point at.
+    """
+
+    version: int
+    """The version. It must exist."""
+
+@dataclass(**_SLOTS)
+class PromptVersionsResponse:
+    """Every version of one prompt, newest first.
+    """
+
+    name: str
+    """The prompt's name."""
+    versions: list[Prompt] = field(default_factory=list)
+    """Its versions, newest first, each with the labels that point at it."""
+
+@dataclass(**_SLOTS)
+class CreateScorerDefinitionRequest:
+    """A new version of a scorer definition. A body identical to the latest version is not stored again.
+    """
+
+    id: str
+    """The definition's id. A new id creates it at version 1."""
+    kind: ScorerDefinitionKind
+    """`judge` or `code`."""
+    description: str
+    """What it measures, in a sentence."""
+    direction: ScoreDirection | None = None
+    """Which way is better. Defaults to `higher_is_better`."""
+    prompt: str | None = None
+    """For `judge`: the criterion."""
+    builtin: str | None = None
+    """For `code`: the code scorer to run."""
+    config: ScorerConfig | None = None
+    """For `code`: its settings."""
+    note: str | None = None
+    """What changed."""
+
+@dataclass(**_SLOTS)
+class ScorerDefinitionVersions:
+    """Every version of one scorer definition, newest first.
+    """
+
+    id: str
+    """The definition's id."""
+    versions: list[ScorerDefinition] = field(default_factory=list)
+    """Its versions, newest first."""
+
+@dataclass(**_SLOTS)
+class CreateEvaluationRuleRequest:
+    """A new version of a live scoring rule. Posting the same body as the latest version stores nothing new.
+    """
+
+    id: str
+    """The rule's id: lower-case letters, digits, `-` and `_`, up to 64."""
+    scorers: list[str] = field(default_factory=list)
+    """The scorers to run. At least one."""
+    enabled: bool | None = None
+    """Whether it runs. Defaults to `false`, so a rule is read back and checked before it spends anything."""
+    sample_rate: float | None = None
+    """The share of matching runs to score, from 0 to 1. Defaults to 1."""
+    name: str | None = None
+    """Only runs whose root step has this name."""
+    kind: SpanKind | None = None
+    """Only runs whose root step is this kind."""
+    environment: str | None = None
+    """Only runs from this environment."""
+    tags: list[str] | None = None
+    """Only runs carrying all of these tags."""
+    status: SpanStatus | None = None
+    """Only runs with this outcome."""
+    config: ScorerConfig | None = None
+    """Settings for the code scorers that need them."""
+    max_judged_per_minute: int | None = None
+    """The most judged scores per minute. Defaults to 30."""
+    note: str | None = None
+    """What changed."""
+
+@dataclass(**_SLOTS)
+class TrajectoryStep:
+    """One action an agent took: a tool call, a model generation or a handoff, in the order they started.
+    """
+
+    index: int
+    """Its position in the trajectory, from 0."""
+    span_id: str
+    """The span it was read from."""
+    kind: SpanKind
+    """What kind of action."""
+    name: str
+    """The tool, model step or agent it names."""
+    status: SpanStatus
+    """How it ended."""
+    start_offset_ms: float
+    """When it started, in milliseconds after the run started."""
+    duration_ms: float | None = None
+    """How long it took. Absent while it is still running."""
+    model: str | None = None
+    """The model, for a model generation."""
+    input_preview: str | None = None
+    """The start of its input as plain text, up to 240 characters."""
+    output_preview: str | None = None
+    """The start of its output as plain text, up to 240 characters."""
+    tokens: int | None = None
+    """Input and output tokens together, for a model generation."""
+
+@dataclass(**_SLOTS)
+class Trajectory:
+    """A run read as the sequence of actions its agent took. This is what a trajectory is scored on: which tools were called, in what order, how many steps it took, and whether it ended with an answer.
+    """
+
+    trace_id: str
+    """The run."""
+    step_count: int
+    """How many steps."""
+    tool_count: int
+    """How many of them were tool calls."""
+    error_count: int
+    """How many of them failed."""
+    goal_reached: bool
+    """True when the run ended `ok` with a non-empty answer."""
+    steps: list[TrajectoryStep] = field(default_factory=list)
+    """Every action, in start order."""
+    tool_sequence: list[str] = field(default_factory=list)
+    """The names of the tool calls, in order. What `expected_tools` is compared with."""
+    final_output_preview: str | None = None
+    """The start of the run's answer, from the root step's output."""
+
+@dataclass(**_SLOTS)
+class ExperimentScoreRequest:
+    """Which scorers to run over every run recorded under an experiment.
+    """
+
+    scorers: list[str] = field(default_factory=list)
+    """The scorers, as `POST /v1/api/score` takes them. Empty runs the code scorers that need no settings."""
+    dry_run: bool = False
+    """Store nothing; report what would be stored."""
+    config: ScorerConfig | None = None
+    """Settings for the code scorers. `expected` is filled per run from the dataset case the run answered, when the run names one."""
+
+@dataclass(**_SLOTS)
+class ExperimentItemResult:
+    """One case of an experiment: the run that answered it and how each scorer marked it.
+    """
+
+    trace_id: str
+    """The run that answered the case."""
+    status: SpanStatus
+    """How the run ended."""
+    scores: Any
+    """The mean value per scorer for this run, keyed by scorer id."""
+    item_id: str | None = None
+    """The dataset case, when the run named one in its `mcpd.dataset_item_id` attribute."""
+    duration_ns: int | None = None
+    """How long the run took."""
+    cost: float | None = None
+    """What the run cost."""
+    input_preview: str | None = None
+    """The start of the run's input."""
+    output_preview: str | None = None
+    """The start of the run's answer."""
+    expected: Any | None = None
+    """The case's expected answer, when it has one."""
+
+@dataclass(**_SLOTS)
+class ScorerSummary:
+    """One scorer's marks across an experiment.
+    """
+
+    scorer_id: str
+    """The scorer."""
+    n: int
+    """How many scores."""
+    mean: float
+    """Their mean."""
+    min: float
+    """The lowest."""
+    max: float
+    """The highest."""
+    direction: ScoreDirection
+    """Which way is better."""
+
+@dataclass(**_SLOTS)
+class ExperimentResults:
+    """An experiment case by case, with a summary per scorer. Two of these joined on `item_id` are the per-case comparison of two versions.
+    """
+
+    experiment_id: str
+    """The experiment."""
+    runs: int
+    """How many runs are recorded under it."""
+    failed: int
+    """How many of them ended in an error."""
+    items: list[ExperimentItemResult] = field(default_factory=list)
+    """One row per run recorded under the experiment, oldest first."""
+    scorers: list[ScorerSummary] = field(default_factory=list)
+    """Per scorer, across every run."""
+
+@dataclass(**_SLOTS)
+class CreateReviewItemRequest:
+    """A run to queue for review.
+    """
+
+    trace_id: str
+    """The run."""
+    span_id: str | None = None
+    """The step, when it is one step."""
+    feedback_id: str | None = None
+    """The feedback that prompted it."""
+    assignee: str | None = None
+    """Who should review it."""
+    note: str | None = None
+    """Why it is queued."""
+
+@dataclass(**_SLOTS)
+class UpdateReviewItemRequest:
+    """A change to a review item. Absent fields keep their value.
+    """
+
+    status: ReviewStatus | None = None
+    """The new status."""
+    assignee: str | None = None
+    """The new assignee. An empty string unassigns it."""
+    note: str | None = None
+    """What the reviewer found."""
+
+@dataclass(**_SLOTS)
+class ReviewQueueResponse:
+    """The review queue, newest first.
+    """
+
+    pending: int
+    """How many items in the project are still pending, whatever the filter."""
+    items: list[ReviewItem] = field(default_factory=list)
+    """The items that matched, newest change first."""
+
+@dataclass(**_SLOTS)
+class DatasetVersion:
+    """A frozen copy of a dataset's cases. An experiment that names a version runs against exactly those cases, whatever has been added to the dataset since.
+    """
+
+    dataset_id: str
+    """The dataset."""
+    version: int
+    """Its number, from 1."""
+    item_count: int
+    """How many cases it froze."""
+    created_at: datetime
+    """When it was frozen."""
+    note: str | None = None
+    """What changed since the version before."""
+    created_by: str | None = None
+    """Which key or account froze it."""
+
+@dataclass(**_SLOTS)
+class CreateDatasetVersionRequest:
+    """Freeze the dataset's current cases as a new version.
+    """
+
+    note: str | None = None
+    """What changed since the version before."""
+
+@dataclass(**_SLOTS)
 class Span:
     """One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.
 
@@ -2903,6 +3219,10 @@ class Trace:
     """Token usage summed across every model span in the trace."""
     cost: Cost | None = None
     """Cost summed across the trace. This is the number a bill is reconciled against."""
+    input_preview: str | None = None
+    """The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list when it is asked with `preview=true`; the full input is on the span."""
+    output_preview: str | None = None
+    """The start of the root step's output as plain text, up to 240 characters. Filled by the trace list when it is asked with `preview=true`; the full output is on the span."""
     tags: list[str] | None = None
     """Tags from the root span."""
     score_summary: Any | None = None
@@ -3459,6 +3779,150 @@ class Theme:
     """This theme's share of the notes the snapshot read for this aspect, between 0 and 1. The denominator is the snapshot's `note_count`, so in a capped snapshot it is a share of what was read."""
 
     TABLE = "themes"
+
+@dataclass(**_SLOTS)
+class Prompt:
+    """One version of a named prompt. A version never changes once stored: a new body is a new version, and labels such as `production` and `staging` point at the version a caller should use. SDKs fetch a prompt by name and label, render it with variables, and link the spans that used it, so a trace shows which version produced an answer.
+
+    Stored in the `documents` table.
+    """
+
+    project: str
+    """Which project owns it."""
+    name: str
+    """The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and `/`, up to 128 characters."""
+    version: int
+    """Its version, from 1, assigned by the daemon in the order versions arrive."""
+    kind: PromptKind
+    """Whether the body is one template or a list of messages."""
+    created_at: datetime
+    """When this version was stored."""
+    variables: list[str] = field(default_factory=list)
+    """Every variable the body names, in order of first use, without duplicates."""
+    labels: list[str] = field(default_factory=list)
+    """The labels that point at this version now."""
+    template: str | None = None
+    """The template, for a `text` prompt. Variables are written `{{name}}`."""
+    messages: Any | None = None
+    """The messages, for a `chat` prompt: an array of objects with `role` and `content`, where `content` is a template."""
+    config: Any | None = None
+    """Model settings stored with the prompt, such as `model` and `temperature`. The daemon stores them and does not read them."""
+    note: str | None = None
+    """What changed in this version, written by whoever stored it."""
+    created_by: str | None = None
+    """Which key or account stored it."""
+
+    TABLE = "documents"
+
+@dataclass(**_SLOTS)
+class ScorerDefinition:
+    """A scorer the project defined: a judge prompt written for this agent, or a code scorer with its settings fixed. Stored as numbered versions; a version never changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the latest version or `id@3` for version 3.
+
+    Stored in the `documents` table.
+    """
+
+    project: str
+    """Which project owns it."""
+    id: str
+    """Its id, unique in the project: lower-case letters, digits and `_`, up to 64. It cannot be the id of a scorer mcpd ships."""
+    version: int
+    """Its version, from 1, assigned by the daemon."""
+    kind: ScorerDefinitionKind
+    """Judged by the model, or computed by code."""
+    description: str
+    """What it measures, in a sentence. Shown in the scorer catalogue."""
+    direction: ScoreDirection
+    """Which way is better. Comparisons and live alerts read it."""
+    created_at: datetime
+    """When this version was stored."""
+    prompt: str | None = None
+    """For a `judge` definition: the criterion the model grades against, such as `The answer cites the refund policy by section number.` The daemon adds the run's input and output and asks for a value from 0 to 1 with a one-sentence reason."""
+    builtin: str | None = None
+    """For a `code` definition: the code scorer it runs, such as `keyword_coverage`."""
+    config: ScorerConfig | None = None
+    """For a `code` definition: the settings the code scorer runs with."""
+    note: str | None = None
+    """What changed in this version."""
+    created_by: str | None = None
+    """Which key or account stored it."""
+
+    TABLE = "documents"
+
+@dataclass(**_SLOTS)
+class EvaluationRule:
+    """A rule for live scoring: which finished runs to score, with which scorers, and how many of them. The daemon reads finished runs as they arrive and scores the sampled ones in the background, so a quality drop shows up in minutes rather than at the next offline pass. Scores it writes have source `live`.
+
+    Stored in the `documents` table.
+    """
+
+    project: str
+    """Which project it scores."""
+    id: str
+    """Its id, unique in the project."""
+    version: int
+    """Its version, from 1. Each change is a new version."""
+    enabled: bool
+    """Whether it runs. A rule is stored disabled unless the request says otherwise."""
+    sample_rate: float
+    """The share of matching runs to score, from 0 to 1. Chosen by a hash of the trace id, so the same run is in or out on every replica and every restart."""
+    max_judged_per_minute: int
+    """The most judged scores the rule may produce in one minute, across the daemon. Each one is a model call, so this caps what the rule can spend. Runs over it are skipped, not queued."""
+    created_at: datetime
+    """When this version was stored."""
+    scorers: list[str] = field(default_factory=list)
+    """The scorers to run: shipped ids, criteria from the config file, or stored definitions as `id` or `id@version`."""
+    tags: list[str] = field(default_factory=list)
+    """Only runs carrying all of these tags."""
+    name: str | None = None
+    """Only runs whose root step has this name."""
+    kind: SpanKind | None = None
+    """Only runs whose root step is this kind."""
+    environment: str | None = None
+    """Only runs from this environment."""
+    status: SpanStatus | None = None
+    """Only runs with this outcome."""
+    config: ScorerConfig | None = None
+    """Settings for the code scorers that need them."""
+    note: str | None = None
+    """What changed in this version."""
+    created_by: str | None = None
+    """Which key or account stored it."""
+
+    TABLE = "documents"
+
+@dataclass(**_SLOTS)
+class ReviewItem:
+    """A run, or one step of it, queued for a person to review. Queue the runs a low score or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every change is kept, so the item's history says who decided what and when. Corrections and labels go on the run as feedback.
+
+    Stored in the `documents` table.
+    """
+
+    project: str
+    """Which project."""
+    review_id: str
+    """Its id."""
+    version: int
+    """How many times it has changed, from 1."""
+    trace_id: str
+    """The run to review."""
+    status: ReviewStatus
+    """Where it has got to."""
+    created_at: datetime
+    """When it was queued."""
+    updated_at: datetime
+    """When it last changed."""
+    span_id: str | None = None
+    """The step to look at, when it is one step."""
+    feedback_id: str | None = None
+    """The feedback that put it in the queue, when it was feedback."""
+    assignee: str | None = None
+    """Who should review it."""
+    note: str | None = None
+    """Why it is queued, or what the reviewer found."""
+    updated_by: str | None = None
+    """Which key or account made the latest change."""
+
+    TABLE = "documents"
 
 #: Wire name -> attribute name, for the fields Python could not spell.
 RESERVED_FIELD_NAMES = {

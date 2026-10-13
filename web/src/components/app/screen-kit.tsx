@@ -36,7 +36,8 @@ const qs = (params: Record<string, string | number | boolean | undefined | null>
 }
 
 export const more = {
-  scorers: (o?: ClientOptions) => request<ScorerInfo[]>('/v1/api/scorers', o),
+  scorers: (o?: ClientOptions, project?: string) =>
+    request<ScorerInfo[]>(`/v1/api/scorers${qs({ project })}`, o),
   scores: (
     params: { project: string; scorer_id?: string; trace_id?: string; experiment_id?: string; limit?: number },
     o?: ClientOptions,

@@ -614,6 +614,9 @@ pub enum ScorerKind {
     /// A criterion the operator wrote under `judge.criteria`, graded by the judge model in
     /// one call.
     Criterion,
+    /// A scorer definition stored in the project through the API: a judge prompt, or a code
+    /// scorer with its settings. Versioned, and the version is on every score it produces.
+    Custom,
 }
 
 impl ScorerKind {
@@ -623,11 +626,12 @@ impl ScorerKind {
             Self::Code => "code",
             Self::Judge => "judge",
             Self::Criterion => "criterion",
+            Self::Custom => "custom",
         }
     }
 
     /// Every variant, in declaration order.
-    pub const ALL: &'static [Self] = &[Self::Code, Self::Judge, Self::Criterion];
+    pub const ALL: &'static [Self] = &[Self::Code, Self::Judge, Self::Criterion, Self::Custom];
 }
 
 impl std::str::FromStr for ScorerKind {
@@ -637,6 +641,7 @@ impl std::str::FromStr for ScorerKind {
             "code" => Ok(Self::Code),
             "judge" => Ok(Self::Judge),
             "criterion" => Ok(Self::Criterion),
+            "custom" => Ok(Self::Custom),
             _ => Err(()),
         }
     }
@@ -2582,6 +2587,133 @@ impl std::fmt::Display for SsoProvider {
     }
 }
 
+/// The shape of a prompt's body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptKind {
+    /// One template string, for a completion-style call.
+    Text,
+    /// An ordered list of messages, each with a `role` and a `content` template, for a
+    /// chat-style call.
+    Chat,
+}
+
+impl PromptKind {
+    /// The wire representation, exactly as it appears in JSON.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Chat => "chat",
+        }
+    }
+
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[Self::Text, Self::Chat];
+}
+
+impl std::str::FromStr for PromptKind {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "text" => Ok(Self::Text),
+            "chat" => Ok(Self::Chat),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for PromptKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// How a stored scorer definition reaches its answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScorerDefinitionKind {
+    /// The configured judge model grades the run against the definition's `prompt`, in one
+    /// call.
+    Judge,
+    /// One of the daemon's code scorers, named in `builtin`, with the settings in `config`
+    /// fixed. Free, and gives the same answer twice.
+    Code,
+}
+
+impl ScorerDefinitionKind {
+    /// The wire representation, exactly as it appears in JSON.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Judge => "judge",
+            Self::Code => "code",
+        }
+    }
+
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[Self::Judge, Self::Code];
+}
+
+impl std::str::FromStr for ScorerDefinitionKind {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "judge" => Ok(Self::Judge),
+            "code" => Ok(Self::Code),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for ScorerDefinitionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Where an item in the review queue has got to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewStatus {
+    /// Waiting for a person.
+    Pending,
+    /// A person looked at it and recorded what they found.
+    Reviewed,
+    /// A person looked at it and it needed nothing.
+    Dismissed,
+}
+
+impl ReviewStatus {
+    /// The wire representation, exactly as it appears in JSON.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Reviewed => "reviewed",
+            Self::Dismissed => "dismissed",
+        }
+    }
+
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[Self::Pending, Self::Reviewed, Self::Dismissed];
+}
+
+impl std::str::FromStr for ReviewStatus {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "reviewed" => Ok(Self::Reviewed),
+            "dismissed" => Ok(Self::Dismissed),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for ReviewStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Input tokens broken down by how the provider billed them. Every field is optional;
 /// absent means the provider did not report it, which is different from zero.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3409,6 +3541,16 @@ pub struct ScorerConfig {
     /// Tools the run must not call, for `tool_not_called`.
     #[serde(default)]
     pub forbidden_tools: Vec<String>,
+    /// How `trajectory` compares the tools the run called with `expected_tools`: `strict`
+    /// for the same calls in the same order and nothing else, `ordered` for the expected
+    /// calls in order with others allowed between them, `unordered` for every expected call
+    /// in any order. Defaults to `ordered`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trajectory_match: Option<String>,
+    /// The most steps a healthy run takes, for `trajectory`. A step is a tool call, a model
+    /// generation or a handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<u32>,
     /// The shortest acceptable answer in characters, for `answer_length`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_chars: Option<u32>,
@@ -3451,6 +3593,8 @@ impl Default for ScorerConfig {
             pattern: None,
             expected_tools: Vec::new(),
             forbidden_tools: Vec::new(),
+            trajectory_match: None,
+            max_steps: None,
             min_chars: None,
             max_chars: None,
             json_schema: None,
@@ -5543,6 +5687,367 @@ pub struct SsoCallbackRequest {
     pub binding: String,
 }
 
+/// A new version of a prompt. Posting a body identical to the latest version stores
+/// nothing new and returns that version, so a deploy that posts its prompts on every
+/// start is a no-op when nothing changed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatePromptRequest {
+    /// The prompt's name. A new name creates the prompt at version 1.
+    pub name: String,
+    /// `text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PromptKind>,
+    /// The template, for a `text` prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// The messages, for a `chat` prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<serde_json::Value>,
+    /// Model settings to store with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+    /// What changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Labels to point at the stored version once it is stored, such as `staging`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+}
+
+/// Which version a label should point at.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptLabelRequest {
+    /// The version. It must exist.
+    pub version: u32,
+}
+
+/// Every version of one prompt, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptVersionsResponse {
+    /// The prompt's name.
+    pub name: String,
+    /// Its versions, newest first, each with the labels that point at it.
+    #[serde(default)]
+    pub versions: Vec<Prompt>,
+}
+
+/// A new version of a scorer definition. A body identical to the latest version is not
+/// stored again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateScorerDefinitionRequest {
+    /// The definition's id. A new id creates it at version 1.
+    pub id: String,
+    /// `judge` or `code`.
+    pub kind: ScorerDefinitionKind,
+    /// What it measures, in a sentence.
+    pub description: String,
+    /// Which way is better. Defaults to `higher_is_better`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<ScoreDirection>,
+    /// For `judge`: the criterion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// For `code`: the code scorer to run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<String>,
+    /// For `code`: its settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<ScorerConfig>,
+    /// What changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Every version of one scorer definition, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScorerDefinitionVersions {
+    /// The definition's id.
+    pub id: String,
+    /// Its versions, newest first.
+    #[serde(default)]
+    pub versions: Vec<ScorerDefinition>,
+}
+
+/// A new version of a live scoring rule. Posting the same body as the latest version
+/// stores nothing new.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateEvaluationRuleRequest {
+    /// The rule's id: lower-case letters, digits, `-` and `_`, up to 64.
+    pub id: String,
+    /// Whether it runs. Defaults to `false`, so a rule is read back and checked before it
+    /// spends anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// The scorers to run. At least one.
+    #[serde(default)]
+    pub scorers: Vec<String>,
+    /// The share of matching runs to score, from 0 to 1. Defaults to 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<f64>,
+    /// Only runs whose root step has this name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Only runs whose root step is this kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SpanKind>,
+    /// Only runs from this environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    /// Only runs carrying all of these tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    /// Only runs with this outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<SpanStatus>,
+    /// Settings for the code scorers that need them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<ScorerConfig>,
+    /// The most judged scores per minute. Defaults to 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_judged_per_minute: Option<u32>,
+    /// What changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// One action an agent took: a tool call, a model generation or a handoff, in the order
+/// they started.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrajectoryStep {
+    /// Its position in the trajectory, from 0.
+    pub index: u32,
+    /// The span it was read from.
+    pub span_id: String,
+    /// What kind of action.
+    pub kind: SpanKind,
+    /// The tool, model step or agent it names.
+    pub name: String,
+    /// How it ended.
+    pub status: SpanStatus,
+    /// When it started, in milliseconds after the run started.
+    pub start_offset_ms: f64,
+    /// How long it took. Absent while it is still running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<f64>,
+    /// The model, for a model generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The start of its input as plain text, up to 240 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_preview: Option<String>,
+    /// The start of its output as plain text, up to 240 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_preview: Option<String>,
+    /// Input and output tokens together, for a model generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+}
+
+/// A run read as the sequence of actions its agent took. This is what a trajectory is
+/// scored on: which tools were called, in what order, how many steps it took, and
+/// whether it ended with an answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Trajectory {
+    /// The run.
+    pub trace_id: String,
+    /// Every action, in start order.
+    #[serde(default)]
+    pub steps: Vec<TrajectoryStep>,
+    /// The names of the tool calls, in order. What `expected_tools` is compared with.
+    #[serde(default)]
+    pub tool_sequence: Vec<String>,
+    /// How many steps.
+    pub step_count: u32,
+    /// How many of them were tool calls.
+    pub tool_count: u32,
+    /// How many of them failed.
+    pub error_count: u32,
+    /// The start of the run's answer, from the root step's output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_output_preview: Option<String>,
+    /// True when the run ended `ok` with a non-empty answer.
+    pub goal_reached: bool,
+}
+
+/// Which scorers to run over every run recorded under an experiment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentScoreRequest {
+    /// The scorers, as `POST /v1/api/score` takes them. Empty runs the code scorers that
+    /// need no settings.
+    #[serde(default)]
+    pub scorers: Vec<String>,
+    /// Settings for the code scorers. `expected` is filled per run from the dataset case
+    /// the run answered, when the run names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<ScorerConfig>,
+    /// Store nothing; report what would be stored.
+    #[serde(default = "experiment_score_request_default_dry_run")]
+    pub dry_run: bool,
+}
+
+/// Spec-declared default for [`ExperimentScoreRequest::dry_run`].
+fn experiment_score_request_default_dry_run() -> bool {
+    false
+}
+
+impl Default for ExperimentScoreRequest {
+    fn default() -> Self {
+        Self {
+            scorers: Vec::new(),
+            config: None,
+            dry_run: experiment_score_request_default_dry_run(),
+        }
+    }
+}
+
+/// One case of an experiment: the run that answered it and how each scorer marked it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentItemResult {
+    /// The run that answered the case.
+    pub trace_id: String,
+    /// The dataset case, when the run named one in its `mcpd.dataset_item_id` attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    /// How the run ended.
+    pub status: SpanStatus,
+    /// How long the run took.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ns: Option<u64>,
+    /// What the run cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    /// The start of the run's input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_preview: Option<String>,
+    /// The start of the run's answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_preview: Option<String>,
+    /// The case's expected answer, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<serde_json::Value>,
+    /// The mean value per scorer for this run, keyed by scorer id.
+    pub scores: serde_json::Value,
+}
+
+/// One scorer's marks across an experiment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScorerSummary {
+    /// The scorer.
+    pub scorer_id: String,
+    /// How many scores.
+    pub n: u64,
+    /// Their mean.
+    pub mean: f64,
+    /// The lowest.
+    pub min: f64,
+    /// The highest.
+    pub max: f64,
+    /// Which way is better.
+    pub direction: ScoreDirection,
+}
+
+/// An experiment case by case, with a summary per scorer. Two of these joined on
+/// `item_id` are the per-case comparison of two versions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentResults {
+    /// The experiment.
+    pub experiment_id: String,
+    /// One row per run recorded under the experiment, oldest first.
+    #[serde(default)]
+    pub items: Vec<ExperimentItemResult>,
+    /// Per scorer, across every run.
+    #[serde(default)]
+    pub scorers: Vec<ScorerSummary>,
+    /// How many runs are recorded under it.
+    pub runs: u32,
+    /// How many of them ended in an error.
+    pub failed: u32,
+}
+
+/// A run to queue for review.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateReviewItemRequest {
+    /// The run.
+    pub trace_id: String,
+    /// The step, when it is one step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
+    /// The feedback that prompted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_id: Option<String>,
+    /// Who should review it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// Why it is queued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A change to a review item. Absent fields keep their value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateReviewItemRequest {
+    /// The new status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ReviewStatus>,
+    /// The new assignee. An empty string unassigns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// What the reviewer found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Default for UpdateReviewItemRequest {
+    fn default() -> Self {
+        Self { status: None, assignee: None, note: None }
+    }
+}
+
+/// The review queue, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewQueueResponse {
+    /// The items that matched, newest change first.
+    #[serde(default)]
+    pub items: Vec<ReviewItem>,
+    /// How many items in the project are still pending, whatever the filter.
+    pub pending: u32,
+}
+
+/// A frozen copy of a dataset's cases. An experiment that names a version runs against
+/// exactly those cases, whatever has been added to the dataset since.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatasetVersion {
+    /// The dataset.
+    pub dataset_id: String,
+    /// Its number, from 1.
+    pub version: u32,
+    /// How many cases it froze.
+    pub item_count: u32,
+    /// What changed since the version before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Which key or account froze it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    /// When it was frozen.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+}
+
+/// Freeze the dataset's current cases as a new version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateDatasetVersionRequest {
+    /// What changed since the version before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Default for CreateDatasetVersionRequest {
+    fn default() -> Self {
+        Self { note: None }
+    }
+}
+
 /// One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback
 /// all hang off a span or a trace.
 /// Stored in the `spans` table.
@@ -5692,6 +6197,15 @@ pub struct Trace {
     pub model_count: u32,
     /// How many tool calls the run made.
     pub tool_count: u32,
+    /// The start of the root step's input as plain text, up to 240 characters, for a list
+    /// column. For a chat input it is the last user message. Filled by the trace list when
+    /// it is asked with `preview=true`; the full input is on the span.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_preview: Option<String>,
+    /// The start of the root step's output as plain text, up to 240 characters. Filled by
+    /// the trace list when it is asked with `preview=true`; the full output is on the span.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_preview: Option<String>,
     /// Tags from the root span.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
@@ -6540,4 +7054,213 @@ impl Theme {
     pub const PRIMARY_KEY: &'static [&'static str] = &["snapshot_id", "aspect", "theme_id"];
     /// The storage table this entity lives in.
     pub const TABLE: &'static str = "themes";
+}
+
+/// One version of a named prompt. A version never changes once stored: a new body is a
+/// new version, and labels such as `production` and `staging` point at the version a
+/// caller should use. SDKs fetch a prompt by name and label, render it with variables,
+/// and link the spans that used it, so a trace shows which version produced an answer.
+/// Stored in the `documents` table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Prompt {
+    /// Which project owns it.
+    pub project: String,
+    /// The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and
+    /// `/`, up to 128 characters.
+    pub name: String,
+    /// Its version, from 1, assigned by the daemon in the order versions arrive.
+    pub version: u32,
+    /// Whether the body is one template or a list of messages.
+    pub kind: PromptKind,
+    /// The template, for a `text` prompt. Variables are written `{{name}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// The messages, for a `chat` prompt: an array of objects with `role` and `content`,
+    /// where `content` is a template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<serde_json::Value>,
+    /// Model settings stored with the prompt, such as `model` and `temperature`. The daemon
+    /// stores them and does not read them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+    /// Every variable the body names, in order of first use, without duplicates.
+    #[serde(default)]
+    pub variables: Vec<String>,
+    /// The labels that point at this version now.
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// What changed in this version, written by whoever stored it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Which key or account stored it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    /// When this version was stored.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+}
+
+impl Prompt {
+    /// The primary key, as declared in the spec.
+    pub const PRIMARY_KEY: &'static [&'static str] = &["project", "name", "version"];
+    /// The storage table this entity lives in.
+    pub const TABLE: &'static str = "documents";
+}
+
+/// A scorer the project defined: a judge prompt written for this agent, or a code
+/// scorer with its settings fixed. Stored as numbered versions; a version never
+/// changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the latest
+/// version or `id@3` for version 3.
+/// Stored in the `documents` table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScorerDefinition {
+    /// Which project owns it.
+    pub project: String,
+    /// Its id, unique in the project: lower-case letters, digits and `_`, up to 64. It
+    /// cannot be the id of a scorer mcpd ships.
+    pub id: String,
+    /// Its version, from 1, assigned by the daemon.
+    pub version: u32,
+    /// Judged by the model, or computed by code.
+    pub kind: ScorerDefinitionKind,
+    /// What it measures, in a sentence. Shown in the scorer catalogue.
+    pub description: String,
+    /// Which way is better. Comparisons and live alerts read it.
+    pub direction: ScoreDirection,
+    /// For a `judge` definition: the criterion the model grades against, such as `The
+    /// answer cites the refund policy by section number.` The daemon adds the run's input
+    /// and output and asks for a value from 0 to 1 with a one-sentence reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// For a `code` definition: the code scorer it runs, such as `keyword_coverage`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<String>,
+    /// For a `code` definition: the settings the code scorer runs with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<ScorerConfig>,
+    /// What changed in this version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Which key or account stored it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    /// When this version was stored.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+}
+
+impl ScorerDefinition {
+    /// The primary key, as declared in the spec.
+    pub const PRIMARY_KEY: &'static [&'static str] = &["project", "id", "version"];
+    /// The storage table this entity lives in.
+    pub const TABLE: &'static str = "documents";
+}
+
+/// A rule for live scoring: which finished runs to score, with which scorers, and how
+/// many of them. The daemon reads finished runs as they arrive and scores the sampled
+/// ones in the background, so a quality drop shows up in minutes rather than at the
+/// next offline pass. Scores it writes have source `live`.
+/// Stored in the `documents` table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluationRule {
+    /// Which project it scores.
+    pub project: String,
+    /// Its id, unique in the project.
+    pub id: String,
+    /// Its version, from 1. Each change is a new version.
+    pub version: u32,
+    /// Whether it runs. A rule is stored disabled unless the request says otherwise.
+    pub enabled: bool,
+    /// The scorers to run: shipped ids, criteria from the config file, or stored
+    /// definitions as `id` or `id@version`.
+    #[serde(default)]
+    pub scorers: Vec<String>,
+    /// The share of matching runs to score, from 0 to 1. Chosen by a hash of the trace id,
+    /// so the same run is in or out on every replica and every restart.
+    pub sample_rate: f64,
+    /// Only runs whose root step has this name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Only runs whose root step is this kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SpanKind>,
+    /// Only runs from this environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    /// Only runs carrying all of these tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Only runs with this outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<SpanStatus>,
+    /// Settings for the code scorers that need them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<ScorerConfig>,
+    /// The most judged scores the rule may produce in one minute, across the daemon. Each
+    /// one is a model call, so this caps what the rule can spend. Runs over it are skipped,
+    /// not queued.
+    pub max_judged_per_minute: u32,
+    /// What changed in this version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Which key or account stored it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    /// When this version was stored.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+}
+
+impl EvaluationRule {
+    /// The primary key, as declared in the spec.
+    pub const PRIMARY_KEY: &'static [&'static str] = &["project", "id", "version"];
+    /// The storage table this entity lives in.
+    pub const TABLE: &'static str = "documents";
+}
+
+/// A run, or one step of it, queued for a person to review. Queue the runs a low score
+/// or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every
+/// change is kept, so the item's history says who decided what and when. Corrections
+/// and labels go on the run as feedback.
+/// Stored in the `documents` table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewItem {
+    /// Which project.
+    pub project: String,
+    /// Its id.
+    pub review_id: String,
+    /// How many times it has changed, from 1.
+    pub version: u32,
+    /// The run to review.
+    pub trace_id: String,
+    /// The step to look at, when it is one step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
+    /// The feedback that put it in the queue, when it was feedback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_id: Option<String>,
+    /// Where it has got to.
+    pub status: ReviewStatus,
+    /// Who should review it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// Why it is queued, or what the reviewer found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Which key or account made the latest change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_by: Option<String>,
+    /// When it was queued.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+    /// When it last changed.
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: time::OffsetDateTime,
+}
+
+impl ReviewItem {
+    /// The primary key, as declared in the spec.
+    pub const PRIMARY_KEY: &'static [&'static str] = &["project", "review_id", "version"];
+    /// The storage table this entity lives in.
+    pub const TABLE: &'static str = "documents";
 }

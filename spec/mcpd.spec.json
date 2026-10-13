@@ -329,6 +329,10 @@
         {
           "name": "criterion",
           "doc": "A criterion the operator wrote under `judge.criteria`, graded by the judge model in one call."
+        },
+        {
+          "name": "custom",
+          "doc": "A scorer definition stored in the project through the API: a judge prompt, or a code scorer with its settings. Versioned, and the version is on every score it produces."
         }
       ]
     },
@@ -1116,6 +1120,49 @@
         {
           "name": "github",
           "doc": "GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub user id and the email is the primary verified address GitHub reports."
+        }
+      ]
+    },
+    "PromptKind": {
+      "doc": "The shape of a prompt's body.",
+      "values": [
+        {
+          "name": "text",
+          "doc": "One template string, for a completion-style call."
+        },
+        {
+          "name": "chat",
+          "doc": "An ordered list of messages, each with a `role` and a `content` template, for a chat-style call."
+        }
+      ]
+    },
+    "ScorerDefinitionKind": {
+      "doc": "How a stored scorer definition reaches its answer.",
+      "values": [
+        {
+          "name": "judge",
+          "doc": "The configured judge model grades the run against the definition's `prompt`, in one call."
+        },
+        {
+          "name": "code",
+          "doc": "One of the daemon's code scorers, named in `builtin`, with the settings in `config` fixed. Free, and gives the same answer twice."
+        }
+      ]
+    },
+    "ReviewStatus": {
+      "doc": "Where an item in the review queue has got to.",
+      "values": [
+        {
+          "name": "pending",
+          "doc": "Waiting for a person."
+        },
+        {
+          "name": "reviewed",
+          "doc": "A person looked at it and recorded what they found."
+        },
+        {
+          "name": "dismissed",
+          "doc": "A person looked at it and it needed nothing."
         }
       ]
     }
@@ -2184,6 +2231,16 @@
           "name": "forbidden_tools",
           "type": "string[]",
           "doc": "Tools the run must not call, for `tool_not_called`."
+        },
+        {
+          "name": "trajectory_match",
+          "type": "string?",
+          "doc": "How `trajectory` compares the tools the run called with `expected_tools`: `strict` for the same calls in the same order and nothing else, `ordered` for the expected calls in order with others allowed between them, `unordered` for every expected call in any order. Defaults to `ordered`."
+        },
+        {
+          "name": "max_steps",
+          "type": "u32?",
+          "doc": "The most steps a healthy run takes, for `trajectory`. A step is a tool call, a model generation or a handoff."
         },
         {
           "name": "min_chars",
@@ -5091,6 +5148,547 @@
           "doc": "The binding from the start of the flow."
         }
       ]
+    },
+    "CreatePromptRequest": {
+      "doc": "A new version of a prompt. Posting a body identical to the latest version stores nothing new and returns that version, so a deploy that posts its prompts on every start is a no-op when nothing changed.",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The prompt's name. A new name creates the prompt at version 1."
+        },
+        {
+          "name": "kind",
+          "type": "PromptKind?",
+          "doc": "`text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`."
+        },
+        {
+          "name": "template",
+          "type": "string?",
+          "doc": "The template, for a `text` prompt."
+        },
+        {
+          "name": "messages",
+          "type": "json?",
+          "doc": "The messages, for a `chat` prompt."
+        },
+        {
+          "name": "config",
+          "type": "json?",
+          "doc": "Model settings to store with it."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed."
+        },
+        {
+          "name": "labels",
+          "type": "string[]?",
+          "doc": "Labels to point at the stored version once it is stored, such as `staging`."
+        }
+      ]
+    },
+    "PromptLabelRequest": {
+      "doc": "Which version a label should point at.",
+      "fields": [
+        {
+          "name": "version",
+          "type": "u32",
+          "doc": "The version. It must exist."
+        }
+      ]
+    },
+    "PromptVersionsResponse": {
+      "doc": "Every version of one prompt, newest first.",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The prompt's name."
+        },
+        {
+          "name": "versions",
+          "type": "Prompt[]",
+          "doc": "Its versions, newest first, each with the labels that point at it."
+        }
+      ]
+    },
+    "CreateScorerDefinitionRequest": {
+      "doc": "A new version of a scorer definition. A body identical to the latest version is not stored again.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The definition's id. A new id creates it at version 1."
+        },
+        {
+          "name": "kind",
+          "type": "ScorerDefinitionKind",
+          "doc": "`judge` or `code`."
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "doc": "What it measures, in a sentence."
+        },
+        {
+          "name": "direction",
+          "type": "ScoreDirection?",
+          "doc": "Which way is better. Defaults to `higher_is_better`."
+        },
+        {
+          "name": "prompt",
+          "type": "string?",
+          "doc": "For `judge`: the criterion."
+        },
+        {
+          "name": "builtin",
+          "type": "string?",
+          "doc": "For `code`: the code scorer to run."
+        },
+        {
+          "name": "config",
+          "type": "ScorerConfig?",
+          "doc": "For `code`: its settings."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed."
+        }
+      ]
+    },
+    "ScorerDefinitionVersions": {
+      "doc": "Every version of one scorer definition, newest first.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The definition's id."
+        },
+        {
+          "name": "versions",
+          "type": "ScorerDefinition[]",
+          "doc": "Its versions, newest first."
+        }
+      ]
+    },
+    "CreateEvaluationRuleRequest": {
+      "doc": "A new version of a live scoring rule. Posting the same body as the latest version stores nothing new.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The rule's id: lower-case letters, digits, `-` and `_`, up to 64."
+        },
+        {
+          "name": "enabled",
+          "type": "bool?",
+          "doc": "Whether it runs. Defaults to `false`, so a rule is read back and checked before it spends anything."
+        },
+        {
+          "name": "scorers",
+          "type": "string[]",
+          "doc": "The scorers to run. At least one."
+        },
+        {
+          "name": "sample_rate",
+          "type": "f64?",
+          "doc": "The share of matching runs to score, from 0 to 1. Defaults to 1."
+        },
+        {
+          "name": "name",
+          "type": "string?",
+          "doc": "Only runs whose root step has this name."
+        },
+        {
+          "name": "kind",
+          "type": "SpanKind?",
+          "doc": "Only runs whose root step is this kind."
+        },
+        {
+          "name": "environment",
+          "type": "string?",
+          "doc": "Only runs from this environment."
+        },
+        {
+          "name": "tags",
+          "type": "string[]?",
+          "doc": "Only runs carrying all of these tags."
+        },
+        {
+          "name": "status",
+          "type": "SpanStatus?",
+          "doc": "Only runs with this outcome."
+        },
+        {
+          "name": "config",
+          "type": "ScorerConfig?",
+          "doc": "Settings for the code scorers that need them."
+        },
+        {
+          "name": "max_judged_per_minute",
+          "type": "u32?",
+          "doc": "The most judged scores per minute. Defaults to 30."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed."
+        }
+      ]
+    },
+    "TrajectoryStep": {
+      "doc": "One action an agent took: a tool call, a model generation or a handoff, in the order they started.",
+      "fields": [
+        {
+          "name": "index",
+          "type": "u32",
+          "doc": "Its position in the trajectory, from 0."
+        },
+        {
+          "name": "span_id",
+          "type": "string",
+          "doc": "The span it was read from."
+        },
+        {
+          "name": "kind",
+          "type": "SpanKind",
+          "doc": "What kind of action."
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The tool, model step or agent it names."
+        },
+        {
+          "name": "status",
+          "type": "SpanStatus",
+          "doc": "How it ended."
+        },
+        {
+          "name": "start_offset_ms",
+          "type": "f64",
+          "doc": "When it started, in milliseconds after the run started."
+        },
+        {
+          "name": "duration_ms",
+          "type": "f64?",
+          "doc": "How long it took. Absent while it is still running."
+        },
+        {
+          "name": "model",
+          "type": "string?",
+          "doc": "The model, for a model generation."
+        },
+        {
+          "name": "input_preview",
+          "type": "string?",
+          "doc": "The start of its input as plain text, up to 240 characters."
+        },
+        {
+          "name": "output_preview",
+          "type": "string?",
+          "doc": "The start of its output as plain text, up to 240 characters."
+        },
+        {
+          "name": "tokens",
+          "type": "u64?",
+          "doc": "Input and output tokens together, for a model generation."
+        }
+      ]
+    },
+    "Trajectory": {
+      "doc": "A run read as the sequence of actions its agent took. This is what a trajectory is scored on: which tools were called, in what order, how many steps it took, and whether it ended with an answer.",
+      "fields": [
+        {
+          "name": "trace_id",
+          "type": "string",
+          "doc": "The run."
+        },
+        {
+          "name": "steps",
+          "type": "TrajectoryStep[]",
+          "doc": "Every action, in start order."
+        },
+        {
+          "name": "tool_sequence",
+          "type": "string[]",
+          "doc": "The names of the tool calls, in order. What `expected_tools` is compared with."
+        },
+        {
+          "name": "step_count",
+          "type": "u32",
+          "doc": "How many steps."
+        },
+        {
+          "name": "tool_count",
+          "type": "u32",
+          "doc": "How many of them were tool calls."
+        },
+        {
+          "name": "error_count",
+          "type": "u32",
+          "doc": "How many of them failed."
+        },
+        {
+          "name": "final_output_preview",
+          "type": "string?",
+          "doc": "The start of the run's answer, from the root step's output."
+        },
+        {
+          "name": "goal_reached",
+          "type": "bool",
+          "doc": "True when the run ended `ok` with a non-empty answer."
+        }
+      ]
+    },
+    "ExperimentScoreRequest": {
+      "doc": "Which scorers to run over every run recorded under an experiment.",
+      "fields": [
+        {
+          "name": "scorers",
+          "type": "string[]",
+          "doc": "The scorers, as `POST /v1/api/score` takes them. Empty runs the code scorers that need no settings."
+        },
+        {
+          "name": "config",
+          "type": "ScorerConfig?",
+          "doc": "Settings for the code scorers. `expected` is filled per run from the dataset case the run answered, when the run names one."
+        },
+        {
+          "name": "dry_run",
+          "type": "bool",
+          "doc": "Store nothing; report what would be stored.",
+          "default": false
+        }
+      ]
+    },
+    "ExperimentItemResult": {
+      "doc": "One case of an experiment: the run that answered it and how each scorer marked it.",
+      "fields": [
+        {
+          "name": "trace_id",
+          "type": "string",
+          "doc": "The run that answered the case."
+        },
+        {
+          "name": "item_id",
+          "type": "string?",
+          "doc": "The dataset case, when the run named one in its `mcpd.dataset_item_id` attribute."
+        },
+        {
+          "name": "status",
+          "type": "SpanStatus",
+          "doc": "How the run ended."
+        },
+        {
+          "name": "duration_ns",
+          "type": "u64?",
+          "doc": "How long the run took."
+        },
+        {
+          "name": "cost",
+          "type": "f64?",
+          "doc": "What the run cost."
+        },
+        {
+          "name": "input_preview",
+          "type": "string?",
+          "doc": "The start of the run's input."
+        },
+        {
+          "name": "output_preview",
+          "type": "string?",
+          "doc": "The start of the run's answer."
+        },
+        {
+          "name": "expected",
+          "type": "json?",
+          "doc": "The case's expected answer, when it has one."
+        },
+        {
+          "name": "scores",
+          "type": "json",
+          "doc": "The mean value per scorer for this run, keyed by scorer id."
+        }
+      ]
+    },
+    "ScorerSummary": {
+      "doc": "One scorer's marks across an experiment.",
+      "fields": [
+        {
+          "name": "scorer_id",
+          "type": "string",
+          "doc": "The scorer."
+        },
+        {
+          "name": "n",
+          "type": "u64",
+          "doc": "How many scores."
+        },
+        {
+          "name": "mean",
+          "type": "f64",
+          "doc": "Their mean."
+        },
+        {
+          "name": "min",
+          "type": "f64",
+          "doc": "The lowest."
+        },
+        {
+          "name": "max",
+          "type": "f64",
+          "doc": "The highest."
+        },
+        {
+          "name": "direction",
+          "type": "ScoreDirection",
+          "doc": "Which way is better."
+        }
+      ]
+    },
+    "ExperimentResults": {
+      "doc": "An experiment case by case, with a summary per scorer. Two of these joined on `item_id` are the per-case comparison of two versions.",
+      "fields": [
+        {
+          "name": "experiment_id",
+          "type": "string",
+          "doc": "The experiment."
+        },
+        {
+          "name": "items",
+          "type": "ExperimentItemResult[]",
+          "doc": "One row per run recorded under the experiment, oldest first."
+        },
+        {
+          "name": "scorers",
+          "type": "ScorerSummary[]",
+          "doc": "Per scorer, across every run."
+        },
+        {
+          "name": "runs",
+          "type": "u32",
+          "doc": "How many runs are recorded under it."
+        },
+        {
+          "name": "failed",
+          "type": "u32",
+          "doc": "How many of them ended in an error."
+        }
+      ]
+    },
+    "CreateReviewItemRequest": {
+      "doc": "A run to queue for review.",
+      "fields": [
+        {
+          "name": "trace_id",
+          "type": "string",
+          "doc": "The run."
+        },
+        {
+          "name": "span_id",
+          "type": "string?",
+          "doc": "The step, when it is one step."
+        },
+        {
+          "name": "feedback_id",
+          "type": "string?",
+          "doc": "The feedback that prompted it."
+        },
+        {
+          "name": "assignee",
+          "type": "string?",
+          "doc": "Who should review it."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "Why it is queued."
+        }
+      ]
+    },
+    "UpdateReviewItemRequest": {
+      "doc": "A change to a review item. Absent fields keep their value.",
+      "fields": [
+        {
+          "name": "status",
+          "type": "ReviewStatus?",
+          "doc": "The new status."
+        },
+        {
+          "name": "assignee",
+          "type": "string?",
+          "doc": "The new assignee. An empty string unassigns it."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What the reviewer found."
+        }
+      ]
+    },
+    "ReviewQueueResponse": {
+      "doc": "The review queue, newest first.",
+      "fields": [
+        {
+          "name": "items",
+          "type": "ReviewItem[]",
+          "doc": "The items that matched, newest change first."
+        },
+        {
+          "name": "pending",
+          "type": "u32",
+          "doc": "How many items in the project are still pending, whatever the filter."
+        }
+      ]
+    },
+    "DatasetVersion": {
+      "doc": "A frozen copy of a dataset's cases. An experiment that names a version runs against exactly those cases, whatever has been added to the dataset since.",
+      "fields": [
+        {
+          "name": "dataset_id",
+          "type": "string",
+          "doc": "The dataset."
+        },
+        {
+          "name": "version",
+          "type": "u32",
+          "doc": "Its number, from 1."
+        },
+        {
+          "name": "item_count",
+          "type": "u32",
+          "doc": "How many cases it froze."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed since the version before."
+        },
+        {
+          "name": "created_by",
+          "type": "string?",
+          "doc": "Which key or account froze it."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When it was frozen."
+        }
+      ]
+    },
+    "CreateDatasetVersionRequest": {
+      "doc": "Freeze the dataset's current cases as a new version.",
+      "fields": [
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed since the version before."
+        }
+      ]
     }
   },
   "entities": {
@@ -5366,6 +5964,16 @@
           "name": "tool_count",
           "type": "u32",
           "doc": "How many tool calls the run made."
+        },
+        {
+          "name": "input_preview",
+          "type": "string?",
+          "doc": "The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list when it is asked with `preview=true`; the full input is on the span."
+        },
+        {
+          "name": "output_preview",
+          "type": "string?",
+          "doc": "The start of the root step's output as plain text, up to 240 characters. Filled by the trace list when it is asked with `preview=true`; the full output is on the span."
         },
         {
           "name": "tags",
@@ -6647,6 +7255,310 @@
           "doc": "One theme across every snapshot that holds it, which is what a history reads."
         }
       ]
+    },
+    "Prompt": {
+      "doc": "One version of a named prompt. A version never changes once stored: a new body is a new version, and labels such as `production` and `staging` point at the version a caller should use. SDKs fetch a prompt by name and label, render it with variables, and link the spans that used it, so a trace shows which version produced an answer.",
+      "table": "documents",
+      "fields": [
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "Which project owns it."
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and `/`, up to 128 characters."
+        },
+        {
+          "name": "version",
+          "type": "u32",
+          "doc": "Its version, from 1, assigned by the daemon in the order versions arrive."
+        },
+        {
+          "name": "kind",
+          "type": "PromptKind",
+          "doc": "Whether the body is one template or a list of messages."
+        },
+        {
+          "name": "template",
+          "type": "string?",
+          "doc": "The template, for a `text` prompt. Variables are written `{{name}}`."
+        },
+        {
+          "name": "messages",
+          "type": "json?",
+          "doc": "The messages, for a `chat` prompt: an array of objects with `role` and `content`, where `content` is a template."
+        },
+        {
+          "name": "config",
+          "type": "json?",
+          "doc": "Model settings stored with the prompt, such as `model` and `temperature`. The daemon stores them and does not read them."
+        },
+        {
+          "name": "variables",
+          "type": "string[]",
+          "doc": "Every variable the body names, in order of first use, without duplicates."
+        },
+        {
+          "name": "labels",
+          "type": "string[]",
+          "doc": "The labels that point at this version now."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed in this version, written by whoever stored it."
+        },
+        {
+          "name": "created_by",
+          "type": "string?",
+          "doc": "Which key or account stored it."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When this version was stored."
+        }
+      ],
+      "primaryKey": [
+        "project",
+        "name",
+        "version"
+      ]
+    },
+    "ScorerDefinition": {
+      "doc": "A scorer the project defined: a judge prompt written for this agent, or a code scorer with its settings fixed. Stored as numbered versions; a version never changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the latest version or `id@3` for version 3.",
+      "table": "documents",
+      "fields": [
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "Which project owns it."
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "Its id, unique in the project: lower-case letters, digits and `_`, up to 64. It cannot be the id of a scorer mcpd ships."
+        },
+        {
+          "name": "version",
+          "type": "u32",
+          "doc": "Its version, from 1, assigned by the daemon."
+        },
+        {
+          "name": "kind",
+          "type": "ScorerDefinitionKind",
+          "doc": "Judged by the model, or computed by code."
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "doc": "What it measures, in a sentence. Shown in the scorer catalogue."
+        },
+        {
+          "name": "direction",
+          "type": "ScoreDirection",
+          "doc": "Which way is better. Comparisons and live alerts read it."
+        },
+        {
+          "name": "prompt",
+          "type": "string?",
+          "doc": "For a `judge` definition: the criterion the model grades against, such as `The answer cites the refund policy by section number.` The daemon adds the run's input and output and asks for a value from 0 to 1 with a one-sentence reason."
+        },
+        {
+          "name": "builtin",
+          "type": "string?",
+          "doc": "For a `code` definition: the code scorer it runs, such as `keyword_coverage`."
+        },
+        {
+          "name": "config",
+          "type": "ScorerConfig?",
+          "doc": "For a `code` definition: the settings the code scorer runs with."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed in this version."
+        },
+        {
+          "name": "created_by",
+          "type": "string?",
+          "doc": "Which key or account stored it."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When this version was stored."
+        }
+      ],
+      "primaryKey": [
+        "project",
+        "id",
+        "version"
+      ]
+    },
+    "EvaluationRule": {
+      "doc": "A rule for live scoring: which finished runs to score, with which scorers, and how many of them. The daemon reads finished runs as they arrive and scores the sampled ones in the background, so a quality drop shows up in minutes rather than at the next offline pass. Scores it writes have source `live`.",
+      "table": "documents",
+      "fields": [
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "Which project it scores."
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "Its id, unique in the project."
+        },
+        {
+          "name": "version",
+          "type": "u32",
+          "doc": "Its version, from 1. Each change is a new version."
+        },
+        {
+          "name": "enabled",
+          "type": "bool",
+          "doc": "Whether it runs. A rule is stored disabled unless the request says otherwise."
+        },
+        {
+          "name": "scorers",
+          "type": "string[]",
+          "doc": "The scorers to run: shipped ids, criteria from the config file, or stored definitions as `id` or `id@version`."
+        },
+        {
+          "name": "sample_rate",
+          "type": "f64",
+          "doc": "The share of matching runs to score, from 0 to 1. Chosen by a hash of the trace id, so the same run is in or out on every replica and every restart."
+        },
+        {
+          "name": "name",
+          "type": "string?",
+          "doc": "Only runs whose root step has this name."
+        },
+        {
+          "name": "kind",
+          "type": "SpanKind?",
+          "doc": "Only runs whose root step is this kind."
+        },
+        {
+          "name": "environment",
+          "type": "string?",
+          "doc": "Only runs from this environment."
+        },
+        {
+          "name": "tags",
+          "type": "string[]",
+          "doc": "Only runs carrying all of these tags."
+        },
+        {
+          "name": "status",
+          "type": "SpanStatus?",
+          "doc": "Only runs with this outcome."
+        },
+        {
+          "name": "config",
+          "type": "ScorerConfig?",
+          "doc": "Settings for the code scorers that need them."
+        },
+        {
+          "name": "max_judged_per_minute",
+          "type": "u32",
+          "doc": "The most judged scores the rule may produce in one minute, across the daemon. Each one is a model call, so this caps what the rule can spend. Runs over it are skipped, not queued."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed in this version."
+        },
+        {
+          "name": "created_by",
+          "type": "string?",
+          "doc": "Which key or account stored it."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When this version was stored."
+        }
+      ],
+      "primaryKey": [
+        "project",
+        "id",
+        "version"
+      ]
+    },
+    "ReviewItem": {
+      "doc": "A run, or one step of it, queued for a person to review. Queue the runs a low score or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every change is kept, so the item's history says who decided what and when. Corrections and labels go on the run as feedback.",
+      "table": "documents",
+      "fields": [
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "Which project."
+        },
+        {
+          "name": "review_id",
+          "type": "string",
+          "doc": "Its id."
+        },
+        {
+          "name": "version",
+          "type": "u32",
+          "doc": "How many times it has changed, from 1."
+        },
+        {
+          "name": "trace_id",
+          "type": "string",
+          "doc": "The run to review."
+        },
+        {
+          "name": "span_id",
+          "type": "string?",
+          "doc": "The step to look at, when it is one step."
+        },
+        {
+          "name": "feedback_id",
+          "type": "string?",
+          "doc": "The feedback that put it in the queue, when it was feedback."
+        },
+        {
+          "name": "status",
+          "type": "ReviewStatus",
+          "doc": "Where it has got to."
+        },
+        {
+          "name": "assignee",
+          "type": "string?",
+          "doc": "Who should review it."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "Why it is queued, or what the reviewer found."
+        },
+        {
+          "name": "updated_by",
+          "type": "string?",
+          "doc": "Which key or account made the latest change."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When it was queued."
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "doc": "When it last changed."
+        }
+      ],
+      "primaryKey": [
+        "project",
+        "review_id",
+        "version"
+      ]
     }
   },
   "endpoints": [
@@ -6808,7 +7720,7 @@
       "method": "GET",
       "path": "/v1/api/traces",
       "summary": "List traces",
-      "doc": "The trace list. Filter on status, kind, name, tags, session, thread, user, environment, model, time window, duration, cost and score, and sort by start time, duration, cost, span count or score. Unlike a plain span dump, this reads the materialised trace projection rather than aggregating spans on every request.",
+      "doc": "The trace list. Filter on status, kind, name, tags, session, thread, user, environment, model, time window, duration, cost, tokens, score and feedback, and sort by start time, duration, cost, span count, tokens or score. With `preview=true` each trace carries a short preview of its input and output. Unlike a plain span dump, this reads the materialised trace projection rather than aggregating spans on every request.",
       "query": [
         {
           "name": "project",
@@ -6861,6 +7773,11 @@
           "doc": "Restrict to one environment."
         },
         {
+          "name": "experiment_id",
+          "type": "string?",
+          "doc": "Only runs recorded under this experiment."
+        },
+        {
           "name": "model",
           "type": "string?",
           "doc": "Traces that used this model."
@@ -6881,9 +7798,24 @@
           "doc": "Only traces at least this slow."
         },
         {
+          "name": "max_duration_ms",
+          "type": "u64?",
+          "doc": "Only traces at most this slow."
+        },
+        {
           "name": "min_cost",
           "type": "f64?",
           "doc": "Only traces at least this expensive."
+        },
+        {
+          "name": "max_cost",
+          "type": "f64?",
+          "doc": "Only traces at most this expensive."
+        },
+        {
+          "name": "min_tokens",
+          "type": "u64?",
+          "doc": "Only traces that used at least this many tokens, input and output together."
         },
         {
           "name": "has_score",
@@ -6894,6 +7826,21 @@
           "name": "score_below",
           "type": "f64?",
           "doc": "Combined with `has_score`: only traces where that scorer came in under this value. This is the query that finds bad answers."
+        },
+        {
+          "name": "score_above",
+          "type": "f64?",
+          "doc": "Combined with `has_score`: only traces where that scorer came in over this value."
+        },
+        {
+          "name": "has_feedback",
+          "type": "bool?",
+          "doc": "`true` for only traces a person gave feedback on, `false` for only traces with none."
+        },
+        {
+          "name": "preview",
+          "type": "bool?",
+          "doc": "Fill `input_preview` and `output_preview` on each trace. A list read with previews carries the start of each run's input and output, so it is recorded in the audit log as `list_traces`; one without is not."
         },
         {
           "name": "sort",
@@ -6947,6 +7894,37 @@
       ],
       "response": {
         "type": "TraceDetail"
+      },
+      "auth": "read"
+    },
+    {
+      "id": "get_trajectory",
+      "tag": "Traces",
+      "method": "GET",
+      "path": "/v1/api/traces/{trace_id}/trajectory",
+      "summary": "Read a run as a trajectory",
+      "doc": "The run as the ordered actions its agent took: tool calls, model generations and handoffs, with the tool sequence, the step count and whether it reached an answer. Score one with the `trajectory` scorer.",
+      "params": [
+        {
+          "name": "trace_id",
+          "type": "string",
+          "doc": "The run."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "Which project to read. Required."
+        }
+      ],
+      "response": {
+        "type": "Trajectory"
+      },
+      "responses": {
+        "404": {
+          "doc": "No run with that id in the project."
+        }
       },
       "auth": "read"
     },
@@ -7114,6 +8092,16 @@
           "name": "trace_id",
           "type": "string?",
           "doc": "Restrict to one trace."
+        },
+        {
+          "name": "prompt",
+          "type": "string?",
+          "doc": "Only spans that used this prompt, as linked by an SDK's prompt helper."
+        },
+        {
+          "name": "prompt_version",
+          "type": "u32?",
+          "doc": "With `prompt`: only spans that used this version of it."
         },
         {
           "name": "from",
@@ -7596,6 +8584,102 @@
       "auth": "read"
     },
     {
+      "id": "list_review_items",
+      "tag": "Evaluation",
+      "method": "GET",
+      "path": "/v1/api/review-queue",
+      "summary": "Read the review queue",
+      "doc": "The runs queued for review in the project, newest change first, filtered by status and assignee.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        },
+        {
+          "name": "status",
+          "type": "ReviewStatus?",
+          "doc": "Only items with this status."
+        },
+        {
+          "name": "assignee",
+          "type": "string?",
+          "doc": "Only items assigned to this person."
+        },
+        {
+          "name": "limit",
+          "type": "u32?",
+          "doc": "Page size, 1 to 500.",
+          "default": 100
+        }
+      ],
+      "response": {
+        "type": "ReviewQueueResponse"
+      },
+      "auth": "read"
+    },
+    {
+      "id": "create_review_item",
+      "tag": "Evaluation",
+      "method": "POST",
+      "path": "/v1/api/review-queue",
+      "summary": "Queue a run for review",
+      "doc": "Puts a run, or one step of it, in the review queue as `pending`. The run must exist in the project.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "request": {
+        "type": "CreateReviewItemRequest"
+      },
+      "response": {
+        "type": "ReviewItem"
+      },
+      "responses": {
+        "404": {
+          "doc": "No run with that id in the project."
+        }
+      },
+      "auth": "write"
+    },
+    {
+      "id": "update_review_item",
+      "tag": "Evaluation",
+      "method": "PATCH",
+      "path": "/v1/api/review-queue/{review_id}",
+      "summary": "Review, assign or dismiss an item",
+      "doc": "Changes an item's status, assignee or note. Each change is a new version of the item, so its history is kept.",
+      "params": [
+        {
+          "name": "review_id",
+          "type": "string",
+          "doc": "The item."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "request": {
+        "type": "UpdateReviewItemRequest"
+      },
+      "response": {
+        "type": "ReviewItem"
+      },
+      "responses": {
+        "404": {
+          "doc": "No review item with that id in the project."
+        }
+      },
+      "auth": "write"
+    },
+    {
       "id": "analytics_summary",
       "tag": "Analytics",
       "method": "GET",
@@ -7674,12 +8758,19 @@
       "tag": "Evaluation",
       "method": "GET",
       "path": "/v1/api/scorers",
-      "summary": "List the built-in scorers",
-      "doc": "Every scorer mcpd ships, with what it measures and whether it needs configuration. Scorers are deterministic code, not model calls, so they cost nothing to run and give the same answer twice.",
+      "summary": "List the scorers",
+      "doc": "Every scorer this daemon can run: the code scorers, the judged rubrics, the criteria in the config file, and, with `project`, the definitions that project stored. Code scorers are deterministic, cost nothing and give the same answer twice; judged ones make one model call per run.",
       "response": {
         "type": "ScorerInfo[]"
       },
-      "auth": "read"
+      "auth": "read",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Also list the scorer definitions this project stored, each at its latest version."
+        }
+      ]
     },
     {
       "id": "score_runs",
@@ -7687,12 +8778,161 @@
       "method": "POST",
       "path": "/v1/api/score",
       "summary": "Run scorers over stored runs",
-      "doc": "Scores runs that are already stored, and records the results. Naming a scorer that does not exist fails the request before any work happens; a scorer that cannot answer on a given run is reported in `skipped` rather than failing it.",
+      "doc": "Scores runs that are already stored, and records the results. Naming a scorer that does not exist fails the request before any work happens; a scorer that cannot answer on a given run is reported in `skipped` rather than failing it. A stored definition is named as `id` or `id@version`. Each judged score is recorded with the trace of its own model call, in `score_trace_id`: a `scorer_run` span holding the prompt, the reply, the tokens and the cost.",
       "request": {
         "type": "ScoreRunRequest"
       },
       "response": {
         "type": "ScoreRunResult"
+      },
+      "auth": "write"
+    },
+    {
+      "id": "list_scorer_definitions",
+      "tag": "Evaluation",
+      "method": "GET",
+      "path": "/v1/api/scorer-definitions",
+      "summary": "List scorer definitions",
+      "doc": "The latest version of every scorer the project defined, sorted by id.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "response": {
+        "type": "ScorerDefinition[]"
+      },
+      "auth": "read"
+    },
+    {
+      "id": "create_scorer_definition",
+      "tag": "Evaluation",
+      "method": "POST",
+      "path": "/v1/api/scorer-definitions",
+      "summary": "Store a scorer definition",
+      "doc": "Stores a new version of a scorer definition. A `judge` definition needs `prompt` and a judge in the config file to run; a `code` definition needs `builtin`, and its `config` is checked against that scorer before anything is stored.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "request": {
+        "type": "CreateScorerDefinitionRequest"
+      },
+      "response": {
+        "type": "ScorerDefinition"
+      },
+      "auth": "write"
+    },
+    {
+      "id": "get_scorer_definition",
+      "tag": "Evaluation",
+      "method": "GET",
+      "path": "/v1/api/scorer-definitions/{id}",
+      "summary": "Get a scorer definition",
+      "doc": "One version of a definition, the latest when `version` is absent.",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The definition's id."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        },
+        {
+          "name": "version",
+          "type": "u32?",
+          "doc": "Which version. Absent means the latest."
+        }
+      ],
+      "response": {
+        "type": "ScorerDefinition"
+      },
+      "responses": {
+        "404": {
+          "doc": "No definition with that id, or no such version."
+        }
+      },
+      "auth": "read"
+    },
+    {
+      "id": "list_scorer_definition_versions",
+      "tag": "Evaluation",
+      "method": "GET",
+      "path": "/v1/api/scorer-definitions/{id}/versions",
+      "summary": "List a scorer definition's versions",
+      "doc": "Every version of one definition, newest first.",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": "The definition's id."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "response": {
+        "type": "ScorerDefinitionVersions"
+      },
+      "responses": {
+        "404": {
+          "doc": "No definition with that id."
+        }
+      },
+      "auth": "read"
+    },
+    {
+      "id": "list_evaluation_rules",
+      "tag": "Evaluation",
+      "method": "GET",
+      "path": "/v1/api/evaluation-rules",
+      "summary": "List live scoring rules",
+      "doc": "The latest version of every live scoring rule in the project.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "response": {
+        "type": "EvaluationRule[]"
+      },
+      "auth": "read"
+    },
+    {
+      "id": "create_evaluation_rule",
+      "tag": "Evaluation",
+      "method": "POST",
+      "path": "/v1/api/evaluation-rules",
+      "summary": "Store a live scoring rule",
+      "doc": "Stores a new version of a rule; the daemon applies the latest version of each rule from the next run that finishes. Every named scorer is resolved before anything is stored, and a judged scorer is refused when no judge is configured. Turn a rule off by posting it with `enabled: false`.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "request": {
+        "type": "CreateEvaluationRuleRequest"
+      },
+      "response": {
+        "type": "EvaluationRule"
       },
       "auth": "write"
     },
@@ -7779,6 +9019,11 @@
           "type": "u32?",
           "doc": "Page size.",
           "default": 500
+        },
+        {
+          "name": "version",
+          "type": "u32?",
+          "doc": "Read a frozen version's cases instead of the current ones."
         }
       ],
       "response": {
@@ -7838,6 +9083,57 @@
       "auth": "write"
     },
     {
+      "id": "create_dataset_version",
+      "tag": "Datasets",
+      "method": "POST",
+      "path": "/v1/api/datasets/{dataset_id}/versions",
+      "summary": "Freeze a dataset version",
+      "doc": "Copies the dataset's current cases into a new numbered version. A version never changes, so an experiment run against it today and one run next month read the same cases.",
+      "params": [
+        {
+          "name": "dataset_id",
+          "type": "string",
+          "doc": "Which dataset."
+        }
+      ],
+      "request": {
+        "type": "CreateDatasetVersionRequest"
+      },
+      "response": {
+        "type": "DatasetVersion"
+      },
+      "responses": {
+        "404": {
+          "doc": "No dataset with that id."
+        }
+      },
+      "auth": "write"
+    },
+    {
+      "id": "list_dataset_versions",
+      "tag": "Datasets",
+      "method": "GET",
+      "path": "/v1/api/datasets/{dataset_id}/versions",
+      "summary": "List a dataset's versions",
+      "doc": "Every frozen version of the dataset, newest first.",
+      "params": [
+        {
+          "name": "dataset_id",
+          "type": "string",
+          "doc": "Which dataset."
+        }
+      ],
+      "response": {
+        "type": "DatasetVersion[]"
+      },
+      "responses": {
+        "404": {
+          "doc": "No dataset with that id."
+        }
+      },
+      "auth": "read"
+    },
+    {
       "id": "list_experiments",
       "tag": "Datasets",
       "method": "GET",
@@ -7868,6 +9164,254 @@
       },
       "response": {
         "type": "Experiment"
+      },
+      "auth": "write"
+    },
+    {
+      "id": "score_experiment",
+      "tag": "Datasets",
+      "method": "POST",
+      "path": "/v1/api/experiments/{experiment_id}/score",
+      "summary": "Score an experiment's runs",
+      "doc": "Runs scorers over every run recorded under the experiment and stores the scores with source `experiment`. A run that names its dataset case in the `mcpd.dataset_item_id` attribute is scored against that case's expected answer, so `exact_match`, `similarity` and the judged rubrics that read `expected` compare each answer with its own case. This is the step an SDK's experiment runner calls after the target has answered every case.",
+      "params": [
+        {
+          "name": "experiment_id",
+          "type": "string",
+          "doc": "The experiment."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "request": {
+        "type": "ExperimentScoreRequest"
+      },
+      "response": {
+        "type": "ScoreRunResult"
+      },
+      "responses": {
+        "404": {
+          "doc": "No experiment with that id in the project."
+        }
+      },
+      "auth": "write"
+    },
+    {
+      "id": "get_experiment_results",
+      "tag": "Datasets",
+      "method": "GET",
+      "path": "/v1/api/experiments/{experiment_id}/results",
+      "summary": "Read an experiment case by case",
+      "doc": "Every run recorded under the experiment with its case, its answer and its scores, and a summary per scorer.",
+      "params": [
+        {
+          "name": "experiment_id",
+          "type": "string",
+          "doc": "The experiment."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "response": {
+        "type": "ExperimentResults"
+      },
+      "responses": {
+        "404": {
+          "doc": "No experiment with that id in the project."
+        }
+      },
+      "auth": "read"
+    },
+    {
+      "id": "list_prompts",
+      "tag": "Prompts",
+      "method": "GET",
+      "path": "/v1/api/prompts",
+      "summary": "List prompts",
+      "doc": "The latest version of every prompt in the project, each with its labels, sorted by name.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "response": {
+        "type": "Prompt[]"
+      },
+      "auth": "read"
+    },
+    {
+      "id": "create_prompt",
+      "tag": "Prompts",
+      "method": "POST",
+      "path": "/v1/api/prompts",
+      "summary": "Store a prompt version",
+      "doc": "Stores a new version of a prompt and returns it. A `text` prompt needs `template`, a `chat` prompt needs `messages`. A body identical to the latest version is not stored again: the latest version comes back, with any `labels` applied.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "request": {
+        "type": "CreatePromptRequest"
+      },
+      "response": {
+        "type": "Prompt"
+      },
+      "auth": "write"
+    },
+    {
+      "id": "get_prompt",
+      "tag": "Prompts",
+      "method": "GET",
+      "path": "/v1/api/prompts/{name}",
+      "summary": "Get a prompt",
+      "doc": "One version of a prompt: the one `label` points at, or the one numbered `version`, or the latest when neither is given. This is what an SDK reads before it renders a prompt.",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The prompt's name."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        },
+        {
+          "name": "label",
+          "type": "string?",
+          "doc": "Read the version this label points at, such as `production`."
+        },
+        {
+          "name": "version",
+          "type": "u32?",
+          "doc": "Read this version. Not with `label`."
+        }
+      ],
+      "response": {
+        "type": "Prompt"
+      },
+      "responses": {
+        "404": {
+          "doc": "No prompt with that name in the project, no version with that number, or no version carries that label."
+        }
+      },
+      "auth": "read"
+    },
+    {
+      "id": "list_prompt_versions",
+      "tag": "Prompts",
+      "method": "GET",
+      "path": "/v1/api/prompts/{name}/versions",
+      "summary": "List a prompt's versions",
+      "doc": "Every version of one prompt, newest first, with the labels that point at each.",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The prompt's name."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "response": {
+        "type": "PromptVersionsResponse"
+      },
+      "responses": {
+        "404": {
+          "doc": "No prompt with that name in the project."
+        }
+      },
+      "auth": "read"
+    },
+    {
+      "id": "set_prompt_label",
+      "tag": "Prompts",
+      "method": "PUT",
+      "path": "/v1/api/prompts/{name}/labels/{label}",
+      "summary": "Point a label at a version",
+      "doc": "Moves a label to a version, creating the label if it is new. Moving `production` is how a prompt change is released, and moving it back is how one is rolled back; no code is deployed for either. `latest` is reserved: it always means the newest version.",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The prompt's name."
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "doc": "The label. Letters, digits, `-`, `_` and `.`, up to 64 characters."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "request": {
+        "type": "PromptLabelRequest"
+      },
+      "response": {
+        "type": "Prompt"
+      },
+      "responses": {
+        "404": {
+          "doc": "No prompt with that name, or no version with that number."
+        }
+      },
+      "auth": "write"
+    },
+    {
+      "id": "delete_prompt_label",
+      "tag": "Prompts",
+      "method": "DELETE",
+      "path": "/v1/api/prompts/{name}/labels/{label}",
+      "summary": "Remove a label",
+      "doc": "Removes a label from whichever version holds it. A caller that then asks for the label is answered 404, so remove a label only once nothing reads it.",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The prompt's name."
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "doc": "The label."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "response": {
+        "type": "DeleteResult"
       },
       "auth": "write"
     },

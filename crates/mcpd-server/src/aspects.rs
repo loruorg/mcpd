@@ -1297,6 +1297,12 @@ async fn derive_outcomes(
     let mut notes = Vec::new();
     for trace in &traces.items {
         let Some(text) = outcome_sentence(state, trace, &diverged).await else { continue };
+        // Stamped when the run ended, which is when its outcome became a fact,
+        // and not at `now`. The clustering below reads notes recorded before
+        // `now`, so a note stamped `now` sat outside its own pass, and the next
+        // pass rewrote it to that pass's `now`: the outcome aspect never reached
+        // a snapshot. The end time also makes a rewrite byte-for-byte the same.
+        let recorded = trace.end_time.map_or(now, |end| end.min(now - Duration::microseconds(1)));
         notes.push(mcpd_core::AspectNote {
             note_id: derived_note_id(project, &trace.trace_id),
             trace_id: trace.trace_id.clone(),
@@ -1305,7 +1311,7 @@ async fn derive_outcomes(
             definition_version: 1,
             // Absent, and it is the field that says so: no model wrote this.
             model: None,
-            created_at: now,
+            created_at: recorded,
             correlation: trace.correlation.clone(),
         });
     }

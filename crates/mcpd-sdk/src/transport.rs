@@ -231,6 +231,18 @@ impl Transport {
         self.decode(response).await
     }
 
+    /// PUT a JSON body and decode the answer. Not retried, like a POST.
+    pub(crate) async fn put<B: Serialize + ?Sized, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+        body: &B,
+    ) -> Result<T, Error> {
+        let response =
+            self.request(reqwest::Method::PUT, path).query(params).json(body).send().await?;
+        self.decode(response).await
+    }
+
     async fn decode<T: DeserializeOwned>(&self, response: reqwest::Response) -> Result<T, Error> {
         let status = response.status();
         if !status.is_success() {

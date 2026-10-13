@@ -1,7 +1,7 @@
 ---
 title: "Organisations"
 description: "The organisations endpoints of the mcpd HTTP API."
-order: 19
+order: 20
 generated: true
 ---
 

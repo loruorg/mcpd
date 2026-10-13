@@ -260,8 +260,9 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: { go-version: '1.27' }
       - run: cd examples/typescript && npm ci --no-audit --no-fund && npx tsc --noEmit
-      - run: python -m py_compile examples/python/quickstart.py
+      - run: python -m py_compile examples/python/quickstart.py examples/python/experiment.py
       - run: cargo build --example quickstart -p mcpd-sdk || cargo check -p mcpd-sdk
+      - run: cargo build --example experiment -p mcpd-sdk
       - run: cd examples/go && go vet ./...
       - run: bash -n examples/curl/quickstart.sh
 
@@ -423,6 +424,43 @@ jobs:
           # fails the job instead.
           MCPD_REQUIRE_LIVE: '1'
         run: cargo test -p mcpd-store --features postgres --test postgres --test datasets --test conformance
+
+  runs-postgres:
+    name: postgres run store
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        ports: ['5432:5432']
+        env:
+          POSTGRES_USER: mcpd
+          POSTGRES_PASSWORD: mcpd
+          POSTGRES_DB: mcpd
+        options: >-
+          --health-cmd "pg_isready -U mcpd"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08-05
+        with: { toolchain: stable }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Every run conformance test is one body that runs on SQLite and on
+      # Postgres. This is where the Postgres half meets a real server: the
+      # isolation that keeps two replicas apart, the types the server infers
+      # for each parameter, and the byte order text sorts in all exist only
+      # there. Each test makes a schema of its own, so they run in parallel.
+      - name: run the run store suites against a real server
+        env:
+          MCPD_TEST_POSTGRES_URL: postgres://mcpd:mcpd@localhost:5432/mcpd
+          # Without this a missing URL skips the Postgres half, and a skip is
+          # indistinguishable from a pass. With it, the job fails instead.
+          MCPD_REQUIRE_LIVE: '1'
+        run: cargo test -p mcpd-runs --features postgres
 
   site:
     name: site

@@ -14,6 +14,7 @@
 use crate::client::ClientInner;
 use crate::context::{self, Active, SpanContext};
 use crate::queue::Signal;
+use crate::stream::{Accumulator, RecordedStream};
 use mcpd_core::{
     Correlation, EntityKind, ModelParameters, Span as SpanRecord, SpanError, SpanKind, SpanStatus,
     TokenUsage,
@@ -470,6 +471,67 @@ impl Span {
         self
     }
 
+    /// Read a streamed model call through this span. Hand it the provider's
+    /// stream and read the stream it gives back instead: every item comes
+    /// through unchanged and in order.
+    ///
+    /// Items are `Result`s. Each `Ok` chunk is read as JSON, so an OpenAI
+    /// chat-completion chunk or an Anthropic message event works as a
+    /// `serde_json::Value` or as any type that serialises to that shape. The
+    /// first chunk with text or a tool call calls [`Span::mark_first_token`].
+    ///
+    /// The returned stream owns this span and ends it once: when the stream
+    /// ends, at the first `Err` item, or when you drop it before the end. On
+    /// the way out the span gets what [`Span::record_response`] would record
+    /// for the same call unstreamed, the text (and any tool calls) as its
+    /// output, and, for an `Err`, its `Display` text as the error. The `Err`
+    /// itself still reaches you. Text and tool-call arguments kept are capped
+    /// at 32,768 code points together, and at 64 tool calls; past either,
+    /// `mcpd.stream.truncated` is set.
+    ///
+    /// ```no_run
+    /// # async fn f(mcpd: mcpd_sdk::Mcpd) {
+    /// use futures::StreamExt;
+    /// # let chunks = futures::stream::iter(Vec::<Result<serde_json::Value, String>>::new());
+    /// let call = mcpd.span("answer", mcpd_sdk::SpanKind::ModelGeneration);
+    /// let mut stream = call.record_stream(chunks, None);
+    /// while let Some(chunk) = stream.next().await {
+    ///     // use the chunk as you would have
+    /// #   let _ = chunk;
+    /// }
+    /// # }
+    /// ```
+    pub fn record_stream<S>(self, stream: S, provider: Option<&str>) -> RecordedStream<S> {
+        RecordedStream::new(self, stream, provider)
+    }
+
+    /// Apply what a stream collected and end the span. Called once, by the
+    /// [`RecordedStream`] that owns this span.
+    pub(crate) fn finish_stream(
+        &self,
+        acc: &Accumulator,
+        provider: Option<&str>,
+        error: Option<String>,
+    ) {
+        if self.inner.is_some() {
+            if let Some(response) = acc.response() {
+                self.record_response(&response, provider);
+            }
+            if let Some(output) = acc.output() {
+                self.set_output(output);
+            }
+            if acc.truncated {
+                let mut add = serde_json::Map::new();
+                add.insert("mcpd.stream.truncated".to_owned(), serde_json::Value::Bool(true));
+                self.edit(|r| merge_attributes(r, add));
+            }
+            if let Some(message) = error {
+                self.set_error(message);
+            }
+        }
+        self.end();
+    }
+
     /// Record a guardrail's outcome as `mcpd.guardrail.tripped` and, when
     /// given, `mcpd.guardrail.reason`. Tripping is not an error by itself;
     /// call [`Span::set_error`] as well if it should fail the span.
@@ -478,6 +540,25 @@ impl Span {
         add.insert("mcpd.guardrail.tripped".to_owned(), serde_json::Value::Bool(tripped));
         if let Some(reason) = reason {
             add.insert("mcpd.guardrail.reason".to_owned(), serde_json::Value::from(reason));
+        }
+        self.edit(|r| merge_attributes(r, add));
+        self
+    }
+
+    /// Link the prompt this step used, as `mcpd.prompt.name` and
+    /// `mcpd.prompt.version`, so [`Mcpd::list_spans`](crate::Mcpd::list_spans)
+    /// can find every span that used it.
+    ///
+    /// A fallback prompt has version 0, which no stored version has, so it
+    /// sets the name only. A prompt with no name sets nothing.
+    pub fn set_prompt(&self, prompt: &mcpd_core::Prompt) -> &Self {
+        if prompt.name.is_empty() {
+            return self;
+        }
+        let mut add = serde_json::Map::new();
+        add.insert("mcpd.prompt.name".to_owned(), serde_json::Value::from(prompt.name.as_str()));
+        if prompt.version > 0 {
+            add.insert("mcpd.prompt.version".to_owned(), serde_json::Value::from(prompt.version));
         }
         self.edit(|r| merge_attributes(r, add));
         self

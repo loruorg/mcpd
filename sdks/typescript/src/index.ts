@@ -24,6 +24,7 @@ export type {
   CostQuery,
   FeedbackInput,
   FeedbackQuery,
+  GetPromptOptions,
   LogQuery,
   McpdOptions,
   McpdStats,
@@ -38,8 +39,18 @@ export type {
 } from './client.js'
 
 export { McpdSpan } from './span.js'
+
+// Experiments: run a dataset through your code and score the answers.
+export { DATASET_ITEM_ATTRIBUTE } from './experiment.js'
+export type { ExperimentHost, ExperimentTarget, RunExperimentOptions } from './experiment.js'
+
+// Prompts: fetched with `mcpd.getPrompt`, filled in here, linked with
+// `span.setPrompt`.
+export { PromptRenderError, renderPrompt } from './prompts.js'
+export type { PromptFallback, RenderedPrompt } from './prompts.js'
 export { responseFacts, responseShape, usageFromAnthropic, usageFromOpenAI } from './model-call.js'
 export type { ResponseFacts } from './model-call.js'
+export { STREAM_MAX_TOOL_CALLS, STREAM_TEXT_BUDGET } from './stream.js'
 export type { ErrorOptions, ModelParameterInput, SpanHost, SpanOptions, UsageReport } from './span.js'
 
 // Where batches go: the HTTP transport by default, memory for a test, the

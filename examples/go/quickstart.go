@@ -10,12 +10,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	mcpd "github.com/mcpd/mcpd/sdks/go"
+	"github.com/mcpd/mcpd/sdks/go/mcpdtest"
 )
 
 func main() {
@@ -33,7 +36,26 @@ func main() {
 	defer m.Shutdown(ctx)
 	// #endregion init
 
+	// Store the prompt the agent reads and label it production. Posting the
+	// same body again stores nothing, so this can run on every start.
+	if _, err := m.CreatePrompt(ctx, mcpd.CreatePromptRequest{
+		Name: "support/answer",
+		Messages: json.RawMessage(`[
+			{"role": "system", "content": "You answer billing questions for {{company}}."},
+			{"role": "user", "content": "{{question}}"}
+		]`),
+		Labels: []string{"production"},
+	}); err != nil {
+		log.Printf("store the prompt: %v", err)
+	}
+
 	traceID := handleTicket(ctx, m, "My invoice for March charged me twice.")
+
+	// A streamed call, and the unit test that checks what it records.
+	fmt.Println("streamed:", streamAnswer(ctx, m, "Is A-1042 on its way?"))
+	if err := checkStreamAnswer(); err != nil {
+		log.Fatalf("check the streamed call: %v", err)
+	}
 
 	// #region score
 	// A machine evaluation of the run. min and max are required: 0.86 means
@@ -109,16 +131,34 @@ func handleTicket(ctx context.Context, m *mcpd.Client, question string) string {
 
 // draftAnswer stands in for a model call.
 func draftAnswer(ctx context.Context, m *mcpd.Client, question string) string {
+	// #region prompt
+	// The version labelled production, cached for a minute. If the daemon is
+	// down before the first fetch, the fallback keeps the agent working.
+	prompt, err := m.GetPrompt(ctx, "support/answer", mcpd.PromptOptions{
+		Label: "production",
+		FallbackMessages: []map[string]any{
+			{"role": "system", "content": "You answer billing questions for {{company}}."},
+			{"role": "user", "content": "{{question}}"},
+		},
+	})
+	if err != nil {
+		log.Fatalf("read the prompt: %v", err)
+	}
+	rendered, err := mcpd.RenderPrompt(prompt, map[string]string{
+		"company": "Acme", "question": question,
+	})
+	if err != nil {
+		log.Fatalf("render the prompt: %v", err)
+	}
+
 	ctx, span := m.Start(ctx, "draft_answer",
 		mcpd.WithSpanKind(mcpd.SpanKindModelGeneration),
-		mcpd.WithInput(map[string]any{
-			"messages": []map[string]string{
-				{"role": "system", "content": "You are a billing support agent."},
-				{"role": "user", "content": question},
-			},
-		}),
+		mcpd.WithInput(map[string]any{"messages": rendered.Messages}),
 	)
 	defer span.End()
+	// The run now shows which prompt version wrote the answer.
+	span.SetPrompt(prompt)
+	// #endregion prompt
 
 	// Where a real provider call goes. This is the shape Anthropic answers in.
 	time.Sleep(40 * time.Millisecond)
@@ -160,6 +200,116 @@ func sendReply(ctx context.Context, m *mcpd.Client, answer string) error {
 	span.RecordError(err, mcpd.ErrorKind("SMTPTemporaryFailure"), mcpd.ErrorRetryable(true))
 	return err
 }
+
+// chatChunk is the part of an OpenAI streamed chat-completion chunk this
+// example reads.
+type chatChunk struct {
+	ID      string         `json:"id"`
+	Model   string         `json:"model"`
+	Choices []chatChoice   `json:"choices"`
+	Usage   map[string]int `json:"usage,omitempty"`
+}
+
+type chatChoice struct {
+	Index        int       `json:"index"`
+	Delta        chatDelta `json:"delta"`
+	FinishReason string    `json:"finish_reason,omitempty"`
+}
+
+type chatDelta struct {
+	Content string `json:"content,omitempty"`
+}
+
+// fakeChatStream stands in for a provider's stream. It has the four methods of
+// the stream the official OpenAI Go SDK returns.
+type fakeChatStream struct {
+	chunks []chatChunk
+	at     int
+}
+
+func newFakeChatStream(text string) *fakeChatStream {
+	s := &fakeChatStream{at: -1}
+	chunk := func(choice chatChoice) chatChunk {
+		return chatChunk{ID: "chatcmpl-01", Model: "gpt-4o-mini", Choices: []chatChoice{choice}}
+	}
+	for _, word := range strings.SplitAfter(text, " ") {
+		s.chunks = append(s.chunks, chunk(chatChoice{Delta: chatDelta{Content: word}}))
+	}
+	s.chunks = append(s.chunks, chunk(chatChoice{FinishReason: "stop"}))
+	usage := map[string]int{"prompt_tokens": 24, "completion_tokens": 6, "total_tokens": 30}
+	s.chunks = append(s.chunks, chatChunk{ID: "chatcmpl-01", Model: "gpt-4o-mini", Usage: usage})
+	return s
+}
+
+func (s *fakeChatStream) Next() bool {
+	time.Sleep(5 * time.Millisecond)
+	s.at++
+	return s.at < len(s.chunks)
+}
+func (s *fakeChatStream) Current() chatChunk { return s.chunks[s.at] }
+func (s *fakeChatStream) Err() error         { return nil }
+func (s *fakeChatStream) Close() error       { return nil }
+
+// #region stream
+// streamAnswer is a streamed model call. Read the recorded stream in place of
+// the provider's: every chunk comes through unchanged, and when the stream
+// ends the span gets the time to first token, the text, the usage and the
+// finish reason.
+func streamAnswer(ctx context.Context, m *mcpd.Client, question string) string {
+	_, span := m.Start(ctx, "stream_answer", mcpd.WithSpanKind(mcpd.SpanKindModelGeneration))
+	span.SetInput([]map[string]string{{"role": "user", "content": question}})
+
+	// Where client.Chat.Completions.NewStreaming(ctx, params) goes.
+	provider := newFakeChatStream("Your order is in transit.")
+	stream := mcpd.RecordStream(span, provider, "")
+	// Close ends the span if the loop stops early. After a full read it
+	// only closes the provider's stream.
+	defer stream.Close()
+
+	var answer strings.Builder
+	for stream.Next() {
+		if choices := stream.Current().Choices; len(choices) > 0 {
+			answer.WriteString(choices[0].Delta.Content)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		log.Printf("stream: %v", err)
+	}
+	return answer.String()
+}
+
+// #endregion stream
+
+// #region testing
+// checkStreamAnswer is a unit test. Pass the recorder's Client where your code
+// takes an *mcpd.Client, then read back what it recorded: no daemon, no port,
+// no flush. In a _test.go file, rec.MustSpan(t, name) fails the test for you.
+func checkStreamAnswer() error {
+	ctx := context.Background()
+	rec := mcpdtest.New()
+	defer rec.Client.Shutdown(ctx)
+	answer := streamAnswer(ctx, rec.Client, "Where is my order A-1042?")
+
+	call, err := rec.Span("stream_answer")
+	if err != nil {
+		return err
+	}
+	var output string
+	_ = json.Unmarshal(call.Output, &output)
+	if output != answer || call.Model == nil || *call.Model != "gpt-4o-mini" {
+		return fmt.Errorf("recorded %q from %v", output, call.Model)
+	}
+	if call.Usage == nil || call.Usage.OutputTokens == nil || *call.Usage.OutputTokens != 6 {
+		return fmt.Errorf("recorded usage %+v", call.Usage)
+	}
+
+	if trees := rec.Trees(); len(trees) != 1 || trees[0].Span.Name != "stream_answer" {
+		return fmt.Errorf("expected one run named stream_answer, got %d", len(trees))
+	}
+	return nil
+}
+
+// #endregion testing
 
 func duration(ns *uint64) time.Duration {
 	if ns == nil {

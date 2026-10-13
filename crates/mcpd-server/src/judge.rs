@@ -26,10 +26,101 @@
 use crate::state::AppState;
 use mcpd_core::judged::{Judged, StepDecline};
 use mcpd_core::scoring::{judge_request, ScorerConfig, Target};
-use mcpd_core::{Correlation, Score, ScoreSource};
+use mcpd_core::{Correlation, Score, ScoreSource, Span, SpanKind, SpanLink, SpanStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use time::OffsetDateTime;
+
+/// A judged score and the model call that produced it.
+///
+/// The call is kept so it can be stored as a run of its own: a score that
+/// looks wrong is debugged by reading the prompt the judge was given and the
+/// reply it wrote, like any other model call.
+#[derive(Debug, Clone)]
+pub struct Graded {
+    /// The score, with no `score_trace_id` yet.
+    pub score: Score,
+    /// The model call behind it.
+    pub call: JudgeCall,
+}
+
+/// One judge call, as a scorer run records it.
+#[derive(Debug, Clone)]
+pub struct JudgeCall {
+    /// The prompt the judge was sent.
+    pub prompt: String,
+    /// The reply it wrote.
+    pub reply: String,
+    /// Which model answered.
+    pub model: String,
+    /// What the endpoint reported it used.
+    pub usage: Option<mcpd_core::TokenUsage>,
+    /// When the first attempt started.
+    pub started: OffsetDateTime,
+    /// When the reply arrived.
+    pub ended: OffsetDateTime,
+}
+
+impl Graded {
+    /// The `scorer_run` span for this score, and the score pointing at it.
+    ///
+    /// A trace of its own, not a step inside the run it scored: adding the
+    /// judge's tokens and cost to the scored run would change the very
+    /// figures a reader compares runs by. A link names the scored run, and
+    /// the span carries the scored run's correlation so it lands in the same
+    /// project and environment.
+    #[must_use]
+    pub fn into_parts(mut self) -> (Score, Span) {
+        let trace_id = mcpd_core::ids::new_trace_id();
+        let started = self.call.started;
+        let ended = self.call.ended.max(started);
+        let span = Span {
+            trace_id: trace_id.clone(),
+            span_id: mcpd_core::ids::new_span_id(),
+            parent_span_id: None,
+            external_parent_span_id: None,
+            name: format!("score {}", self.score.scorer_id),
+            kind: SpanKind::ScorerRun,
+            status: SpanStatus::Ok,
+            start_time: started,
+            end_time: Some(ended),
+            duration_ns: u64::try_from((ended - started).whole_nanoseconds()).ok(),
+            is_root: true,
+            is_event: false,
+            entity_kind: Some(mcpd_core::EntityKind::Scorer),
+            entity_id: Some(self.score.scorer_id.clone()),
+            entity_name: Some(self.score.scorer_id.clone()),
+            input: Some(serde_json::json!({ "prompt": self.call.prompt })),
+            output: Some(serde_json::json!({
+                "reply": self.call.reply,
+                "value": self.score.value,
+                "reason": self.score.reason,
+            })),
+            attributes: Some(serde_json::json!({ "mcpd.score_id": self.score.score_id })),
+            metadata: None,
+            usage: self.call.usage.clone(),
+            cost: self.score.cost.clone(),
+            model_parameters: None,
+            error: None,
+            links: self.score.trace_id.clone().map(|t| {
+                vec![SpanLink {
+                    trace_id: t,
+                    span_id: self.score.span_id.clone(),
+                    kind: Some("scores".to_owned()),
+                    attributes: None,
+                }]
+            }),
+            tags: None,
+            correlation: self.score.correlation.clone(),
+            model: Some(self.call.model.clone()),
+            provider: None,
+            received_at: OffsetDateTime::now_utc(),
+            ingest_key: None,
+        };
+        self.score.score_trace_id = Some(trace_id);
+        (self.score, span)
+    }
+}
 
 /// Where the judge sends its prompt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -404,12 +495,47 @@ pub async fn grade(
     correlation: Correlation,
     now: OffsetDateTime,
     latest: std::time::Instant,
-) -> Result<Score, Declined> {
+) -> Result<Graded, Declined> {
     let cfg = state.config.judge.as_ref().ok_or(Declined::NotConfigured)?;
     let criterion = cfg
         .criteria
         .get(scorer_id)
         .ok_or_else(|| Declined::UnknownCriterion(scorer_id.to_owned()))?;
+    let version = cfg.model.clone();
+    grade_criterion(
+        state,
+        scorer_id,
+        criterion,
+        &version,
+        target,
+        trace_id,
+        correlation,
+        now,
+        latest,
+    )
+    .await
+}
+
+/// Grade one run against a criterion's text, under a scorer id and version.
+///
+/// What [`grade`] does for a criterion in the config file, and what a stored
+/// judge definition does with its own prompt.
+///
+/// # Errors
+/// Returns [`Declined`] for the same reasons as [`grade`].
+#[allow(clippy::too_many_arguments)]
+pub async fn grade_criterion(
+    state: &Arc<AppState>,
+    scorer_id: &str,
+    criterion: &str,
+    version: &str,
+    target: &Target<'_>,
+    trace_id: &str,
+    correlation: Correlation,
+    now: OffsetDateTime,
+    latest: std::time::Instant,
+) -> Result<Graded, Declined> {
+    let cfg = state.config.judge.as_ref().ok_or(Declined::NotConfigured)?;
 
     // Nothing to grade is a decline, not a zero. A run with no answer has not
     // scored badly on relevance; it has not been measured.
@@ -418,7 +544,9 @@ pub async fn grade(
     }
 
     let req = judge_request(scorer_id, criterion, target);
+    let started = OffsetDateTime::now_utc();
     let reply = chat(state, cfg, &req.prompt, latest).await?;
+    let ended = OffsetDateTime::now_utc();
 
     let json = extract_json(&reply.content)
         .ok_or_else(|| Declined::Unparsable(truncate(&reply.content)))?;
@@ -429,15 +557,24 @@ pub async fn grade(
         return Err(Declined::OutOfScale(verdict.value));
     }
     let (cost, call) = call_record(state, cfg, &reply);
+    let judge_call = JudgeCall {
+        prompt: req.prompt.clone(),
+        reply: reply.content.clone(),
+        model: cfg.model.clone(),
+        usage: reply.usage.clone(),
+        started,
+        ended,
+    };
 
-    Ok(Score {
+    let score = Score {
         score_id: mcpd_core::ids::new_trace_id(),
         trace_id: Some(trace_id.to_owned()),
         span_id: None,
         scorer_id: scorer_id.to_owned(),
-        // The model is the version. Two scores from different judges are not
-        // comparable, and this is what says so on the record.
-        scorer_version: Some(cfg.model.clone()),
+        // For a configured criterion the model is the version: two scores
+        // from different judges are not comparable, and this is what says so
+        // on the record. A stored definition adds its own number to it.
+        scorer_version: Some(version.to_owned()),
         source: ScoreSource::Offline,
         value: verdict.value,
         min: Some(req.min),
@@ -449,7 +586,8 @@ pub async fn grade(
         metadata: Some(serde_json::json!({ "judge": call })),
         timestamp: now,
         correlation,
-    })
+    };
+    Ok(Graded { score, call: judge_call })
 }
 
 /// Grade one run with a scorer from the judged library, in its four steps.
@@ -471,10 +609,13 @@ pub async fn grade_judged(
     correlation: Correlation,
     now: OffsetDateTime,
     latest: std::time::Instant,
-) -> Result<Score, Declined> {
+) -> Result<Graded, Declined> {
     let cfg = state.config.judge.as_ref().ok_or(Declined::NotConfigured)?;
     let inputs = scorer.preprocess(target, config).map_err(Declined::Step)?;
-    let reply = chat(state, cfg, &scorer.analyze_prompt(&inputs), latest).await?;
+    let prompt = scorer.analyze_prompt(&inputs);
+    let started = OffsetDateTime::now_utc();
+    let reply = chat(state, cfg, &prompt, latest).await?;
+    let ended = OffsetDateTime::now_utc();
     let json = extract_json(&reply.content).ok_or_else(|| {
         Declined::Step(StepDecline {
             step: "analyze",
@@ -484,7 +625,15 @@ pub async fn grade_judged(
     let items = scorer.parse_analysis(json).map_err(Declined::Step)?;
     let (value, reason) = scorer.score(&items).map_err(Declined::Step)?;
     let (cost, call) = call_record(state, cfg, &reply);
-    Ok(Score {
+    let judge_call = JudgeCall {
+        prompt,
+        reply: reply.content.clone(),
+        model: cfg.model.clone(),
+        usage: reply.usage.clone(),
+        started,
+        ended,
+    };
+    let score = Score {
         score_id: mcpd_core::ids::new_trace_id(),
         trace_id: Some(trace_id.to_owned()),
         span_id: None,
@@ -516,7 +665,8 @@ pub async fn grade_judged(
         })),
         timestamp: now,
         correlation,
-    })
+    };
+    Ok(Graded { score, call: judge_call })
 }
 
 /// How many items took each verdict, for the reason step's record.

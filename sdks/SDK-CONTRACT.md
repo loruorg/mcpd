@@ -171,6 +171,47 @@ When the deadline passes:
 The deadline covers the whole call: `shutdown()` does not spend one deadline
 flushing and another stopping the worker.
 
+### 2.5 The test client
+
+A user testing their own code needs to see what it recorded without a daemon.
+Every SDK ships a test client in a module of its own:
+
+| Language | Name |
+| --- | --- |
+| TypeScript | `TestClient` from `@mcpd/sdk/testing`, a subclass of `Mcpd` |
+| Python | `mcpd.testing.TestClient`, a subclass of `Mcpd` |
+| Go | `mcpdtest.New(options...)`, whose `Client` field is a `*mcpd.Client` |
+| Kotlin | `dev.mcpd.testing.TestClient`, whose `client` is an `Mcpd` |
+| Rust | `mcpd_sdk::testing::TestClient`, whose `client()` is a `Mcpd` |
+| Elixir | `Mcpd.Testing.start(opts)`, whose `client` is an `Mcpd` client |
+
+It is a real client whose sink is a `RecordingSink`, so what the code under
+test records goes through the same pipeline as in production: sampling,
+`capture_payloads`, `redact`, validation and the queue bound. A test sees what
+the daemon would have received, and nothing leaves the process.
+
+- It takes every client option except `sink`. `enabled` defaults to `true` and
+  `sample` to `1.0` whatever the environment says, so a CI job that sets
+  `MCPD_ENABLED=false` does not turn the test client off. Every other option
+  takes the client's own default.
+- Every accessor flushes first, so the test never calls `flush()` itself.
+- `spans(name?, kind?)` answers the finished spans, one per span id. A span is
+  queued on start and again on end (B8); the accessor keeps the last record
+  seen for each id, in the order each id first arrived, and leaves out a span
+  that has not ended.
+- `span(name)` answers the one finished span with that name, and fails with a
+  message giving the count when there is none or more than one. It is the one
+  call here that raises, because it is called from a test and a failed
+  assertion is its purpose. Python spells it `recorded_span(name)`, because
+  its client already has a `span` that starts one.
+- `logs()`, `metrics()`, `scores()` and `recorded_feedback()` answer the
+  other signals in arrival order. The last is not `feedback()` because the
+  client already has a `feedback` that records one.
+- `trees()` answers each trace as a tree of finished spans: the roots, each
+  with its children ordered by start time. A span whose parent was not
+  recorded is a root.
+- `reset()` flushes and forgets everything recorded so far.
+
 ## 3. Tracing surface
 
 ```
@@ -308,6 +349,64 @@ that return span options: `Mcpd.ModelCall.usage_from_openai/1`,
 `attributes:` that `record_response` would set), `first_token/1` (the attribute
 from a start time) and `guardrail/2`.
 
+### 3.2 Streamed model calls
+
+A streamed response arrives as chunks, and the facts `record_response` reads
+are spread across them. Every SDK ships a wrapper that collects them:
+
+```
+span.record_stream(stream, provider?) -> stream     # the same chunks, recorded
+```
+
+`stream` is the provider's stream in the language's own form: an async
+iterable in TypeScript, an iterator or async iterator in Python, a
+`Next`/`Current`/`Err`/`Close` stream in Go, a `Flow` in Kotlin, a `Stream` in
+Rust, an `Enumerable` in Elixir. The wrapper is the same form, and the caller
+reads it in place of the original. Elixir has no span handle, so there it is
+`Mcpd.ModelCall.record_stream(client, stream, name, opts)`, which opens the
+model span when the stream is first read.
+
+Four rules hold in every language.
+
+- **Every chunk passes through unchanged**, in order, none added and none
+  dropped. Reading a chunk never raises: a chunk of an unknown shape, a missing
+  field or a wrong type is skipped by the accumulator and still handed to the
+  caller (B1).
+- **The first chunk that carries text or a tool-call delta calls
+  `mark_first_token`.**
+- **The span is finished exactly once**, when the stream ends, when it raises,
+  or when the caller stops reading early (a `break`, a cancelled coroutine, a
+  dropped stream, a `Close`). Finishing applies `record_response` to a response
+  built from what was collected, sets the output, and ends the span. A stream
+  that raised also gets `set_error` with the error's message, and the error
+  reaches the caller unchanged: it is the provider's error, not
+  instrumentation's. An error the caller's own code raises while reading is
+  an early stop, not a failed call, and ends the span with no error.
+- **Memory is bounded.** The collected text and the tool calls' arguments
+  share one budget of 32,768 Unicode code points. What arrives past it is not
+  kept, and `mcpd.stream.truncated = true` is set on the span. At most 64 tool
+  calls are kept; later ones are ignored and set the same attribute.
+
+What is collected, by chunk shape:
+
+| Shape | Recognised by | Collected |
+| --- | --- | --- |
+| OpenAI chat completions | a `choices` key holding a list, or null (a typed chunk with no choices can serialise them that way) | `id`, `model`, `service_tier` (first non-empty wins); text from `choices[0].delta.content`; tool calls from `choices[0].delta.tool_calls`, keyed by `index`, with `id` and `function.name` set once and `function.arguments` appended; each choice's `finish_reason`, by choice index; `usage` from the chunk that carries one (the final chunk under `stream_options.include_usage`) |
+| Anthropic messages | a `type` of `message_start`, `content_block_start`, `content_block_delta` or `message_delta` | `id`, `model` and `usage` from `message_start.message`; a `tool_use` block from `content_block_start`, keyed by `index`; text from a `text_delta` and arguments from an `input_json_delta`; `stop_reason` from `message_delta.delta`; and each usage field in `message_delta.usage` replaces the one from `message_start` |
+
+The response handed to `record_response` is shaped like the provider's own:
+`{"object": "chat.completion", id, model, service_tier, choices: [{finish_reason}], usage}`
+for OpenAI and `{"type": "message", id, model, stop_reason, usage}` for
+Anthropic, each field only when it was seen. So the model, the provider, the
+usage and the `gen_ai.response.*` attributes come out exactly as they would for
+the same call made without streaming.
+
+The output is the text when no tool call arrived, and
+`{"content": text, "tool_calls": [{id, name, arguments}]}` when one did, with
+`arguments` the collected string. It goes through `set_output`, so
+`capture_payloads = false` keeps it in the process like any other output. A
+stream that carried neither text nor a tool call sets no output.
+
 ## 4. The other four signals
 
 ```
@@ -434,6 +533,12 @@ analytics_cost(from, to, group_by?, bucket?) -> CostBreakdown
 health() -> HealthStatus
 ```
 
+`list_traces` takes every filter `GET /v1/api/traces` documents, including
+`max_duration_ms`, `max_cost`, `min_tokens`, `score_above` (with `has_score`)
+and `has_feedback`, a boolean sent as `true` or `false`. `list_spans` takes
+`prompt` and `prompt_version`, which match the spans a prompt was linked to
+(section 5.1).
+
 Three more are part of this contract and are **not implemented in any SDK yet**.
 They are written down here rather than left out, because the obligation is the
 contract's and a surface the daemon serves that no client can reach is a gap
@@ -468,6 +573,162 @@ answers for one tag instead of all of them, with a 200.
 The metric `filter` is label equality pairs in the daemon's own spelling,
 `key:value` joined by commas: `filter=model:gpt-4o,status:ok`. A JSON object in
 that place matches no point, and the daemon answers 200 with an empty series.
+
+### 5.1 Prompts
+
+A prompt is stored in the daemon as numbered versions, and labels such as
+`production` point at the version a caller should use. The SDK fetches one,
+renders it, and links the spans that used it.
+
+```
+get_prompt(name, label? | version?, cache_ttl? = 60s, fallback?) -> Prompt
+render_prompt(prompt, variables) -> string | messages
+create_prompt(name, kind?, template? | messages?, config?, note?, labels?) -> Prompt
+set_prompt_label(name, label, version) -> Prompt
+span.set_prompt(prompt)
+```
+
+**Which version.** `label` reads `GET /v1/api/prompts/{name}?label=`, `version`
+reads `?version=`, and giving both is refused before the wire. Given neither,
+the SDK asks for the label `production`, and when the daemon answers 404 for it
+asks again with no selector, which returns the latest version. A prompt with no
+`production` label yet still works, and labelling a version later changes what
+the same call returns without a deploy.
+
+**Caching.** Each client keeps fetched prompts in memory, keyed by project, name
+and selector (the label, the version, or the default). The cache holds at most
+256 entries and evicts the oldest when full (B3).
+
+- A copy younger than `cache_ttl` is returned with no request.
+- An older copy, or none, is fetched. A successful fetch replaces the copy.
+- When the fetch fails for any reason (unreachable daemon, a 5xx, a 404, a
+  timeout) and a copy exists, the copy is returned however old it is, and the
+  failure is reported once through the diagnostics channel. A daemon outage
+  never breaks an agent that has fetched its prompt once.
+- When the fetch fails and no copy exists, `fallback` is returned if given: a
+  template (a `text` prompt) or a list of messages (a `chat` prompt), returned
+  as a `Prompt` with the requested name, version `0`, no labels and its
+  variables computed by the rule below. A fallback is never cached, so the next
+  call tries the daemon again.
+- With no copy and no fallback, the call raises the fetch error. `get_prompt`
+  is the caller's own code path, not instrumentation, so B1 does not apply.
+
+`cache_ttl = 0` fetches every time and still serves a stale copy when the
+fetch fails. `enabled = false` does not stop a fetch: a prompt is the agent's
+input, not telemetry.
+
+**Rendering.** `render_prompt` substitutes variables by the daemon's own rule
+(`variables_in` in `crates/mcpd-server/src/prompts.rs`):
+
+- A placeholder is `{{`, then everything up to the next `}}`. The text between,
+  with surrounding whitespace removed, is the name: `{{city}}` and `{{ city }}`
+  are the same variable.
+- A name starts with an ASCII letter or `_` and continues with ASCII letters,
+  digits, `_` and `.`. A placeholder whose text is not a name, and a `{{` with no
+  closing `}}`, is left in the output as written.
+- Substitution is one pass. A value that itself contains `{{x}}` is not
+  rendered again.
+- A variable the template names and `variables` lacks is an error that names
+  every missing variable in order of first use. Rendering is user code, so it
+  raises rather than sending a prompt with a hole in it. Extra variables are
+  ignored.
+
+A `text` prompt renders to a string. A `chat` prompt renders to a copy of its
+messages in which every `content` that is a string is rendered; any other field,
+and a `content` that is not a string, is copied unchanged. Typed languages take
+string values; dynamic languages write a non-string value in its plain string
+form.
+
+**Writing.** `create_prompt` posts `CreatePromptRequest` and returns the stored
+version. Posting a body identical to the latest version stores nothing and
+returns that version, so a deploy script can post its prompts on every start.
+`set_prompt_label` puts `{version}` to `/v1/api/prompts/{name}/labels/{label}`:
+moving `production` releases a version, and moving it back rolls one back. Both
+raise on an error answer, and neither clears the read cache, so a running agent
+sees a moved label within `cache_ttl`.
+
+**Linking.** `span.set_prompt(prompt)` sets the attributes `mcpd.prompt.name`
+(a string) and `mcpd.prompt.version` (an integer) on the span. A prompt with
+version `0`, a fallback, sets the name only. It never raises (B1): a missing or
+malformed prompt sets nothing. `list_spans(prompt=, prompt_version=)` then
+finds every span that used a prompt or one version of it. Elixir has no mutable
+span handle and returns the attributes instead, for the `attributes:` option.
+
+### 5.2 Experiments
+
+An experiment runs one version of an agent over every case of a dataset and
+scores each answer against its own case. The daemon never calls the agent: the
+SDK does, in the caller's process, so the target can be any function.
+
+```
+get_trajectory(trace_id) -> Trajectory
+list_dataset_items(dataset_id, limit?) -> DatasetItem[]
+create_experiment(experiment) -> Experiment
+score_experiment(experiment_id, scorers, config?) -> ScoreRunResult
+experiment_results(experiment_id) -> ExperimentResults
+run_experiment(dataset_id, target, name?, scorers?, config?, concurrency? = 4,
+               metadata?) -> ExperimentResults
+```
+
+`list_traces` also takes `experiment_id` and `preview` (a boolean sent as
+`true` or `false`, which fills `input_preview` and `output_preview`).
+
+**The reads and writes.** `get_trajectory` reads
+`GET /v1/api/traces/{trace_id}/trajectory`. `list_dataset_items` reads
+`GET /v1/api/datasets/{dataset_id}/items` and sends `limit` only, because the
+endpoint documents nothing else; the daemon finds the project from the
+dataset. `create_experiment` posts an `Experiment` to `/v1/api/experiments`
+with the client's project in its correlation when the caller left it empty. It
+is an upsert on `experiment_id`: an empty id gets a new one, and posting the
+same id again replaces the record, which is how a status is moved.
+`score_experiment` posts `ExperimentScoreRequest` to
+`/v1/api/experiments/{id}/score` and `experiment_results` reads
+`/v1/api/experiments/{id}/results`, both with the client's project. Each of
+these raises on an error answer (Elixir returns `{:error, reason}`, as its
+other reads do): it is the caller's own code path, so B1 does not apply.
+
+**The runner.** `run_experiment` does these steps in order:
+
+1. Create the experiment: `name` (the dataset id when not given), the dataset
+   id, status `running`, `started_at` now, and `metadata` when given.
+2. Read the cases with `list_dataset_items(dataset_id, 5000)`, the most the
+   daemon answers in one page.
+3. For each case, open a root span of kind `agent_run` named after the
+   experiment, with `correlation.experiment_id` set to the experiment's id, the
+   attribute `mcpd.dataset_item_id` set to the case's `item_id`, and the
+   case's `input` as the span's input. The span is always kept, whatever the
+   sample rate, because a sampled-out case would be a case with no answer.
+   Call `target` with the case's input inside that span, so spans the target
+   opens are its children. Record what it returns as the output and end the
+   span `ok`. When the target raises, record the error on the span (B10), end
+   it `error`, and carry on with the next case: one failing case is a result,
+   not a reason to stop.
+4. At most `concurrency` cases run at once (4 by default, and at least 1). The
+   runner holds the cases it read and the targets in flight, and never the
+   answers once their spans have ended.
+5. `flush()`. A flush that does not deliver every run before its deadline
+   fails the runner, because scoring would read an experiment with runs
+   missing.
+6. `score_experiment(id, scorers, config)`. With no scorers given the daemon
+   runs the code scorers that need no settings.
+7. `experiment_results(id)`, then post the experiment again with status
+   `succeeded`, `finished_at` now, `item_count` the number of cases, and
+   `summary` an object from each scorer's id to its mean.
+8. Return the `ExperimentResults`.
+
+When any step of the runner itself fails (a read, a write, the flush), it
+posts the experiment with status `failed`, `finished_at` and `error` set to
+the message, if the experiment was created, and raises the original error. A failure to record the `failed` status is
+reported through the diagnostics channel and never hides the original error.
+A `concurrency` below 1 is refused before the first request, and so is a
+client with `enabled = false`, because none of its runs would reach the daemon
+to be scored.
+
+The target's shape follows the language: a function that may return a promise
+in TypeScript, a plain or async function in Python (with `arun_experiment` to
+await from async code), a suspend function in Kotlin, a function taking a
+`context.Context` in Go, an async closure in Rust, and a one-argument function
+in Elixir, run in a task per case.
 
 ## 6. Wire format
 
@@ -687,4 +948,31 @@ error. `start_and_wait` is the two in one call.
   in both directions across every level; and, in the languages that can carry a
   key with no value, that key falling through to the run's own value rather
   than erasing it.
+- Tests for the prompts of section 5.1: the default label falling back to the
+  latest version on a 404, a fresh copy served with no request, a stale copy
+  served when the refetch fails, a fallback when nothing was fetched, both
+  selectors refused, rendering with whitespace in braces, a name left alone
+  when it is not a name, one-pass substitution, a missing variable named in the
+  error, chat `content` rendered and other fields kept, and `set_prompt` setting
+  both attributes without raising on a bad prompt.
+- Tests that `list_traces` and `list_spans` send the filters of section 5 and
+  nothing else.
+- Tests for the experiments of section 5.2: each read and write on its path
+  with its body; a run of several cases creating the experiment as `running`,
+  opening one root span per case with the experiment id, the case id and the
+  input, recording each output, recording a target's error on its own span and
+  running the cases after it, scoring with the scorers given, and posting
+  `succeeded` with the summary; no more than `concurrency` targets in flight;
+  and a failed read posting `failed` with the error and raising.
+- Tests for `record_stream` (section 3.2): an OpenAI stream and an Anthropic
+  stream each recording the model, usage, id, finish reason and output that
+  `record_response` and `set_output` would; tool-call deltas joined; every
+  chunk passed through unchanged, an unknown one included; the first token
+  marked once; a stream that raises ending the span with an error and the
+  error reaching the caller; a caller that stops early still ending the span;
+  and text past the budget cut with `mcpd.stream.truncated` set.
+- Tests for the test client (section 2.5): spans, logs, scores and feedback
+  read back with no flush; one record per span id; `span(name)` failing on
+  none and on two; the tree; `reset()`; `redact` applied; and `enabled` and
+  `sample` holding against the environment.
 - An example under `examples/<language>/` that the docs include **by reference**.

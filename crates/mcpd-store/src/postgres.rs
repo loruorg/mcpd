@@ -21,12 +21,12 @@
 use crate::{
     decode_delta_cursor, encode_delta_cursor, hashed_id_regex, is_hashed_identifier,
     unmatchable_identifiers, Aggregation, AspectNoteQuery, AspectNoteRollup, AspectRollupQuery,
-    AuditQuery, Batch, Delta, DeltaQuery, DeltaSignal, Discovered, DiscoveryQuery, ErasureOutcome,
-    Error, IdentifierProbe, Include, LogQuery, MetricQuery, Order, Paged, Partitioning,
-    PolledSignal, Result, RetentionOutcome, RetentionPolicy, ScoreQuery, SnapshotQuery,
-    SnapshotWrite, SpanQuery, SpanSort, Store, StoreCapabilities, StoredNote, StoredTheme,
-    TextSearch, ThemeLineage, ThemeMember, ThemeMemberQuery, ThemeQuery, TraceQuery, TraceSort,
-    ERASED_ITEM,
+    AuditQuery, Batch, Delta, DeltaQuery, DeltaSignal, Discovered, DiscoveryQuery, DocKind,
+    DocumentLabel, ErasureOutcome, Error, IdentifierProbe, Include, LogQuery, MetricQuery,
+    NewDocument, Order, Paged, Partitioning, PolledSignal, Result, RetentionOutcome,
+    RetentionPolicy, ScoreQuery, SnapshotQuery, SnapshotWrite, SpanQuery, SpanSort, Store,
+    StoreCapabilities, StoredDocument, StoredNote, StoredTheme, TextSearch, ThemeLineage,
+    ThemeMember, ThemeMemberQuery, ThemeQuery, TraceQuery, TraceSort, ERASED_ITEM,
 };
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use mcpd_core::{
@@ -221,7 +221,9 @@ const MIGRATION_LOCK: i64 = 0x6d63_7064_0001;
 /// `CREATE TABLE IF NOT EXISTS` cannot apply, so `migrate` drops the old table
 /// inside the migrating transaction and rebuilds every row from the spans. That
 /// is safe only because every column of `traces` is derived.
-const SCHEMA_VERSION: i32 = 6;
+///
+/// 7 adds `documents` and `document_labels`, two new tables.
+const SCHEMA_VERSION: i32 = 7;
 
 /// The first version whose `traces` table is keyed by project as well.
 const TRACES_BY_PROJECT: i32 = 5;
@@ -337,6 +339,81 @@ fn unreachable(e: deadpool_postgres::PoolError) -> Error {
 /// their escape characters escaped in turn.
 fn escape_like(raw: &str) -> String {
     raw.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
+/// Put the root step's input and output on each trace of a page, as previews.
+///
+/// One read for the whole page, of at most [`crate::PREVIEW_READ_BYTES`] of
+/// each payload.
+async fn pg_fill_previews(
+    conn: &tokio_postgres::Client,
+    project: &str,
+    traces: &mut [Trace],
+) -> Result<()> {
+    let (ids, roots): (Vec<String>, Vec<String>) = traces
+        .iter()
+        .filter_map(|t| t.root_span_id.clone().map(|r| (t.trace_id.clone(), r)))
+        .unzip();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT s.trace_id, left(s.input, {n}), left(s.output, {n})
+                 FROM spans s JOIN unnest($2::text[], $3::text[]) AS r(trace_id, span_id)
+                   ON s.trace_id = r.trace_id AND s.span_id = r.span_id
+                 WHERE s.project = $1",
+                n = crate::PREVIEW_READ_BYTES
+            ),
+            &[&project, &ids, &roots],
+        )
+        .await
+        .map_err(be)?;
+    for r in &rows {
+        let id: String = r.get(0);
+        let input: Option<String> = r.get(1);
+        let output: Option<String> = r.get(2);
+        if let Some(t) = traces.iter_mut().find(|t| t.trace_id == id) {
+            t.input_preview = input.as_deref().and_then(crate::payload_preview);
+            t.output_preview = output.as_deref().and_then(crate::payload_preview);
+        }
+    }
+    Ok(())
+}
+
+/// A `documents` row read as `project, id, version, body, note, created_by,
+/// created_at`.
+fn pg_document(kind: DocKind, r: &Row) -> StoredDocument {
+    let body: String = r.get(3);
+    StoredDocument {
+        project: r.get(0),
+        kind,
+        id: r.get(1),
+        version: r.get::<_, i64>(2).clamp(0, i64::from(u32::MAX)) as u32,
+        body: serde_json::from_str(&body).unwrap_or(Value::Null),
+        note: r.get(4),
+        created_by: r.get(5),
+        created_at: from_nanos(r.get(6)),
+    }
+}
+
+async fn pg_latest_document(
+    conn: &tokio_postgres::Client,
+    project: &str,
+    kind: DocKind,
+    id: &str,
+) -> Result<Option<StoredDocument>> {
+    Ok(conn
+        .query_opt(
+            "SELECT project, id, version, body, note, created_by, created_at
+             FROM documents WHERE project = $1 AND kind = $2 AND id = $3
+             ORDER BY version DESC LIMIT 1",
+            &[&project, &kind.as_str(), &id],
+        )
+        .await
+        .map_err(be)?
+        .map(|r| pg_document(kind, &r)))
 }
 
 fn to_nanos(t: OffsetDateTime) -> i64 {
@@ -601,6 +678,8 @@ fn row_to_trace(r: &Row) -> Trace {
         }),
         model_count: r.get::<_, i64>(14).max(0) as u32,
         tool_count: r.get::<_, i64>(15).max(0) as u32,
+        input_preview: None,
+        output_preview: None,
         tags: tags_in(r.get(16)),
         correlation: Correlation {
             project: r.get(17),
@@ -735,40 +814,55 @@ impl PostgresStore {
     /// Returns [`Error::Backend`] if the connection string cannot be parsed or
     /// the pool cannot be built.
     pub fn new(config: PostgresConfig) -> Result<Self> {
-        let (url, tls) = split_tls(&config.url)?;
-        // The connection string is not repeated in the error: it carries the
-        // password, and this message reaches the start-up log.
-        let pg: tokio_postgres::Config = url.parse().map_err(|e| {
-            Error::Backend(format!("postgres: the connection string is not usable: {e}"))
-        })?;
-
-        // Built from the parsed configuration as a whole, so every option the
-        // string carries reaches the connection: `connect_timeout`, a second
-        // host, `application_name`. Copying five fields out of it dropped the
-        // rest without a word.
-        let manager_config = ManagerConfig { recycling_method: RecyclingMethod::Fast };
-        let manager = if pg.get_ssl_mode() == SslMode::Require {
-            let connector = tokio_postgres_rustls::MakeRustlsConnect::new(tls.client_config()?);
-            Manager::from_config(pg, connector, manager_config)
-        } else {
-            Manager::from_config(pg, NoTls, manager_config)
-        };
-
-        // Bounded waits. A pool with none holds a request, or a background
-        // loop, for ever on a server that accepts the connection and never
-        // answers, and the request timeout above it is then the only thing
-        // that ends it.
-        let pool = Pool::builder(manager)
-            .max_size(config.pool_size.max(2))
-            .wait_timeout(Some(POOL_WAIT))
-            .create_timeout(Some(POOL_WAIT))
-            .recycle_timeout(Some(POOL_WAIT))
-            .runtime(Runtime::Tokio1)
-            .build()
-            .map_err(|e| Error::Backend(format!("postgres: could not build a pool: {e}")))?;
-        Ok(Self { pool })
+        Ok(Self { pool: connect_pool(&config)? })
     }
+}
 
+/// Build a connection pool the way this store builds its own: the TLS
+/// settings read out of the connection string, and bounded waits.
+///
+/// Public so the run store, which is a separate crate with its own schema,
+/// reaches the same server through the same rules rather than a second copy of
+/// them. No connection is made until the first query.
+///
+/// # Errors
+/// Returns [`Error::Backend`] if the connection string cannot be parsed, its
+/// `sslrootcert` cannot be read, or the pool cannot be built.
+pub fn connect_pool(config: &PostgresConfig) -> Result<Pool> {
+    let (url, tls) = split_tls(&config.url)?;
+    // The connection string is not repeated in the error: it carries the
+    // password, and this message reaches the start-up log.
+    let pg: tokio_postgres::Config = url.parse().map_err(|e| {
+        Error::Backend(format!("postgres: the connection string is not usable: {e}"))
+    })?;
+
+    // Built from the parsed configuration as a whole, so every option the
+    // string carries reaches the connection: `connect_timeout`, a second
+    // host, `application_name`. Copying five fields out of it dropped the
+    // rest without a word.
+    let manager_config = ManagerConfig { recycling_method: RecyclingMethod::Fast };
+    let manager = if pg.get_ssl_mode() == SslMode::Require {
+        let connector = tokio_postgres_rustls::MakeRustlsConnect::new(tls.client_config()?);
+        Manager::from_config(pg, connector, manager_config)
+    } else {
+        Manager::from_config(pg, NoTls, manager_config)
+    };
+
+    // Bounded waits. A pool with none holds a request, or a background
+    // loop, for ever on a server that accepts the connection and never
+    // answers, and the request timeout above it is then the only thing
+    // that ends it.
+    Pool::builder(manager)
+        .max_size(config.pool_size.max(2))
+        .wait_timeout(Some(POOL_WAIT))
+        .create_timeout(Some(POOL_WAIT))
+        .recycle_timeout(Some(POOL_WAIT))
+        .runtime(Runtime::Tokio1)
+        .build()
+        .map_err(|e| Error::Backend(format!("postgres: could not build a pool: {e}")))
+}
+
+impl PostgresStore {
     /// Whether the schema is already at the version this build writes.
     ///
     /// `to_regclass` returns NULL rather than raising for a table that does not
@@ -1895,6 +1989,9 @@ impl Store for PostgresStore {
         if let Some(v) = &q.environment {
             w.push("t.environment = {}", v.clone());
         }
+        if let Some(v) = &q.experiment_id {
+            w.push("t.experiment_id = {}", v.clone());
+        }
         if let Some(t) = q.from {
             w.push("t.start_time >= {}", to_nanos(t));
         }
@@ -1906,6 +2003,22 @@ impl Store for PostgresStore {
         }
         if let Some(c) = q.min_cost {
             w.push("t.total_cost >= {}", c);
+        }
+        if let Some(ms) = q.max_duration_ms {
+            w.push("t.duration_ns <= {}", (ms as i64).saturating_mul(1_000_000));
+        }
+        if let Some(c) = q.max_cost {
+            w.push("t.total_cost <= {}", c);
+        }
+        if let Some(n) = q.min_tokens {
+            w.push("(t.input_tokens + t.output_tokens) >= {}", n as i64);
+        }
+        if let Some(has) = q.has_feedback {
+            w.push_raw(format!(
+                "{}EXISTS (SELECT 1 FROM feedback f WHERE f.project = t.project
+                         AND f.trace_id = t.trace_id)",
+                if has { "" } else { "NOT " }
+            ));
         }
         if let Some(m) = &q.model {
             w.push(
@@ -1929,24 +2042,23 @@ impl Store for PostgresStore {
             );
         }
         if let Some(scorer) = &q.has_score {
-            match q.score_below {
-                Some(v) => {
-                    let n = w.next();
-                    w.push_raw(format!(
-                        "EXISTS (SELECT 1 FROM scores sc WHERE sc.project = t.project
-                                 AND sc.trace_id = t.trace_id
-                                 AND sc.scorer_id = ${n} AND sc.value < ${})",
-                        n + 1
-                    ));
-                    w.bind(scorer.clone());
-                    w.bind(v);
-                }
-                None => w.push(
-                    "EXISTS (SELECT 1 FROM scores sc WHERE sc.project = t.project
-                             AND sc.trace_id = t.trace_id AND sc.scorer_id = {})",
-                    scorer.clone(),
-                ),
+            // Both bounds on the same score row, as on the embedded store.
+            let n = w.next();
+            let mut clause = format!(
+                "EXISTS (SELECT 1 FROM scores sc WHERE sc.project = t.project
+                         AND sc.trace_id = t.trace_id AND sc.scorer_id = ${n}"
+            );
+            w.bind(scorer.clone());
+            if let Some(v) = q.score_below {
+                clause.push_str(&format!(" AND sc.value < ${}", w.next()));
+                w.bind(v);
             }
+            if let Some(v) = q.score_above {
+                clause.push_str(&format!(" AND sc.value > ${}", w.next()));
+                w.bind(v);
+            }
+            clause.push(')');
+            w.push_raw(clause);
         }
 
         // The score sort reads `min_score`, which the projection maintains as
@@ -2029,7 +2141,11 @@ impl Store for PostgresStore {
             None
         };
 
-        Ok(Paged { items: items.into_iter().map(|(t, _)| t).collect(), next_cursor, total: None })
+        let mut items: Vec<Trace> = items.into_iter().map(|(t, _)| t).collect();
+        if q.previews {
+            pg_fill_previews(&conn, &q.project, &mut items).await?;
+        }
+        Ok(Paged { items, next_cursor, total: None })
     }
 
     async fn get_trace(
@@ -2455,6 +2571,23 @@ impl Store for PostgresStore {
         }
         if let Some(ms) = q.min_duration_ms {
             w.push("duration_ns >= {}", (ms as i64).saturating_mul(1_000_000));
+        }
+        // Compared as text, so a version an SDK sent as a number and one sent
+        // as a string both match.
+        if let Some(p) = &q.prompt {
+            w.push(
+                &format!("(attributes::jsonb ->> '{}') = {{}}", crate::PROMPT_NAME_ATTRIBUTE),
+                p.clone(),
+            );
+            if let Some(v) = q.prompt_version {
+                w.push(
+                    &format!(
+                        "(attributes::jsonb ->> '{}') = {{}}",
+                        crate::PROMPT_VERSION_ATTRIBUTE
+                    ),
+                    v.to_string(),
+                );
+            }
         }
         if let Some(text) = q.q.as_deref().and_then(search_text) {
             w.push("search @@ plainto_tsquery('simple', {})", text);
@@ -3508,6 +3641,179 @@ impl Store for PostgresStore {
                 error: r.get(10),
                 metadata: json_in(r.get(11)),
                 correlation: correlation_of(r.get(12), r.get(13)),
+            })
+            .collect())
+    }
+
+    // ------------------------------------------------- versioned documents
+
+    async fn put_document(&self, doc: &NewDocument) -> Result<(StoredDocument, bool)> {
+        let conn = self.conn().await?;
+        // Two replicas can read the same latest version and both try the next
+        // number. The primary key lets one of them in; the other sees no row
+        // inserted, reads again and tries the number after, or finds its body
+        // is now the latest and confirms it.
+        for _ in 0..8 {
+            let held = pg_latest_document(&conn, &doc.project, doc.kind, &doc.id).await?;
+            if let Some(held) = held.as_ref().filter(|h| h.body == doc.body) {
+                return Ok((held.clone(), false));
+            }
+            let version = held.map_or(1, |h| h.version.saturating_add(1));
+            let n = conn
+                .execute(
+                    "INSERT INTO documents
+                       (project, kind, id, version, body, note, created_by, created_at)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                     ON CONFLICT (project, kind, id, version) DO NOTHING",
+                    &[
+                        &doc.project,
+                        &doc.kind.as_str(),
+                        &doc.id,
+                        &i64::from(version),
+                        &doc.body.to_string(),
+                        &doc.note,
+                        &doc.created_by,
+                        &to_nanos(doc.created_at),
+                    ],
+                )
+                .await
+                .map_err(be)?;
+            if n == 1 {
+                return Ok((
+                    StoredDocument {
+                        project: doc.project.clone(),
+                        kind: doc.kind,
+                        id: doc.id.clone(),
+                        version,
+                        body: doc.body.clone(),
+                        note: doc.note.clone(),
+                        created_by: doc.created_by.clone(),
+                        created_at: doc.created_at,
+                    },
+                    true,
+                ));
+            }
+        }
+        Err(Error::Backend(format!(
+            "could not assign a version to {} {:?}: other writers took every number tried; \
+             post it again",
+            doc.kind.as_str(),
+            doc.id
+        )))
+    }
+
+    async fn list_documents(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: Option<&str>,
+    ) -> Result<Vec<StoredDocument>> {
+        let conn = self.conn().await?;
+        let rows = match id {
+            Some(id) => conn
+                .query(
+                    "SELECT project, id, version, body, note, created_by, created_at
+                     FROM documents WHERE project = $1 AND kind = $2 AND id = $3
+                     ORDER BY version DESC",
+                    &[&project, &kind.as_str(), &id],
+                )
+                .await
+                .map_err(be)?,
+            None => conn
+                .query(
+                    "SELECT DISTINCT ON (id) project, id, version, body, note, created_by,
+                            created_at
+                     FROM documents WHERE project = $1 AND kind = $2
+                     ORDER BY id, version DESC",
+                    &[&project, &kind.as_str()],
+                )
+                .await
+                .map_err(be)?,
+        };
+        let docs: Vec<StoredDocument> = rows.iter().map(|r| pg_document(kind, r)).collect();
+        Ok(if id.is_some() { docs } else { crate::latest_per_id(docs) })
+    }
+
+    async fn get_document(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: &str,
+        version: Option<u32>,
+    ) -> Result<Option<StoredDocument>> {
+        let conn = self.conn().await?;
+        let Some(v) = version else {
+            return pg_latest_document(&conn, project, kind, id).await;
+        };
+        Ok(conn
+            .query_opt(
+                "SELECT project, id, version, body, note, created_by, created_at
+                 FROM documents WHERE project = $1 AND kind = $2 AND id = $3 AND version = $4",
+                &[&project, &kind.as_str(), &id, &i64::from(v)],
+            )
+            .await
+            .map_err(be)?
+            .map(|r| pg_document(kind, &r)))
+    }
+
+    async fn set_document_label(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: &str,
+        label: &str,
+        version: Option<u32>,
+    ) -> Result<bool> {
+        let conn = self.conn().await?;
+        let n = match version {
+            None => conn
+                .execute(
+                    "DELETE FROM document_labels
+                     WHERE project = $1 AND kind = $2 AND id = $3 AND label = $4",
+                    &[&project, &kind.as_str(), &id, &label],
+                )
+                .await
+                .map_err(be)?,
+            // One statement, so the version is checked by the same snapshot
+            // that writes the label.
+            Some(v) => conn
+                .execute(
+                    "INSERT INTO document_labels (project, kind, id, label, version, updated_at)
+                     SELECT $1, $2, $3, $4, $5, $6
+                     WHERE EXISTS (SELECT 1 FROM documents
+                                   WHERE project = $1 AND kind = $2 AND id = $3
+                                     AND version = $5)
+                     ON CONFLICT (project, kind, id, label)
+                     DO UPDATE SET version = EXCLUDED.version, updated_at = EXCLUDED.updated_at",
+                    &[&project, &kind.as_str(), &id, &label, &i64::from(v), &now_nanos()],
+                )
+                .await
+                .map_err(be)?,
+        };
+        Ok(n > 0)
+    }
+
+    async fn list_document_labels(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: Option<&str>,
+    ) -> Result<Vec<DocumentLabel>> {
+        let conn = self.conn().await?;
+        Ok(conn
+            .query(
+                "SELECT id, label, version FROM document_labels
+                 WHERE project = $1 AND kind = $2 AND ($3::TEXT IS NULL OR id = $3)
+                 ORDER BY id, label",
+                &[&project, &kind.as_str(), &id],
+            )
+            .await
+            .map_err(be)?
+            .iter()
+            .map(|r| DocumentLabel {
+                id: r.get(0),
+                label: r.get(1),
+                version: r.get::<_, i64>(2).clamp(0, i64::from(u32::MAX)) as u32,
             })
             .collect())
     }

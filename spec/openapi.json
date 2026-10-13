@@ -219,12 +219,14 @@
         "enum": [
           "code",
           "judge",
-          "criterion"
+          "criterion",
+          "custom"
         ],
         "x-enumDescriptions": {
           "code": "Deterministic code in the daemon. Free, and gives the same answer twice.",
           "judge": "A built-in rubric graded by the configured judge model, in steps: preprocess, analyze, score, reason.",
-          "criterion": "A criterion the operator wrote under `judge.criteria`, graded by the judge model in one call."
+          "criterion": "A criterion the operator wrote under `judge.criteria`, graded by the judge model in one call.",
+          "custom": "A scorer definition stored in the project through the API: a judge prompt, or a code scorer with its settings. Versioned, and the version is on every score it produces."
         }
       },
       "ScoreDirection": {
@@ -811,6 +813,44 @@
         "x-enumDescriptions": {
           "oidc": "Any OpenID Connect provider, such as Google, Microsoft Entra ID, Okta or Auth0, found through its issuer's discovery document. Authorization code flow with PKCE, state and nonce.",
           "github": "GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub user id and the email is the primary verified address GitHub reports."
+        }
+      },
+      "PromptKind": {
+        "type": "string",
+        "description": "The shape of a prompt's body.",
+        "enum": [
+          "text",
+          "chat"
+        ],
+        "x-enumDescriptions": {
+          "text": "One template string, for a completion-style call.",
+          "chat": "An ordered list of messages, each with a `role` and a `content` template, for a chat-style call."
+        }
+      },
+      "ScorerDefinitionKind": {
+        "type": "string",
+        "description": "How a stored scorer definition reaches its answer.",
+        "enum": [
+          "judge",
+          "code"
+        ],
+        "x-enumDescriptions": {
+          "judge": "The configured judge model grades the run against the definition's `prompt`, in one call.",
+          "code": "One of the daemon's code scorers, named in `builtin`, with the settings in `config` fixed. Free, and gives the same answer twice."
+        }
+      },
+      "ReviewStatus": {
+        "type": "string",
+        "description": "Where an item in the review queue has got to.",
+        "enum": [
+          "pending",
+          "reviewed",
+          "dismissed"
+        ],
+        "x-enumDescriptions": {
+          "pending": "Waiting for a person.",
+          "reviewed": "A person looked at it and recorded what they found.",
+          "dismissed": "A person looked at it and it needed nothing."
         }
       },
       "InputTokenDetails": {
@@ -2063,6 +2103,16 @@
               "type": "string"
             },
             "description": "Tools the run must not call, for `tool_not_called`."
+          },
+          "trajectory_match": {
+            "type": "string",
+            "description": "How `trajectory` compares the tools the run called with `expected_tools`: `strict` for the same calls in the same order and nothing else, `ordered` for the expected calls in order with others allowed between them, `unordered` for every expected call in any order. Defaults to `ordered`."
+          },
+          "max_steps": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "The most steps a healthy run takes, for `trajectory`. A step is a tool call, a model generation or a handoff."
           },
           "min_chars": {
             "type": "integer",
@@ -5493,6 +5543,615 @@
           "binding"
         ]
       },
+      "CreatePromptRequest": {
+        "type": "object",
+        "description": "A new version of a prompt. Posting a body identical to the latest version stores nothing new and returns that version, so a deploy that posts its prompts on every start is a no-op when nothing changed.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The prompt's name. A new name creates the prompt at version 1."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PromptKind",
+            "description": "`text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`."
+          },
+          "template": {
+            "type": "string",
+            "description": "The template, for a `text` prompt."
+          },
+          "messages": {
+            "description": "The messages, for a `chat` prompt."
+          },
+          "config": {
+            "description": "Model settings to store with it."
+          },
+          "note": {
+            "type": "string",
+            "description": "What changed."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Labels to point at the stored version once it is stored, such as `staging`."
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "PromptLabelRequest": {
+        "type": "object",
+        "description": "Which version a label should point at.",
+        "properties": {
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "The version. It must exist."
+          }
+        },
+        "required": [
+          "version"
+        ]
+      },
+      "PromptVersionsResponse": {
+        "type": "object",
+        "description": "Every version of one prompt, newest first.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The prompt's name."
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Prompt"
+            },
+            "description": "Its versions, newest first, each with the labels that point at it."
+          }
+        },
+        "required": [
+          "name",
+          "versions"
+        ]
+      },
+      "CreateScorerDefinitionRequest": {
+        "type": "object",
+        "description": "A new version of a scorer definition. A body identical to the latest version is not stored again.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The definition's id. A new id creates it at version 1."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ScorerDefinitionKind",
+            "description": "`judge` or `code`."
+          },
+          "description": {
+            "type": "string",
+            "description": "What it measures, in a sentence."
+          },
+          "direction": {
+            "$ref": "#/components/schemas/ScoreDirection",
+            "description": "Which way is better. Defaults to `higher_is_better`."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "For `judge`: the criterion."
+          },
+          "builtin": {
+            "type": "string",
+            "description": "For `code`: the code scorer to run."
+          },
+          "config": {
+            "$ref": "#/components/schemas/ScorerConfig",
+            "description": "For `code`: its settings."
+          },
+          "note": {
+            "type": "string",
+            "description": "What changed."
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "description"
+        ]
+      },
+      "ScorerDefinitionVersions": {
+        "type": "object",
+        "description": "Every version of one scorer definition, newest first.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The definition's id."
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScorerDefinition"
+            },
+            "description": "Its versions, newest first."
+          }
+        },
+        "required": [
+          "id",
+          "versions"
+        ]
+      },
+      "CreateEvaluationRuleRequest": {
+        "type": "object",
+        "description": "A new version of a live scoring rule. Posting the same body as the latest version stores nothing new.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The rule's id: lower-case letters, digits, `-` and `_`, up to 64."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether it runs. Defaults to `false`, so a rule is read back and checked before it spends anything."
+          },
+          "scorers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The scorers to run. At least one."
+          },
+          "sample_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "The share of matching runs to score, from 0 to 1. Defaults to 1."
+          },
+          "name": {
+            "type": "string",
+            "description": "Only runs whose root step has this name."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SpanKind",
+            "description": "Only runs whose root step is this kind."
+          },
+          "environment": {
+            "type": "string",
+            "description": "Only runs from this environment."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Only runs carrying all of these tags."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SpanStatus",
+            "description": "Only runs with this outcome."
+          },
+          "config": {
+            "$ref": "#/components/schemas/ScorerConfig",
+            "description": "Settings for the code scorers that need them."
+          },
+          "max_judged_per_minute": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "The most judged scores per minute. Defaults to 30."
+          },
+          "note": {
+            "type": "string",
+            "description": "What changed."
+          }
+        },
+        "required": [
+          "id",
+          "scorers"
+        ]
+      },
+      "TrajectoryStep": {
+        "type": "object",
+        "description": "One action an agent took: a tool call, a model generation or a handoff, in the order they started.",
+        "properties": {
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "Its position in the trajectory, from 0."
+          },
+          "span_id": {
+            "type": "string",
+            "description": "The span it was read from."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SpanKind",
+            "description": "What kind of action."
+          },
+          "name": {
+            "type": "string",
+            "description": "The tool, model step or agent it names."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SpanStatus",
+            "description": "How it ended."
+          },
+          "start_offset_ms": {
+            "type": "number",
+            "format": "double",
+            "description": "When it started, in milliseconds after the run started."
+          },
+          "duration_ms": {
+            "type": "number",
+            "format": "double",
+            "description": "How long it took. Absent while it is still running."
+          },
+          "model": {
+            "type": "string",
+            "description": "The model, for a model generation."
+          },
+          "input_preview": {
+            "type": "string",
+            "description": "The start of its input as plain text, up to 240 characters."
+          },
+          "output_preview": {
+            "type": "string",
+            "description": "The start of its output as plain text, up to 240 characters."
+          },
+          "tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Input and output tokens together, for a model generation."
+          }
+        },
+        "required": [
+          "index",
+          "span_id",
+          "kind",
+          "name",
+          "status",
+          "start_offset_ms"
+        ]
+      },
+      "Trajectory": {
+        "type": "object",
+        "description": "A run read as the sequence of actions its agent took. This is what a trajectory is scored on: which tools were called, in what order, how many steps it took, and whether it ended with an answer.",
+        "properties": {
+          "trace_id": {
+            "type": "string",
+            "description": "The run."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrajectoryStep"
+            },
+            "description": "Every action, in start order."
+          },
+          "tool_sequence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names of the tool calls, in order. What `expected_tools` is compared with."
+          },
+          "step_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many steps."
+          },
+          "tool_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many of them were tool calls."
+          },
+          "error_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many of them failed."
+          },
+          "final_output_preview": {
+            "type": "string",
+            "description": "The start of the run's answer, from the root step's output."
+          },
+          "goal_reached": {
+            "type": "boolean",
+            "description": "True when the run ended `ok` with a non-empty answer."
+          }
+        },
+        "required": [
+          "trace_id",
+          "steps",
+          "tool_sequence",
+          "step_count",
+          "tool_count",
+          "error_count",
+          "goal_reached"
+        ]
+      },
+      "ExperimentScoreRequest": {
+        "type": "object",
+        "description": "Which scorers to run over every run recorded under an experiment.",
+        "properties": {
+          "scorers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The scorers, as `POST /v1/api/score` takes them. Empty runs the code scorers that need no settings."
+          },
+          "config": {
+            "$ref": "#/components/schemas/ScorerConfig",
+            "description": "Settings for the code scorers. `expected` is filled per run from the dataset case the run answered, when the run names one."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Store nothing; report what would be stored.",
+            "default": false
+          }
+        },
+        "required": [
+          "scorers",
+          "dry_run"
+        ]
+      },
+      "ExperimentItemResult": {
+        "type": "object",
+        "description": "One case of an experiment: the run that answered it and how each scorer marked it.",
+        "properties": {
+          "trace_id": {
+            "type": "string",
+            "description": "The run that answered the case."
+          },
+          "item_id": {
+            "type": "string",
+            "description": "The dataset case, when the run named one in its `mcpd.dataset_item_id` attribute."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SpanStatus",
+            "description": "How the run ended."
+          },
+          "duration_ns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "How long the run took."
+          },
+          "cost": {
+            "type": "number",
+            "format": "double",
+            "description": "What the run cost."
+          },
+          "input_preview": {
+            "type": "string",
+            "description": "The start of the run's input."
+          },
+          "output_preview": {
+            "type": "string",
+            "description": "The start of the run's answer."
+          },
+          "expected": {
+            "description": "The case's expected answer, when it has one."
+          },
+          "scores": {
+            "description": "The mean value per scorer for this run, keyed by scorer id."
+          }
+        },
+        "required": [
+          "trace_id",
+          "status",
+          "scores"
+        ]
+      },
+      "ScorerSummary": {
+        "type": "object",
+        "description": "One scorer's marks across an experiment.",
+        "properties": {
+          "scorer_id": {
+            "type": "string",
+            "description": "The scorer."
+          },
+          "n": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "How many scores."
+          },
+          "mean": {
+            "type": "number",
+            "format": "double",
+            "description": "Their mean."
+          },
+          "min": {
+            "type": "number",
+            "format": "double",
+            "description": "The lowest."
+          },
+          "max": {
+            "type": "number",
+            "format": "double",
+            "description": "The highest."
+          },
+          "direction": {
+            "$ref": "#/components/schemas/ScoreDirection",
+            "description": "Which way is better."
+          }
+        },
+        "required": [
+          "scorer_id",
+          "n",
+          "mean",
+          "min",
+          "max",
+          "direction"
+        ]
+      },
+      "ExperimentResults": {
+        "type": "object",
+        "description": "An experiment case by case, with a summary per scorer. Two of these joined on `item_id` are the per-case comparison of two versions.",
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "description": "The experiment."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExperimentItemResult"
+            },
+            "description": "One row per run recorded under the experiment, oldest first."
+          },
+          "scorers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScorerSummary"
+            },
+            "description": "Per scorer, across every run."
+          },
+          "runs": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many runs are recorded under it."
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many of them ended in an error."
+          }
+        },
+        "required": [
+          "experiment_id",
+          "items",
+          "scorers",
+          "runs",
+          "failed"
+        ]
+      },
+      "CreateReviewItemRequest": {
+        "type": "object",
+        "description": "A run to queue for review.",
+        "properties": {
+          "trace_id": {
+            "type": "string",
+            "description": "The run."
+          },
+          "span_id": {
+            "type": "string",
+            "description": "The step, when it is one step."
+          },
+          "feedback_id": {
+            "type": "string",
+            "description": "The feedback that prompted it."
+          },
+          "assignee": {
+            "type": "string",
+            "description": "Who should review it."
+          },
+          "note": {
+            "type": "string",
+            "description": "Why it is queued."
+          }
+        },
+        "required": [
+          "trace_id"
+        ]
+      },
+      "UpdateReviewItemRequest": {
+        "type": "object",
+        "description": "A change to a review item. Absent fields keep their value.",
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/ReviewStatus",
+            "description": "The new status."
+          },
+          "assignee": {
+            "type": "string",
+            "description": "The new assignee. An empty string unassigns it."
+          },
+          "note": {
+            "type": "string",
+            "description": "What the reviewer found."
+          }
+        }
+      },
+      "ReviewQueueResponse": {
+        "type": "object",
+        "description": "The review queue, newest first.",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "description": "The items that matched, newest change first."
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many items in the project are still pending, whatever the filter."
+          }
+        },
+        "required": [
+          "items",
+          "pending"
+        ]
+      },
+      "DatasetVersion": {
+        "type": "object",
+        "description": "A frozen copy of a dataset's cases. An experiment that names a version runs against exactly those cases, whatever has been added to the dataset since.",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "description": "The dataset."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "Its number, from 1."
+          },
+          "item_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many cases it froze."
+          },
+          "note": {
+            "type": "string",
+            "description": "What changed since the version before."
+          },
+          "created_by": {
+            "type": "string",
+            "description": "Which key or account froze it."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was frozen."
+          }
+        },
+        "required": [
+          "dataset_id",
+          "version",
+          "item_count",
+          "created_at"
+        ]
+      },
+      "CreateDatasetVersionRequest": {
+        "type": "object",
+        "description": "Freeze the dataset's current cases as a new version.",
+        "properties": {
+          "note": {
+            "type": "string",
+            "description": "What changed since the version before."
+          }
+        }
+      },
       "Span": {
         "type": "object",
         "description": "One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.",
@@ -5710,6 +6369,14 @@
             "format": "int32",
             "minimum": 0,
             "description": "How many tool calls the run made."
+          },
+          "input_preview": {
+            "type": "string",
+            "description": "The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list when it is asked with `preview=true`; the full input is on the span."
+          },
+          "output_preview": {
+            "type": "string",
+            "description": "The start of the root step's output as plain text, up to 240 characters. Filled by the trace list when it is asked with `preview=true`; the full output is on the span."
           },
           "tags": {
             "type": "array",
@@ -6840,6 +7507,306 @@
           "coverage"
         ],
         "x-table": "themes"
+      },
+      "Prompt": {
+        "type": "object",
+        "description": "One version of a named prompt. A version never changes once stored: a new body is a new version, and labels such as `production` and `staging` point at the version a caller should use. SDKs fetch a prompt by name and label, render it with variables, and link the spans that used it, so a trace shows which version produced an answer.",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "Which project owns it."
+          },
+          "name": {
+            "type": "string",
+            "description": "The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and `/`, up to 128 characters."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "Its version, from 1, assigned by the daemon in the order versions arrive."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PromptKind",
+            "description": "Whether the body is one template or a list of messages."
+          },
+          "template": {
+            "type": "string",
+            "description": "The template, for a `text` prompt. Variables are written `{{name}}`."
+          },
+          "messages": {
+            "description": "The messages, for a `chat` prompt: an array of objects with `role` and `content`, where `content` is a template."
+          },
+          "config": {
+            "description": "Model settings stored with the prompt, such as `model` and `temperature`. The daemon stores them and does not read them."
+          },
+          "variables": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every variable the body names, in order of first use, without duplicates."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The labels that point at this version now."
+          },
+          "note": {
+            "type": "string",
+            "description": "What changed in this version, written by whoever stored it."
+          },
+          "created_by": {
+            "type": "string",
+            "description": "Which key or account stored it."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this version was stored."
+          }
+        },
+        "required": [
+          "project",
+          "name",
+          "version",
+          "kind",
+          "variables",
+          "labels",
+          "created_at"
+        ],
+        "x-table": "documents"
+      },
+      "ScorerDefinition": {
+        "type": "object",
+        "description": "A scorer the project defined: a judge prompt written for this agent, or a code scorer with its settings fixed. Stored as numbered versions; a version never changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the latest version or `id@3` for version 3.",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "Which project owns it."
+          },
+          "id": {
+            "type": "string",
+            "description": "Its id, unique in the project: lower-case letters, digits and `_`, up to 64. It cannot be the id of a scorer mcpd ships."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "Its version, from 1, assigned by the daemon."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ScorerDefinitionKind",
+            "description": "Judged by the model, or computed by code."
+          },
+          "description": {
+            "type": "string",
+            "description": "What it measures, in a sentence. Shown in the scorer catalogue."
+          },
+          "direction": {
+            "$ref": "#/components/schemas/ScoreDirection",
+            "description": "Which way is better. Comparisons and live alerts read it."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "For a `judge` definition: the criterion the model grades against, such as `The answer cites the refund policy by section number.` The daemon adds the run's input and output and asks for a value from 0 to 1 with a one-sentence reason."
+          },
+          "builtin": {
+            "type": "string",
+            "description": "For a `code` definition: the code scorer it runs, such as `keyword_coverage`."
+          },
+          "config": {
+            "$ref": "#/components/schemas/ScorerConfig",
+            "description": "For a `code` definition: the settings the code scorer runs with."
+          },
+          "note": {
+            "type": "string",
+            "description": "What changed in this version."
+          },
+          "created_by": {
+            "type": "string",
+            "description": "Which key or account stored it."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this version was stored."
+          }
+        },
+        "required": [
+          "project",
+          "id",
+          "version",
+          "kind",
+          "description",
+          "direction",
+          "created_at"
+        ],
+        "x-table": "documents"
+      },
+      "EvaluationRule": {
+        "type": "object",
+        "description": "A rule for live scoring: which finished runs to score, with which scorers, and how many of them. The daemon reads finished runs as they arrive and scores the sampled ones in the background, so a quality drop shows up in minutes rather than at the next offline pass. Scores it writes have source `live`.",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "Which project it scores."
+          },
+          "id": {
+            "type": "string",
+            "description": "Its id, unique in the project."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "Its version, from 1. Each change is a new version."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether it runs. A rule is stored disabled unless the request says otherwise."
+          },
+          "scorers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The scorers to run: shipped ids, criteria from the config file, or stored definitions as `id` or `id@version`."
+          },
+          "sample_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "The share of matching runs to score, from 0 to 1. Chosen by a hash of the trace id, so the same run is in or out on every replica and every restart."
+          },
+          "name": {
+            "type": "string",
+            "description": "Only runs whose root step has this name."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SpanKind",
+            "description": "Only runs whose root step is this kind."
+          },
+          "environment": {
+            "type": "string",
+            "description": "Only runs from this environment."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Only runs carrying all of these tags."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SpanStatus",
+            "description": "Only runs with this outcome."
+          },
+          "config": {
+            "$ref": "#/components/schemas/ScorerConfig",
+            "description": "Settings for the code scorers that need them."
+          },
+          "max_judged_per_minute": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "The most judged scores the rule may produce in one minute, across the daemon. Each one is a model call, so this caps what the rule can spend. Runs over it are skipped, not queued."
+          },
+          "note": {
+            "type": "string",
+            "description": "What changed in this version."
+          },
+          "created_by": {
+            "type": "string",
+            "description": "Which key or account stored it."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this version was stored."
+          }
+        },
+        "required": [
+          "project",
+          "id",
+          "version",
+          "enabled",
+          "scorers",
+          "sample_rate",
+          "tags",
+          "max_judged_per_minute",
+          "created_at"
+        ],
+        "x-table": "documents"
+      },
+      "ReviewItem": {
+        "type": "object",
+        "description": "A run, or one step of it, queued for a person to review. Queue the runs a low score or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every change is kept, so the item's history says who decided what and when. Corrections and labels go on the run as feedback.",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "Which project."
+          },
+          "review_id": {
+            "type": "string",
+            "description": "Its id."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many times it has changed, from 1."
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "The run to review."
+          },
+          "span_id": {
+            "type": "string",
+            "description": "The step to look at, when it is one step."
+          },
+          "feedback_id": {
+            "type": "string",
+            "description": "The feedback that put it in the queue, when it was feedback."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ReviewStatus",
+            "description": "Where it has got to."
+          },
+          "assignee": {
+            "type": "string",
+            "description": "Who should review it."
+          },
+          "note": {
+            "type": "string",
+            "description": "Why it is queued, or what the reviewer found."
+          },
+          "updated_by": {
+            "type": "string",
+            "description": "Which key or account made the latest change."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was queued."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it last changed."
+          }
+        },
+        "required": [
+          "project",
+          "review_id",
+          "version",
+          "trace_id",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "x-table": "documents"
       }
     },
     "securitySchemes": {
@@ -7350,7 +8317,7 @@
           "Traces"
         ],
         "summary": "List traces",
-        "description": "The trace list. Filter on status, kind, name, tags, session, thread, user, environment, model, time window, duration, cost and score, and sort by start time, duration, cost, span count or score. Unlike a plain span dump, this reads the materialised trace projection rather than aggregating spans on every request.",
+        "description": "The trace list. Filter on status, kind, name, tags, session, thread, user, environment, model, time window, duration, cost, tokens, score and feedback, and sort by start time, duration, cost, span count, tokens or score. With `preview=true` each trace carries a short preview of its input and output. Unlike a plain span dump, this reads the materialised trace projection rather than aggregating spans on every request.",
         "parameters": [
           {
             "name": "project",
@@ -7448,6 +8415,15 @@
             }
           },
           {
+            "name": "experiment_id",
+            "in": "query",
+            "required": false,
+            "description": "Only runs recorded under this experiment.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "model",
             "in": "query",
             "required": false,
@@ -7488,6 +8464,17 @@
             }
           },
           {
+            "name": "max_duration_ms",
+            "in": "query",
+            "required": false,
+            "description": "Only traces at most this slow.",
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
             "name": "min_cost",
             "in": "query",
             "required": false,
@@ -7495,6 +8482,27 @@
             "schema": {
               "type": "number",
               "format": "double"
+            }
+          },
+          {
+            "name": "max_cost",
+            "in": "query",
+            "required": false,
+            "description": "Only traces at most this expensive.",
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          {
+            "name": "min_tokens",
+            "in": "query",
+            "required": false,
+            "description": "Only traces that used at least this many tokens, input and output together.",
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
             }
           },
           {
@@ -7514,6 +8522,34 @@
             "schema": {
               "type": "number",
               "format": "double"
+            }
+          },
+          {
+            "name": "score_above",
+            "in": "query",
+            "required": false,
+            "description": "Combined with `has_score`: only traces where that scorer came in over this value.",
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          {
+            "name": "has_feedback",
+            "in": "query",
+            "required": false,
+            "description": "`true` for only traces a person gave feedback on, `false` for only traces with none.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "preview",
+            "in": "query",
+            "required": false,
+            "description": "Fill `input_preview` and `output_preview` on each trace. A list read with previews carries the start of each run's input and output, so it is recorded in the audit log as `list_traces`; one without is not.",
+            "schema": {
+              "type": "boolean"
             }
           },
           {
@@ -7675,6 +8711,65 @@
           },
           "401": {
             "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/traces/{trace_id}/trajectory": {
+      "get": {
+        "operationId": "get_trajectory",
+        "tags": [
+          "Traces"
+        ],
+        "summary": "Read a run as a trajectory",
+        "description": "The run as the ordered actions its agent took: tool calls, model generations and handoffs, with the tool sequence, the step count and whether it reached an answer. Score one with the `trajectory` scorer.",
+        "parameters": [
+          {
+            "name": "trace_id",
+            "in": "path",
+            "required": true,
+            "description": "The run.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": true,
+            "description": "Which project to read. Required.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Trajectory"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No run with that id in the project."
           },
           "429": {
             "description": "Rate limited. `Retry-After` says how long to wait."
@@ -7976,6 +9071,26 @@
             "description": "Restrict to one trace.",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "prompt",
+            "in": "query",
+            "required": false,
+            "description": "Only spans that used this prompt, as linked by an SDK's prompt helper.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prompt_version",
+            "in": "query",
+            "required": false,
+            "description": "With `prompt`: only spans that used this version of it.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
             }
           },
           {
@@ -9001,6 +10116,210 @@
         ]
       }
     },
+    "/v1/api/review-queue": {
+      "get": {
+        "operationId": "list_review_items",
+        "tags": [
+          "Evaluation"
+        ],
+        "summary": "Read the review queue",
+        "description": "The runs queued for review in the project, newest change first, filtered by status and assignee.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Only items with this status.",
+            "schema": {
+              "$ref": "#/components/schemas/ReviewStatus"
+            }
+          },
+          {
+            "name": "assignee",
+            "in": "query",
+            "required": false,
+            "description": "Only items assigned to this person.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 500.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewQueueResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create_review_item",
+        "tags": [
+          "Evaluation"
+        ],
+        "summary": "Queue a run for review",
+        "description": "Puts a run, or one step of it, in the review queue as `pending`. The run must exist in the project.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateReviewItemRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewItem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No run with that id in the project."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/review-queue/{review_id}": {
+      "patch": {
+        "operationId": "update_review_item",
+        "tags": [
+          "Evaluation"
+        ],
+        "summary": "Review, assign or dismiss an item",
+        "description": "Changes an item's status, assignee or note. Each change is a new version of the item, so its history is kept.",
+        "parameters": [
+          {
+            "name": "review_id",
+            "in": "path",
+            "required": true,
+            "description": "The item.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateReviewItemRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewItem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No review item with that id in the project."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/api/analytics/summary": {
       "get": {
         "operationId": "analytics_summary",
@@ -9169,8 +10488,19 @@
         "tags": [
           "Evaluation"
         ],
-        "summary": "List the built-in scorers",
-        "description": "Every scorer mcpd ships, with what it measures and whether it needs configuration. Scorers are deterministic code, not model calls, so they cost nothing to run and give the same answer twice.",
+        "summary": "List the scorers",
+        "description": "Every scorer this daemon can run: the code scorers, the judged rubrics, the criteria in the config file, and, with `project`, the definitions that project stored. Code scorers are deterministic, cost nothing and give the same answer twice; judged ones make one model call per run.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Also list the scorer definitions this project stored, each at its latest version.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Success",
@@ -9209,7 +10539,7 @@
           "Evaluation"
         ],
         "summary": "Run scorers over stored runs",
-        "description": "Scores runs that are already stored, and records the results. Naming a scorer that does not exist fails the request before any work happens; a scorer that cannot answer on a given run is reported in `skipped` rather than failing it.",
+        "description": "Scores runs that are already stored, and records the results. Naming a scorer that does not exist fails the request before any work happens; a scorer that cannot answer on a given run is reported in `skipped` rather than failing it. A stored definition is named as `id` or `id@version`. Each judged score is recorded with the trace of its own model call, in `score_trace_id`: a `scorer_run` span holding the prompt, the reply, the tokens and the cost.",
         "requestBody": {
           "required": true,
           "content": {
@@ -9227,6 +10557,345 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ScoreRunResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/scorer-definitions": {
+      "get": {
+        "operationId": "list_scorer_definitions",
+        "tags": [
+          "Evaluation"
+        ],
+        "summary": "List scorer definitions",
+        "description": "The latest version of every scorer the project defined, sorted by id.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ScorerDefinition"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create_scorer_definition",
+        "tags": [
+          "Evaluation"
+        ],
+        "summary": "Store a scorer definition",
+        "description": "Stores a new version of a scorer definition. A `judge` definition needs `prompt` and a judge in the config file to run; a `code` definition needs `builtin`, and its `config` is checked against that scorer before anything is stored.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateScorerDefinitionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScorerDefinition"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/scorer-definitions/{id}": {
+      "get": {
+        "operationId": "get_scorer_definition",
+        "tags": [
+          "Evaluation"
+        ],
+        "summary": "Get a scorer definition",
+        "description": "One version of a definition, the latest when `version` is absent.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The definition's id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "description": "Which version. Absent means the latest.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScorerDefinition"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No definition with that id, or no such version."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/scorer-definitions/{id}/versions": {
+      "get": {
+        "operationId": "list_scorer_definition_versions",
+        "tags": [
+          "Evaluation"
+        ],
+        "summary": "List a scorer definition's versions",
+        "description": "Every version of one definition, newest first.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The definition's id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScorerDefinitionVersions"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No definition with that id."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/evaluation-rules": {
+      "get": {
+        "operationId": "list_evaluation_rules",
+        "tags": [
+          "Evaluation"
+        ],
+        "summary": "List live scoring rules",
+        "description": "The latest version of every live scoring rule in the project.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EvaluationRule"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create_evaluation_rule",
+        "tags": [
+          "Evaluation"
+        ],
+        "summary": "Store a live scoring rule",
+        "description": "Stores a new version of a rule; the daemon applies the latest version of each rule from the next run that finishes. Every named scorer is resolved before anything is stored, and a judged scorer is refused when no judge is configured. Turn a rule off by posting it with `enabled: false`.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEvaluationRuleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationRule"
                 }
               }
             }
@@ -9436,6 +11105,17 @@
               "minimum": 0,
               "default": 500
             }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "description": "Read a frozen version's cases instead of the current ones.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
           }
         ],
         "responses": {
@@ -9593,6 +11273,117 @@
         ]
       }
     },
+    "/v1/api/datasets/{dataset_id}/versions": {
+      "post": {
+        "operationId": "create_dataset_version",
+        "tags": [
+          "Datasets"
+        ],
+        "summary": "Freeze a dataset version",
+        "description": "Copies the dataset's current cases into a new numbered version. A version never changes, so an experiment run against it today and one run next month read the same cases.",
+        "parameters": [
+          {
+            "name": "dataset_id",
+            "in": "path",
+            "required": true,
+            "description": "Which dataset.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDatasetVersionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetVersion"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No dataset with that id."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "list_dataset_versions",
+        "tags": [
+          "Datasets"
+        ],
+        "summary": "List a dataset's versions",
+        "description": "Every frozen version of the dataset, newest first.",
+        "parameters": [
+          {
+            "name": "dataset_id",
+            "in": "path",
+            "required": true,
+            "description": "Which dataset.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DatasetVersion"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No dataset with that id."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/api/experiments": {
       "get": {
         "operationId": "list_experiments",
@@ -9666,6 +11457,518 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Experiment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/experiments/{experiment_id}/score": {
+      "post": {
+        "operationId": "score_experiment",
+        "tags": [
+          "Datasets"
+        ],
+        "summary": "Score an experiment's runs",
+        "description": "Runs scorers over every run recorded under the experiment and stores the scores with source `experiment`. A run that names its dataset case in the `mcpd.dataset_item_id` attribute is scored against that case's expected answer, so `exact_match`, `similarity` and the judged rubrics that read `expected` compare each answer with its own case. This is the step an SDK's experiment runner calls after the target has answered every case.",
+        "parameters": [
+          {
+            "name": "experiment_id",
+            "in": "path",
+            "required": true,
+            "description": "The experiment.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExperimentScoreRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScoreRunResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No experiment with that id in the project."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/experiments/{experiment_id}/results": {
+      "get": {
+        "operationId": "get_experiment_results",
+        "tags": [
+          "Datasets"
+        ],
+        "summary": "Read an experiment case by case",
+        "description": "Every run recorded under the experiment with its case, its answer and its scores, and a summary per scorer.",
+        "parameters": [
+          {
+            "name": "experiment_id",
+            "in": "path",
+            "required": true,
+            "description": "The experiment.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExperimentResults"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No experiment with that id in the project."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/prompts": {
+      "get": {
+        "operationId": "list_prompts",
+        "tags": [
+          "Prompts"
+        ],
+        "summary": "List prompts",
+        "description": "The latest version of every prompt in the project, each with its labels, sorted by name.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Prompt"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create_prompt",
+        "tags": [
+          "Prompts"
+        ],
+        "summary": "Store a prompt version",
+        "description": "Stores a new version of a prompt and returns it. A `text` prompt needs `template`, a `chat` prompt needs `messages`. A body identical to the latest version is not stored again: the latest version comes back, with any `labels` applied.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePromptRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Prompt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/prompts/{name}": {
+      "get": {
+        "operationId": "get_prompt",
+        "tags": [
+          "Prompts"
+        ],
+        "summary": "Get a prompt",
+        "description": "One version of a prompt: the one `label` points at, or the one numbered `version`, or the latest when neither is given. This is what an SDK reads before it renders a prompt.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The prompt's name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "query",
+            "required": false,
+            "description": "Read the version this label points at, such as `production`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "description": "Read this version. Not with `label`.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Prompt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No prompt with that name in the project, no version with that number, or no version carries that label."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/prompts/{name}/versions": {
+      "get": {
+        "operationId": "list_prompt_versions",
+        "tags": [
+          "Prompts"
+        ],
+        "summary": "List a prompt's versions",
+        "description": "Every version of one prompt, newest first, with the labels that point at each.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The prompt's name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptVersionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No prompt with that name in the project."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/prompts/{name}/labels/{label}": {
+      "put": {
+        "operationId": "set_prompt_label",
+        "tags": [
+          "Prompts"
+        ],
+        "summary": "Point a label at a version",
+        "description": "Moves a label to a version, creating the label if it is new. Moving `production` is how a prompt change is released, and moving it back is how one is rolled back; no code is deployed for either. `latest` is reserved: it always means the newest version.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The prompt's name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "path",
+            "required": true,
+            "description": "The label. Letters, digits, `-`, `_` and `.`, up to 64 characters.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptLabelRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Prompt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No prompt with that name, or no version with that number."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "delete_prompt_label",
+        "tags": [
+          "Prompts"
+        ],
+        "summary": "Remove a label",
+        "description": "Removes a label from whichever version holds it. A caller that then asks for the label is answered 404, so remove a label only once nothing reads it.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The prompt's name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "path",
+            "required": true,
+            "description": "The label.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResult"
                 }
               }
             }

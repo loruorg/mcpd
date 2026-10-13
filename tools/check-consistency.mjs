@@ -52,7 +52,7 @@ function checkDocsNav() {
 const MOTION = [
   'LiveTrace', 'RunViews', 'Waterfall', 'SignalFlow', 'PipelineDiagram',
   'SearchDemo', 'TerminalCast', 'MonitorChart', 'DurableRun', 'LeaseProtocol',
-  'SamplingGate',
+  'SamplingGate', 'PromptLabels',
 ]
 
 function walk(dir, out = []) {
@@ -129,9 +129,25 @@ const WORKFLOW_EXAMPLES = {
   elixir: 'examples/elixir/workflow.exs',
 }
 
+/** The experiment runners, read by the testing page. */
+const EXPERIMENT_EXAMPLES = {
+  typescript: 'examples/typescript/experiment.ts',
+  python: 'examples/python/experiment.py',
+  rust: 'examples/rust/experiment.rs',
+  go: 'examples/go/experiment.go',
+  kotlin: 'examples/kotlin/Experiment.kt',
+  elixir: 'examples/elixir/experiment.exs',
+}
+
+/** Regions only an SDK can show, read by the SDK pages and the integrating page. */
+const SDK_REGIONS = ['stream', 'testing']
+const SDK_EXAMPLES = Object.fromEntries(Object.entries(EXAMPLES).filter(([lang]) => lang !== 'curl'))
+
 function checkExamples() {
   checkExampleSet(EXAMPLES, REQUIRED_REGIONS, 'LANGUAGES')
+  checkExampleSet(SDK_EXAMPLES, SDK_REGIONS, 'the SDK pages')
   checkExampleSet(WORKFLOW_EXAMPLES, WORKFLOW_REGIONS, 'the workflow pages')
+  checkExampleSet(EXPERIMENT_EXAMPLES, ['experiment'], 'the testing page')
   notes.push(`examples: ${Object.keys(EXAMPLES).length} quickstart and ${Object.keys(WORKFLOW_EXAMPLES).length} workflow programs present with all regions`)
 }
 
@@ -1630,6 +1646,10 @@ function checkEndpointScopes() {
     'crates/mcpd-server/src/orgs.rs',
     'crates/mcpd-server/src/sso.rs',
     'crates/mcpd-server/src/scim.rs',
+    'crates/mcpd-server/src/prompts.rs',
+    'crates/mcpd-server/src/definitions.rs',
+    'crates/mcpd-server/src/experiments.rs',
+    'crates/mcpd-server/src/curation.rs',
   ]
   if (!exists(router)) {
     fail(router, 'is missing; the scope check cannot run without the route table')

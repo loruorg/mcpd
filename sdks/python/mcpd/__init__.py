@@ -61,6 +61,8 @@ from ._generated import (
     DeleteResult,
     EntityKind,
     Experiment,
+    ExperimentItemResult,
+    ExperimentResults,
     ExperimentStatus,
     Feedback,
     FeedbackKind,
@@ -81,11 +83,19 @@ from ._generated import (
     OutputTokenDetails,
     Page,
     Project,
+    CreatePromptRequest,
+    Prompt,
+    PromptKind,
+    PromptLabelRequest,
+    PromptVersionsResponse,
     RedactionMode,
     SamplingKind,
     Score,
     ScoreListResponse,
+    ScoreRunResult,
     ScoreSource,
+    ScorerConfig,
+    ScorerSummary,
     SignalType,
     SpanError,
     SpanKind,
@@ -96,6 +106,8 @@ from ._generated import (
     Trace,
     TraceDetail,
     TraceListResponse,
+    Trajectory,
+    TrajectoryStep,
 )
 from ._generated import Span as SpanRecord
 from .client import Mcpd, Stats
@@ -113,6 +125,7 @@ from .model_call import (
     usage_from_anthropic,
     usage_from_openai,
 )
+from .experiment import DATASET_ITEM_ATTRIBUTE, ExperimentTarget
 from .logs import (
     describe_error,
     encode_fields,
@@ -121,9 +134,11 @@ from .logs import (
     parse_log_level,
     severity_number,
 )
+from .prompts import PromptRenderError, render_prompt
 from .runs import DefinitionsApi, EventsApi, RunFailedError, RunResult, RunsApi, StepConflictError, StepsApi
 from .sinks import ConsoleSink, RecordingSink, Sink
 from .span import Span
+from .stream import STREAM_MAX_TOOL_CALLS, STREAM_TEXT_BUDGET
 from .transport import McpdError, TransportError
 from .worker import RetryableError, StepContext, StepFailure, StepOutcome, Worker, WorkerStats
 from .workflow import (
@@ -158,6 +173,8 @@ __all__ = [
     "new_trace_id",
     "parse_traceparent",
     "records",
+    "PromptRenderError",
+    "render_prompt",
     # The logging signal: severity numbers both ways, the level floor, and the
     # serialiser that keeps an exception from costing its batch.
     "describe_error",
@@ -172,6 +189,12 @@ __all__ = [
     "response_shape",
     "usage_from_anthropic",
     "usage_from_openai",
+    # Streamed model calls: the budget `Span.record_stream` keeps to (contract 3.2).
+    "STREAM_MAX_TOOL_CALLS",
+    "STREAM_TEXT_BUDGET",
+    # Experiments: the case attribute the daemon reads, and the target's shape (contract 5.2).
+    "DATASET_ITEM_ATTRIBUTE",
+    "ExperimentTarget",
     # The run surface: the builder, the worker, and the client namespaces.
     "BranchBuilder",
     "DefinitionsApi",
@@ -235,6 +258,8 @@ __all__ = [
     "DeleteResult",
     "EntityKind",
     "Experiment",
+    "ExperimentItemResult",
+    "ExperimentResults",
     "ExperimentStatus",
     "Feedback",
     "FeedbackKind",
@@ -255,11 +280,19 @@ __all__ = [
     "OutputTokenDetails",
     "Page",
     "Project",
+    "CreatePromptRequest",
+    "Prompt",
+    "PromptKind",
+    "PromptLabelRequest",
+    "PromptVersionsResponse",
     "RedactionMode",
     "SamplingKind",
     "Score",
     "ScoreListResponse",
+    "ScoreRunResult",
     "ScoreSource",
+    "ScorerConfig",
+    "ScorerSummary",
     "SignalType",
     "SpanError",
     "SpanKind",
@@ -270,4 +303,6 @@ __all__ = [
     "Trace",
     "TraceDetail",
     "TraceListResponse",
+    "Trajectory",
+    "TrajectoryStep",
 ]

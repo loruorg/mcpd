@@ -143,6 +143,7 @@ How a scorer reaches its answer.
 | `code` | Deterministic code in the daemon. Free, and gives the same answer twice. |
 | `judge` | A built-in rubric graded by the configured judge model, in steps: preprocess, analyze, score, reason. |
 | `criterion` | A criterion the operator wrote under `judge.criteria`, graded by the judge model in one call. |
+| `custom` | A scorer definition stored in the project through the API: a judge prompt, or a code scorer with its settings. Versioned, and the version is on every score it produces. |
 
 ### ScoreDirection
 
@@ -541,6 +542,34 @@ How an organisation's members log in with single sign-on.
 | --- | --- |
 | `oidc` | Any OpenID Connect provider, such as Google, Microsoft Entra ID, Okta or Auth0, found through its issuer's discovery document. Authorization code flow with PKCE, state and nonce. |
 | `github` | GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub user id and the email is the primary verified address GitHub reports. |
+
+### PromptKind
+
+The shape of a prompt's body.
+
+| Value | Meaning |
+| --- | --- |
+| `text` | One template string, for a completion-style call. |
+| `chat` | An ordered list of messages, each with a `role` and a `content` template, for a chat-style call. |
+
+### ScorerDefinitionKind
+
+How a stored scorer definition reaches its answer.
+
+| Value | Meaning |
+| --- | --- |
+| `judge` | The configured judge model grades the run against the definition's `prompt`, in one call. |
+| `code` | One of the daemon's code scorers, named in `builtin`, with the settings in `config` fixed. Free, and gives the same answer twice. |
+
+### ReviewStatus
+
+Where an item in the review queue has got to.
+
+| Value | Meaning |
+| --- | --- |
+| `pending` | Waiting for a person. |
+| `reviewed` | A person looked at it and recorded what they found. |
+| `dismissed` | A person looked at it and it needed nothing. |
 
 ## Entities
 
@@ -955,6 +984,8 @@ Settings shared by the scorers that need them. Every field is optional; a scorer
 | `pattern` | `string` | A regular expression the answer must match somewhere, for `matches_pattern`. |
 | `expected_tools` | `string`[] <span class="req">required</span> | The tools the run should call, for `tool_call_accuracy`, and the order it should call them in, for `tool_order`. Matched exactly against tool-call span names. |
 | `forbidden_tools` | `string`[] <span class="req">required</span> | Tools the run must not call, for `tool_not_called`. |
+| `trajectory_match` | `string` | How `trajectory` compares the tools the run called with `expected_tools`: `strict` for the same calls in the same order and nothing else, `ordered` for the expected calls in order with others allowed between them, `unordered` for every expected call in any order. Defaults to `ordered`. |
+| `max_steps` | `u32` | The most steps a healthy run takes, for `trajectory`. A step is a tool call, a model generation or a handoff. |
 | `min_chars` | `u32` | The shortest acceptable answer in characters, for `answer_length`. |
 | `max_chars` | `u32` | The longest acceptable answer in characters, for `answer_length`. |
 | `json_schema` | `json` | A JSON Schema the answer must satisfy, for `json_schema`. `type`, `properties`, `required`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and `additionalProperties: false` are checked. |
@@ -2175,6 +2206,216 @@ What the provider sent back to the redirect URL.
 | `code` | `string` <span class="req">required</span> | The `code` parameter. |
 | `binding` | `string` <span class="req">required</span> | The binding from the start of the flow. |
 
+### CreatePromptRequest
+
+A new version of a prompt. Posting a body identical to the latest version stores nothing new and returns that version, so a deploy that posts its prompts on every start is a no-op when nothing changed.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | `string` <span class="req">required</span> | The prompt's name. A new name creates the prompt at version 1. |
+| `kind` | [`PromptKind`](#promptkind) | `text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`. |
+| `template` | `string` | The template, for a `text` prompt. |
+| `messages` | `json` | The messages, for a `chat` prompt. |
+| `config` | `json` | Model settings to store with it. |
+| `note` | `string` | What changed. |
+| `labels` | `string`[] | Labels to point at the stored version once it is stored, such as `staging`. |
+
+### PromptLabelRequest
+
+Which version a label should point at.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `version` | `u32` <span class="req">required</span> | The version. It must exist. |
+
+### PromptVersionsResponse
+
+Every version of one prompt, newest first.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | `string` <span class="req">required</span> | The prompt's name. |
+| `versions` | [`Prompt`](#prompt)[] <span class="req">required</span> | Its versions, newest first, each with the labels that point at it. |
+
+### CreateScorerDefinitionRequest
+
+A new version of a scorer definition. A body identical to the latest version is not stored again.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | `string` <span class="req">required</span> | The definition's id. A new id creates it at version 1. |
+| `kind` | [`ScorerDefinitionKind`](#scorerdefinitionkind) <span class="req">required</span> | `judge` or `code`. |
+| `description` | `string` <span class="req">required</span> | What it measures, in a sentence. |
+| `direction` | [`ScoreDirection`](#scoredirection) | Which way is better. Defaults to `higher_is_better`. |
+| `prompt` | `string` | For `judge`: the criterion. |
+| `builtin` | `string` | For `code`: the code scorer to run. |
+| `config` | [`ScorerConfig`](#scorerconfig) | For `code`: its settings. |
+| `note` | `string` | What changed. |
+
+### ScorerDefinitionVersions
+
+Every version of one scorer definition, newest first.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | `string` <span class="req">required</span> | The definition's id. |
+| `versions` | [`ScorerDefinition`](#scorerdefinition)[] <span class="req">required</span> | Its versions, newest first. |
+
+### CreateEvaluationRuleRequest
+
+A new version of a live scoring rule. Posting the same body as the latest version stores nothing new.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | `string` <span class="req">required</span> | The rule's id: lower-case letters, digits, `-` and `_`, up to 64. |
+| `enabled` | `bool` | Whether it runs. Defaults to `false`, so a rule is read back and checked before it spends anything. |
+| `scorers` | `string`[] <span class="req">required</span> | The scorers to run. At least one. |
+| `sample_rate` | `f64` | The share of matching runs to score, from 0 to 1. Defaults to 1. |
+| `name` | `string` | Only runs whose root step has this name. |
+| `kind` | [`SpanKind`](#spankind) | Only runs whose root step is this kind. |
+| `environment` | `string` | Only runs from this environment. |
+| `tags` | `string`[] | Only runs carrying all of these tags. |
+| `status` | [`SpanStatus`](#spanstatus) | Only runs with this outcome. |
+| `config` | [`ScorerConfig`](#scorerconfig) | Settings for the code scorers that need them. |
+| `max_judged_per_minute` | `u32` | The most judged scores per minute. Defaults to 30. |
+| `note` | `string` | What changed. |
+
+### TrajectoryStep
+
+One action an agent took: a tool call, a model generation or a handoff, in the order they started.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `index` | `u32` <span class="req">required</span> | Its position in the trajectory, from 0. |
+| `span_id` | `string` <span class="req">required</span> | The span it was read from. |
+| `kind` | [`SpanKind`](#spankind) <span class="req">required</span> | What kind of action. |
+| `name` | `string` <span class="req">required</span> | The tool, model step or agent it names. |
+| `status` | [`SpanStatus`](#spanstatus) <span class="req">required</span> | How it ended. |
+| `start_offset_ms` | `f64` <span class="req">required</span> | When it started, in milliseconds after the run started. |
+| `duration_ms` | `f64` | How long it took. Absent while it is still running. |
+| `model` | `string` | The model, for a model generation. |
+| `input_preview` | `string` | The start of its input as plain text, up to 240 characters. |
+| `output_preview` | `string` | The start of its output as plain text, up to 240 characters. |
+| `tokens` | `u64` | Input and output tokens together, for a model generation. |
+
+### Trajectory
+
+A run read as the sequence of actions its agent took. This is what a trajectory is scored on: which tools were called, in what order, how many steps it took, and whether it ended with an answer.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `trace_id` | `string` <span class="req">required</span> | The run. |
+| `steps` | [`TrajectoryStep`](#trajectorystep)[] <span class="req">required</span> | Every action, in start order. |
+| `tool_sequence` | `string`[] <span class="req">required</span> | The names of the tool calls, in order. What `expected_tools` is compared with. |
+| `step_count` | `u32` <span class="req">required</span> | How many steps. |
+| `tool_count` | `u32` <span class="req">required</span> | How many of them were tool calls. |
+| `error_count` | `u32` <span class="req">required</span> | How many of them failed. |
+| `final_output_preview` | `string` | The start of the run's answer, from the root step's output. |
+| `goal_reached` | `bool` <span class="req">required</span> | True when the run ended `ok` with a non-empty answer. |
+
+### ExperimentScoreRequest
+
+Which scorers to run over every run recorded under an experiment.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `scorers` | `string`[] <span class="req">required</span> | The scorers, as `POST /v1/api/score` takes them. Empty runs the code scorers that need no settings. |
+| `config` | [`ScorerConfig`](#scorerconfig) | Settings for the code scorers. `expected` is filled per run from the dataset case the run answered, when the run names one. |
+| `dry_run` | `bool` <span class="req">required</span> | Store nothing; report what would be stored. |
+
+### ExperimentItemResult
+
+One case of an experiment: the run that answered it and how each scorer marked it.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `trace_id` | `string` <span class="req">required</span> | The run that answered the case. |
+| `item_id` | `string` | The dataset case, when the run named one in its `mcpd.dataset_item_id` attribute. |
+| `status` | [`SpanStatus`](#spanstatus) <span class="req">required</span> | How the run ended. |
+| `duration_ns` | `u64` | How long the run took. |
+| `cost` | `f64` | What the run cost. |
+| `input_preview` | `string` | The start of the run's input. |
+| `output_preview` | `string` | The start of the run's answer. |
+| `expected` | `json` | The case's expected answer, when it has one. |
+| `scores` | `json` <span class="req">required</span> | The mean value per scorer for this run, keyed by scorer id. |
+
+### ScorerSummary
+
+One scorer's marks across an experiment.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `scorer_id` | `string` <span class="req">required</span> | The scorer. |
+| `n` | `u64` <span class="req">required</span> | How many scores. |
+| `mean` | `f64` <span class="req">required</span> | Their mean. |
+| `min` | `f64` <span class="req">required</span> | The lowest. |
+| `max` | `f64` <span class="req">required</span> | The highest. |
+| `direction` | [`ScoreDirection`](#scoredirection) <span class="req">required</span> | Which way is better. |
+
+### ExperimentResults
+
+An experiment case by case, with a summary per scorer. Two of these joined on `item_id` are the per-case comparison of two versions.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `experiment_id` | `string` <span class="req">required</span> | The experiment. |
+| `items` | [`ExperimentItemResult`](#experimentitemresult)[] <span class="req">required</span> | One row per run recorded under the experiment, oldest first. |
+| `scorers` | [`ScorerSummary`](#scorersummary)[] <span class="req">required</span> | Per scorer, across every run. |
+| `runs` | `u32` <span class="req">required</span> | How many runs are recorded under it. |
+| `failed` | `u32` <span class="req">required</span> | How many of them ended in an error. |
+
+### CreateReviewItemRequest
+
+A run to queue for review.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `trace_id` | `string` <span class="req">required</span> | The run. |
+| `span_id` | `string` | The step, when it is one step. |
+| `feedback_id` | `string` | The feedback that prompted it. |
+| `assignee` | `string` | Who should review it. |
+| `note` | `string` | Why it is queued. |
+
+### UpdateReviewItemRequest
+
+A change to a review item. Absent fields keep their value.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `status` | [`ReviewStatus`](#reviewstatus) | The new status. |
+| `assignee` | `string` | The new assignee. An empty string unassigns it. |
+| `note` | `string` | What the reviewer found. |
+
+### ReviewQueueResponse
+
+The review queue, newest first.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `items` | [`ReviewItem`](#reviewitem)[] <span class="req">required</span> | The items that matched, newest change first. |
+| `pending` | `u32` <span class="req">required</span> | How many items in the project are still pending, whatever the filter. |
+
+### DatasetVersion
+
+A frozen copy of a dataset's cases. An experiment that names a version runs against exactly those cases, whatever has been added to the dataset since.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `dataset_id` | `string` <span class="req">required</span> | The dataset. |
+| `version` | `u32` <span class="req">required</span> | Its number, from 1. |
+| `item_count` | `u32` <span class="req">required</span> | How many cases it froze. |
+| `note` | `string` | What changed since the version before. |
+| `created_by` | `string` | Which key or account froze it. |
+| `created_at` | `timestamp` <span class="req">required</span> | When it was frozen. |
+
+### CreateDatasetVersionRequest
+
+Freeze the dataset's current cases as a new version.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `note` | `string` | What changed since the version before. |
+
 ### Span
 
 One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.
@@ -2246,6 +2487,8 @@ Stored in the `traces` table.
 | `cost` | [`Cost`](#cost) | Cost summed across the trace. This is the number a bill is reconciled against. |
 | `model_count` | `u32` <span class="req">required</span> | How many model calls the run made. |
 | `tool_count` | `u32` <span class="req">required</span> | How many tool calls the run made. |
+| `input_preview` | `string` | The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list when it is asked with `preview=true`; the full input is on the span. |
+| `output_preview` | `string` | The start of the root step's output as plain text, up to 240 characters. Filled by the trace list when it is asked with `preview=true`; the full output is on the span. |
 | `tags` | `string`[] | Tags from the root span. |
 | `correlation` | [`Correlation`](#correlation) <span class="req">required</span> | Context inherited from the root span. |
 | `score_summary` | `json` | Mean score per scorer id, maintained as scores arrive, so the list can sort by quality without a join. |
@@ -2676,3 +2919,99 @@ Stored in the `themes` table.
 **Indexes**
 
 - `theme_id, aspect`: One theme across every snapshot that holds it, which is what a history reads.
+
+### Prompt
+
+One version of a named prompt. A version never changes once stored: a new body is a new version, and labels such as `production` and `staging` point at the version a caller should use. SDKs fetch a prompt by name and label, render it with variables, and link the spans that used it, so a trace shows which version produced an answer.
+
+Stored in the `documents` table.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `project` | `string` <span class="req">required</span> | Which project owns it. |
+| `name` | `string` <span class="req">required</span> | The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and `/`, up to 128 characters. |
+| `version` | `u32` <span class="req">required</span> | Its version, from 1, assigned by the daemon in the order versions arrive. |
+| `kind` | [`PromptKind`](#promptkind) <span class="req">required</span> | Whether the body is one template or a list of messages. |
+| `template` | `string` | The template, for a `text` prompt. Variables are written `{{name}}`. |
+| `messages` | `json` | The messages, for a `chat` prompt: an array of objects with `role` and `content`, where `content` is a template. |
+| `config` | `json` | Model settings stored with the prompt, such as `model` and `temperature`. The daemon stores them and does not read them. |
+| `variables` | `string`[] <span class="req">required</span> | Every variable the body names, in order of first use, without duplicates. |
+| `labels` | `string`[] <span class="req">required</span> | The labels that point at this version now. |
+| `note` | `string` | What changed in this version, written by whoever stored it. |
+| `created_by` | `string` | Which key or account stored it. |
+| `created_at` | `timestamp` <span class="req">required</span> | When this version was stored. |
+
+**Primary key:** `project`, `name`, `version`
+
+### ScorerDefinition
+
+A scorer the project defined: a judge prompt written for this agent, or a code scorer with its settings fixed. Stored as numbered versions; a version never changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the latest version or `id@3` for version 3.
+
+Stored in the `documents` table.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `project` | `string` <span class="req">required</span> | Which project owns it. |
+| `id` | `string` <span class="req">required</span> | Its id, unique in the project: lower-case letters, digits and `_`, up to 64. It cannot be the id of a scorer mcpd ships. |
+| `version` | `u32` <span class="req">required</span> | Its version, from 1, assigned by the daemon. |
+| `kind` | [`ScorerDefinitionKind`](#scorerdefinitionkind) <span class="req">required</span> | Judged by the model, or computed by code. |
+| `description` | `string` <span class="req">required</span> | What it measures, in a sentence. Shown in the scorer catalogue. |
+| `direction` | [`ScoreDirection`](#scoredirection) <span class="req">required</span> | Which way is better. Comparisons and live alerts read it. |
+| `prompt` | `string` | For a `judge` definition: the criterion the model grades against, such as `The answer cites the refund policy by section number.` The daemon adds the run's input and output and asks for a value from 0 to 1 with a one-sentence reason. |
+| `builtin` | `string` | For a `code` definition: the code scorer it runs, such as `keyword_coverage`. |
+| `config` | [`ScorerConfig`](#scorerconfig) | For a `code` definition: the settings the code scorer runs with. |
+| `note` | `string` | What changed in this version. |
+| `created_by` | `string` | Which key or account stored it. |
+| `created_at` | `timestamp` <span class="req">required</span> | When this version was stored. |
+
+**Primary key:** `project`, `id`, `version`
+
+### EvaluationRule
+
+A rule for live scoring: which finished runs to score, with which scorers, and how many of them. The daemon reads finished runs as they arrive and scores the sampled ones in the background, so a quality drop shows up in minutes rather than at the next offline pass. Scores it writes have source `live`.
+
+Stored in the `documents` table.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `project` | `string` <span class="req">required</span> | Which project it scores. |
+| `id` | `string` <span class="req">required</span> | Its id, unique in the project. |
+| `version` | `u32` <span class="req">required</span> | Its version, from 1. Each change is a new version. |
+| `enabled` | `bool` <span class="req">required</span> | Whether it runs. A rule is stored disabled unless the request says otherwise. |
+| `scorers` | `string`[] <span class="req">required</span> | The scorers to run: shipped ids, criteria from the config file, or stored definitions as `id` or `id@version`. |
+| `sample_rate` | `f64` <span class="req">required</span> | The share of matching runs to score, from 0 to 1. Chosen by a hash of the trace id, so the same run is in or out on every replica and every restart. |
+| `name` | `string` | Only runs whose root step has this name. |
+| `kind` | [`SpanKind`](#spankind) | Only runs whose root step is this kind. |
+| `environment` | `string` | Only runs from this environment. |
+| `tags` | `string`[] <span class="req">required</span> | Only runs carrying all of these tags. |
+| `status` | [`SpanStatus`](#spanstatus) | Only runs with this outcome. |
+| `config` | [`ScorerConfig`](#scorerconfig) | Settings for the code scorers that need them. |
+| `max_judged_per_minute` | `u32` <span class="req">required</span> | The most judged scores the rule may produce in one minute, across the daemon. Each one is a model call, so this caps what the rule can spend. Runs over it are skipped, not queued. |
+| `note` | `string` | What changed in this version. |
+| `created_by` | `string` | Which key or account stored it. |
+| `created_at` | `timestamp` <span class="req">required</span> | When this version was stored. |
+
+**Primary key:** `project`, `id`, `version`
+
+### ReviewItem
+
+A run, or one step of it, queued for a person to review. Queue the runs a low score or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every change is kept, so the item's history says who decided what and when. Corrections and labels go on the run as feedback.
+
+Stored in the `documents` table.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `project` | `string` <span class="req">required</span> | Which project. |
+| `review_id` | `string` <span class="req">required</span> | Its id. |
+| `version` | `u32` <span class="req">required</span> | How many times it has changed, from 1. |
+| `trace_id` | `string` <span class="req">required</span> | The run to review. |
+| `span_id` | `string` | The step to look at, when it is one step. |
+| `feedback_id` | `string` | The feedback that put it in the queue, when it was feedback. |
+| `status` | [`ReviewStatus`](#reviewstatus) <span class="req">required</span> | Where it has got to. |
+| `assignee` | `string` | Who should review it. |
+| `note` | `string` | Why it is queued, or what the reviewer found. |
+| `updated_by` | `string` | Which key or account made the latest change. |
+| `created_at` | `timestamp` <span class="req">required</span> | When it was queued. |
+| `updated_at` | `timestamp` <span class="req">required</span> | When it last changed. |
+
+**Primary key:** `project`, `review_id`, `version`

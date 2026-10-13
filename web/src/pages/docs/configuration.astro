@@ -670,14 +670,27 @@ volumes:
   <h3>--runs-data</h3>
   <p>
     Where the run store lives: the definitions, the journal of step attempts,
-    every deadline and every wait. It is an embedded file whatever the signal
-    store is, so on Postgres or ClickHouse the runs still sit in one file beside
-    the daemon, and the run surface is served by one replica. By default it is
-    the <code>--data</code> path with <code>.runs</code> before the extension,
+    every deadline and every wait. A file path keeps them in an embedded SQLite
+    file, whatever the signal store is. By default it is the
+    <code>--data</code> path with <code>.runs</code> before the extension,
     <code>./mcpd.runs.db</code> for the default, and <code>:memory:</code> when
     <code>--data</code> is. <code>--runs-data off</code> serves no runs at all:
     every run endpoint answers <code>503</code> naming this flag, and the rest of
     the daemon is unchanged.
+  </p>
+  <p>
+    A Postgres connection string keeps the runs in Postgres instead, such as
+    <code>--runs-data postgres://mcpd:secret@db:5432/mcpd</code>. The string
+    starts with <code>postgres://</code> or <code>postgresql://</code>, and it
+    reads TLS settings the way <code>--postgres-url</code> does. It can name the
+    same database as <code>--postgres-url</code>: the run tables have names of
+    their own, and the schema is created on start under an advisory lock.
+    Several replicas can share one run store. Every run store transaction is
+    <code>SERIALIZABLE</code>, so two replicas claiming, completing or firing
+    deadlines at once give the same result as one daemon doing it in turn, and
+    a transaction that loses to a concurrent one is run again.
+    <code>mcpd config</code> prints the line as <code>postgres at</code> the
+    server, with the password removed.
   </p>
   <p>
     The store's timings are in the config file under <code>runs</code>, in whole
@@ -1108,6 +1121,17 @@ volumes:
     reason the keys are: one team's ninety-day requirement should not force
     everybody else's data to be kept, and one team's traffic should not decide
     how another team is sampled.
+  </p>
+  <p>
+    <code>tail_sampling</code> keeps a project&rsquo;s finished runs by what
+    happened in them and deletes the rest. It takes <code>rate</code>, the
+    share of ordinary runs to keep, and keeps every run that matches
+    <code>keep_errors</code> (on by default), <code>keep_slower_than_ms</code>,
+    <code>keep_cost_above</code>, <code>keep_score_below</code> or
+    <code>keep_feedback</code> (on by default). A run is decided
+    <code>decide_after_seconds</code> after it finishes, 120 by default, so live
+    scores have arrived. <code>mcpd config</code> prints each rule on its
+    <code>tail sampling</code> line. See <a href="/docs/sampling">Sampling</a>.
   </p>
   <p>
     A batch may name several projects. A scoped ingest key writes the signals it

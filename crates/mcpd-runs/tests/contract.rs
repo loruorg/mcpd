@@ -8,18 +8,19 @@
 //! catch-all, so a value nothing writes is a compile error here and not a
 //! review finding.
 
+mod common;
+
+use common::TestStore;
 use mcpd_runs::model::{
     AttemptStatus, ConflictReason, DefinitionKind, EventOutcome, InboundEvent, RunEventKind,
     RunStatus, StepErrorClass, TimerKind,
 };
 use mcpd_runs::store::{
-    DefinitionDocument, RunConfig, RunFilter, RunStore, StartRun, StepCompletion, StepError,
+    DefinitionDocument, RunConfig, RunFilter, StartRun, StepCompletion, StepError,
 };
-use mcpd_runs::{Error, SqliteRunStore};
+use mcpd_runs::Error;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use time::{Duration, OffsetDateTime};
 
 fn t0() -> OffsetDateTime {
@@ -28,15 +29,6 @@ fn t0() -> OffsetDateTime {
 
 fn at(seconds: i64) -> OffsetDateTime {
     t0() + Duration::seconds(seconds)
-}
-
-static STAMP: AtomicU64 = AtomicU64::new(0);
-
-fn temp_db() -> PathBuf {
-    let n = STAMP.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("mcpd-contract-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    dir.join("runs.db")
 }
 
 fn done(output: Value) -> StepCompletion {
@@ -70,16 +62,12 @@ fn derived(key: &str, payload: Value) -> InboundEvent {
 }
 
 struct Harness {
-    store: SqliteRunStore,
-    path: PathBuf,
+    store: TestStore,
 }
 
 impl Harness {
     async fn open() -> Self {
-        let path = temp_db();
-        let store = SqliteRunStore::open(&path, RunConfig::default()).expect("open");
-        store.migrate().await.expect("migrate");
-        Self { store, path }
+        Self { store: TestStore::open(RunConfig::default()).await }
     }
 
     fn document(id: &str, version: Option<u32>, body: Value) -> DefinitionDocument {
@@ -171,14 +159,6 @@ impl Harness {
     }
 }
 
-impl Drop for Harness {
-    fn drop(&mut self) {
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-    }
-}
-
 fn reason_of(err: &Error) -> ConflictReason {
     match err {
         Error::Conflict { reason, .. } => *reason,
@@ -200,7 +180,7 @@ fn two_steps() -> Value {
 // Every enum value has a writer
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn every_run_status_has_a_writer() {
     let h = Harness::open().await;
     h.define("one", one_step()).await;
@@ -241,8 +221,9 @@ async fn every_run_status_has_a_writer() {
         assert_eq!(h.run(&run_id).await.status, status, "nothing writes {status:?}");
     }
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn every_attempt_status_has_a_writer() {
     let h = Harness::open().await;
     h.define("one", one_step()).await;
@@ -304,8 +285,9 @@ async fn every_attempt_status_has_a_writer() {
         assert_eq!(h.attempt(&run_id, "work", 0).await.status, status, "nothing writes {status:?}");
     }
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn every_run_event_kind_has_a_writer() {
     let h = Harness::open().await;
     h.define(
@@ -336,12 +318,13 @@ async fn every_run_event_kind_has_a_writer() {
     }
     assert_eq!(h.run(&run_id).await.status, RunStatus::Succeeded);
 }
+}
 
 // ---------------------------------------------------------------------------
 // The four 409 reasons
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn a_landed_complete_whose_reply_was_lost_is_already_applied() {
     let h = Harness::open().await;
     h.define("two", two_steps()).await;
@@ -361,8 +344,9 @@ async fn a_landed_complete_whose_reply_was_lost_is_already_applied() {
     }
     assert_eq!(h.attempt(&run_id, "a", 0).await.output, Some(json!({ "x": 1 })));
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_lease_a_later_attempt_replaced_is_fenced() {
     let h = Harness::open().await;
     h.define("one", one_step()).await;
@@ -378,8 +362,9 @@ async fn a_lease_a_later_attempt_replaced_is_fenced() {
         h.store.complete_step(&old.lease_id, done(json!(1)), at(91)).await.expect_err("fenced");
     assert_eq!(reason_of(&err), ConflictReason::Fenced);
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn an_at_most_once_attempt_cannot_complete_before_it_started() {
     let h = Harness::open().await;
     h.define("once", json!({"steps": [{"kind": "task", "id": "work", "effect": "at_most_once"}]}))
@@ -403,8 +388,9 @@ async fn an_at_most_once_attempt_cannot_complete_before_it_started() {
     h.store.complete_step(&lease.lease_id, done(json!(1)), t0()).await.expect("now it lands");
     assert_eq!(h.run(&run_id).await.status, RunStatus::Succeeded);
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn every_call_on_an_ended_run_is_run_terminal() {
     let h = Harness::open().await;
     h.define("two", two_steps()).await;
@@ -428,12 +414,13 @@ async fn every_call_on_an_ended_run_is_run_terminal() {
     }
     assert!(h.timer_kinds(&run_id).await.is_empty(), "a heartbeat must not revive a timer");
 }
+}
 
 // ---------------------------------------------------------------------------
 // Cancel
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn cancel_walks_the_tree_and_fails_every_live_attempt() {
     let h = Harness::open().await;
     h.define(
@@ -478,8 +465,9 @@ async fn cancel_walks_the_tree_and_fails_every_live_attempt() {
     let err = h.store.heartbeat(&leases[0].lease_id, at(3)).await.expect_err("terminal");
     assert_eq!(reason_of(&err), ConflictReason::RunTerminal);
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_failed_run_leaves_no_live_sibling_attempt() {
     let h = Harness::open().await;
     h.define(
@@ -506,12 +494,13 @@ async fn a_failed_run_leaves_no_live_sibling_attempt() {
     let err = h.store.heartbeat(&leases[1].lease_id, at(1)).await.expect_err("terminal");
     assert_eq!(reason_of(&err), ConflictReason::RunTerminal);
 }
+}
 
 // ---------------------------------------------------------------------------
 // Starts and versions
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn a_reposted_idempotency_key_returns_the_same_run() {
     let h = Harness::open().await;
     h.define("one", one_step()).await;
@@ -535,13 +524,12 @@ async fn a_reposted_idempotency_key_returns_the_same_run() {
         h.store.start_run(start("ticket-1"), t0() + Duration::hours(25)).await.expect("fourth");
     assert_ne!(fourth.run_id, first.run_id);
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn two_simultaneous_posts_of_one_key_produce_one_run() {
-    let path = temp_db();
-    let store =
-        std::sync::Arc::new(SqliteRunStore::open(&path, RunConfig::default()).expect("open"));
-    store.migrate().await.expect("migrate");
+    let h = Harness::open().await;
+    let store = h.store.shared();
     store.put_definition(Harness::document("one", Some(1), one_step())).await.expect("define");
     let mut tasks = Vec::new();
     for _ in 0..8 {
@@ -574,12 +562,10 @@ async fn two_simultaneous_posts_of_one_key_produce_one_run() {
         .await
         .expect("list");
     assert_eq!(page.runs.len(), 1);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::remove_dir_all(dir);
-    }
+}
 }
 
-#[tokio::test]
+backend_tests! {
 async fn definition_versions_follow_the_section_four_rule() {
     let h = Harness::open().await;
     let body_a = one_step();
@@ -631,11 +617,12 @@ async fn definition_versions_follow_the_section_four_rule() {
         (2, false)
     );
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn every_fixture_document_is_judged_the_way_the_schema_says() {
     let h = Harness::open().await;
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/documents");
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/documents");
     let mut valid = 0;
     for entry in std::fs::read_dir(root.join("valid")).expect("valid dir") {
         let path = entry.expect("entry").path();
@@ -666,8 +653,9 @@ async fn every_fixture_document_is_judged_the_way_the_schema_says() {
     }
     assert!(invalid >= 50, "expected the invalid fixtures, found {invalid}");
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn an_input_that_fails_the_schema_is_refused_before_a_run_exists() {
     let h = Harness::open().await;
     h.define(
@@ -701,8 +689,9 @@ async fn an_input_that_fails_the_schema_is_refused_before_a_run_exists() {
         .expect("list");
     assert!(page.runs.is_empty());
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn runs_are_listed_newest_first_with_a_cursor_and_filters() {
     let h = Harness::open().await;
     h.define("one", one_step()).await;
@@ -767,12 +756,13 @@ async fn runs_are_listed_newest_first_with_a_cursor_and_filters() {
         .expect("other project");
     assert!(other.runs.is_empty(), "a project sees its own runs only");
 }
+}
 
 // ---------------------------------------------------------------------------
 // Guards, retries and on_error
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn a_false_guard_skips_the_node_and_the_run_moves_on() {
     let h = Harness::open().await;
     h.define(
@@ -791,8 +781,9 @@ async fn a_false_guard_skips_the_node_and_the_run_moves_on() {
     h.store.complete_step(&lease.lease_id, done(json!({})), t0()).await.expect("complete");
     assert_eq!(h.run(&run_id).await.status, RunStatus::Succeeded);
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn retries_are_spaced_by_the_policy_and_end_in_on_error() {
     let h = Harness::open().await;
     h.define(
@@ -857,8 +848,9 @@ async fn retries_are_spaced_by_the_policy_and_end_in_on_error() {
     assert_eq!(out.attempts_left, 0);
     assert_eq!(out.run_status, RunStatus::Failed, "the budget is spent and on_error is fail_run");
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_fatal_failure_skips_the_retries_and_an_unservable_one_spends_none() {
     let h = Harness::open().await;
     h.define(
@@ -888,8 +880,9 @@ async fn a_fatal_failure_skips_the_retries_and_an_unservable_one_spends_none() {
     assert_eq!(out.run_status, RunStatus::Failed, "fatal does not retry");
     assert!(h.run(&run_id).await.error.as_deref().is_some_and(|e| e.contains("never")));
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn on_error_continue_lets_a_later_guard_read_the_failure() {
     let h = Harness::open().await;
     h.define(
@@ -920,12 +913,13 @@ async fn on_error_continue_lets_a_later_guard_read_the_failure() {
     assert_eq!(h.attempt(&run_id, "thank", 0).await.status, AttemptStatus::Skipped);
     assert_eq!(h.run(&run_id).await.status, RunStatus::Succeeded);
 }
+}
 
 // ---------------------------------------------------------------------------
 // The iteration constructs
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn foreach_renders_each_item_bounds_concurrency_and_collects_outputs() {
     let h = Harness::open().await;
     h.define(
@@ -959,8 +953,9 @@ async fn foreach_renders_each_item_bounds_concurrency_and_collects_outputs() {
     assert_eq!(report.step_key, "report");
     assert_eq!(report.input, json!({ "sent": ["sent a", "sent b"] }));
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_foreach_over_too_many_items_or_a_non_array_fails_the_run() {
     let h = Harness::open().await;
     h.define(
@@ -984,8 +979,9 @@ async fn a_foreach_over_too_many_items_or_a_non_array_fails_the_run() {
         run.error
     );
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_loop_stops_when_until_says_so_and_collects_its_outputs() {
     let h = Harness::open().await;
     h.define(
@@ -1015,12 +1011,13 @@ async fn a_loop_stops_when_until_says_so_and_collects_its_outputs() {
         json!({ "seen": [{ "ready": false }, { "ready": false }, { "ready": true }] })
     );
 }
+}
 
 // ---------------------------------------------------------------------------
 // Subworkflows
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn a_subworkflow_maps_its_input_and_output_and_pins_the_latest_version() {
     let h = Harness::open().await;
     h.define(
@@ -1071,8 +1068,9 @@ async fn a_subworkflow_maps_its_input_and_output_and_pins_the_latest_version() {
         "the child's output is the parent step's output"
     );
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_child_that_fails_fails_the_parent_step_which_follows_its_on_error() {
     let h = Harness::open().await;
     h.define("child", one_step()).await;
@@ -1114,8 +1112,9 @@ async fn a_child_that_fails_fails_the_parent_step_which_follows_its_on_error() {
         }
     }
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_childs_own_limits_apply_to_it_and_the_roots_cost_ceiling_ends_the_tree() {
     let h = Harness::open().await;
     h.define("two", json!({"steps": [{"kind": "task", "id": "a"}, {"kind": "task", "id": "b"}], "limits": {"max_steps": 1}}))
@@ -1165,12 +1164,13 @@ async fn a_childs_own_limits_apply_to_it_and_the_roots_cost_ceiling_ends_the_tre
     assert!((run.cost_usd - 1.2).abs() < 1e-9);
     assert_eq!(h.attempt(&run_id, "a", 0).await.cost_usd, Some(0.6));
 }
+}
 
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn a_supplied_event_id_deduplicates_and_a_derived_one_deduplicates_parking_only() {
     let h = Harness::open().await;
     h.define(
@@ -1219,8 +1219,9 @@ async fn a_supplied_event_id_deduplicates_and_a_derived_one_deduplicates_parking
     let swept = h.store.run_due_timers(t0() + Duration::hours(25)).await.expect("sweep");
     assert!(swept.parked_events_deleted >= 1);
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_signal_addresses_one_run_through_its_own_wait() {
     let h = Harness::open().await;
     h.define(
@@ -1245,8 +1246,9 @@ async fn a_signal_addresses_one_run_through_its_own_wait() {
     assert_eq!(h.run(&run_id).await.status, RunStatus::Running, "not the one expiring soonest");
     assert_eq!(h.attempt(&other, "approval", 0).await.output, Some(json!({ "by": "me" })));
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_wait_that_expires_fails_the_run_by_default() {
     let h = Harness::open().await;
     h.define(
@@ -1266,12 +1268,13 @@ async fn a_wait_that_expires_fails_the_run_by_default() {
     );
     assert_eq!(h.attempt(&run_id, "approval", 0).await.status, AttemptStatus::TimedOut);
 }
+}
 
 // ---------------------------------------------------------------------------
 // State, correlation, sleep_until, and the outbox
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn state_merges_shallowly_and_reaches_the_next_lease() {
     let h = Harness::open().await;
     h.define("two", two_steps()).await;
@@ -1319,8 +1322,9 @@ async fn state_merges_shallowly_and_reaches_the_next_lease() {
         .await;
     assert!(err.is_err());
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn sleep_until_renders_its_instant_from_the_input() {
     let h = Harness::open().await;
     h.define(
@@ -1340,8 +1344,9 @@ async fn sleep_until_renders_its_instant_from_the_input() {
     assert_eq!(run.status, RunStatus::Failed);
     assert!(run.error.as_deref().is_some_and(|e| e.contains("RFC 3339")), "got {:?}", run.error);
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_whole_run_leaves_its_spans_in_the_outbox_in_order() {
     let h = Harness::open().await;
     h.define(
@@ -1425,8 +1430,9 @@ async fn a_whole_run_leaves_its_spans_in_the_outbox_in_order() {
     h.store.ack_outbox(&ids).await.expect("ack");
     assert!(h.store.claim_outbox(100, t0() + Duration::hours(1)).await.expect("empty").is_empty());
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_lease_carries_everything_a_worker_needs() {
     let h = Harness::open().await;
     h.define(
@@ -1451,4 +1457,5 @@ async fn a_lease_carries_everything_a_worker_needs() {
     assert_eq!(lease.parent_span_id, run.root_span_id);
     assert_eq!(lease.span_id.len(), 16);
     assert_eq!(lease.attempt, 0);
+}
 }

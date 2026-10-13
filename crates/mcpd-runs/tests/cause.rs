@@ -12,15 +12,13 @@
 //! identical rendered input is making no progress, and two of the daemon's own
 //! paths retry without spending any retry budget, so nothing else stops it.
 
+mod common;
+
+use common::TestStore;
 use mcpd_runs::cause::ValueKind;
 use mcpd_runs::model::{AttemptStatus, DefinitionKind, RunStatus, StepErrorClass};
-use mcpd_runs::store::{
-    DefinitionDocument, RunConfig, RunStore, StartRun, StepCompletion, StepError,
-};
-use mcpd_runs::SqliteRunStore;
+use mcpd_runs::store::{DefinitionDocument, RunConfig, StartRun, StepCompletion, StepError};
 use serde_json::{json, Value};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use time::{Duration, OffsetDateTime};
 
 fn t0() -> OffsetDateTime {
@@ -29,17 +27,6 @@ fn t0() -> OffsetDateTime {
 
 fn at(secs: i64) -> OffsetDateTime {
     t0() + Duration::seconds(secs)
-}
-
-/// A pid alone is not unique: pids are recycled, and a recycled one reopens
-/// the previous run's database, so every count is off by a whole prior suite.
-static STAMP: AtomicU64 = AtomicU64::new(0);
-
-fn temp_db() -> PathBuf {
-    let n = STAMP.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("mcpd-cause-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    dir.join("runs.db")
 }
 
 fn done(output: Value) -> StepCompletion {
@@ -51,8 +38,7 @@ fn failure(class: StepErrorClass, message: &str) -> StepError {
 }
 
 struct Harness {
-    store: SqliteRunStore,
-    path: PathBuf,
+    store: TestStore,
 }
 
 impl Harness {
@@ -61,10 +47,7 @@ impl Harness {
     }
 
     async fn with_config(config: RunConfig) -> Self {
-        let path = temp_db();
-        let store = SqliteRunStore::open(&path, config).expect("open");
-        store.migrate().await.expect("migrate");
-        Self { store, path }
+        Self { store: TestStore::open(config).await }
     }
 
     async fn define(&self, id: &str, body: Value) {
@@ -126,14 +109,6 @@ impl Harness {
     }
 }
 
-impl Drop for Harness {
-    fn drop(&mut self) {
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-    }
-}
-
 /// The link for one `(step_key, template_path)` pair, so an assertion names
 /// the edge it is about rather than an offset into a list.
 fn link<'a>(
@@ -159,11 +134,11 @@ fn link<'a>(
 // A. The green ancestor
 // ---------------------------------------------------------------------------
 
+backend_tests! {
 /// The whole point of the feature. `classify` succeeds and hands back an empty
 /// list, `enrich` succeeds passing it along, `charge` fails on it. Every step
 /// in the chain is green, so no status-based search reaches `classify`, and
 /// the walk has to.
-#[tokio::test]
 async fn the_ancestor_that_produced_the_bad_value_succeeded() {
     let h = Harness::open().await;
     h.define(
@@ -220,11 +195,12 @@ async fn the_ancestor_that_produced_the_bad_value_succeeded() {
         vec![("enrich", 1), ("classify", 2)]
     );
 }
+}
 
+backend_tests! {
 /// `silent_producer` is not `status == succeeded`. An ancestor sitting behind
 /// a step that did fail is not silent: that failure already explains the run,
 /// and marking the ancestor would point a reader at the wrong step.
-#[tokio::test]
 async fn an_ancestor_behind_a_failed_step_is_not_a_silent_producer() {
     let h = Harness::open().await;
     h.define(
@@ -269,10 +245,11 @@ async fn an_ancestor_behind_a_failed_step_is_not_a_silent_producer() {
     assert_eq!(fetch.value_kind, Some(ValueKind::String));
     assert_eq!(fetch.value_empty, Some(false));
 }
+}
 
+backend_tests! {
 /// A guard is a data dependency too: `when` decides whether the step runs at
 /// all, so the step it reads belongs in the chain.
-#[tokio::test]
 async fn a_guard_declares_an_edge_as_much_as_an_input_does() {
     let h = Harness::open().await;
     h.define(
@@ -299,10 +276,11 @@ async fn a_guard_declares_an_edge_as_much_as_an_input_does() {
     assert_eq!(score.value_kind, Some(ValueKind::Number));
     assert_eq!(score.value_empty, Some(false));
 }
+}
 
+backend_tests! {
 /// A template that reads `input` names no ancestor. The chain is empty and the
 /// answer says so, rather than inventing a hop.
-#[tokio::test]
 async fn a_step_that_reads_only_the_run_input_has_an_empty_chain() {
     let h = Harness::open().await;
     h.define(
@@ -323,10 +301,11 @@ async fn a_step_that_reads_only_the_run_input_has_an_empty_chain() {
     assert!(cause.chain.is_empty(), "input is not a step: {:?}", cause.chain);
     assert!(!cause.truncated);
 }
+}
 
+backend_tests! {
 /// A `foreach` item key carries an index, and the array it fanned out over is
 /// itself an edge: the item exists at all because an earlier step produced it.
-#[tokio::test]
 async fn a_foreach_item_names_its_index_and_the_step_the_array_came_from() {
     let h = Harness::open().await;
     h.define(
@@ -359,10 +338,11 @@ async fn a_foreach_item_names_its_index_and_the_step_the_array_came_from() {
     assert_eq!(listing.value_kind, Some(ValueKind::Array));
     assert_eq!(listing.value_empty, Some(false));
 }
+}
 
+backend_tests! {
 /// A `parallel` branch key carries a slash, and a sibling branch read by name
 /// is a real edge.
-#[tokio::test]
 async fn a_parallel_branch_reads_a_sibling_by_its_nested_name() {
     let h = Harness::open().await;
     h.define(
@@ -401,10 +381,11 @@ async fn a_parallel_branch_reads_a_sibling_by_its_nested_name() {
         "the sibling nobody read is not an ancestor"
     );
 }
+}
 
+backend_tests! {
 /// A loop iteration reads the iteration before it, so the chain walks
 /// backwards through the loop and stops when the walk runs out of iterations.
-#[tokio::test]
 async fn a_loop_iteration_reads_the_iteration_before_it() {
     let h = Harness::open().await;
     h.define(
@@ -435,11 +416,12 @@ async fn a_loop_iteration_reads_the_iteration_before_it() {
     assert_eq!(prev.value_kind, Some(ValueKind::Object));
     assert_eq!(prev.value_empty, Some(false));
 }
+}
 
+backend_tests! {
 /// A subworkflow is a step of its parent with no attempt row of its own: its
 /// status and output come from the child run. The boundary is a hop in the
 /// chain like any other, and the walk does not cross into the child.
-#[tokio::test]
 async fn a_subworkflow_boundary_is_one_hop_read_from_the_child_run() {
     let h = Harness::open().await;
     h.define(
@@ -484,10 +466,11 @@ async fn a_subworkflow_boundary_is_one_hop_read_from_the_child_run() {
         "the walk stops at the boundary; the child's steps are the child's own answer"
     );
 }
+}
 
+backend_tests! {
 /// The bound is a bound. A chain longer than `max_depth` comes back as a
 /// prefix, and says so.
-#[tokio::test]
 async fn max_depth_truncates_and_says_so() {
     let h = Harness::open().await;
     h.define(
@@ -522,9 +505,10 @@ async fn max_depth_truncates_and_says_so() {
     assert!(none.chain.is_empty());
     assert!(none.truncated);
 }
+}
 
+backend_tests! {
 /// Two calls against one run answer the same list in the same order.
-#[tokio::test]
 async fn the_answer_is_stable_across_calls() {
     let h = Harness::open().await;
     h.define(
@@ -554,11 +538,12 @@ async fn the_answer_is_stable_across_calls() {
     // a repeated reference counted once.
     assert_eq!(first.chain.len(), 2);
 }
+}
 
+backend_tests! {
 /// The endpoint answers about any step, not only a failed one, and refuses
 /// what it cannot answer for: a step the definition never declared, and one
 /// this run never reached.
-#[tokio::test]
 async fn it_answers_for_any_step_it_has_evidence_of_and_refuses_the_rest() {
     let h = Harness::open().await;
     h.define(
@@ -593,11 +578,12 @@ async fn it_answers_for_any_step_it_has_evidence_of_and_refuses_the_rest() {
     let err = h.store.step_cause(&run_id, "third", 32).await.expect_err("never reached");
     assert!(matches!(err, mcpd_runs::Error::NotFound { .. }), "{err}");
 }
+}
 
+backend_tests! {
 /// The wire says an ancestor read through two paths appears twice, once per
 /// path, because two paths are two different claims about what went wrong. The
 /// same path written twice is still one link.
-#[tokio::test]
 async fn one_ancestor_read_through_two_paths_is_two_links() {
     let h = Harness::open().await;
     h.define(
@@ -628,12 +614,13 @@ async fn one_ancestor_read_through_two_paths_is_two_links() {
     assert_eq!(total.value_kind, Some(ValueKind::Number));
     assert_eq!(total.value_empty, Some(false), "zero is a number, not an absence");
 }
+}
 
+backend_tests! {
 /// A definition may name a step that never produced anything, and two steps
 /// may name each other. Neither is refused when the document is stored, so the
 /// walk has to survive both: the first yields no link, and the second
 /// terminates instead of walking round for ever.
-#[tokio::test]
 async fn the_walk_terminates_on_a_document_that_reads_itself_in_a_circle() {
     let h = Harness::open().await;
     h.define(
@@ -665,14 +652,15 @@ async fn the_walk_terminates_on_a_document_that_reads_itself_in_a_circle() {
     );
     assert!(!cause.truncated, "it finished, it did not run out of depth");
 }
+}
 
 // ---------------------------------------------------------------------------
 // B. The breaker
 // ---------------------------------------------------------------------------
 
+backend_tests! {
 /// An `unservable` failure spends no retry budget, so the step comes back
 /// after one lease length for ever. The breaker is what ends it.
-#[tokio::test]
 async fn a_step_that_repeats_with_the_same_input_ends_the_run() {
     let h = Harness::with_config(RunConfig { max_step_repeats: 3, ..RunConfig::default() }).await;
     h.define("stuck", json!({"steps": [{"kind": "task", "id": "call"}]})).await;
@@ -707,13 +695,14 @@ async fn a_step_that_repeats_with_the_same_input_ends_the_run() {
         "no retry is left counting down behind an ended run"
     );
 }
+}
 
+backend_tests! {
 /// The breaker counts identical inputs, not failures. One step key can fail
 /// three times and still be making progress, because a sibling finishing
 /// underneath it changes what its template renders to. A counter that only
 /// looked at failures would have ended this run; the run then keeps going and
 /// trips only once the input really does stop moving.
-#[tokio::test]
 async fn a_step_whose_input_changes_between_attempts_is_not_repeating() {
     let h = Harness::with_config(RunConfig { max_step_repeats: 3, ..RunConfig::default() }).await;
     h.define(
@@ -778,10 +767,11 @@ async fn a_step_whose_input_changes_between_attempts_is_not_repeating() {
     assert_eq!(run.status, RunStatus::Failed);
     assert!(run.error.unwrap_or_default().contains("max_step_repeats"));
 }
+}
 
+backend_tests! {
 /// Zero turns the breaker off, which is what an operator who wants the old
 /// behaviour writes.
-#[tokio::test]
 async fn zero_turns_the_breaker_off() {
     let h = Harness::with_config(RunConfig { max_step_repeats: 0, ..RunConfig::default() }).await;
     h.define("stuck", json!({"steps": [{"kind": "task", "id": "call"}]})).await;
@@ -796,10 +786,11 @@ async fn zero_turns_the_breaker_off() {
     }
     assert_eq!(h.run(&run_id).await.status, RunStatus::Running);
 }
+}
 
+backend_tests! {
 /// A failure that ends or advances the run is not a repetition: the breaker
 /// only stands in front of a retry.
-#[tokio::test]
 async fn the_breaker_does_not_touch_a_run_that_is_ending_anyway() {
     let h = Harness::with_config(RunConfig { max_step_repeats: 1, ..RunConfig::default() }).await;
     h.define("once", json!({"steps": [{"kind": "task", "id": "call"}]})).await;
@@ -814,4 +805,5 @@ async fn the_breaker_does_not_touch_a_run_that_is_ending_anyway() {
     let error = h.run(&run_id).await.error.unwrap_or_default();
     assert!(error.contains("the real reason"), "the step's own error survives: {error}");
     assert!(!error.contains("max_step_repeats"), "{error}");
+}
 }

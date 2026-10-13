@@ -70,7 +70,11 @@ fn runs(state: &AppState) -> ApiResult<Arc<dyn RunStore>> {
 /// key reaches everything, and refused when the key reaches several projects
 /// and the request names none, because a guessed project is the wrong one
 /// often enough to be worth a 400.
-fn select_project(state: &AppState, grant: &Grant, requested: Option<&str>) -> ApiResult<String> {
+pub(crate) fn select_project(
+    state: &AppState,
+    grant: &Grant,
+    requested: Option<&str>,
+) -> ApiResult<String> {
     match (requested.map(str::trim).filter(|p| !p.is_empty()), grant) {
         (Some(p), grant) if grant.covers(p) => Ok(p.to_owned()),
         (Some(p), _) => {

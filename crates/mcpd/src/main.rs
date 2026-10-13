@@ -97,10 +97,11 @@ struct Cli {
     worker_keys: Vec<String>,
 
     /// Where to keep runs: the definitions, the journal of step attempts, the
-    /// deadlines and the waits. An embedded file beside the signal store,
-    /// whatever the signal store is, so the run surface is one daemon replica.
-    /// Defaults to the `--data` path with `.runs` before its extension, or
-    /// `:memory:` when `--data` is. Set it to `off` to serve no runs at all.
+    /// deadlines and the waits. A file path keeps them in an embedded SQLite
+    /// file. A `postgres://` connection string keeps them in Postgres, where
+    /// several replicas share one run store. Defaults to the `--data` path
+    /// with `.runs` before its extension, or `:memory:` when `--data` is. Set
+    /// it to `off` to serve no runs at all.
     #[arg(long, env = "MCPD_RUNS_DATA", global = true)]
     runs_data: Option<String>,
 
@@ -713,6 +714,21 @@ fn forward_header(raw: &str) -> Result<(String, String)> {
     Ok((name.to_owned(), value.to_owned()))
 }
 
+/// Whether a `--runs-data` value names a Postgres server rather than a file.
+fn is_postgres_url(value: &str) -> bool {
+    value.starts_with("postgres://") || value.starts_with("postgresql://")
+}
+
+/// What `mcpd config` says about the run store: the backend, and where it is,
+/// with any password taken out of a connection string.
+fn describe_runs(location: &str) -> String {
+    if is_postgres_url(location) {
+        format!("postgres at {}", doctor::without_credentials(location))
+    } else {
+        format!("sqlite at {location}")
+    }
+}
+
 /// Where the run store lives, from the flag or from the data path.
 fn runs_path(data: &str, runs_data: Option<&str>) -> Option<String> {
     match runs_data.map(str::trim) {
@@ -1020,6 +1036,11 @@ async fn main() -> Result<()> {
     // start-up checks and the server all see the lists without blank entries.
     // `ServerConfig::drop_blank_keys` says why an empty variable produces one.
     config.drop_blank_keys();
+    // The demo seeds aspect notes and themes, so it keeps clustering them on
+    // the timer too, unless the config file says otherwise.
+    if matches!(cli.command, Some(Command::Demo)) && file.aspects.is_none() {
+        config.aspects.enabled = true;
+    }
 
     if matches!(cli.command, Some(Command::Config)) {
         let prices_line = prices::describe(&price_book, price_book_path.as_deref());
@@ -1079,12 +1100,30 @@ async fn main() -> Result<()> {
         }
     };
 
-    // The run store is a second embedded file, whatever the signal store is,
-    // and it is opened after the signal store so a daemon that cannot open its
-    // data refuses to start before it has written anything anywhere.
+    // The run store is a second embedded file, or a Postgres database, whatever
+    // the signal store is, and it is opened after the signal store so a daemon
+    // that cannot open its data refuses to start before it has written
+    // anything anywhere.
     let run_store: Option<Arc<dyn mcpd_runs::RunStore>> =
         match runs_path(&cli.data, cli.runs_data.as_deref()) {
             None => None,
+            // The connection string is not repeated in the context: it carries
+            // the password, and this message reaches the start-up log.
+            Some(url) if is_postgres_url(&url) => {
+                let pool = mcpd_store::connect_postgres_pool(&mcpd_store::PostgresConfig {
+                    url: url.clone(),
+                    ..Default::default()
+                })
+                .context("configuring the Postgres run store")?;
+                let store = mcpd_runs::PostgresRunStore::new(pool, config.run_config);
+                store.migrate().await.with_context(|| {
+                    format!(
+                        "applying run store migrations at {}",
+                        doctor::without_credentials(&url)
+                    )
+                })?;
+                Some(Arc::new(store))
+            }
             Some(path) => {
                 let store = mcpd_runs::SqliteRunStore::open(&path, config.run_config)
                     .with_context(|| format!("opening the run store at {path}"))?;
@@ -1212,6 +1251,16 @@ async fn main() -> Result<()> {
     // Monitors run in the background for the life of the process. `spawn` is a
     // no-op when none are configured, so this costs nothing by default.
     mcpd_server::monitor::spawn(Arc::clone(&state));
+    // Live scoring. Its rules are data written through the API, so it always
+    // runs, and a pass with no enabled rule reads one list per project.
+    mcpd_server::live::spawn(Arc::clone(&state));
+    // Tail sampling, for the projects whose block sets `tail_sampling`.
+    for (name, p) in &state.config.projects {
+        if let Some(t) = &p.tail_sampling {
+            t.check(name).map_err(anyhow::Error::msg)?;
+        }
+    }
+    mcpd_server::tail::spawn(Arc::clone(&state));
     // The run store's deadline tick and its span outbox drain. A no-op when
     // the daemon serves no runs.
     mcpd_server::runs::spawn(Arc::clone(&state));
@@ -1233,6 +1282,8 @@ async fn main() -> Result<()> {
         )
         .await?;
         tracing::info!("seeded {n} demo signals");
+        let noted = demo::seed_aspects(&state, &cli.project).await?;
+        tracing::info!("seeded {noted} demo signals with aspect notes and themes");
         if let Some(runs) = &run_store {
             let seeded = demo::seed_runs(runs.as_ref(), &cli.project).await?;
             tracing::info!("seeded {seeded} demo runs");
@@ -1652,7 +1703,7 @@ fn config_lines(
         },
     );
     let runs = runs_path(&cli.data, cli.runs_data.as_deref());
-    row("runs", runs.as_ref().map_or("off".to_owned(), |p| format!("sqlite at {p}")));
+    row("runs", runs.as_deref().map_or("off".to_owned(), describe_runs));
     // In the units and under the names the config file uses, so the line can
     // be compared with the `runs` block that set it.
     row(
@@ -1728,6 +1779,7 @@ fn config_lines(
             config.projects.iter().filter_map(|(name, p)| p.sample.map(|f| format!("{name} {f}"))),
         ),
     );
+    row("tail sampling", tail_summary(&config.projects));
     // Every limited project by name, not a count. A ceiling is set from two
     // places, and the mistake it hides is a project you thought was covered and
     // is not: one that appears in no `projects` block has no ceiling, whatever
@@ -1881,6 +1933,46 @@ fn config_lines(
 }
 
 /// A setting's global value, then every project that sets its own.
+/// Each project's tail sampling rule, in one line, or that there is none.
+fn tail_summary(
+    projects: &std::collections::BTreeMap<String, mcpd_server::state::ProjectConfig>,
+) -> String {
+    let rules: Vec<String> = projects
+        .iter()
+        .filter_map(|(name, p)| {
+            p.tail_sampling.as_ref().map(|t| {
+                let mut keep = Vec::new();
+                if t.keep_errors {
+                    keep.push("errors".to_owned());
+                }
+                if let Some(ms) = t.keep_slower_than_ms {
+                    keep.push(format!("slower than {ms}ms"));
+                }
+                if let Some(c) = t.keep_cost_above {
+                    keep.push(format!("cost over {c}"));
+                }
+                if let Some(s) = t.keep_score_below {
+                    keep.push(format!("scored under {s}"));
+                }
+                if t.keep_feedback {
+                    keep.push("feedback".to_owned());
+                }
+                format!(
+                    "{name} keeps {} and {} of the rest after {}s",
+                    if keep.is_empty() { "nothing by rule".to_owned() } else { keep.join(", ") },
+                    t.rate,
+                    t.decide_after_seconds
+                )
+            })
+        })
+        .collect();
+    if rules.is_empty() {
+        "off".to_owned()
+    } else {
+        rules.join("; ")
+    }
+}
+
 fn with_exceptions(global: String, projects: impl Iterator<Item = String>) -> String {
     let projects: Vec<String> = projects.collect();
     if projects.is_empty() {
@@ -1960,6 +2052,21 @@ mod tests {
             .find(|a| a.get_id() == flag)
             .and_then(clap::Arg::get_env)
             .map(|s| s.to_string_lossy().into_owned())
+    }
+
+    /// A connection string selects Postgres, and `mcpd config` prints where
+    /// the run store is without the password the string carries.
+    #[test]
+    fn runs_data_names_a_postgres_server_or_a_file() {
+        let url = "postgres://mcpd:s3cret@db:5432/mcpd";
+        assert_eq!(runs_path("/data/mcpd.db", Some(url)).as_deref(), Some(url));
+        assert!(is_postgres_url(url));
+        assert!(is_postgres_url("postgresql://db/mcpd"));
+        assert!(!is_postgres_url("/data/postgres.db"));
+        let line = describe_runs(url);
+        assert!(line.starts_with("postgres at "), "{line}");
+        assert!(!line.contains("s3cret"), "the password reached the output: {line}");
+        assert_eq!(describe_runs("/data/mcpd.runs.db"), "sqlite at /data/mcpd.runs.db");
     }
 
     /// Both caps existed on `ServerConfig` and neither was reachable: no flag

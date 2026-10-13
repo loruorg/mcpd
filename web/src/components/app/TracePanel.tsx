@@ -27,6 +27,7 @@ import {
 import { useCapabilities } from './capabilities'
 import { SpanInspector } from './SpanInspector'
 import { TraceActions } from './TraceActions'
+import { TraceAspects } from './TraceAspects'
 import { Legend, Waterfall } from './Waterfall'
 import {
   buildHaystack,
@@ -394,6 +395,8 @@ export function TracePanel({
               : (blank?.short ?? 'not priced')}
           </Reading>
         </dl>
+
+        <TraceAspects traceId={traceId} project={project} endpoint={endpoint} apiKey={apiKey} />
 
         {live && !canFollow && caps && fetching && (
           <p className="mt-2 max-w-[64ch] text-[0.75rem] leading-snug text-ink-2">

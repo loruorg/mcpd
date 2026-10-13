@@ -76,8 +76,9 @@ config:
 #
 # An external store is what lets mcpd run more than one pod: the single writer
 # and the single replica are limits of the SQLite file, not of mcpd. It is half
-# of what it takes, though. The run store is always an embedded file (see
-# `runs` below), so more than one replica also needs runs.enabled false.
+# of what it takes, though. The run store is an embedded file by default (see
+# `runs` below), so more than one replica also needs runs.store postgres or
+# runs.enabled false.
 #
 # `type` decides the mode, never the URLs. That is what lets a URL live only in
 # a Secret you manage: set the type here, point keys.existingSecret at the
@@ -103,17 +104,26 @@ externalStore:
 # The durable run surface: definitions, the journal of step attempts, deadlines
 # and waits.
 #
-# Its store is an embedded SQLite file whatever the signal store is, so while
-# it is on, the pod keeps a file on a volume and runs as one replica. With an
-# external store that volume holds the run store alone. Turn it off to run
-# several pods against an external store; the daemon then answers the run
-# endpoints with a 503 that says so, and nothing else changes.
+# `store` decides where they live, as externalStore.type does for signals.
+# `sqlite`, the default, keeps an embedded file on the volume, so the pod runs
+# as one replica; with an external signal store that volume holds the run store
+# alone. `postgres` keeps them in Postgres, where several pods share one run
+# store. Turning the surface off also lets several pods run; the daemon then
+# answers the run endpoints with a 503 that says so, and nothing else changes.
 runs:
   enabled: true
+  # sqlite or postgres.
+  store: sqlite
+  # The Postgres connection string when store is postgres. It may name the same
+  # database as externalStore.postgresUrl: the run tables have names of their
+  # own. Held in the chart's Secret; with keys.existingSecret, put it in yours
+  # under runs-postgres-url and leave this empty.
+  postgresUrl: ""
 
-# Pods to run. More than one needs both an external store and runs.enabled
-# false, because each embedded SQLite file has one writer. The chart refuses to
-# render a larger count otherwise, rather than pinning it to 1 behind your back.
+# Pods to run. More than one needs an external store, and runs either on
+# Postgres or off, because each embedded SQLite file has one writer. The chart
+# refuses to render a larger count otherwise, rather than pinning it to 1
+# behind your back.
 replicaCount: 1
 
 keys:

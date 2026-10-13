@@ -389,6 +389,31 @@ CREATE TABLE IF NOT EXISTS experiments (
 
 CREATE INDEX IF NOT EXISTS experiments_project ON experiments (project, started_at DESC);
 
+-- Versioned documents: prompts, scorer definitions and evaluation rules. A
+-- version is written once and never changed; labels point at one. The primary
+-- key is what stops two replicas assigning one number twice.
+CREATE TABLE IF NOT EXISTS documents (
+    project    TEXT   NOT NULL,
+    kind       TEXT   NOT NULL,
+    id         TEXT   NOT NULL,
+    version    BIGINT NOT NULL,
+    body       TEXT   NOT NULL,
+    note       TEXT,
+    created_by TEXT,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (project, kind, id, version)
+);
+
+CREATE TABLE IF NOT EXISTS document_labels (
+    project    TEXT   NOT NULL,
+    kind       TEXT   NOT NULL,
+    id         TEXT   NOT NULL,
+    label      TEXT   NOT NULL,
+    version    BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    PRIMARY KEY (project, kind, id, label)
+);
+
 -- The audit log: who read a payload, and who deleted one.
 --
 -- Not covered by the retention pass, on purpose. A log that deleted itself on

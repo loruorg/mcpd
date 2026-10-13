@@ -214,6 +214,24 @@ async fn main() {
     span can be filled in from anywhere it is borrowed.
   </p>
 
+  <h3>Streamed calls</h3>
+  <p>
+    Pass the provider's stream to <code>span.record_stream</code> and read the
+    stream it gives back instead. Its items are <code>Result</code>s, and the
+    chunks can be OpenAI chat-completion chunks or Anthropic message events,
+    each a <code>serde_json::Value</code> or any type that serialises to one. Every
+    item comes through unchanged. The first chunk with text or a tool call
+    marks the time to first token. The wrapper owns the span: when the stream
+    ends, yields an <code>Err</code> or is dropped early, the span gets what
+    <code>record_response</code> would have recorded for the same call
+    unstreamed, the text as its output, and ends. An <code>Err</code> marks
+    the span with its <code>Display</code> text and still reaches you. The text
+    kept is capped at 32,768 characters, and
+    <code>mcpd.stream.truncated</code> is set when the cap was reached.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="stream" title="a streamed call" />
+
   <h2>Payloads, sinks and finished spans</h2>
   <p>
     <code>Config::with_capture_payloads(false)</code> keeps prompts and
@@ -234,6 +252,21 @@ async fn main() {
     <code>capacity</code>, <code>exported</code>, <code>failed</code> and
     <code>rejected</code>.
   </p>
+  <p>
+    <code>mcpd_sdk::testing::TestClient</code> wraps a client that records
+    into memory. Pass <code>test.client()</code> wherever your code takes an
+    <code>&amp;Mcpd</code>, then read back what it recorded:
+    <code>spans(name, kind)</code>, <code>span(name)</code> for the one span
+    that must exist, <code>trees()</code> for each run as a tree,
+    <code>logs()</code>, <code>metrics()</code>, <code>scores()</code>,
+    <code>recorded_feedback()</code> and <code>reset()</code>. Each accessor
+    flushes first. What it holds went through sampling, payload capture and
+    <code>redact</code> as it would on the way to a daemon, and
+    <code>TestClient::new()</code> stays on when
+    <code>MCPD_ENABLED=false</code> is set for the test run.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="testing" title="a unit test" />
   <p>
     <code>mcpd.record(span)</code> queues a span that already ended, ids,
     parent, start and end included, as an adapter or an import holds it: never

@@ -163,13 +163,20 @@ pub const TRACE_PARAMS: &[&str] = &[
     "thread_id",
     "user_id",
     "environment",
+    "experiment_id",
     "model",
     "from",
     "to",
     "min_duration_ms",
+    "max_duration_ms",
     "min_cost",
+    "max_cost",
+    "min_tokens",
     "has_score",
     "score_below",
+    "score_above",
+    "has_feedback",
+    "preview",
     "sort",
     "order",
     "limit",
@@ -185,6 +192,8 @@ pub const SPAN_PARAMS: &[&str] = &[
     "name",
     "model",
     "trace_id",
+    "prompt",
+    "prompt_version",
     "from",
     "to",
     "min_duration_ms",
@@ -542,10 +551,28 @@ pub async fn list_audit(
 pub async fn list_traces(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: Peer,
     Query(p): Query<Params>,
 ) -> ApiResult<Json<TraceListResponse>> {
     let project = project(&p, &state, &headers);
-    authorize_project(&state, &headers, Scope::Read, &project)?;
+    let previews: bool = parse(&p, "preview")?.unwrap_or(false);
+    if previews {
+        // Audited only with previews: they carry the start of each run's
+        // input and output, and the audit boundary is the payload. A list
+        // without them is names, timings and figures, and is not recorded.
+        audited(
+            &state,
+            &headers,
+            peer.0,
+            authorize_project(&state, &headers, Scope::Read, &project),
+            "list_traces",
+            &project,
+            None,
+        )
+        .await?;
+    } else {
+        authorize_project(&state, &headers, Scope::Read, &project)?;
+    }
     // Before anything is read, and after the key is checked. A refusal that
     // named the vocabulary before authorising would tell an anonymous caller
     // what this daemon serves.
@@ -569,13 +596,20 @@ pub async fn list_traces(
         // field exists.
         user_id: state.redactor.hash_identifier(get(&p, "user_id")),
         environment: get(&p, "environment").map(str::to_owned),
+        experiment_id: get(&p, "experiment_id").map(str::to_owned),
         model: get(&p, "model").map(str::to_owned),
         from: parse_time(&p, "from")?,
         to: parse_time(&p, "to")?,
         min_duration_ms: parse(&p, "min_duration_ms")?,
         min_cost: parse(&p, "min_cost")?,
+        max_duration_ms: parse(&p, "max_duration_ms")?,
+        max_cost: parse(&p, "max_cost")?,
+        min_tokens: parse(&p, "min_tokens")?,
         has_score: get(&p, "has_score").map(str::to_owned),
         score_below: parse(&p, "score_below")?,
+        score_above: parse(&p, "score_above")?,
+        has_feedback: parse(&p, "has_feedback")?,
+        previews,
         sort: match get(&p, "sort") {
             Some("duration") => TraceSort::Duration,
             Some("cost") => TraceSort::Cost,
@@ -629,6 +663,31 @@ pub async fn get_trace(
     let include = Include::parse(get(&p, "include"));
     let detail = state.store.get_trace(&project, &trace_id, &include).await?;
     Ok(Json(detail))
+}
+
+/// `GET /v1/api/traces/{trace_id}/trajectory`
+pub async fn get_trajectory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: Peer,
+    Path(trace_id): Path<String>,
+    Query(p): Query<Params>,
+) -> ApiResult<Json<mcpd_core::Trajectory>> {
+    let project = project(&p, &state, &headers);
+    // Audited like the run it reads: the previews carry the start of each
+    // step's input and output.
+    audited(
+        &state,
+        &headers,
+        peer.0,
+        authorize_project(&state, &headers, Scope::Read, &project),
+        "get_trajectory",
+        &project,
+        Some(&trace_id),
+    )
+    .await?;
+    let detail = state.store.get_trace(&project, &trace_id, &Include::default()).await?;
+    Ok(Json(mcpd_core::trajectory::trajectory(&trace_id, &detail.spans)))
 }
 
 /// `DELETE /v1/api/traces/{trace_id}`
@@ -705,6 +764,8 @@ pub async fn list_spans(
                 from: parse_time(&p, "from")?,
                 to: parse_time(&p, "to")?,
                 min_duration_ms: parse(&p, "min_duration_ms")?,
+                prompt: get(&p, "prompt").map(str::to_owned),
+                prompt_version: parse(&p, "prompt_version")?,
                 sort,
                 order: order(&p),
                 limit: parse::<u32>(&p, "limit")?.unwrap_or(50).clamp(1, 500),
@@ -1331,9 +1392,26 @@ pub async fn self_metrics(
 pub async fn list_scorers(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(p): Query<Params>,
 ) -> ApiResult<Json<Vec<crate::eval::ScorerInfo>>> {
-    authorize(&state, &headers, Scope::Read)?;
-    Ok(Json(crate::eval::catalogue(state.config.judge.as_ref())))
+    only(&p, "GET /v1/api/scorers", &["project"], &[])?;
+    let defined = match get(&p, "project") {
+        Some(project) => {
+            authorize_project(&state, &headers, Scope::Read, project)?;
+            state
+                .store
+                .list_documents(project, mcpd_store::DocKind::Scorer, None)
+                .await?
+                .iter()
+                .map(crate::definitions::to_definition)
+                .collect()
+        }
+        None => {
+            authorize(&state, &headers, Scope::Read)?;
+            Vec::new()
+        }
+    };
+    Ok(Json(crate::eval::catalogue(state.config.judge.as_ref(), &defined)))
 }
 
 /// `POST /v1/api/score` — run scorers over stored runs.
@@ -1397,7 +1475,17 @@ pub async fn compare_experiments(
 
     let base = fetch(baseline.to_owned()).await?;
     let cand = fetch(candidate.to_owned()).await?;
-    Ok(Json(crate::eval::compare(baseline, candidate, &base.items, &cand.items)))
+    let defined = state
+        .store
+        .list_documents(&project, mcpd_store::DocKind::Scorer, None)
+        .await?
+        .iter()
+        .map(|d| {
+            let d = crate::definitions::to_definition(d);
+            (d.id, d.direction)
+        })
+        .collect();
+    Ok(Json(crate::eval::compare_with(baseline, candidate, &base.items, &cand.items, &defined)))
 }
 
 // ---------------------------------------------- datasets and experiments ---
@@ -1482,6 +1570,11 @@ pub async fn list_dataset_items(
         Some(&dataset_id),
     )
     .await?;
+    if let Some(version) = parse::<u32>(&p, "version")? {
+        return Ok(Json(
+            crate::curation::version_items(&state, &project, &dataset_id, version, limit).await?,
+        ));
+    }
     Ok(Json(state.store.list_dataset_items(&dataset_id, limit).await?))
 }
 

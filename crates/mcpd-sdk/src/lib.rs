@@ -47,12 +47,16 @@
 
 pub mod client;
 pub mod context;
+pub mod experiment;
 pub mod logs;
 pub mod model_call;
+pub mod prompts;
 mod queue;
 pub mod runs;
 pub mod sink;
 pub mod span;
+pub mod stream;
+pub mod testing;
 mod transport;
 pub mod worker;
 pub mod workflow;
@@ -62,15 +66,21 @@ pub use client::{
     DEFAULT_DEADLINE,
 };
 pub use context::{current, current_traceparent, SpanContext};
+pub use experiment::{RunExperiment, DATASET_ITEM_ATTRIBUTE, DEFAULT_EXPERIMENT_CONCURRENCY};
 pub use logs::{
     error_fields, log_level_from_severity, meets_level, parse_log_level, severity_number,
 };
 pub use model_call::{
     response_facts, response_shape, usage_from_anthropic, usage_from_openai, ResponseFacts,
 };
+pub use prompts::{
+    render_prompt, GetPrompt, PromptFallback, PromptRenderError, Rendered, DEFAULT_PROMPT_LABEL,
+    DEFAULT_PROMPT_TTL,
+};
 pub use runs::{ClaimSteps, PublishEvent, RunFilter, RunResult, StartRun};
 pub use sink::{ConsoleSink, RecordingSink, Sink};
 pub use span::Span;
+pub use stream::{RecordedStream, STREAM_MAX_TOOL_CALLS, STREAM_TEXT_BUDGET};
 pub use worker::{StepContext, StepFailure, StepOutcome, Worker, WorkerBuilder, WorkerStats};
 pub use workflow::{
     all, any, exists, not, when, Branch, Limits, Predicate, RetryPolicy, StepOptions, Workflow,
@@ -79,11 +89,12 @@ pub use workflow::{
 /// The generated data model, shared by the server, the store and every SDK.
 pub use mcpd_core as model;
 pub use mcpd_core::{
-    AttemptStatus, Backoff, ConflictReason, Definition, DefinitionDocument, DefinitionVersion,
-    Effect, EntityKind, EventOutcome, FeedbackKind, LogLevel, MetricKind, OnError, Run, RunDetail,
-    RunEvent, RunEventKind, RunStatus, ScoreSource, SpanError, SpanKind, SpanStatus, StepAttempt,
-    StepConflict, StepError, StepErrorClass, StepKind, StepLease, StepUsage, TokenUsage,
-    WaitTimeout,
+    AttemptStatus, Backoff, ConflictReason, CreatePromptRequest, DatasetItem, Definition,
+    DefinitionDocument, DefinitionVersion, Effect, EntityKind, EventOutcome, Experiment,
+    ExperimentResults, ExperimentStatus, FeedbackKind, LogLevel, MetricKind, OnError, Prompt,
+    PromptKind, Run, RunDetail, RunEvent, RunEventKind, RunStatus, ScoreSource, ScorerConfig,
+    SpanError, SpanKind, SpanStatus, StepAttempt, StepConflict, StepError, StepErrorClass,
+    StepKind, StepLease, StepUsage, TokenUsage, Trajectory, WaitTimeout,
 };
 
 use std::sync::{Arc, Mutex};

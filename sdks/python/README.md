@@ -229,7 +229,23 @@ cost = mcpd.analytics_cost("-7d", "-0s", group_by="model", bucket="1d")
 ```
 
 Also available: `list_spans`, `list_logs`, `list_scores`, `list_feedback`,
-`query_metrics`, `delete_trace` and `health`.
+`query_metrics`, `delete_trace`, `get_trajectory` and `health`.
+
+## Experiments
+
+`run_experiment` runs your code over every case of a dataset, each case in its
+own root span, and scores each answer against its case. A case that raises is a
+failed run, and the others still run.
+
+```python
+results = mcpd.run_experiment("support-questions", answer, name="answers-v2",
+                              scorers=["exact_match"], concurrency=4)
+```
+
+A plain function runs on a pool of threads; an `async def` target runs on one
+event loop. From async code, call `await mcpd.arun_experiment(...)`. The parts
+are there too: `list_dataset_items`, `create_experiment`, `score_experiment` and
+`experiment_results`.
 
 In async code, run them off the loop:
 

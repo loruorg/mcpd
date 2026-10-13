@@ -20,9 +20,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Clock
 import kotlin.time.Instant
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.util.UUID
 import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.atomic.AtomicBoolean
@@ -60,8 +63,12 @@ internal object Environment {
  *
  * Only the query methods throw this. Instrumentation never does.
  */
-open class McpdException internal constructor(message: String, cause: Throwable? = null) :
-    RuntimeException(message, cause)
+open class McpdException internal constructor(
+    message: String,
+    cause: Throwable? = null,
+    /** The HTTP status mcpd answered with, or null when no answer arrived. */
+    val status: Int? = null,
+) : RuntimeException(message, cause)
 
 private fun env(name: String): String? = try {
     Environment.lookup(name)?.trim()?.takeIf { it.isNotEmpty() }
@@ -223,6 +230,7 @@ class Mcpd(
     internal val diagnostics = Diagnostics(diagnosticInterval)
     private val queue = SignalQueue(config.maxQueue.coerceAtLeast(1))
     internal val transport = Transport(config, json, diagnostics)
+    private val prompts = PromptStore(this)
     private val sink: Sink = config.sink ?: transport
     private val exportLock = Mutex()
 
@@ -528,7 +536,12 @@ class Mcpd(
 
     // ------------------------------------------------------------- reads ----
 
-    /** A page of runs. Every filter is optional except the project. */
+    /**
+     * A page of runs. Every filter is optional except the project.
+     *
+     * [experimentId] keeps the runs an experiment recorded. [preview] fills
+     * each run's `input_preview` and `output_preview`.
+     */
     suspend fun listTraces(
         q: String? = null,
         status: SpanStatus? = null,
@@ -543,9 +556,16 @@ class Mcpd(
         from: Instant? = null,
         to: Instant? = null,
         minDurationMs: Long? = null,
+        maxDurationMs: Long? = null,
         minCost: Double? = null,
+        maxCost: Double? = null,
+        minTokens: Long? = null,
         hasScore: String? = null,
         scoreBelow: Double? = null,
+        scoreAbove: Double? = null,
+        hasFeedback: Boolean? = null,
+        experimentId: String? = null,
+        preview: Boolean? = null,
         sort: String? = null,
         order: String? = null,
         limit: Int? = null,
@@ -557,9 +577,11 @@ class Mcpd(
             "project" to project, "q" to q, "status" to status, "kind" to kind, "name" to name,
             "tags" to tags, "session_id" to sessionId, "thread_id" to threadId, "user_id" to userId,
             "environment" to environment, "model" to model, "from" to from, "to" to to,
-            "min_duration_ms" to minDurationMs, "min_cost" to minCost, "has_score" to hasScore,
-            "score_below" to scoreBelow, "sort" to sort, "order" to order, "limit" to limit,
-            "cursor" to cursor,
+            "min_duration_ms" to minDurationMs, "max_duration_ms" to maxDurationMs,
+            "min_cost" to minCost, "max_cost" to maxCost, "min_tokens" to minTokens,
+            "has_score" to hasScore, "score_below" to scoreBelow, "score_above" to scoreAbove,
+            "has_feedback" to hasFeedback, "experiment_id" to experimentId, "preview" to preview,
+            "sort" to sort, "order" to order, "limit" to limit, "cursor" to cursor,
         ),
         TraceListResponse.serializer(),
     )
@@ -586,7 +608,12 @@ class Mcpd(
         TraceDetail.serializer(),
     )
 
-    /** Search individual steps across every run. */
+    /**
+     * Search individual steps across every run.
+     *
+     * [prompt] and [promptVersion] find the spans [ActiveSpan.setPrompt] linked
+     * to a prompt, or to one version of it.
+     */
     suspend fun listSpans(
         q: String? = null,
         kind: SpanKind? = null,
@@ -594,6 +621,8 @@ class Mcpd(
         name: String? = null,
         model: String? = null,
         traceId: String? = null,
+        prompt: String? = null,
+        promptVersion: Int? = null,
         from: Instant? = null,
         to: Instant? = null,
         minDurationMs: Long? = null,
@@ -606,7 +635,8 @@ class Mcpd(
         "/v1/api/spans",
         query(
             "project" to project, "q" to q, "kind" to kind, "status" to status, "name" to name,
-            "model" to model, "trace_id" to traceId, "from" to from, "to" to to,
+            "model" to model, "trace_id" to traceId, "prompt" to prompt,
+            "prompt_version" to promptVersion, "from" to from, "to" to to,
             "min_duration_ms" to minDurationMs, "sort" to sort, "order" to order,
             "limit" to limit, "cursor" to cursor,
         ),
@@ -732,6 +762,170 @@ class Mcpd(
     suspend fun health(): HealthStatus =
         transport.getJson("/healthz", emptyList(), HealthStatus.serializer())
 
+    // ----------------------------------------------------------- prompts ----
+
+    /**
+     * One version of a prompt, from the daemon or from this client's cache.
+     *
+     * Give [label] or [version], not both; with neither, the version labelled
+     * `production` is read, or the latest when no version carries that label.
+     * A copy younger than [cacheTtl] is returned with no request. When a fetch
+     * fails, an older copy is returned however old it is, then [fallback] if
+     * nothing was ever fetched, and only then is the failure thrown as an
+     * [McpdException]. `enabled = false` does not stop a fetch: a prompt is the
+     * agent's input, not telemetry.
+     */
+    suspend fun getPrompt(
+        name: String,
+        label: String? = null,
+        version: Int? = null,
+        cacheTtl: Duration = 60.seconds,
+        fallback: PromptFallback? = null,
+        project: String = config.project,
+    ): Prompt = prompts.get(name, label, version, cacheTtl, fallback, project)
+
+    /**
+     * Store a new version of a prompt and return it. A body identical to the
+     * latest version stores nothing and returns that version, so a deploy can
+     * post its prompts on every start.
+     */
+    suspend fun createPrompt(request: CreatePromptRequest, project: String = config.project): Prompt =
+        prompts.create(request, project)
+
+    /**
+     * Store a new version of a prompt, built from its parts. [messages] are
+     * maps or JSON objects with `role` and `content`; [config] is model
+     * settings the daemon stores and does not read.
+     */
+    suspend fun createPrompt(
+        name: String,
+        kind: PromptKind? = null,
+        template: String? = null,
+        messages: List<Any?>? = null,
+        config: Map<String, Any?>? = null,
+        note: String? = null,
+        labels: List<String>? = null,
+        project: String = this.config.project,
+    ): Prompt = prompts.create(
+        CreatePromptRequest(
+            name = name,
+            kind = kind,
+            template = template,
+            messages = messages?.let(::toJsonElement),
+            config = config?.let(::toJsonElement),
+            note = note,
+            labels = labels,
+        ),
+        project,
+    )
+
+    /**
+     * Point [label] at [version] of a prompt. Moving `production` releases a
+     * version and moving it back rolls one back. The read cache is not
+     * cleared, so a running agent sees the move within its `cacheTtl`.
+     */
+    suspend fun setPromptLabel(
+        name: String,
+        label: String,
+        version: Int,
+        project: String = config.project,
+    ): Prompt = prompts.setLabel(name, label, version, project)
+
+    // ------------------------------------------------------- experiments ----
+
+    /** A run as the tool calls, model generations and handoffs its agent took. */
+    suspend fun getTrajectory(traceId: String, project: String = config.project): Trajectory =
+        transport.getJson(
+            "/v1/api/traces/${segment(traceId)}/trajectory",
+            query("project" to project),
+            Trajectory.serializer(),
+        )
+
+    /**
+     * The cases of a dataset. Sends [limit] only: the daemon finds the project
+     * from the dataset.
+     */
+    suspend fun listDatasetItems(datasetId: String, limit: Int? = null): List<DatasetItem> =
+        transport.getJson(
+            "/v1/api/datasets/${segment(datasetId)}/items",
+            query("limit" to limit),
+            ListSerializer(DatasetItem.serializer()),
+        )
+
+    /**
+     * Record an experiment, or replace one: the daemon upserts on
+     * `experiment_id`, and an empty id gets a new one. This client's project
+     * is used when the correlation names none.
+     */
+    suspend fun createExperiment(experiment: Experiment): Experiment {
+        val correlation = experiment.correlation
+        val scoped = experiment.copy(correlation = correlation.copy(project = correlation.project.ifBlank { config.project }))
+        return transport.postJson(
+            "/v1/api/experiments",
+            emptyList(),
+            json.encodeToString(Experiment.serializer(), scoped),
+            Experiment.serializer(),
+        )
+    }
+
+    /**
+     * Score every run of an experiment, each against the expected answer of
+     * the dataset case it names. No [scorers] runs the code scorers that need
+     * no settings.
+     */
+    suspend fun scoreExperiment(
+        experimentId: String,
+        scorers: List<String> = emptyList(),
+        config: ScorerConfig? = null,
+        project: String = this.config.project,
+    ): ScoreRunResult {
+        // Built by hand so the body carries what was given and nothing else:
+        // the generated request would add `dry_run` to every call.
+        val body = buildMap<String, JsonElement> {
+            put("scorers", JsonArray(scorers.map(::JsonPrimitive)))
+            if (config != null) put("config", json.encodeToJsonElement(ScorerConfig.serializer(), config))
+        }
+        return transport.postJson(
+            "/v1/api/experiments/${segment(experimentId)}/score",
+            query("project" to project),
+            json.encodeToString(JsonObject.serializer(), JsonObject(body)),
+            ScoreRunResult.serializer(),
+        )
+    }
+
+    /** An experiment case by case, with a summary per scorer. */
+    suspend fun experimentResults(experimentId: String, project: String = config.project): ExperimentResults =
+        transport.getJson(
+            "/v1/api/experiments/${segment(experimentId)}/results",
+            query("project" to project),
+            ExperimentResults.serializer(),
+        )
+
+    /**
+     * Run [target] over every case of a dataset and score the answers.
+     *
+     * Each case runs inside a root span named after the experiment, carrying
+     * the experiment id and the case id, with at most [concurrency] cases at
+     * once. The span is in the coroutine context, so spans [target] opens are
+     * its children. A target that throws fails its own run and the next case
+     * still runs. Then the runs are flushed and scored, the experiment is
+     * marked `succeeded` with each scorer's mean, and the results are
+     * returned. When the runner itself fails, the experiment is marked
+     * `failed` and the error is thrown.
+     *
+     * [name] defaults to the dataset id. [metadata] is kept with the
+     * experiment, such as the prompt version under test.
+     */
+    suspend fun runExperiment(
+        datasetId: String,
+        name: String = datasetId,
+        scorers: List<String> = emptyList(),
+        config: ScorerConfig? = null,
+        concurrency: Int = 4,
+        metadata: Map<String, Any?>? = null,
+        target: ExperimentTarget,
+    ): ExperimentResults = ExperimentRunner(this).run(datasetId, name, scorers, config, concurrency, metadata, target)
+
     // ------------------------------------------------------------ lifecycle --
 
     /**
@@ -838,6 +1032,8 @@ class Mcpd(
         output: Any? = null,
         externalParentSpanId: String? = null,
         capturePayloads: Boolean? = null,
+        experimentId: String? = null,
+        alwaysSampled: Boolean = false,
     ): ActiveSpan {
         val created = guard("span-start") {
             // The sampling decision is made once, at the root, and inherited.
@@ -845,6 +1041,7 @@ class Mcpd(
             val sampled = when {
                 parent != null -> parent.sampled
                 remote != null -> remote.sampled
+                alwaysSampled -> true
                 else -> decideSampling()
             }
             val parentSpanId = parent?.spanId ?: remote?.parentSpanId
@@ -867,6 +1064,7 @@ class Mcpd(
                     userId = userId ?: inherited.userId,
                     runId = runId ?: inherited.runId,
                     requestId = requestId ?: inherited.requestId,
+                    experimentId = experimentId ?: inherited.experimentId,
                 ),
                 capturesPayloads = capturePayloads ?: config.capturePayloads,
                 externalParentSpanId = externalParentSpanId,
@@ -1259,7 +1457,7 @@ class Mcpd(
     }
 
     /** Render query parameters, dropping the ones that were not supplied. */
-    private fun query(vararg pairs: Pair<String, Any?>): List<Pair<String, String?>> =
+    internal fun query(vararg pairs: Pair<String, Any?>): List<Pair<String, String?>> =
         pairs.map { (key, value) ->
             key to when (value) {
                 null -> null

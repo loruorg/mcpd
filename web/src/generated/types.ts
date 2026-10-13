@@ -253,12 +253,15 @@ export const ScorerKind = {
   // A criterion the operator wrote under `judge.criteria`, graded by the judge model in
   // one call.
   Criterion: 'criterion',
+  // A scorer definition stored in the project through the API: a judge prompt, or a code
+  // scorer with its settings. Versioned, and the version is on every score it produces.
+  Custom: 'custom',
 } as const
 
 export type ScorerKind = typeof ScorerKind[keyof typeof ScorerKind]
 
 /** Every `ScorerKind` value, in declaration order. */
-export const ALL_SCORER_KIND: readonly ScorerKind[] = ['code', 'judge', 'criterion']
+export const ALL_SCORER_KIND: readonly ScorerKind[] = ['code', 'judge', 'criterion', 'custom']
 
 /**
   * Which way a scorer's value is better. A comparison reads a fall in `toxicity` as an
@@ -1043,6 +1046,53 @@ export type SsoProvider = typeof SsoProvider[keyof typeof SsoProvider]
 
 /** Every `SsoProvider` value, in declaration order. */
 export const ALL_SSO_PROVIDER: readonly SsoProvider[] = ['oidc', 'github']
+
+/**
+  * The shape of a prompt's body. */
+export const PromptKind = {
+  // One template string, for a completion-style call.
+  Text: 'text',
+  // An ordered list of messages, each with a `role` and a `content` template, for a
+  // chat-style call.
+  Chat: 'chat',
+} as const
+
+export type PromptKind = typeof PromptKind[keyof typeof PromptKind]
+
+/** Every `PromptKind` value, in declaration order. */
+export const ALL_PROMPT_KIND: readonly PromptKind[] = ['text', 'chat']
+
+/**
+  * How a stored scorer definition reaches its answer. */
+export const ScorerDefinitionKind = {
+  // The configured judge model grades the run against the definition's `prompt`, in one
+  // call.
+  Judge: 'judge',
+  // One of the daemon's code scorers, named in `builtin`, with the settings in `config`
+  // fixed. Free, and gives the same answer twice.
+  Code: 'code',
+} as const
+
+export type ScorerDefinitionKind = typeof ScorerDefinitionKind[keyof typeof ScorerDefinitionKind]
+
+/** Every `ScorerDefinitionKind` value, in declaration order. */
+export const ALL_SCORER_DEFINITION_KIND: readonly ScorerDefinitionKind[] = ['judge', 'code']
+
+/**
+  * Where an item in the review queue has got to. */
+export const ReviewStatus = {
+  // Waiting for a person.
+  Pending: 'pending',
+  // A person looked at it and recorded what they found.
+  Reviewed: 'reviewed',
+  // A person looked at it and it needed nothing.
+  Dismissed: 'dismissed',
+} as const
+
+export type ReviewStatus = typeof ReviewStatus[keyof typeof ReviewStatus]
+
+/** Every `ReviewStatus` value, in declaration order. */
+export const ALL_REVIEW_STATUS: readonly ReviewStatus[] = ['pending', 'reviewed', 'dismissed']
 
 /**
  * Input tokens broken down by how the provider billed them. Every field is optional;
@@ -2044,6 +2094,18 @@ export interface ScorerConfig {
    * Tools the run must not call, for `tool_not_called`.
    */
   forbidden_tools: string[]
+  /**
+   * How `trajectory` compares the tools the run called with `expected_tools`: `strict`
+   * for the same calls in the same order and nothing else, `ordered` for the expected
+   * calls in order with others allowed between them, `unordered` for every expected call
+   * in any order. Defaults to `ordered`.
+   */
+  trajectory_match?: string
+  /**
+   * The most steps a healthy run takes, for `trajectory`. A step is a tool call, a model
+   * generation or a handoff.
+   */
+  max_steps?: number
   /**
    * The shortest acceptable answer in characters, for `answer_length`.
    */
@@ -4902,6 +4964,489 @@ export interface SsoCallbackRequest {
 }
 
 /**
+ * A new version of a prompt. Posting a body identical to the latest version stores
+ * nothing new and returns that version, so a deploy that posts its prompts on every
+ * start is a no-op when nothing changed.
+ */
+export interface CreatePromptRequest {
+  /**
+   * The prompt's name. A new name creates the prompt at version 1.
+   */
+  name: string
+  /**
+   * `text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`.
+   */
+  kind?: PromptKind
+  /**
+   * The template, for a `text` prompt.
+   */
+  template?: string
+  /**
+   * The messages, for a `chat` prompt.
+   */
+  messages?: unknown
+  /**
+   * Model settings to store with it.
+   */
+  config?: unknown
+  /**
+   * What changed.
+   */
+  note?: string
+  /**
+   * Labels to point at the stored version once it is stored, such as `staging`.
+   */
+  labels?: string[]
+}
+
+/**
+ * Which version a label should point at.
+ */
+export interface PromptLabelRequest {
+  /**
+   * The version. It must exist.
+   */
+  version: number
+}
+
+/**
+ * Every version of one prompt, newest first.
+ */
+export interface PromptVersionsResponse {
+  /**
+   * The prompt's name.
+   */
+  name: string
+  /**
+   * Its versions, newest first, each with the labels that point at it.
+   */
+  versions: Prompt[]
+}
+
+/**
+ * A new version of a scorer definition. A body identical to the latest version is not
+ * stored again.
+ */
+export interface CreateScorerDefinitionRequest {
+  /**
+   * The definition's id. A new id creates it at version 1.
+   */
+  id: string
+  /**
+   * `judge` or `code`.
+   */
+  kind: ScorerDefinitionKind
+  /**
+   * What it measures, in a sentence.
+   */
+  description: string
+  /**
+   * Which way is better. Defaults to `higher_is_better`.
+   */
+  direction?: ScoreDirection
+  /**
+   * For `judge`: the criterion.
+   */
+  prompt?: string
+  /**
+   * For `code`: the code scorer to run.
+   */
+  builtin?: string
+  /**
+   * For `code`: its settings.
+   */
+  config?: ScorerConfig
+  /**
+   * What changed.
+   */
+  note?: string
+}
+
+/**
+ * Every version of one scorer definition, newest first.
+ */
+export interface ScorerDefinitionVersions {
+  /**
+   * The definition's id.
+   */
+  id: string
+  /**
+   * Its versions, newest first.
+   */
+  versions: ScorerDefinition[]
+}
+
+/**
+ * A new version of a live scoring rule. Posting the same body as the latest version
+ * stores nothing new.
+ */
+export interface CreateEvaluationRuleRequest {
+  /**
+   * The rule's id: lower-case letters, digits, `-` and `_`, up to 64.
+   */
+  id: string
+  /**
+   * Whether it runs. Defaults to `false`, so a rule is read back and checked before it
+   * spends anything.
+   */
+  enabled?: boolean
+  /**
+   * The scorers to run. At least one.
+   */
+  scorers: string[]
+  /**
+   * The share of matching runs to score, from 0 to 1. Defaults to 1.
+   */
+  sample_rate?: number
+  /**
+   * Only runs whose root step has this name.
+   */
+  name?: string
+  /**
+   * Only runs whose root step is this kind.
+   */
+  kind?: SpanKind
+  /**
+   * Only runs from this environment.
+   */
+  environment?: string
+  /**
+   * Only runs carrying all of these tags.
+   */
+  tags?: string[]
+  /**
+   * Only runs with this outcome.
+   */
+  status?: SpanStatus
+  /**
+   * Settings for the code scorers that need them.
+   */
+  config?: ScorerConfig
+  /**
+   * The most judged scores per minute. Defaults to 30.
+   */
+  max_judged_per_minute?: number
+  /**
+   * What changed.
+   */
+  note?: string
+}
+
+/**
+ * One action an agent took: a tool call, a model generation or a handoff, in the order
+ * they started.
+ */
+export interface TrajectoryStep {
+  /**
+   * Its position in the trajectory, from 0.
+   */
+  index: number
+  /**
+   * The span it was read from.
+   */
+  span_id: string
+  /**
+   * What kind of action.
+   */
+  kind: SpanKind
+  /**
+   * The tool, model step or agent it names.
+   */
+  name: string
+  /**
+   * How it ended.
+   */
+  status: SpanStatus
+  /**
+   * When it started, in milliseconds after the run started.
+   */
+  start_offset_ms: number
+  /**
+   * How long it took. Absent while it is still running.
+   */
+  duration_ms?: number
+  /**
+   * The model, for a model generation.
+   */
+  model?: string
+  /**
+   * The start of its input as plain text, up to 240 characters.
+   */
+  input_preview?: string
+  /**
+   * The start of its output as plain text, up to 240 characters.
+   */
+  output_preview?: string
+  /**
+   * Input and output tokens together, for a model generation.
+   */
+  tokens?: number
+}
+
+/**
+ * A run read as the sequence of actions its agent took. This is what a trajectory is
+ * scored on: which tools were called, in what order, how many steps it took, and
+ * whether it ended with an answer.
+ */
+export interface Trajectory {
+  /**
+   * The run.
+   */
+  trace_id: string
+  /**
+   * Every action, in start order.
+   */
+  steps: TrajectoryStep[]
+  /**
+   * The names of the tool calls, in order. What `expected_tools` is compared with.
+   */
+  tool_sequence: string[]
+  /**
+   * How many steps.
+   */
+  step_count: number
+  /**
+   * How many of them were tool calls.
+   */
+  tool_count: number
+  /**
+   * How many of them failed.
+   */
+  error_count: number
+  /**
+   * The start of the run's answer, from the root step's output.
+   */
+  final_output_preview?: string
+  /**
+   * True when the run ended `ok` with a non-empty answer.
+   */
+  goal_reached: boolean
+}
+
+/**
+ * Which scorers to run over every run recorded under an experiment.
+ */
+export interface ExperimentScoreRequest {
+  /**
+   * The scorers, as `POST /v1/api/score` takes them. Empty runs the code scorers that
+   * need no settings.
+   */
+  scorers: string[]
+  /**
+   * Settings for the code scorers. `expected` is filled per run from the dataset case
+   * the run answered, when the run names one.
+   */
+  config?: ScorerConfig
+  /**
+   * Store nothing; report what would be stored.
+   */
+  dry_run: boolean
+}
+
+/** Spec-declared defaults for `ExperimentScoreRequest`. Spread these when constructing one. */
+export const experimentScoreRequestDefaults = {
+  dry_run: false,
+} satisfies Partial<ExperimentScoreRequest>
+
+/**
+ * One case of an experiment: the run that answered it and how each scorer marked it.
+ */
+export interface ExperimentItemResult {
+  /**
+   * The run that answered the case.
+   */
+  trace_id: string
+  /**
+   * The dataset case, when the run named one in its `mcpd.dataset_item_id` attribute.
+   */
+  item_id?: string
+  /**
+   * How the run ended.
+   */
+  status: SpanStatus
+  /**
+   * How long the run took.
+   */
+  duration_ns?: number
+  /**
+   * What the run cost.
+   */
+  cost?: number
+  /**
+   * The start of the run's input.
+   */
+  input_preview?: string
+  /**
+   * The start of the run's answer.
+   */
+  output_preview?: string
+  /**
+   * The case's expected answer, when it has one.
+   */
+  expected?: unknown
+  /**
+   * The mean value per scorer for this run, keyed by scorer id.
+   */
+  scores: unknown
+}
+
+/**
+ * One scorer's marks across an experiment.
+ */
+export interface ScorerSummary {
+  /**
+   * The scorer.
+   */
+  scorer_id: string
+  /**
+   * How many scores.
+   */
+  n: number
+  /**
+   * Their mean.
+   */
+  mean: number
+  /**
+   * The lowest.
+   */
+  min: number
+  /**
+   * The highest.
+   */
+  max: number
+  /**
+   * Which way is better.
+   */
+  direction: ScoreDirection
+}
+
+/**
+ * An experiment case by case, with a summary per scorer. Two of these joined on
+ * `item_id` are the per-case comparison of two versions.
+ */
+export interface ExperimentResults {
+  /**
+   * The experiment.
+   */
+  experiment_id: string
+  /**
+   * One row per run recorded under the experiment, oldest first.
+   */
+  items: ExperimentItemResult[]
+  /**
+   * Per scorer, across every run.
+   */
+  scorers: ScorerSummary[]
+  /**
+   * How many runs are recorded under it.
+   */
+  runs: number
+  /**
+   * How many of them ended in an error.
+   */
+  failed: number
+}
+
+/**
+ * A run to queue for review.
+ */
+export interface CreateReviewItemRequest {
+  /**
+   * The run.
+   */
+  trace_id: string
+  /**
+   * The step, when it is one step.
+   */
+  span_id?: string
+  /**
+   * The feedback that prompted it.
+   */
+  feedback_id?: string
+  /**
+   * Who should review it.
+   */
+  assignee?: string
+  /**
+   * Why it is queued.
+   */
+  note?: string
+}
+
+/**
+ * A change to a review item. Absent fields keep their value.
+ */
+export interface UpdateReviewItemRequest {
+  /**
+   * The new status.
+   */
+  status?: ReviewStatus
+  /**
+   * The new assignee. An empty string unassigns it.
+   */
+  assignee?: string
+  /**
+   * What the reviewer found.
+   */
+  note?: string
+}
+
+/**
+ * The review queue, newest first.
+ */
+export interface ReviewQueueResponse {
+  /**
+   * The items that matched, newest change first.
+   */
+  items: ReviewItem[]
+  /**
+   * How many items in the project are still pending, whatever the filter.
+   */
+  pending: number
+}
+
+/**
+ * A frozen copy of a dataset's cases. An experiment that names a version runs against
+ * exactly those cases, whatever has been added to the dataset since.
+ */
+export interface DatasetVersion {
+  /**
+   * The dataset.
+   */
+  dataset_id: string
+  /**
+   * Its number, from 1.
+   */
+  version: number
+  /**
+   * How many cases it froze.
+   */
+  item_count: number
+  /**
+   * What changed since the version before.
+   */
+  note?: string
+  /**
+   * Which key or account froze it.
+   */
+  created_by?: string
+  /**
+   * When it was frozen.
+   */
+  created_at: string
+}
+
+/**
+ * Freeze the dataset's current cases as a new version.
+ */
+export interface CreateDatasetVersionRequest {
+  /**
+   * What changed since the version before.
+   */
+  note?: string
+}
+
+/**
  * One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback
  * all hang off a span or a trace.
  * Stored in the `spans` table.
@@ -5103,6 +5648,17 @@ export interface Trace {
    * How many tool calls the run made.
    */
   tool_count: number
+  /**
+   * The start of the root step's input as plain text, up to 240 characters, for a list
+   * column. For a chat input it is the last user message. Filled by the trace list when
+   * it is asked with `preview=true`; the full input is on the span.
+   */
+  input_preview?: string
+  /**
+   * The start of the root step's output as plain text, up to 240 characters. Filled by
+   * the trace list when it is asked with `preview=true`; the full output is on the span.
+   */
+  output_preview?: string
   /**
    * Tags from the root span.
    */
@@ -6127,4 +6683,262 @@ export interface Theme {
    * share of what was read.
    */
   coverage: number
+}
+
+/**
+ * One version of a named prompt. A version never changes once stored: a new body is a
+ * new version, and labels such as `production` and `staging` point at the version a
+ * caller should use. SDKs fetch a prompt by name and label, render it with variables,
+ * and link the spans that used it, so a trace shows which version produced an answer.
+ * Stored in the `documents` table.
+ */
+export interface Prompt {
+  /**
+   * Which project owns it.
+   */
+  project: string
+  /**
+   * The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and
+   * `/`, up to 128 characters.
+   */
+  name: string
+  /**
+   * Its version, from 1, assigned by the daemon in the order versions arrive.
+   */
+  version: number
+  /**
+   * Whether the body is one template or a list of messages.
+   */
+  kind: PromptKind
+  /**
+   * The template, for a `text` prompt. Variables are written `{{name}}`.
+   */
+  template?: string
+  /**
+   * The messages, for a `chat` prompt: an array of objects with `role` and `content`,
+   * where `content` is a template.
+   */
+  messages?: unknown
+  /**
+   * Model settings stored with the prompt, such as `model` and `temperature`. The daemon
+   * stores them and does not read them.
+   */
+  config?: unknown
+  /**
+   * Every variable the body names, in order of first use, without duplicates.
+   */
+  variables: string[]
+  /**
+   * The labels that point at this version now.
+   */
+  labels: string[]
+  /**
+   * What changed in this version, written by whoever stored it.
+   */
+  note?: string
+  /**
+   * Which key or account stored it.
+   */
+  created_by?: string
+  /**
+   * When this version was stored.
+   */
+  created_at: string
+}
+
+/**
+ * A scorer the project defined: a judge prompt written for this agent, or a code
+ * scorer with its settings fixed. Stored as numbered versions; a version never
+ * changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the latest
+ * version or `id@3` for version 3.
+ * Stored in the `documents` table.
+ */
+export interface ScorerDefinition {
+  /**
+   * Which project owns it.
+   */
+  project: string
+  /**
+   * Its id, unique in the project: lower-case letters, digits and `_`, up to 64. It
+   * cannot be the id of a scorer mcpd ships.
+   */
+  id: string
+  /**
+   * Its version, from 1, assigned by the daemon.
+   */
+  version: number
+  /**
+   * Judged by the model, or computed by code.
+   */
+  kind: ScorerDefinitionKind
+  /**
+   * What it measures, in a sentence. Shown in the scorer catalogue.
+   */
+  description: string
+  /**
+   * Which way is better. Comparisons and live alerts read it.
+   */
+  direction: ScoreDirection
+  /**
+   * For a `judge` definition: the criterion the model grades against, such as `The
+   * answer cites the refund policy by section number.` The daemon adds the run's input
+   * and output and asks for a value from 0 to 1 with a one-sentence reason.
+   */
+  prompt?: string
+  /**
+   * For a `code` definition: the code scorer it runs, such as `keyword_coverage`.
+   */
+  builtin?: string
+  /**
+   * For a `code` definition: the settings the code scorer runs with.
+   */
+  config?: ScorerConfig
+  /**
+   * What changed in this version.
+   */
+  note?: string
+  /**
+   * Which key or account stored it.
+   */
+  created_by?: string
+  /**
+   * When this version was stored.
+   */
+  created_at: string
+}
+
+/**
+ * A rule for live scoring: which finished runs to score, with which scorers, and how
+ * many of them. The daemon reads finished runs as they arrive and scores the sampled
+ * ones in the background, so a quality drop shows up in minutes rather than at the
+ * next offline pass. Scores it writes have source `live`.
+ * Stored in the `documents` table.
+ */
+export interface EvaluationRule {
+  /**
+   * Which project it scores.
+   */
+  project: string
+  /**
+   * Its id, unique in the project.
+   */
+  id: string
+  /**
+   * Its version, from 1. Each change is a new version.
+   */
+  version: number
+  /**
+   * Whether it runs. A rule is stored disabled unless the request says otherwise.
+   */
+  enabled: boolean
+  /**
+   * The scorers to run: shipped ids, criteria from the config file, or stored
+   * definitions as `id` or `id@version`.
+   */
+  scorers: string[]
+  /**
+   * The share of matching runs to score, from 0 to 1. Chosen by a hash of the trace id,
+   * so the same run is in or out on every replica and every restart.
+   */
+  sample_rate: number
+  /**
+   * Only runs whose root step has this name.
+   */
+  name?: string
+  /**
+   * Only runs whose root step is this kind.
+   */
+  kind?: SpanKind
+  /**
+   * Only runs from this environment.
+   */
+  environment?: string
+  /**
+   * Only runs carrying all of these tags.
+   */
+  tags: string[]
+  /**
+   * Only runs with this outcome.
+   */
+  status?: SpanStatus
+  /**
+   * Settings for the code scorers that need them.
+   */
+  config?: ScorerConfig
+  /**
+   * The most judged scores the rule may produce in one minute, across the daemon. Each
+   * one is a model call, so this caps what the rule can spend. Runs over it are skipped,
+   * not queued.
+   */
+  max_judged_per_minute: number
+  /**
+   * What changed in this version.
+   */
+  note?: string
+  /**
+   * Which key or account stored it.
+   */
+  created_by?: string
+  /**
+   * When this version was stored.
+   */
+  created_at: string
+}
+
+/**
+ * A run, or one step of it, queued for a person to review. Queue the runs a low score
+ * or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every
+ * change is kept, so the item's history says who decided what and when. Corrections
+ * and labels go on the run as feedback.
+ * Stored in the `documents` table.
+ */
+export interface ReviewItem {
+  /**
+   * Which project.
+   */
+  project: string
+  /**
+   * Its id.
+   */
+  review_id: string
+  /**
+   * How many times it has changed, from 1.
+   */
+  version: number
+  /**
+   * The run to review.
+   */
+  trace_id: string
+  /**
+   * The step to look at, when it is one step.
+   */
+  span_id?: string
+  /**
+   * The feedback that put it in the queue, when it was feedback.
+   */
+  feedback_id?: string
+  /**
+   * Where it has got to.
+   */
+  status: ReviewStatus
+  /**
+   * Who should review it.
+   */
+  assignee?: string
+  /**
+   * Why it is queued, or what the reviewer found.
+   */
+  note?: string
+  /**
+   * Which key or account made the latest change.
+   */
+  updated_by?: string
+  /**
+   * When it was queued.
+   */
+  created_at: string
+  /**
+   * When it last changed.
+   */
+  updated_at: string
 }

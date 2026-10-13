@@ -279,6 +279,18 @@ class ActiveSpan internal constructor(
         if (reason != null) attributes["mcpd.guardrail.reason"] = JsonPrimitive(reason)
     }
 
+    /**
+     * Link the prompt this span used, as `mcpd.prompt.name` and
+     * `mcpd.prompt.version`, so `listSpans(prompt = ...)` finds it. A fallback
+     * (version `0`) sets the name only; a null or nameless prompt sets nothing.
+     */
+    fun setPrompt(prompt: Prompt?): ActiveSpan = mutate {
+        if (prompt != null && prompt.name.isNotEmpty()) {
+            attributes["mcpd.prompt.name"] = JsonPrimitive(prompt.name)
+            if (prompt.version > 0) attributes["mcpd.prompt.version"] = JsonPrimitive(prompt.version)
+        }
+    }
+
     /** Attach one piece of kind-specific structured detail. */
     fun setAttribute(key: String, value: Any?): ActiveSpan = mutate {
         attributes[key] = toJsonElement(value)

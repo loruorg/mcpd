@@ -507,6 +507,7 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
       { out: 'identity        off' },
       { out: 'client ip       peer address' },
       { out: 'sampling        keep everything' },
+      { out: 'tail sampling   off' },
       { out: 'quota           unlimited' },
       { out: 'redaction       on' },
       { out: 'redact key      set', tone: 'ok' },
@@ -632,15 +633,23 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
   </p>
   <p>
     That moves the signals and leaves one file on disk: the run store, which is
-    embedded SQLite whatever the signal store is. With
-    <code>runs.enabled</code> true, the default, the chart keeps it on the
-    volume and runs one replica. To run several pods, turn the run surface off.
-    The chart then runs <code>replicaCount</code> pods, switches from
+    embedded SQLite by default. With <code>runs.enabled</code> true, the
+    default, the chart keeps it on the volume and runs one replica. To run
+    several pods, move the runs to Postgres as well: set
+    <code>runs.store</code> to <code>postgres</code> and the connection string in
+    <code>runs.postgresUrl</code>, which can name the same database. The chart
+    then runs <code>replicaCount</code> pods, switches from
     <code>Recreate</code> to a rolling update, and drops the
-    PersistentVolumeClaim, because nothing local is left to fight over, and the
-    daemon answers the run endpoints with a 503 that says so. The chart refuses
-    a <code>replicaCount</code> above 1 while runs are on, rather than starting
-    pods that each hold a run store of their own.
+    PersistentVolumeClaim, because nothing local is left to fight over. Every
+    pod serves runs from the one store. Outside the chart the same setting is
+    <code>--runs-data postgres://...</code>.
+  </p>
+  <p>
+    Turning the run surface off with <code>runs.enabled=false</code> scales out
+    the same way, and the daemon answers the run endpoints with a 503 that says
+    so. The chart refuses a <code>replicaCount</code> above 1 while runs are on
+    an embedded file, rather than starting pods that each hold a run store of
+    their own.
   </p>
 
   <pre><code class="language-bash">{`helm install mcpd ./deploy/helm/mcpd \\
@@ -648,7 +657,8 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
   --set keys.read=$READ_KEY \\
   --set externalStore.type=postgres \\
   --set externalStore.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
-  --set runs.enabled=false \\
+  --set runs.store=postgres \\
+  --set runs.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
   --set replicaCount=3`}</code></pre>
 
   <p>

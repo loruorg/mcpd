@@ -12,8 +12,14 @@
 //! cargo run -p mcpd-sdk --example quickstart
 //! ```
 
-use mcpd_sdk::{Config, FeedbackKind, Include, Mcpd, Scale, SpanKind, Target};
-use serde_json::json;
+use futures::{Stream, StreamExt};
+use mcpd_sdk::testing::TestClient;
+use mcpd_sdk::{
+    render_prompt, Config, CreatePromptRequest, FeedbackKind, GetPrompt, Include, Mcpd,
+    PromptFallback, Scale, SpanKind, Target,
+};
+use serde_json::{json, Value};
+use std::convert::Infallible;
 
 #[tokio::main]
 async fn main() {
@@ -30,6 +36,23 @@ async fn main() {
     // #endregion init
 
     let question = "Where is order 5512?";
+
+    // Store the prompt the agent reads below and label it `production`.
+    // Posting the same body again stores nothing, so this is safe on every start.
+    let stored = mcpd
+        .create_prompt(&CreatePromptRequest {
+            name: "support/answer".into(),
+            kind: None,
+            template: Some("Answer {{ customer }}'s question: {{question}}".into()),
+            messages: None,
+            config: None,
+            note: None,
+            labels: Some(vec!["production".into()]),
+        })
+        .await;
+    if let Err(e) = stored {
+        eprintln!("could not store the prompt: {e}");
+    }
 
     // #region trace
     // The root span is the run. The sampling decision is made here, once, and
@@ -58,6 +81,28 @@ async fn main() {
     run.event_with("fell back to email", json!({ "after": "sms gateway timeout" }));
 
     // #endregion trace
+
+    // #region prompt
+    // The version labelled `production`: moving the label releases another
+    // version with no deploy. A copy fetched once outlives a daemon outage, and
+    // the fallback covers a process that has never reached mcpd.
+    let options = GetPrompt::new()
+        .label("production")
+        .fallback(PromptFallback::Template("Answer this question: {{question}}".into()));
+    match mcpd.get_prompt("support/answer", &options).await {
+        Ok(prompt) => match render_prompt(&prompt, [("customer", "Ada"), ("question", question)]) {
+            Ok(rendered) => {
+                let call = run.child_of("draft with the prompt", SpanKind::ModelGeneration);
+                // Links the span to this version, so list_spans can find it.
+                call.set_prompt(&prompt);
+                call.set_input(rendered.text());
+                call.end();
+            }
+            Err(missing) => eprintln!("{missing}"),
+        },
+        Err(e) => eprintln!("could not fetch the prompt: {e}"),
+    }
+    // #endregion prompt
     // The model call. Token usage is what mcpd prices at ingest, so this is the
     // one field worth never leaving out.
     let answer = {
@@ -113,6 +158,10 @@ async fn main() {
 
     // Short-lived processes must flush. Nothing is sent from memory by a program
     // that exits without this.
+    // A streamed call, and the unit test that checks what it records.
+    println!("streamed: {}", stream_answer(&mcpd, "Is order 5512 on its way?").await);
+    check_stream_answer().await;
+
     if let Err(e) = mcpd.flush().await {
         eprintln!("mcpd could not export: {e}");
     }
@@ -145,3 +194,58 @@ async fn main() {
         eprintln!("mcpd could not shut down cleanly: {e}");
     }
 }
+
+/// A provider's streamed answer, shaped as OpenAI's chat-completion chunks.
+fn fake_chat_stream(text: &str) -> impl Stream<Item = Result<Value, Infallible>> {
+    let base = json!({ "id": "chatcmpl-01", "model": "gpt-4o-mini" });
+    let chunk = |choices: Value| {
+        let mut c = base.clone();
+        c["choices"] = choices;
+        c
+    };
+    let mut chunks: Vec<Value> = text
+        .split_inclusive(' ')
+        .map(|word| chunk(json!([{ "index": 0, "delta": { "content": word } }])))
+        .collect();
+    chunks.push(chunk(json!([{ "index": 0, "delta": {}, "finish_reason": "stop" }])));
+    let mut last = chunk(json!([]));
+    last["usage"] = json!({ "prompt_tokens": 24, "completion_tokens": 6, "total_tokens": 30 });
+    chunks.push(last);
+    futures::stream::iter(chunks.into_iter().map(Ok))
+}
+
+// #region stream
+/// A streamed model call. Read the wrapper instead of the provider's stream:
+/// every chunk comes through unchanged, and when the stream ends the span gets
+/// the time to first token, the text, the usage and the finish reason.
+async fn stream_answer(client: &Mcpd, question: &str) -> String {
+    let generation = client.span("stream_answer", SpanKind::ModelGeneration);
+    generation.set_input(json!([{ "role": "user", "content": question }]));
+    // Where your provider's streaming call goes.
+    let stream = fake_chat_stream("Your order is in transit.");
+    // The wrapper owns the span, and ends it when the stream ends.
+    let mut chunks = generation.record_stream(stream, None);
+    let mut answer = String::new();
+    while let Some(Ok(chunk)) = chunks.next().await {
+        answer.push_str(chunk["choices"][0]["delta"]["content"].as_str().unwrap_or(""));
+    }
+    answer
+}
+// #endregion stream
+
+// #region testing
+/// A unit test. Pass a `TestClient` where your code takes an `Mcpd`, then read
+/// back what it recorded: no daemon, no port, no flush.
+async fn check_stream_answer() {
+    let test = TestClient::new();
+    let answer = stream_answer(test.client(), "Where is order 5512?").await;
+
+    let call = test.span("stream_answer").await.expect("one stream_answer span");
+    assert_eq!(call.output, Some(json!(answer)));
+    assert_eq!(call.model.as_deref(), Some("gpt-4o-mini"));
+    assert_eq!(call.usage.and_then(|u| u.output_tokens), Some(6));
+
+    let trees = test.trees().await;
+    assert_eq!(trees[0].span.name, "stream_answer");
+}
+// #endregion testing

@@ -168,7 +168,10 @@ build and never a licence key:
   procedure, returning a count per signal for the reply you have to write.
 - **Three storage backends**: embedded SQLite for a laptop, Postgres for a team
   that already runs one, ClickHouse when retention is measured in billions of
-  spans. All three are tested in CI against a real server, not a mock.
+  spans. All three are tested in CI against a real server, not a mock. Durable
+  runs live in embedded SQLite or in Postgres (`--runs-data postgres://...`),
+  where several replicas share one run store, and one conformance suite runs
+  against both.
 - **Deterministic sampling**, so a fleet of instances agrees without
   coordinating.
 - **Helm chart**, health and readiness probes, graceful shutdown on SIGTERM, and

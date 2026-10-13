@@ -378,10 +378,13 @@ const (
 	// A criterion the operator wrote under `judge.criteria`, graded by the judge model in
 	// one call.
 	ScorerKindCriterion ScorerKind = "criterion"
+	// A scorer definition stored in the project through the API: a judge prompt, or a code
+	// scorer with its settings. Versioned, and the version is on every score it produces.
+	ScorerKindCustom ScorerKind = "custom"
 )
 
 // AllScorerKinds lists every ScorerKind value, in declaration order.
-var AllScorerKinds = []ScorerKind{ScorerKindCode, ScorerKindJudge, ScorerKindCriterion}
+var AllScorerKinds = []ScorerKind{ScorerKindCode, ScorerKindJudge, ScorerKindCriterion, ScorerKindCustom}
 
 // String returns the wire representation.
 func (v ScorerKind) String() string { return string(v) }
@@ -1600,6 +1603,89 @@ func (v SsoProvider) Valid() bool {
 	return false
 }
 
+// The shape of a prompt's body.
+type PromptKind string
+
+const (
+	// One template string, for a completion-style call.
+	PromptKindText PromptKind = "text"
+	// An ordered list of messages, each with a `role` and a `content` template, for a
+	// chat-style call.
+	PromptKindChat PromptKind = "chat"
+)
+
+// AllPromptKinds lists every PromptKind value, in declaration order.
+var AllPromptKinds = []PromptKind{PromptKindText, PromptKindChat}
+
+// String returns the wire representation.
+func (v PromptKind) String() string { return string(v) }
+
+// Valid reports whether v is a value this version of the spec defines.
+func (v PromptKind) Valid() bool {
+	for _, c := range AllPromptKinds {
+		if c == v {
+			return true
+		}
+	}
+	return false
+}
+
+// How a stored scorer definition reaches its answer.
+type ScorerDefinitionKind string
+
+const (
+	// The configured judge model grades the run against the definition's `prompt`, in one
+	// call.
+	ScorerDefinitionKindJudge ScorerDefinitionKind = "judge"
+	// One of the daemon's code scorers, named in `builtin`, with the settings in `config`
+	// fixed. Free, and gives the same answer twice.
+	ScorerDefinitionKindCode ScorerDefinitionKind = "code"
+)
+
+// AllScorerDefinitionKinds lists every ScorerDefinitionKind value, in declaration order.
+var AllScorerDefinitionKinds = []ScorerDefinitionKind{ScorerDefinitionKindJudge, ScorerDefinitionKindCode}
+
+// String returns the wire representation.
+func (v ScorerDefinitionKind) String() string { return string(v) }
+
+// Valid reports whether v is a value this version of the spec defines.
+func (v ScorerDefinitionKind) Valid() bool {
+	for _, c := range AllScorerDefinitionKinds {
+		if c == v {
+			return true
+		}
+	}
+	return false
+}
+
+// Where an item in the review queue has got to.
+type ReviewStatus string
+
+const (
+	// Waiting for a person.
+	ReviewStatusPending ReviewStatus = "pending"
+	// A person looked at it and recorded what they found.
+	ReviewStatusReviewed ReviewStatus = "reviewed"
+	// A person looked at it and it needed nothing.
+	ReviewStatusDismissed ReviewStatus = "dismissed"
+)
+
+// AllReviewStatuss lists every ReviewStatus value, in declaration order.
+var AllReviewStatuss = []ReviewStatus{ReviewStatusPending, ReviewStatusReviewed, ReviewStatusDismissed}
+
+// String returns the wire representation.
+func (v ReviewStatus) String() string { return string(v) }
+
+// Valid reports whether v is a value this version of the spec defines.
+func (v ReviewStatus) Valid() bool {
+	for _, c := range AllReviewStatuss {
+		if c == v {
+			return true
+		}
+	}
+	return false
+}
+
 // Input tokens broken down by how the provider billed them. Every field is optional;
 // absent means the provider did not report it, which is different from zero.
 type InputTokenDetails struct {
@@ -2186,6 +2272,14 @@ type ScorerConfig struct {
 	ExpectedTools []string `json:"expected_tools"`
 	// Tools the run must not call, for `tool_not_called`.
 	ForbiddenTools []string `json:"forbidden_tools"`
+	// How `trajectory` compares the tools the run called with `expected_tools`: `strict`
+	// for the same calls in the same order and nothing else, `ordered` for the expected
+	// calls in order with others allowed between them, `unordered` for every expected call
+	// in any order. Defaults to `ordered`.
+	TrajectoryMatch *string `json:"trajectory_match,omitempty"`
+	// The most steps a healthy run takes, for `trajectory`. A step is a tool call, a model
+	// generation or a handoff.
+	MaxSteps *uint32 `json:"max_steps,omitempty"`
 	// The shortest acceptable answer in characters, for `answer_length`.
 	MinChars *uint32 `json:"min_chars,omitempty"`
 	// The longest acceptable answer in characters, for `answer_length`.
@@ -3897,6 +3991,275 @@ type SsoCallbackRequest struct {
 	Binding string `json:"binding"`
 }
 
+// A new version of a prompt. Posting a body identical to the latest version stores
+// nothing new and returns that version, so a deploy that posts its prompts on every
+// start is a no-op when nothing changed.
+type CreatePromptRequest struct {
+	// The prompt's name. A new name creates the prompt at version 1.
+	Name string `json:"name"`
+	// `text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`.
+	Kind *PromptKind `json:"kind,omitempty"`
+	// The template, for a `text` prompt.
+	Template *string `json:"template,omitempty"`
+	// The messages, for a `chat` prompt.
+	Messages json.RawMessage `json:"messages,omitempty"`
+	// Model settings to store with it.
+	Config json.RawMessage `json:"config,omitempty"`
+	// What changed.
+	Note *string `json:"note,omitempty"`
+	// Labels to point at the stored version once it is stored, such as `staging`.
+	Labels []string `json:"labels,omitempty"`
+}
+
+// Which version a label should point at.
+type PromptLabelRequest struct {
+	// The version. It must exist.
+	Version uint32 `json:"version"`
+}
+
+// Every version of one prompt, newest first.
+type PromptVersionsResponse struct {
+	// The prompt's name.
+	Name string `json:"name"`
+	// Its versions, newest first, each with the labels that point at it.
+	Versions []Prompt `json:"versions"`
+}
+
+// A new version of a scorer definition. A body identical to the latest version is not
+// stored again.
+type CreateScorerDefinitionRequest struct {
+	// The definition's id. A new id creates it at version 1.
+	ID string `json:"id"`
+	// `judge` or `code`.
+	Kind ScorerDefinitionKind `json:"kind"`
+	// What it measures, in a sentence.
+	Description string `json:"description"`
+	// Which way is better. Defaults to `higher_is_better`.
+	Direction *ScoreDirection `json:"direction,omitempty"`
+	// For `judge`: the criterion.
+	Prompt *string `json:"prompt,omitempty"`
+	// For `code`: the code scorer to run.
+	Builtin *string `json:"builtin,omitempty"`
+	// For `code`: its settings.
+	Config *ScorerConfig `json:"config,omitempty"`
+	// What changed.
+	Note *string `json:"note,omitempty"`
+}
+
+// Every version of one scorer definition, newest first.
+type ScorerDefinitionVersions struct {
+	// The definition's id.
+	ID string `json:"id"`
+	// Its versions, newest first.
+	Versions []ScorerDefinition `json:"versions"`
+}
+
+// A new version of a live scoring rule. Posting the same body as the latest version
+// stores nothing new.
+type CreateEvaluationRuleRequest struct {
+	// The rule's id: lower-case letters, digits, `-` and `_`, up to 64.
+	ID string `json:"id"`
+	// Whether it runs. Defaults to `false`, so a rule is read back and checked before it
+	// spends anything.
+	Enabled *bool `json:"enabled,omitempty"`
+	// The scorers to run. At least one.
+	Scorers []string `json:"scorers"`
+	// The share of matching runs to score, from 0 to 1. Defaults to 1.
+	SampleRate *float64 `json:"sample_rate,omitempty"`
+	// Only runs whose root step has this name.
+	Name *string `json:"name,omitempty"`
+	// Only runs whose root step is this kind.
+	Kind *SpanKind `json:"kind,omitempty"`
+	// Only runs from this environment.
+	Environment *string `json:"environment,omitempty"`
+	// Only runs carrying all of these tags.
+	Tags []string `json:"tags,omitempty"`
+	// Only runs with this outcome.
+	Status *SpanStatus `json:"status,omitempty"`
+	// Settings for the code scorers that need them.
+	Config *ScorerConfig `json:"config,omitempty"`
+	// The most judged scores per minute. Defaults to 30.
+	MaxJudgedPerMinute *uint32 `json:"max_judged_per_minute,omitempty"`
+	// What changed.
+	Note *string `json:"note,omitempty"`
+}
+
+// One action an agent took: a tool call, a model generation or a handoff, in the order
+// they started.
+type TrajectoryStep struct {
+	// Its position in the trajectory, from 0.
+	Index uint32 `json:"index"`
+	// The span it was read from.
+	SpanID string `json:"span_id"`
+	// What kind of action.
+	Kind SpanKind `json:"kind"`
+	// The tool, model step or agent it names.
+	Name string `json:"name"`
+	// How it ended.
+	Status SpanStatus `json:"status"`
+	// When it started, in milliseconds after the run started.
+	StartOffsetMs float64 `json:"start_offset_ms"`
+	// How long it took. Absent while it is still running.
+	DurationMs *float64 `json:"duration_ms,omitempty"`
+	// The model, for a model generation.
+	Model *string `json:"model,omitempty"`
+	// The start of its input as plain text, up to 240 characters.
+	InputPreview *string `json:"input_preview,omitempty"`
+	// The start of its output as plain text, up to 240 characters.
+	OutputPreview *string `json:"output_preview,omitempty"`
+	// Input and output tokens together, for a model generation.
+	Tokens *uint64 `json:"tokens,omitempty"`
+}
+
+// A run read as the sequence of actions its agent took. This is what a trajectory is
+// scored on: which tools were called, in what order, how many steps it took, and
+// whether it ended with an answer.
+type Trajectory struct {
+	// The run.
+	TraceID string `json:"trace_id"`
+	// Every action, in start order.
+	Steps []TrajectoryStep `json:"steps"`
+	// The names of the tool calls, in order. What `expected_tools` is compared with.
+	ToolSequence []string `json:"tool_sequence"`
+	// How many steps.
+	StepCount uint32 `json:"step_count"`
+	// How many of them were tool calls.
+	ToolCount uint32 `json:"tool_count"`
+	// How many of them failed.
+	ErrorCount uint32 `json:"error_count"`
+	// The start of the run's answer, from the root step's output.
+	FinalOutputPreview *string `json:"final_output_preview,omitempty"`
+	// True when the run ended `ok` with a non-empty answer.
+	GoalReached bool `json:"goal_reached"`
+}
+
+// Which scorers to run over every run recorded under an experiment.
+type ExperimentScoreRequest struct {
+	// The scorers, as `POST /v1/api/score` takes them. Empty runs the code scorers that
+	// need no settings.
+	Scorers []string `json:"scorers"`
+	// Settings for the code scorers. `expected` is filled per run from the dataset case
+	// the run answered, when the run names one.
+	Config *ScorerConfig `json:"config,omitempty"`
+	// Store nothing; report what would be stored.
+	DryRun bool `json:"dry_run"`
+}
+
+// NewExperimentScoreRequest returns a ExperimentScoreRequest with every spec-declared default applied.
+func NewExperimentScoreRequest() ExperimentScoreRequest {
+	return ExperimentScoreRequest{
+		DryRun: false,
+	}
+}
+
+// One case of an experiment: the run that answered it and how each scorer marked it.
+type ExperimentItemResult struct {
+	// The run that answered the case.
+	TraceID string `json:"trace_id"`
+	// The dataset case, when the run named one in its `mcpd.dataset_item_id` attribute.
+	ItemID *string `json:"item_id,omitempty"`
+	// How the run ended.
+	Status SpanStatus `json:"status"`
+	// How long the run took.
+	DurationNs *uint64 `json:"duration_ns,omitempty"`
+	// What the run cost.
+	Cost *float64 `json:"cost,omitempty"`
+	// The start of the run's input.
+	InputPreview *string `json:"input_preview,omitempty"`
+	// The start of the run's answer.
+	OutputPreview *string `json:"output_preview,omitempty"`
+	// The case's expected answer, when it has one.
+	Expected json.RawMessage `json:"expected,omitempty"`
+	// The mean value per scorer for this run, keyed by scorer id.
+	Scores json.RawMessage `json:"scores"`
+}
+
+// One scorer's marks across an experiment.
+type ScorerSummary struct {
+	// The scorer.
+	ScorerID string `json:"scorer_id"`
+	// How many scores.
+	N uint64 `json:"n"`
+	// Their mean.
+	Mean float64 `json:"mean"`
+	// The lowest.
+	Min float64 `json:"min"`
+	// The highest.
+	Max float64 `json:"max"`
+	// Which way is better.
+	Direction ScoreDirection `json:"direction"`
+}
+
+// An experiment case by case, with a summary per scorer. Two of these joined on
+// `item_id` are the per-case comparison of two versions.
+type ExperimentResults struct {
+	// The experiment.
+	ExperimentID string `json:"experiment_id"`
+	// One row per run recorded under the experiment, oldest first.
+	Items []ExperimentItemResult `json:"items"`
+	// Per scorer, across every run.
+	Scorers []ScorerSummary `json:"scorers"`
+	// How many runs are recorded under it.
+	Runs uint32 `json:"runs"`
+	// How many of them ended in an error.
+	Failed uint32 `json:"failed"`
+}
+
+// A run to queue for review.
+type CreateReviewItemRequest struct {
+	// The run.
+	TraceID string `json:"trace_id"`
+	// The step, when it is one step.
+	SpanID *string `json:"span_id,omitempty"`
+	// The feedback that prompted it.
+	FeedbackID *string `json:"feedback_id,omitempty"`
+	// Who should review it.
+	Assignee *string `json:"assignee,omitempty"`
+	// Why it is queued.
+	Note *string `json:"note,omitempty"`
+}
+
+// A change to a review item. Absent fields keep their value.
+type UpdateReviewItemRequest struct {
+	// The new status.
+	Status *ReviewStatus `json:"status,omitempty"`
+	// The new assignee. An empty string unassigns it.
+	Assignee *string `json:"assignee,omitempty"`
+	// What the reviewer found.
+	Note *string `json:"note,omitempty"`
+}
+
+// The review queue, newest first.
+type ReviewQueueResponse struct {
+	// The items that matched, newest change first.
+	Items []ReviewItem `json:"items"`
+	// How many items in the project are still pending, whatever the filter.
+	Pending uint32 `json:"pending"`
+}
+
+// A frozen copy of a dataset's cases. An experiment that names a version runs against
+// exactly those cases, whatever has been added to the dataset since.
+type DatasetVersion struct {
+	// The dataset.
+	DatasetID string `json:"dataset_id"`
+	// Its number, from 1.
+	Version uint32 `json:"version"`
+	// How many cases it froze.
+	ItemCount uint32 `json:"item_count"`
+	// What changed since the version before.
+	Note *string `json:"note,omitempty"`
+	// Which key or account froze it.
+	CreatedBy *string `json:"created_by,omitempty"`
+	// When it was frozen.
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Freeze the dataset's current cases as a new version.
+type CreateDatasetVersionRequest struct {
+	// What changed since the version before.
+	Note *string `json:"note,omitempty"`
+}
+
 // One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback
 // all hang off a span or a trace.
 // Stored in the spans table.
@@ -4010,6 +4373,13 @@ type Trace struct {
 	ModelCount uint32 `json:"model_count"`
 	// How many tool calls the run made.
 	ToolCount uint32 `json:"tool_count"`
+	// The start of the root step's input as plain text, up to 240 characters, for a list
+	// column. For a chat input it is the last user message. Filled by the trace list when
+	// it is asked with `preview=true`; the full input is on the span.
+	InputPreview *string `json:"input_preview,omitempty"`
+	// The start of the root step's output as plain text, up to 240 characters. Filled by
+	// the trace list when it is asked with `preview=true`; the full output is on the span.
+	OutputPreview *string `json:"output_preview,omitempty"`
 	// Tags from the root span.
 	Tags []string `json:"tags,omitempty"`
 	// Context inherited from the root span.
@@ -4667,3 +5037,161 @@ type Theme struct {
 
 // Table is the storage table Theme lives in.
 func (Theme) Table() string { return "themes" }
+
+// One version of a named prompt. A version never changes once stored: a new body is a
+// new version, and labels such as `production` and `staging` point at the version a
+// caller should use. SDKs fetch a prompt by name and label, render it with variables,
+// and link the spans that used it, so a trace shows which version produced an answer.
+// Stored in the documents table.
+type Prompt struct {
+	// Which project owns it.
+	Project string `json:"project"`
+	// The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and
+	// `/`, up to 128 characters.
+	Name string `json:"name"`
+	// Its version, from 1, assigned by the daemon in the order versions arrive.
+	Version uint32 `json:"version"`
+	// Whether the body is one template or a list of messages.
+	Kind PromptKind `json:"kind"`
+	// The template, for a `text` prompt. Variables are written `{{name}}`.
+	Template *string `json:"template,omitempty"`
+	// The messages, for a `chat` prompt: an array of objects with `role` and `content`,
+	// where `content` is a template.
+	Messages json.RawMessage `json:"messages,omitempty"`
+	// Model settings stored with the prompt, such as `model` and `temperature`. The daemon
+	// stores them and does not read them.
+	Config json.RawMessage `json:"config,omitempty"`
+	// Every variable the body names, in order of first use, without duplicates.
+	Variables []string `json:"variables"`
+	// The labels that point at this version now.
+	Labels []string `json:"labels"`
+	// What changed in this version, written by whoever stored it.
+	Note *string `json:"note,omitempty"`
+	// Which key or account stored it.
+	CreatedBy *string `json:"created_by,omitempty"`
+	// When this version was stored.
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Table is the storage table Prompt lives in.
+func (Prompt) Table() string { return "documents" }
+
+// A scorer the project defined: a judge prompt written for this agent, or a code
+// scorer with its settings fixed. Stored as numbered versions; a version never
+// changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the latest
+// version or `id@3` for version 3.
+// Stored in the documents table.
+type ScorerDefinition struct {
+	// Which project owns it.
+	Project string `json:"project"`
+	// Its id, unique in the project: lower-case letters, digits and `_`, up to 64. It
+	// cannot be the id of a scorer mcpd ships.
+	ID string `json:"id"`
+	// Its version, from 1, assigned by the daemon.
+	Version uint32 `json:"version"`
+	// Judged by the model, or computed by code.
+	Kind ScorerDefinitionKind `json:"kind"`
+	// What it measures, in a sentence. Shown in the scorer catalogue.
+	Description string `json:"description"`
+	// Which way is better. Comparisons and live alerts read it.
+	Direction ScoreDirection `json:"direction"`
+	// For a `judge` definition: the criterion the model grades against, such as `The
+	// answer cites the refund policy by section number.` The daemon adds the run's input
+	// and output and asks for a value from 0 to 1 with a one-sentence reason.
+	Prompt *string `json:"prompt,omitempty"`
+	// For a `code` definition: the code scorer it runs, such as `keyword_coverage`.
+	Builtin *string `json:"builtin,omitempty"`
+	// For a `code` definition: the settings the code scorer runs with.
+	Config *ScorerConfig `json:"config,omitempty"`
+	// What changed in this version.
+	Note *string `json:"note,omitempty"`
+	// Which key or account stored it.
+	CreatedBy *string `json:"created_by,omitempty"`
+	// When this version was stored.
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Table is the storage table ScorerDefinition lives in.
+func (ScorerDefinition) Table() string { return "documents" }
+
+// A rule for live scoring: which finished runs to score, with which scorers, and how
+// many of them. The daemon reads finished runs as they arrive and scores the sampled
+// ones in the background, so a quality drop shows up in minutes rather than at the
+// next offline pass. Scores it writes have source `live`.
+// Stored in the documents table.
+type EvaluationRule struct {
+	// Which project it scores.
+	Project string `json:"project"`
+	// Its id, unique in the project.
+	ID string `json:"id"`
+	// Its version, from 1. Each change is a new version.
+	Version uint32 `json:"version"`
+	// Whether it runs. A rule is stored disabled unless the request says otherwise.
+	Enabled bool `json:"enabled"`
+	// The scorers to run: shipped ids, criteria from the config file, or stored
+	// definitions as `id` or `id@version`.
+	Scorers []string `json:"scorers"`
+	// The share of matching runs to score, from 0 to 1. Chosen by a hash of the trace id,
+	// so the same run is in or out on every replica and every restart.
+	SampleRate float64 `json:"sample_rate"`
+	// Only runs whose root step has this name.
+	Name *string `json:"name,omitempty"`
+	// Only runs whose root step is this kind.
+	Kind *SpanKind `json:"kind,omitempty"`
+	// Only runs from this environment.
+	Environment *string `json:"environment,omitempty"`
+	// Only runs carrying all of these tags.
+	Tags []string `json:"tags"`
+	// Only runs with this outcome.
+	Status *SpanStatus `json:"status,omitempty"`
+	// Settings for the code scorers that need them.
+	Config *ScorerConfig `json:"config,omitempty"`
+	// The most judged scores the rule may produce in one minute, across the daemon. Each
+	// one is a model call, so this caps what the rule can spend. Runs over it are skipped,
+	// not queued.
+	MaxJudgedPerMinute uint32 `json:"max_judged_per_minute"`
+	// What changed in this version.
+	Note *string `json:"note,omitempty"`
+	// Which key or account stored it.
+	CreatedBy *string `json:"created_by,omitempty"`
+	// When this version was stored.
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Table is the storage table EvaluationRule lives in.
+func (EvaluationRule) Table() string { return "documents" }
+
+// A run, or one step of it, queued for a person to review. Queue the runs a low score
+// or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every
+// change is kept, so the item's history says who decided what and when. Corrections
+// and labels go on the run as feedback.
+// Stored in the documents table.
+type ReviewItem struct {
+	// Which project.
+	Project string `json:"project"`
+	// Its id.
+	ReviewID string `json:"review_id"`
+	// How many times it has changed, from 1.
+	Version uint32 `json:"version"`
+	// The run to review.
+	TraceID string `json:"trace_id"`
+	// The step to look at, when it is one step.
+	SpanID *string `json:"span_id,omitempty"`
+	// The feedback that put it in the queue, when it was feedback.
+	FeedbackID *string `json:"feedback_id,omitempty"`
+	// Where it has got to.
+	Status ReviewStatus `json:"status"`
+	// Who should review it.
+	Assignee *string `json:"assignee,omitempty"`
+	// Why it is queued, or what the reviewer found.
+	Note *string `json:"note,omitempty"`
+	// Which key or account made the latest change.
+	UpdatedBy *string `json:"updated_by,omitempty"`
+	// When it was queued.
+	CreatedAt time.Time `json:"created_at"`
+	// When it last changed.
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Table is the storage table ReviewItem lives in.
+func (ReviewItem) Table() string { return "documents" }

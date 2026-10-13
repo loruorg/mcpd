@@ -345,12 +345,30 @@ type TraceQuery struct {
 	To time.Time
 	// MinDurationMs keeps only traces at least this slow.
 	MinDurationMs uint64
+	// MaxDurationMs keeps only traces at most this slow.
+	MaxDurationMs uint64
 	// MinCost keeps only traces at least this expensive.
 	MinCost float64
+	// MaxCost keeps only traces at most this expensive.
+	MaxCost float64
+	// MinTokens keeps only traces that used at least this many tokens, input
+	// and output together.
+	MinTokens uint64
 	// HasScore keeps only traces carrying a score from this scorer.
 	HasScore string
 	// ScoreBelow, with HasScore, is the query that finds bad answers.
 	ScoreBelow *float64
+	// ScoreAbove, with HasScore, keeps traces where that scorer came in over
+	// this value.
+	ScoreAbove *float64
+	// HasFeedback, when set, keeps only traces a person gave feedback on
+	// (true) or only traces with none (false). Nil sends nothing.
+	HasFeedback *bool
+	// ExperimentID keeps only the runs recorded under this experiment.
+	ExperimentID string
+	// Preview, when set to true, fills each trace's InputPreview and
+	// OutputPreview. Nil sends nothing.
+	Preview *bool
 	// Sort is start_time, duration, cost or span_count.
 	Sort string
 	// Order is asc or desc.
@@ -377,10 +395,23 @@ func (c *Client) ListTraces(ctx context.Context, query TraceQuery) (*TraceListRe
 	setTime(values, "from", query.From)
 	setTime(values, "to", query.To)
 	setUint(values, "min_duration_ms", query.MinDurationMs)
+	setUint(values, "max_duration_ms", query.MaxDurationMs)
 	setFloat(values, "min_cost", query.MinCost)
+	setFloat(values, "max_cost", query.MaxCost)
+	setUint(values, "min_tokens", query.MinTokens)
 	setString(values, "has_score", query.HasScore)
 	if query.ScoreBelow != nil {
 		values.Set("score_below", formatFloat(*query.ScoreBelow))
+	}
+	if query.ScoreAbove != nil {
+		values.Set("score_above", formatFloat(*query.ScoreAbove))
+	}
+	if query.HasFeedback != nil {
+		values.Set("has_feedback", strconv.FormatBool(*query.HasFeedback))
+	}
+	setString(values, "experiment_id", query.ExperimentID)
+	if query.Preview != nil {
+		values.Set("preview", strconv.FormatBool(*query.Preview))
 	}
 	setString(values, "sort", query.Sort)
 	setString(values, "order", query.Order)
@@ -445,6 +476,10 @@ type SpanQuery struct {
 	Model string
 	// TraceID restricts the search to one run.
 	TraceID string
+	// Prompt keeps only spans linked to this prompt with SetPrompt.
+	Prompt string
+	// PromptVersion, with Prompt, keeps only spans that used this version.
+	PromptVersion uint32
 	// From and To bound the window.
 	From time.Time
 	// To bounds the window.
@@ -471,6 +506,8 @@ func (c *Client) ListSpans(ctx context.Context, query SpanQuery) (*SpanListRespo
 	setString(values, "name", query.Name)
 	setString(values, "model", query.Model)
 	setString(values, "trace_id", query.TraceID)
+	setString(values, "prompt", query.Prompt)
+	setUint(values, "prompt_version", uint64(query.PromptVersion))
 	setTime(values, "from", query.From)
 	setTime(values, "to", query.To)
 	setUint(values, "min_duration_ms", query.MinDurationMs)

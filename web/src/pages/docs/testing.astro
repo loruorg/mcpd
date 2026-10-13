@@ -2,6 +2,10 @@
 import Doc from '@/layouts/Doc.astro'
 import Command from '@/components/Command.astro'
 import Waterfall from '@/components/Waterfall.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { exampleLanguages } from '@/lib/snippets'
+
+const experimentLangs = exampleLanguages('experiment')
 ---
 
 <Doc
@@ -44,6 +48,17 @@ import Waterfall from '@/components/Waterfall.astro'
   </p>
 
   <Waterfall class="not-prose my-8" />
+
+  <h2>Freezing a dataset</h2>
+  <p>
+    A dataset grows as runs are captured into it. To compare two versions of
+    an agent on the same cases, freeze it first:
+    <code>POST /v1/api/datasets/{'{id}'}/versions</code> copies the current
+    cases into a numbered version that never changes, and freezing the same
+    cases again confirms that version rather than making a copy. Read a
+    version&rsquo;s cases with <code>GET /v1/api/datasets/{'{id}'}/items?version=2</code>,
+    and list the versions with <code>GET /v1/api/datasets/{'{id}'}/versions</code>.
+  </p>
 
   <h2>The run's own answer is not the expected answer</h2>
   <p>
@@ -92,6 +107,7 @@ import Waterfall from '@/components/Waterfall.astro'
       <tr><td><code>tool_not_called</code></td><td>The run called none of <code>forbidden_tools</code>.</td></tr>
       <tr><td><code>answer_length</code></td><td>The answer has between <code>min_chars</code> and <code>max_chars</code> characters.</td></tr>
       <tr><td><code>json_schema</code></td><td>The answer is JSON, fenced or bare, that satisfies <code>json_schema</code>.</td></tr>
+      <tr><td><code>trajectory</code></td><td>The run&rsquo;s path: the tools it called against <code>expected_tools</code>, compared as <code>trajectory_match</code> says (<code>strict</code>, <code>ordered</code> or <code>unordered</code>, with partial credit), its steps against <code>max_steps</code>, and whether it reached an answer. The mean of the parts asked for. <code>GET /v1/api/traces/{'{id}'}/trajectory</code> shows the path it reads.</td></tr>
     </tbody>
   </table>
   <p>
@@ -275,6 +291,65 @@ import Waterfall from '@/components/Waterfall.astro'
     Two scores from two different judges are not comparable, and that field is
     what says so on the record.
   </p>
+  <p>
+    Every judged score also names the run of its own model call in
+    <code>score_trace_id</code>. That run is one <code>scorer_run</code> span
+    holding the prompt the judge was sent, the reply it wrote, its tokens and
+    its cost, with a link to the run it scored. A score that looks wrong is
+    opened and read like any other model call; in the app, the
+    <em>judge call</em> link beside the score opens it.
+  </p>
+
+  <h2>Scorers you define</h2>
+  <p>
+    A project stores its own scorers with <code>POST /v1/api/scorer-definitions</code>.
+    A <code>judge</code> definition is a criterion written for your agent, such
+    as <q>The answer names the section of the refund policy it relies on</q>,
+    graded from 0 to 1 by the configured judge. A <code>code</code> definition
+    is one of the scorers above with its settings fixed, such as
+    <code>keyword_coverage</code> with the keywords your answers must mention.
+  </p>
+  <p>
+    Each save is a new version, and an identical body is not stored again. Name
+    a definition wherever a scorer id is taken: <code>cites_policy</code> runs
+    the latest version and <code>cites_policy@2</code> runs version 2. The
+    version goes on every score, so changing a prompt never changes what an old
+    score meant. A definition cannot take the id of a scorer mcpd ships or of a
+    criterion in the config file. <code>GET /v1/api/scorers?project=</code>
+    lists a project&rsquo;s definitions beside the shipped scorers, with kind
+    <code>custom</code>. The Evaluations screen in the app creates and edits
+    them.
+  </p>
+
+  <h2>Live scoring</h2>
+  <p>
+    An evaluation rule scores runs as they finish, in the background, and
+    writes scores with source <code>live</code>. It names the scorers to run,
+    the share of runs to score, and which runs it is for: a root step name, a
+    kind, an environment, an outcome, tags. Store one with
+    <code>POST /v1/api/evaluation-rules</code>.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="score a tenth of checkout runs as they finish"
+    command={`curl -X POST 'localhost:4317/v1/api/evaluation-rules?project=support-desk' \\
+  -H 'content-type: application/json' \\
+  -d '{"id": "checkout-quality", "enabled": true, "scorers": ["answered", "cites_policy"],
+       "sample_rate": 0.1, "name": "checkout"}'`}
+  />
+
+  <p>
+    A rule is stored off unless the request turns it on, and every scorer it
+    names is resolved when it is stored. Which runs are sampled is decided by a
+    hash of the rule id and the trace id, so the same run is in or out on every
+    replica and after every restart, and two rules at 10% score different
+    tenths. Each run is scored by a rule once. <code>max_judged_per_minute</code>,
+    30 by default, caps the model calls a rule makes; a run over the cap is
+    skipped, not queued. A change to a rule is a new version and applies from
+    the next pass, every 15 seconds. Post the rule with
+    <code>"enabled": false</code> to stop it.
+  </p>
 
   <h2>Scoring happens after the fact</h2>
   <p>
@@ -313,6 +388,36 @@ import Waterfall from '@/components/Waterfall.astro'
     <code>from</code> bounds that page: a pass sent <code>from</code> reads only
     runs that started at or after it, which is how you score everything since a
     deploy without listing ids.
+  </p>
+
+  <h2>Running an experiment from code</h2>
+  <p>
+    Every SDK has an experiment runner. Give it a dataset and your own
+    function: it records an experiment, calls the function once per case inside
+    a run that names the experiment and the case, scores each answer against
+    that case's expected answer, and returns the results case by case with a
+    mean per scorer.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    example="experiment"
+    region="experiment"
+    only={experimentLangs}
+    title="run a dataset through your code"
+  />
+
+  <p>
+    Four cases run at once unless you pass another <code>concurrency</code>.
+    A case whose function raises is recorded as a failed run with its error,
+    and the cases after it still run. Each run's root span carries
+    <code>correlation.experiment_id</code> and the attribute
+    <code>mcpd.dataset_item_id</code>, and spans your function opens nest under
+    it, so a failed case opens in the waterfall like any other run. When the
+    runner itself cannot finish, the experiment is marked <code>failed</code>
+    with the reason. Read the results again later with
+    <code>GET /v1/api/experiments/{'{id}'}/results</code>, and a run's path
+    with <code>GET /v1/api/traces/{'{id}'}/trajectory</code>.
   </p>
 
   <h2>Comparing two versions</h2>

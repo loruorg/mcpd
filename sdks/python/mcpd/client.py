@@ -16,10 +16,12 @@ from __future__ import annotations
 import asyncio
 import atexit
 import dataclasses
+import json
 import logging
 import math
 import os
 import threading
+import urllib.parse
 import weakref
 from enum import Enum
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
@@ -28,7 +30,10 @@ from . import _generated as records
 from ._generated import (
     AnalyticsSummary,
     CostBreakdown,
+    DatasetItem,
     DeleteResult,
+    Experiment,
+    ExperimentResults,
     FeedbackKind,
     FeedbackListResponse,
     HealthStatus,
@@ -36,14 +41,22 @@ from ._generated import (
     LogListResponse,
     MetricKind,
     MetricSeriesResponse,
+    CreatePromptRequest,
+    Prompt,
+    PromptKind,
+    PromptLabelRequest,
     ScoreListResponse,
+    ScoreRunResult,
     ScoreSource,
+    ScorerConfig,
     SpanKind,
     SpanListResponse,
     SpanStatus,
     TraceDetail,
     TraceListResponse,
+    Trajectory,
 )
+from . import experiment as _experiment
 from .context import (
     EPOCH,
     TraceContext,
@@ -57,11 +70,13 @@ from .context import (
     parse_traceparent,
 )
 from .logs import encode_fields, meets_level, parse_log_level
+from .prompts import PromptCache, fallback_prompt
 from .queue import BoundedQueue, Throttle
 from .runs import DefinitionsApi, EventsApi, RunsApi, StepsApi
 from .sinks import Sink, TransportSink
 from .span import Span
-from .transport import Transport, TransportError, decode, encode_params
+from .experiment import ExperimentTarget
+from .transport import McpdError, Transport, TransportError, decode, encode, encode_params
 
 __all__ = ["Mcpd", "Stats"]
 
@@ -287,6 +302,9 @@ class Mcpd:
         self.runs = RunsApi(self._transport, self.project)
         self.events = EventsApi(self._transport, self.project)
         self.steps = StepsApi(self._transport, self.project)
+        #: Prompts fetched by `get_prompt`, per client so two clients for two
+        #: projects never serve each other's copies.
+        self._prompts = PromptCache()
 
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
@@ -547,7 +565,7 @@ class Mcpd:
 
     def _start(self, *, name: str, kind: Union[SpanKind, str], parent: Optional[Span] = None,
                traceparent: Optional[str] = None, root: bool = False, is_event: bool = False,
-               **fields: Any) -> Span:
+               always_sample: bool = False, **fields: Any) -> Span:
         """Build a span, decide whether it is recorded, and export its start."""
         upstream: Optional[TraceContext] = parse_traceparent(traceparent)
         if parent is None and not root:
@@ -571,7 +589,7 @@ class Mcpd:
         else:
             trace_id = new_trace_id()
             parent_span_id = None
-            sampled = self._decide(trace_id)
+            sampled = True if always_sample else self._decide(trace_id)
 
         correlation = self._correlation(corr_fields, parent)
         capture = options.get("capture_payloads")
@@ -951,18 +969,26 @@ class Mcpd:
                     thread_id: Optional[str] = None, user_id: Optional[str] = None,
                     environment: Optional[str] = None, model: Optional[str] = None,
                     from_: Optional[Any] = None, to: Optional[Any] = None,
-                    min_duration_ms: Optional[int] = None, min_cost: Optional[float] = None,
-                    has_score: Optional[str] = None, score_below: Optional[float] = None,
-                    sort: Optional[str] = None, order: Optional[str] = None,
-                    limit: Optional[int] = None, cursor: Optional[str] = None) -> TraceListResponse:
+                    min_duration_ms: Optional[int] = None, max_duration_ms: Optional[int] = None,
+                    min_cost: Optional[float] = None, max_cost: Optional[float] = None,
+                    min_tokens: Optional[int] = None, has_score: Optional[str] = None,
+                    score_below: Optional[float] = None, score_above: Optional[float] = None,
+                    has_feedback: Optional[bool] = None, experiment_id: Optional[str] = None,
+                    preview: Optional[bool] = None, sort: Optional[str] = None,
+                    order: Optional[str] = None, limit: Optional[int] = None, cursor: Optional[str] = None) -> TraceListResponse:
         """A page of runs. `from_`/`to` take a datetime or a shorthand like `-1h`."""
         return decode(TraceListResponse, self._transport.get("/v1/api/traces", {
             "project": project or self.project, "q": q, "status": status, "kind": kind,
             "name": name, "tags": tags, "session_id": session_id, "thread_id": thread_id,
             "user_id": user_id, "environment": environment, "model": model, "from_": from_,
-            "to": to, "min_duration_ms": min_duration_ms, "min_cost": min_cost,
-            "has_score": has_score, "score_below": score_below, "sort": sort, "order": order,
-            "limit": limit, "cursor": cursor,
+            "to": to, "min_duration_ms": min_duration_ms, "max_duration_ms": max_duration_ms,
+            "min_cost": min_cost, "max_cost": max_cost, "min_tokens": min_tokens,
+            "has_score": has_score, "score_below": score_below, "score_above": score_above,
+            # A bool, so `_param` writes `true` or `false`, the only values the daemon reads.
+            "has_feedback": None if has_feedback is None else bool(has_feedback),
+            "experiment_id": experiment_id,
+            "preview": None if preview is None else bool(preview),
+            "sort": sort, "order": order, "limit": limit, "cursor": cursor,
         }))
 
     def get_trace(self, trace_id: str, include: Optional[Union[str, Sequence[str]]] = None,
@@ -987,6 +1013,7 @@ class Mcpd:
                    kind: Optional[Union[SpanKind, str]] = None,
                    status: Optional[Union[SpanStatus, str]] = None, name: Optional[str] = None,
                    model: Optional[str] = None, trace_id: Optional[str] = None,
+                   prompt: Optional[str] = None, prompt_version: Optional[int] = None,
                    from_: Optional[Any] = None, to: Optional[Any] = None,
                    min_duration_ms: Optional[int] = None, sort: Optional[str] = None,
                    order: Optional[str] = None, limit: Optional[int] = None,
@@ -994,7 +1021,8 @@ class Mcpd:
         """A page of steps, across runs."""
         return decode(SpanListResponse, self._transport.get("/v1/api/spans", {
             "project": project or self.project, "q": q, "kind": kind, "status": status,
-            "name": name, "model": model, "trace_id": trace_id, "from_": from_, "to": to,
+            "name": name, "model": model, "trace_id": trace_id, "prompt": prompt,
+            "prompt_version": prompt_version, "from_": from_, "to": to,
             "min_duration_ms": min_duration_ms, "sort": sort, "order": order, "limit": limit,
             "cursor": cursor,
         }))
@@ -1068,6 +1096,201 @@ class Mcpd:
             "bucket": bucket,
         }))
 
+    # ------------------------------------------------------------------- prompts
+
+    def get_prompt(self, name: str, *, label: Optional[str] = None,
+                   version: Optional[int] = None, cache_ttl: float = 60.0,
+                   fallback: Optional[Union[str, Sequence[Any]]] = None,
+                   project: Optional[str] = None) -> Prompt:
+        """One version of a prompt: by `label`, by `version`, or `production`.
+
+        With neither selector it asks for the `production` label and, when no
+        version carries it, takes the latest. A copy younger than `cache_ttl`
+        seconds is served with no request. When a fetch fails, an older copy is
+        served however old, then `fallback` (a template or a list of
+        messages), and only then does the fetch error reach the caller.
+        """
+        if label is not None and version is not None:
+            raise ValueError("get_prompt takes a label or a version, not both")
+        if fallback is not None and not isinstance(fallback, (str, list, tuple)):
+            raise TypeError("a prompt fallback is a template string or a list of messages")
+        project = project or self.project
+        selector = (("label", label) if label is not None
+                    else ("version", int(version)) if version is not None  # type: ignore[arg-type]
+                    else ("default",))
+        key = (project, name, selector)
+        cached = self._prompts.get(key)
+        if cached is not None and cache_ttl > 0 and self._prompts.clock() - cached[0] < cache_ttl:
+            return cached[1]
+        try:
+            prompt = self._fetch_prompt(project, name, label, version)
+        except Exception as exc:  # noqa: BLE001 - any failure falls back the same way
+            if cached is not None:
+                if self._prompts.first_failure(key):
+                    log.warning("mcpd: could not refresh prompt %r, serving the copy fetched "
+                                "earlier: %s", name, exc)
+                return cached[1]
+            if fallback is not None:
+                return fallback_prompt(name, project, fallback)
+            raise
+        self._prompts.put(key, prompt)
+        return prompt
+
+    def _fetch_prompt(self, project: str, name: str, label: Optional[str],
+                      version: Optional[int]) -> Prompt:
+        path = f"/v1/api/prompts/{_segment(name)}"
+        if label is None and version is None:
+            # A prompt nobody has labelled yet still has to work, so a missing
+            # `production` falls through to the latest version.
+            try:
+                return decode(Prompt, self._transport.get(
+                    path, {"project": project, "label": "production"}))
+            except TransportError as exc:
+                if exc.status != 404:
+                    raise
+            return decode(Prompt, self._transport.get(path, {"project": project}))
+        return decode(Prompt, self._transport.get(
+            path, {"project": project, "label": label, "version": version}))
+
+    def create_prompt(self, name: str, *, kind: Optional[Union[PromptKind, str]] = None,
+                      template: Optional[str] = None, messages: Optional[Sequence[Any]] = None,
+                      config: Any = None, note: Optional[str] = None,
+                      labels: Optional[Sequence[str]] = None,
+                      project: Optional[str] = None) -> Prompt:
+        """Store a version of a prompt and return it.
+
+        A body identical to the latest version stores nothing and returns that
+        version, so a deploy can post its prompts on every start.
+        """
+        if isinstance(kind, str) and not isinstance(kind, PromptKind):
+            kind = PromptKind(kind)
+        body = CreatePromptRequest(
+            name=name, kind=kind, template=template,
+            messages=list(messages) if messages is not None else None, config=config,
+            note=note, labels=list(labels) if labels is not None else None,
+        )
+        query = encode_params({"project": project or self.project})
+        return decode(Prompt, self._transport.post(f"/v1/api/prompts?{query}", body))
+
+    def set_prompt_label(self, name: str, label: str, version: int, *,
+                         project: Optional[str] = None) -> Prompt:
+        """Point `label` at `version`: moving `production` releases or rolls back.
+
+        The read cache is left alone, so running agents see the move within
+        their `cache_ttl`.
+        """
+        query = encode_params({"project": project or self.project})
+        body = json.dumps(encode(PromptLabelRequest(version=int(version))),
+                          separators=(",", ":")).encode("utf-8")
+        return decode(Prompt, self._transport.request(
+            "PUT", f"/v1/api/prompts/{_segment(name)}/labels/{_segment(label)}?{query}",
+            body=body, headers={"content-type": "application/json"},
+        ))
+
+    # --------------------------------------------------------------- experiments
+
+    def get_trajectory(self, trace_id: str, *, project: Optional[str] = None) -> Trajectory:
+        """A run as the tool calls, model generations and handoffs its agent took."""
+        return decode(Trajectory, self._transport.get(
+            f"/v1/api/traces/{_segment(trace_id)}/trajectory",
+            {"project": project or self.project},
+        ))
+
+    def list_dataset_items(self, dataset_id: str, *,
+                           limit: Optional[int] = None) -> List[DatasetItem]:
+        """The cases of a dataset.
+
+        Sends `limit` only: the daemon finds the project from the dataset, and
+        refuses a parameter the endpoint does not document.
+        """
+        found = self._transport.get(f"/v1/api/datasets/{_segment(dataset_id)}/items",
+                                    {"limit": limit})
+        if not isinstance(found, list):
+            raise TransportError(f"expected a JSON array of dataset items, got "
+                                 f"{type(found).__name__}")
+        return [decode(DatasetItem, item) for item in found]
+
+    def create_experiment(self, experiment: Experiment) -> Experiment:
+        """Record an experiment, or replace one.
+
+        The daemon upserts on `experiment_id`, and an empty id gets a new one,
+        so posting the same id again is how a status is moved. The client's
+        project is used when the correlation names none.
+        """
+        correlation = dataclasses.replace(experiment.correlation) \
+            if experiment.correlation is not None else records.Correlation(project="")
+        if not correlation.project:
+            correlation.project = self.project
+        return decode(Experiment, self._transport.post(
+            "/v1/api/experiments", dataclasses.replace(experiment, correlation=correlation)))
+
+    def score_experiment(self, experiment_id: str, scorers: Sequence[str] = (),
+                         config: Optional[Union[ScorerConfig, Mapping[str, Any]]] = None, *,
+                         project: Optional[str] = None) -> ScoreRunResult:
+        """Score every run of an experiment against its own dataset case.
+
+        No scorers runs the code scorers that need no settings. Each case's
+        expected answer is filled in by the daemon.
+        """
+        body: Dict[str, Any] = {"scorers": list(scorers)}
+        if config is not None:
+            body["config"] = config
+        query = encode_params({"project": project or self.project})
+        return decode(ScoreRunResult, self._transport.post(
+            f"/v1/api/experiments/{_segment(experiment_id)}/score?{query}", body))
+
+    def experiment_results(self, experiment_id: str, *,
+                           project: Optional[str] = None) -> ExperimentResults:
+        """An experiment case by case, with a summary per scorer."""
+        return decode(ExperimentResults, self._transport.get(
+            f"/v1/api/experiments/{_segment(experiment_id)}/results",
+            {"project": project or self.project},
+        ))
+
+    def run_experiment(self, dataset_id: str, target: ExperimentTarget, *,
+                       name: Optional[str] = None, scorers: Optional[Sequence[str]] = None,
+                       config: Optional[Union[ScorerConfig, Mapping[str, Any]]] = None,
+                       concurrency: int = 4, metadata: Any = None) -> ExperimentResults:
+        """Run `target` over every case of a dataset and score the answers.
+
+        Each case runs inside a root span named after the experiment, carrying
+        the experiment id and the case id, at most `concurrency` at a time on a
+        pool of threads. A target that raises fails its own run and the next
+        case still runs. Then the runs are flushed and scored, the experiment
+        is marked `succeeded` with each scorer's mean, and the results are
+        returned. When the runner itself fails, the experiment is marked
+        `failed` and the error is raised.
+
+        An `async def` target runs on one event loop, `concurrency` cases at a
+        time. From code that already has a running loop, use
+        `await mcpd.arun_experiment(...)`.
+        """
+        p = _experiment.plan(self, dataset_id, target, name, scorers, config, concurrency,
+                            metadata)
+        if _experiment.is_async_target(target):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(_experiment.run_async(self, p))
+            raise McpdError("run_experiment would block the running event loop to await an "
+                            "async target; call `await mcpd.arun_experiment(...)` instead")
+        return _experiment.run_sync(self, p)
+
+    async def arun_experiment(self, dataset_id: str, target: ExperimentTarget, *,
+                              name: Optional[str] = None,
+                              scorers: Optional[Sequence[str]] = None,
+                              config: Optional[Union[ScorerConfig, Mapping[str, Any]]] = None,
+                              concurrency: int = 4, metadata: Any = None) -> ExperimentResults:
+        """`run_experiment` on the running event loop.
+
+        An `async def` target is awaited on this loop, so it can use what the
+        loop owns, such as an open HTTP session. A plain function runs on the
+        loop's default executor.
+        """
+        p = _experiment.plan(self, dataset_id, target, name, scorers, config, concurrency,
+                            metadata)
+        return await _experiment.run_async(self, p)
+
     def health(self) -> HealthStatus:
         """Whether the server is alive, and which spec version it implements."""
         return decode(HealthStatus, self._transport.get("/healthz"))
@@ -1111,6 +1334,11 @@ def _encodable(signal: str, record: Any) -> Any:
             changes["metadata"] = encode_fields(record.metadata)
         return dataclasses.replace(record, **changes)
     return record
+
+
+def _segment(value: str) -> str:
+    # A prompt name may contain `/`, which must stay inside one path segment.
+    return urllib.parse.quote(str(value), safe="")
 
 
 def _metric_filter(filter: Optional[Mapping[str, Any]]) -> Optional[str]:

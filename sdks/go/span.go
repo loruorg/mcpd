@@ -537,6 +537,11 @@ type spanConfig struct {
 	externalParent string
 	capture        bool
 	hasCapture     bool
+
+	// Set only by the experiment runner, which is why they have no exported
+	// option.
+	experimentID string
+	keep         bool
 }
 
 // WithSpanKind sets what the operation is. The kind drives how the span is

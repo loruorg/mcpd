@@ -492,12 +492,13 @@ defmodule Mcpd.ScorerKind do
   How a scorer reaches its answer.
   """
 
-  @type t :: :code | :judge | :criterion
+  @type t :: :code | :judge | :criterion | :custom
 
   @values [
     :code,
     :judge,
     :criterion,
+    :custom,
   ]
 
   @doc "Every value, in declaration order."
@@ -509,6 +510,7 @@ defmodule Mcpd.ScorerKind do
   def to_wire(:code), do: "code"
   def to_wire(:judge), do: "judge"
   def to_wire(:criterion), do: "criterion"
+  def to_wire(:custom), do: "custom"
 
   @doc """
   Parse a wire value.
@@ -521,6 +523,7 @@ defmodule Mcpd.ScorerKind do
   def from_wire("code"), do: {:ok, :code}
   def from_wire("judge"), do: {:ok, :judge}
   def from_wire("criterion"), do: {:ok, :criterion}
+  def from_wire("custom"), do: {:ok, :custom}
   def from_wire(_), do: :error
 end
 
@@ -2013,6 +2016,111 @@ defmodule Mcpd.SsoProvider do
   def from_wire(_), do: :error
 end
 
+defmodule Mcpd.PromptKind do
+  @moduledoc """
+  The shape of a prompt's body.
+  """
+
+  @type t :: :text | :chat
+
+  @values [
+    :text,
+    :chat,
+  ]
+
+  @doc "Every value, in declaration order."
+  @spec values() :: [t()]
+  def values, do: @values
+
+  @doc "The wire representation of a value."
+  @spec to_wire(t()) :: String.t()
+  def to_wire(:text), do: "text"
+  def to_wire(:chat), do: "chat"
+
+  @doc """
+  Parse a wire value.
+
+  Returns `:error` on an unknown value rather than raising: a newer daemon
+  may send a value this build has never heard of, and an SDK that crashes on
+  one it does not recognise breaks the agent it is meant to be observing.
+  """
+  @spec from_wire(String.t()) :: {:ok, t()} | :error
+  def from_wire("text"), do: {:ok, :text}
+  def from_wire("chat"), do: {:ok, :chat}
+  def from_wire(_), do: :error
+end
+
+defmodule Mcpd.ScorerDefinitionKind do
+  @moduledoc """
+  How a stored scorer definition reaches its answer.
+  """
+
+  @type t :: :judge | :code
+
+  @values [
+    :judge,
+    :code,
+  ]
+
+  @doc "Every value, in declaration order."
+  @spec values() :: [t()]
+  def values, do: @values
+
+  @doc "The wire representation of a value."
+  @spec to_wire(t()) :: String.t()
+  def to_wire(:judge), do: "judge"
+  def to_wire(:code), do: "code"
+
+  @doc """
+  Parse a wire value.
+
+  Returns `:error` on an unknown value rather than raising: a newer daemon
+  may send a value this build has never heard of, and an SDK that crashes on
+  one it does not recognise breaks the agent it is meant to be observing.
+  """
+  @spec from_wire(String.t()) :: {:ok, t()} | :error
+  def from_wire("judge"), do: {:ok, :judge}
+  def from_wire("code"), do: {:ok, :code}
+  def from_wire(_), do: :error
+end
+
+defmodule Mcpd.ReviewStatus do
+  @moduledoc """
+  Where an item in the review queue has got to.
+  """
+
+  @type t :: :pending | :reviewed | :dismissed
+
+  @values [
+    :pending,
+    :reviewed,
+    :dismissed,
+  ]
+
+  @doc "Every value, in declaration order."
+  @spec values() :: [t()]
+  def values, do: @values
+
+  @doc "The wire representation of a value."
+  @spec to_wire(t()) :: String.t()
+  def to_wire(:pending), do: "pending"
+  def to_wire(:reviewed), do: "reviewed"
+  def to_wire(:dismissed), do: "dismissed"
+
+  @doc """
+  Parse a wire value.
+
+  Returns `:error` on an unknown value rather than raising: a newer daemon
+  may send a value this build has never heard of, and an SDK that crashes on
+  one it does not recognise breaks the agent it is meant to be observing.
+  """
+  @spec from_wire(String.t()) :: {:ok, t()} | :error
+  def from_wire("pending"), do: {:ok, :pending}
+  def from_wire("reviewed"), do: {:ok, :reviewed}
+  def from_wire("dismissed"), do: {:ok, :dismissed}
+  def from_wire(_), do: :error
+end
+
 defmodule Mcpd.InputTokenDetails do
   @moduledoc """
   Input tokens broken down by how the provider billed them. Every field is optional; absent means the provider did not report it, which is different from zero.
@@ -2777,6 +2885,8 @@ defmodule Mcpd.ScorerConfig do
           span_name: String.t() | nil,
           tool_name: String.t() | nil,
           pattern: String.t() | nil,
+          trajectory_match: String.t() | nil,
+          max_steps: non_neg_integer() | nil,
           min_chars: non_neg_integer() | nil,
           max_chars: non_neg_integer() | nil,
           json_schema: term() | nil
@@ -2799,6 +2909,8 @@ defmodule Mcpd.ScorerConfig do
     span_name: nil,
     tool_name: nil,
     pattern: nil,
+    trajectory_match: nil,
+    max_steps: nil,
     min_chars: nil,
     max_chars: nil,
     json_schema: nil,
@@ -5117,6 +5229,407 @@ defmodule Mcpd.SsoCallbackRequest do
   ]
 end
 
+defmodule Mcpd.CreatePromptRequest do
+  @moduledoc """
+  A new version of a prompt. Posting a body identical to the latest version stores nothing new and returns that version, so a deploy that posts its prompts on every start is a no-op when nothing changed.
+  """
+
+  @type t :: %__MODULE__{
+          name: String.t(),
+          kind: Mcpd.PromptKind.t() | nil,
+          template: String.t() | nil,
+          messages: term() | nil,
+          config: term() | nil,
+          note: String.t() | nil,
+          labels: [String.t()] | nil
+        }
+
+  @enforce_keys [:name]
+  defstruct [
+    name: nil,
+    kind: nil,
+    template: nil,
+    messages: nil,
+    config: nil,
+    note: nil,
+    labels: [],
+  ]
+end
+
+defmodule Mcpd.PromptLabelRequest do
+  @moduledoc """
+  Which version a label should point at.
+  """
+
+  @type t :: %__MODULE__{
+          version: non_neg_integer()
+        }
+
+  @enforce_keys [:version]
+  defstruct [
+    version: nil,
+  ]
+end
+
+defmodule Mcpd.PromptVersionsResponse do
+  @moduledoc """
+  Every version of one prompt, newest first.
+  """
+
+  @type t :: %__MODULE__{
+          name: String.t(),
+          versions: [Mcpd.Prompt.t()]
+        }
+
+  @enforce_keys [:name, :versions]
+  defstruct [
+    name: nil,
+    versions: [],
+  ]
+end
+
+defmodule Mcpd.CreateScorerDefinitionRequest do
+  @moduledoc """
+  A new version of a scorer definition. A body identical to the latest version is not stored again.
+  """
+
+  @type t :: %__MODULE__{
+          id: String.t(),
+          kind: Mcpd.ScorerDefinitionKind.t(),
+          description: String.t(),
+          direction: Mcpd.ScoreDirection.t() | nil,
+          prompt: String.t() | nil,
+          builtin: String.t() | nil,
+          config: Mcpd.ScorerConfig.t() | nil,
+          note: String.t() | nil
+        }
+
+  @enforce_keys [:id, :kind, :description]
+  defstruct [
+    id: nil,
+    kind: nil,
+    description: nil,
+    direction: nil,
+    prompt: nil,
+    builtin: nil,
+    config: nil,
+    note: nil,
+  ]
+end
+
+defmodule Mcpd.ScorerDefinitionVersions do
+  @moduledoc """
+  Every version of one scorer definition, newest first.
+  """
+
+  @type t :: %__MODULE__{
+          id: String.t(),
+          versions: [Mcpd.ScorerDefinition.t()]
+        }
+
+  @enforce_keys [:id, :versions]
+  defstruct [
+    id: nil,
+    versions: [],
+  ]
+end
+
+defmodule Mcpd.CreateEvaluationRuleRequest do
+  @moduledoc """
+  A new version of a live scoring rule. Posting the same body as the latest version stores nothing new.
+  """
+
+  @type t :: %__MODULE__{
+          id: String.t(),
+          scorers: [String.t()],
+          enabled: boolean() | nil,
+          sample_rate: float() | nil,
+          name: String.t() | nil,
+          kind: Mcpd.SpanKind.t() | nil,
+          environment: String.t() | nil,
+          tags: [String.t()] | nil,
+          status: Mcpd.SpanStatus.t() | nil,
+          config: Mcpd.ScorerConfig.t() | nil,
+          max_judged_per_minute: non_neg_integer() | nil,
+          note: String.t() | nil
+        }
+
+  @enforce_keys [:id, :scorers]
+  defstruct [
+    id: nil,
+    scorers: [],
+    enabled: nil,
+    sample_rate: nil,
+    name: nil,
+    kind: nil,
+    environment: nil,
+    tags: [],
+    status: nil,
+    config: nil,
+    max_judged_per_minute: nil,
+    note: nil,
+  ]
+end
+
+defmodule Mcpd.TrajectoryStep do
+  @moduledoc """
+  One action an agent took: a tool call, a model generation or a handoff, in the order they started.
+  """
+
+  @type t :: %__MODULE__{
+          index: non_neg_integer(),
+          span_id: String.t(),
+          kind: Mcpd.SpanKind.t(),
+          name: String.t(),
+          status: Mcpd.SpanStatus.t(),
+          start_offset_ms: float(),
+          duration_ms: float() | nil,
+          model: String.t() | nil,
+          input_preview: String.t() | nil,
+          output_preview: String.t() | nil,
+          tokens: non_neg_integer() | nil
+        }
+
+  @enforce_keys [:index, :span_id, :kind, :name, :status, :start_offset_ms]
+  defstruct [
+    index: nil,
+    span_id: nil,
+    kind: nil,
+    name: nil,
+    status: nil,
+    start_offset_ms: nil,
+    duration_ms: nil,
+    model: nil,
+    input_preview: nil,
+    output_preview: nil,
+    tokens: nil,
+  ]
+end
+
+defmodule Mcpd.Trajectory do
+  @moduledoc """
+  A run read as the sequence of actions its agent took. This is what a trajectory is scored on: which tools were called, in what order, how many steps it took, and whether it ended with an answer.
+  """
+
+  @type t :: %__MODULE__{
+          trace_id: String.t(),
+          steps: [Mcpd.TrajectoryStep.t()],
+          tool_sequence: [String.t()],
+          step_count: non_neg_integer(),
+          tool_count: non_neg_integer(),
+          error_count: non_neg_integer(),
+          goal_reached: boolean(),
+          final_output_preview: String.t() | nil
+        }
+
+  @enforce_keys [:trace_id, :steps, :tool_sequence, :step_count, :tool_count, :error_count, :goal_reached]
+  defstruct [
+    trace_id: nil,
+    steps: [],
+    tool_sequence: [],
+    step_count: nil,
+    tool_count: nil,
+    error_count: nil,
+    goal_reached: nil,
+    final_output_preview: nil,
+  ]
+end
+
+defmodule Mcpd.ExperimentScoreRequest do
+  @moduledoc """
+  Which scorers to run over every run recorded under an experiment.
+  """
+
+  @type t :: %__MODULE__{
+          scorers: [String.t()],
+          dry_run: boolean(),
+          config: Mcpd.ScorerConfig.t() | nil
+        }
+
+  @enforce_keys [:scorers]
+  defstruct [
+    scorers: [],
+    dry_run: false,
+    config: nil,
+  ]
+end
+
+defmodule Mcpd.ExperimentItemResult do
+  @moduledoc """
+  One case of an experiment: the run that answered it and how each scorer marked it.
+  """
+
+  @type t :: %__MODULE__{
+          trace_id: String.t(),
+          status: Mcpd.SpanStatus.t(),
+          scores: term(),
+          item_id: String.t() | nil,
+          duration_ns: non_neg_integer() | nil,
+          cost: float() | nil,
+          input_preview: String.t() | nil,
+          output_preview: String.t() | nil,
+          expected: term() | nil
+        }
+
+  @enforce_keys [:trace_id, :status, :scores]
+  defstruct [
+    trace_id: nil,
+    status: nil,
+    scores: nil,
+    item_id: nil,
+    duration_ns: nil,
+    cost: nil,
+    input_preview: nil,
+    output_preview: nil,
+    expected: nil,
+  ]
+end
+
+defmodule Mcpd.ScorerSummary do
+  @moduledoc """
+  One scorer's marks across an experiment.
+  """
+
+  @type t :: %__MODULE__{
+          scorer_id: String.t(),
+          n: non_neg_integer(),
+          mean: float(),
+          min: float(),
+          max: float(),
+          direction: Mcpd.ScoreDirection.t()
+        }
+
+  @enforce_keys [:scorer_id, :n, :mean, :min, :max, :direction]
+  defstruct [
+    scorer_id: nil,
+    n: nil,
+    mean: nil,
+    min: nil,
+    max: nil,
+    direction: nil,
+  ]
+end
+
+defmodule Mcpd.ExperimentResults do
+  @moduledoc """
+  An experiment case by case, with a summary per scorer. Two of these joined on `item_id` are the per-case comparison of two versions.
+  """
+
+  @type t :: %__MODULE__{
+          experiment_id: String.t(),
+          items: [Mcpd.ExperimentItemResult.t()],
+          scorers: [Mcpd.ScorerSummary.t()],
+          runs: non_neg_integer(),
+          failed: non_neg_integer()
+        }
+
+  @enforce_keys [:experiment_id, :items, :scorers, :runs, :failed]
+  defstruct [
+    experiment_id: nil,
+    items: [],
+    scorers: [],
+    runs: nil,
+    failed: nil,
+  ]
+end
+
+defmodule Mcpd.CreateReviewItemRequest do
+  @moduledoc """
+  A run to queue for review.
+  """
+
+  @type t :: %__MODULE__{
+          trace_id: String.t(),
+          span_id: String.t() | nil,
+          feedback_id: String.t() | nil,
+          assignee: String.t() | nil,
+          note: String.t() | nil
+        }
+
+  @enforce_keys [:trace_id]
+  defstruct [
+    trace_id: nil,
+    span_id: nil,
+    feedback_id: nil,
+    assignee: nil,
+    note: nil,
+  ]
+end
+
+defmodule Mcpd.UpdateReviewItemRequest do
+  @moduledoc """
+  A change to a review item. Absent fields keep their value.
+  """
+
+  @type t :: %__MODULE__{
+          status: Mcpd.ReviewStatus.t() | nil,
+          assignee: String.t() | nil,
+          note: String.t() | nil
+        }
+
+  defstruct [
+    status: nil,
+    assignee: nil,
+    note: nil,
+  ]
+end
+
+defmodule Mcpd.ReviewQueueResponse do
+  @moduledoc """
+  The review queue, newest first.
+  """
+
+  @type t :: %__MODULE__{
+          items: [Mcpd.ReviewItem.t()],
+          pending: non_neg_integer()
+        }
+
+  @enforce_keys [:items, :pending]
+  defstruct [
+    items: [],
+    pending: nil,
+  ]
+end
+
+defmodule Mcpd.DatasetVersion do
+  @moduledoc """
+  A frozen copy of a dataset's cases. An experiment that names a version runs against exactly those cases, whatever has been added to the dataset since.
+  """
+
+  @type t :: %__MODULE__{
+          dataset_id: String.t(),
+          version: non_neg_integer(),
+          item_count: non_neg_integer(),
+          created_at: DateTime.t(),
+          note: String.t() | nil,
+          created_by: String.t() | nil
+        }
+
+  @enforce_keys [:dataset_id, :version, :item_count, :created_at]
+  defstruct [
+    dataset_id: nil,
+    version: nil,
+    item_count: nil,
+    created_at: nil,
+    note: nil,
+    created_by: nil,
+  ]
+end
+
+defmodule Mcpd.CreateDatasetVersionRequest do
+  @moduledoc """
+  Freeze the dataset's current cases as a new version.
+  """
+
+  @type t :: %__MODULE__{
+          note: String.t() | nil
+        }
+
+  defstruct [
+    note: nil,
+  ]
+end
+
 defmodule Mcpd.Span do
   @moduledoc """
   One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.
@@ -5225,6 +5738,8 @@ defmodule Mcpd.Trace do
           duration_ns: non_neg_integer() | nil,
           usage: Mcpd.TokenUsage.t() | nil,
           cost: Mcpd.Cost.t() | nil,
+          input_preview: String.t() | nil,
+          output_preview: String.t() | nil,
           tags: [String.t()] | nil,
           score_summary: term() | nil,
           feedback_summary: term() | nil
@@ -5249,6 +5764,8 @@ defmodule Mcpd.Trace do
     duration_ns: nil,
     usage: nil,
     cost: nil,
+    input_preview: nil,
+    output_preview: nil,
     tags: [],
     score_summary: nil,
     feedback_summary: nil,
@@ -6030,5 +6547,201 @@ defmodule Mcpd.Theme do
   @doc "The primary key, as declared in the spec."
   @spec primary_key() :: [String.t()]
   def primary_key, do: ["snapshot_id", "aspect", "theme_id"]
+end
+
+defmodule Mcpd.Prompt do
+  @moduledoc """
+  One version of a named prompt. A version never changes once stored: a new body is a new version, and labels such as `production` and `staging` point at the version a caller should use. SDKs fetch a prompt by name and label, render it with variables, and link the spans that used it, so a trace shows which version produced an answer.
+
+  Stored in the `documents` table.
+  """
+
+  @type t :: %__MODULE__{
+          project: String.t(),
+          name: String.t(),
+          version: non_neg_integer(),
+          kind: Mcpd.PromptKind.t(),
+          variables: [String.t()],
+          labels: [String.t()],
+          created_at: DateTime.t(),
+          template: String.t() | nil,
+          messages: term() | nil,
+          config: term() | nil,
+          note: String.t() | nil,
+          created_by: String.t() | nil
+        }
+
+  @enforce_keys [:project, :name, :version, :kind, :variables, :labels, :created_at]
+  defstruct [
+    project: nil,
+    name: nil,
+    version: nil,
+    kind: nil,
+    variables: [],
+    labels: [],
+    created_at: nil,
+    template: nil,
+    messages: nil,
+    config: nil,
+    note: nil,
+    created_by: nil,
+  ]
+
+  @doc "The storage table this entity lives in."
+  @spec table() :: String.t()
+  def table, do: "documents"
+
+  @doc "The primary key, as declared in the spec."
+  @spec primary_key() :: [String.t()]
+  def primary_key, do: ["project", "name", "version"]
+end
+
+defmodule Mcpd.ScorerDefinition do
+  @moduledoc """
+  A scorer the project defined: a judge prompt written for this agent, or a code scorer with its settings fixed. Stored as numbered versions; a version never changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the latest version or `id@3` for version 3.
+
+  Stored in the `documents` table.
+  """
+
+  @type t :: %__MODULE__{
+          project: String.t(),
+          id: String.t(),
+          version: non_neg_integer(),
+          kind: Mcpd.ScorerDefinitionKind.t(),
+          description: String.t(),
+          direction: Mcpd.ScoreDirection.t(),
+          created_at: DateTime.t(),
+          prompt: String.t() | nil,
+          builtin: String.t() | nil,
+          config: Mcpd.ScorerConfig.t() | nil,
+          note: String.t() | nil,
+          created_by: String.t() | nil
+        }
+
+  @enforce_keys [:project, :id, :version, :kind, :description, :direction, :created_at]
+  defstruct [
+    project: nil,
+    id: nil,
+    version: nil,
+    kind: nil,
+    description: nil,
+    direction: nil,
+    created_at: nil,
+    prompt: nil,
+    builtin: nil,
+    config: nil,
+    note: nil,
+    created_by: nil,
+  ]
+
+  @doc "The storage table this entity lives in."
+  @spec table() :: String.t()
+  def table, do: "documents"
+
+  @doc "The primary key, as declared in the spec."
+  @spec primary_key() :: [String.t()]
+  def primary_key, do: ["project", "id", "version"]
+end
+
+defmodule Mcpd.EvaluationRule do
+  @moduledoc """
+  A rule for live scoring: which finished runs to score, with which scorers, and how many of them. The daemon reads finished runs as they arrive and scores the sampled ones in the background, so a quality drop shows up in minutes rather than at the next offline pass. Scores it writes have source `live`.
+
+  Stored in the `documents` table.
+  """
+
+  @type t :: %__MODULE__{
+          project: String.t(),
+          id: String.t(),
+          version: non_neg_integer(),
+          enabled: boolean(),
+          scorers: [String.t()],
+          sample_rate: float(),
+          tags: [String.t()],
+          max_judged_per_minute: non_neg_integer(),
+          created_at: DateTime.t(),
+          name: String.t() | nil,
+          kind: Mcpd.SpanKind.t() | nil,
+          environment: String.t() | nil,
+          status: Mcpd.SpanStatus.t() | nil,
+          config: Mcpd.ScorerConfig.t() | nil,
+          note: String.t() | nil,
+          created_by: String.t() | nil
+        }
+
+  @enforce_keys [:project, :id, :version, :enabled, :scorers, :sample_rate, :tags, :max_judged_per_minute, :created_at]
+  defstruct [
+    project: nil,
+    id: nil,
+    version: nil,
+    enabled: nil,
+    scorers: [],
+    sample_rate: nil,
+    tags: [],
+    max_judged_per_minute: nil,
+    created_at: nil,
+    name: nil,
+    kind: nil,
+    environment: nil,
+    status: nil,
+    config: nil,
+    note: nil,
+    created_by: nil,
+  ]
+
+  @doc "The storage table this entity lives in."
+  @spec table() :: String.t()
+  def table, do: "documents"
+
+  @doc "The primary key, as declared in the spec."
+  @spec primary_key() :: [String.t()]
+  def primary_key, do: ["project", "id", "version"]
+end
+
+defmodule Mcpd.ReviewItem do
+  @moduledoc """
+  A run, or one step of it, queued for a person to review. Queue the runs a low score or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every change is kept, so the item's history says who decided what and when. Corrections and labels go on the run as feedback.
+
+  Stored in the `documents` table.
+  """
+
+  @type t :: %__MODULE__{
+          project: String.t(),
+          review_id: String.t(),
+          version: non_neg_integer(),
+          trace_id: String.t(),
+          status: Mcpd.ReviewStatus.t(),
+          created_at: DateTime.t(),
+          updated_at: DateTime.t(),
+          span_id: String.t() | nil,
+          feedback_id: String.t() | nil,
+          assignee: String.t() | nil,
+          note: String.t() | nil,
+          updated_by: String.t() | nil
+        }
+
+  @enforce_keys [:project, :review_id, :version, :trace_id, :status, :created_at, :updated_at]
+  defstruct [
+    project: nil,
+    review_id: nil,
+    version: nil,
+    trace_id: nil,
+    status: nil,
+    created_at: nil,
+    updated_at: nil,
+    span_id: nil,
+    feedback_id: nil,
+    assignee: nil,
+    note: nil,
+    updated_by: nil,
+  ]
+
+  @doc "The storage table this entity lives in."
+  @spec table() :: String.t()
+  def table, do: "documents"
+
+  @doc "The primary key, as declared in the spec."
+  @spec primary_key() :: [String.t()]
+  def primary_key, do: ["project", "review_id", "version"]
 end
 

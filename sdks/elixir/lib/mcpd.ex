@@ -138,6 +138,9 @@ defmodule Mcpd do
   The span goes on the wire when it opens and again when it closes, contract
   behaviour B8: a run that crashes mid-flight is exactly the run you need to
   see, and a span sent only on the way out is never seen at all.
+
+  `sampled: true` keeps a root span and its trace whatever the sample rate,
+  and `sampled: false` drops them. A child span ignores it and follows its root.
   """
   @spec with_span(pid(), String.t(), keyword(), (-> any())) :: any()
   def with_span(client, name, opts \\ [], fun) do
@@ -208,6 +211,39 @@ defmodule Mcpd do
     e -> Worker.reject(client, "a recorded span was refused and dropped: #{Exception.message(e)}")
   catch
     _kind, reason -> Worker.reject(client, "a recorded span was refused and dropped: #{inspect(reason)}")
+  end
+
+  @doc false
+  # Open a span with no block, for a scope that outlives the call that opened
+  # it: a stream, which `Mcpd.ModelCall.record_stream/4` closes when the caller
+  # stops reading. Parent, sampling and correlation are resolved here exactly
+  # as `with_span/4` resolves them, and the open record goes out now (B8).
+  @spec __open__(pid(), String.t(), keyword()) :: map()
+  def __open__(client, name, opts) do
+    span = open(client, name, opts)
+    emit(client, span, :open, nil, nil)
+    span
+  end
+
+  @doc false
+  # Close a span opened by `__open__/3`. `opts` replaces the options it was
+  # opened with, because what a stream says about its call is only known at
+  # the end. `failure` is `{kind, reason, stacktrace}` when the scope raised,
+  # threw or exited. Goes through the same record path as `with_span/4`, so
+  # payload capture, redaction and step usage apply the same way.
+  @spec __close__(pid(), map(), keyword(), term(), {atom(), term(), list()} | nil) :: :ok
+  def __close__(client, span, opts, output, failure) do
+    span = %{span | opts: opts}
+
+    case failure do
+      nil -> emit(client, span, :ok, output, nil)
+      {kind, reason, trace} -> emit(client, span, :error, output, failure_of(kind, reason, trace))
+    end
+
+    accumulate(span)
+    :ok
+  rescue
+    e -> Worker.warn(client, "span could not be recorded and was dropped: #{Exception.message(e)}")
   end
 
   @doc """
@@ -375,14 +411,30 @@ defmodule Mcpd do
 
   # ------------------------------------------------------------- reads -------
 
+  # The query parameters each list endpoint documents. The daemon answers 400
+  # to any other, so a key outside these is refused here, before the request,
+  # with the list a caller can pick from.
+  @trace_filters ~w(project q status kind name tags session_id thread_id user_id environment
+                    model from to min_duration_ms max_duration_ms min_cost max_cost min_tokens
+                    has_score score_below score_above has_feedback experiment_id preview sort order
+                    limit cursor)a
+  @span_filters ~w(project q kind status name model trace_id prompt prompt_version from to
+                   min_duration_ms sort order limit cursor)a
+
   @doc """
   A page of runs. Filters are the HTTP API's query parameters, as a keyword
-  list: `status`, `kind`, `name`, `tags`, `session_id`, `from`, `to`, `limit`,
-  `cursor` and the rest. `from` and `to` take a `DateTime` or a shorthand such
-  as `"-1h"`.
+  list: `status`, `kind`, `name`, `tags`, `session_id`, `from`, `to`,
+  `min_duration_ms`, `max_duration_ms`, `min_cost`, `max_cost`, `min_tokens`,
+  `has_score` with `score_below` or `score_above`, `has_feedback` (a boolean),
+  `experiment_id`, `preview` (a boolean, which fills `input_preview` and
+  `output_preview`), `limit`, `cursor` and the rest. `from` and `to` take a `DateTime` or a
+  shorthand such as `"-1h"`. A key the endpoint does not take raises
+  `ArgumentError` before a request is made.
   """
   @spec list_traces(pid(), keyword()) :: {:ok, Mcpd.TraceListResponse.t()} | {:error, term()}
-  def list_traces(client, filters \\ []), do: read(client, "/traces", filters, Mcpd.TraceListResponse)
+  def list_traces(client, filters \\ []) do
+    read(client, "/traces", documented!(filters, @trace_filters, "list_traces"), Mcpd.TraceListResponse)
+  end
 
   @doc "Read one stored run back, with its spans. `include: [\"logs\", \"scores\", \"feedback\"]` adds the signals attached to it."
   @spec get_trace(pid(), String.t(), keyword()) :: {:ok, Mcpd.TraceDetail.t()} | {:error, term()}
@@ -391,9 +443,27 @@ defmodule Mcpd do
     read(client, "/traces/" <> trace_id, filters, Mcpd.TraceDetail)
   end
 
-  @doc "A page of steps, across runs."
+  @doc """
+  A page of steps, across runs. `prompt:` and `prompt_version:` find the spans
+  linked to a prompt with `Mcpd.Prompts.attributes/1`. A key the endpoint does
+  not take raises `ArgumentError` before a request is made.
+  """
   @spec list_spans(pid(), keyword()) :: {:ok, Mcpd.SpanListResponse.t()} | {:error, term()}
-  def list_spans(client, filters \\ []), do: read(client, "/spans", filters, Mcpd.SpanListResponse)
+  def list_spans(client, filters \\ []) do
+    read(client, "/spans", documented!(filters, @span_filters, "list_spans"), Mcpd.SpanListResponse)
+  end
+
+  defp documented!(filters, allowed, call) do
+    case Enum.reject(Keyword.keys(filters), &(&1 in allowed)) do
+      [] ->
+        filters
+
+      unknown ->
+        raise ArgumentError,
+              "#{call} does not take #{Enum.map_join(unknown, ", ", &inspect/1)}; " <>
+                "it takes #{Enum.map_join(allowed, ", ", &inspect/1)}"
+    end
+  end
 
   @doc "A page of log records. Filtering by level is always `>=`."
   @spec list_logs(pid(), keyword()) :: {:ok, Mcpd.LogListResponse.t()} | {:error, term()}
@@ -483,6 +553,28 @@ defmodule Mcpd do
     read(client, "/analytics/cost", filters, Mcpd.CostBreakdown)
   end
 
+  # ------------------------------------------------------------- experiments
+
+  # The experiment surface, in full in `Mcpd.Experiments` (contract section 5.2).
+
+  @doc "A run as the steps its agent took. See `Mcpd.Experiments.get_trajectory/2`."
+  defdelegate get_trajectory(client, trace_id), to: Mcpd.Experiments
+
+  @doc "The cases of a dataset. See `Mcpd.Experiments.list_dataset_items/3`."
+  defdelegate list_dataset_items(client, dataset_id, opts \\ []), to: Mcpd.Experiments
+
+  @doc "Record or replace an experiment. See `Mcpd.Experiments.create_experiment/2`."
+  defdelegate create_experiment(client, experiment), to: Mcpd.Experiments
+
+  @doc "Score an experiment's runs. See `Mcpd.Experiments.score_experiment/4`."
+  defdelegate score_experiment(client, experiment_id, scorers \\ [], config \\ nil), to: Mcpd.Experiments
+
+  @doc "An experiment case by case. See `Mcpd.Experiments.experiment_results/2`."
+  defdelegate experiment_results(client, experiment_id), to: Mcpd.Experiments
+
+  @doc "Run a function over a dataset and score it. See `Mcpd.Experiments.run_experiment/4`."
+  defdelegate run_experiment(client, dataset_id, target, opts \\ []), to: Mcpd.Experiments
+
   @doc """
   Whether the daemon is alive, and which spec version it implements.
 
@@ -521,6 +613,25 @@ defmodule Mcpd do
       config -> fetch(config, String.trim_trailing(config.endpoint, "/") <> "/healthz", Mcpd.HealthStatus)
     end
   end
+
+  # ------------------------------------------------------------- prompts ----
+
+  # The prompt surface, in full in `Mcpd.Prompts` (contract section 5.1).
+
+  @doc "One version of a prompt, cached. See `Mcpd.Prompts.get_prompt/3`."
+  defdelegate get_prompt(client, name, opts \\ []), to: Mcpd.Prompts
+
+  @doc "Store a new version of a prompt. See `Mcpd.Prompts.create_prompt/3`."
+  defdelegate create_prompt(client, attrs, opts \\ []), to: Mcpd.Prompts
+
+  @doc "Point a label at a version. See `Mcpd.Prompts.set_prompt_label/5`."
+  defdelegate set_prompt_label(client, name, label, version, opts \\ []), to: Mcpd.Prompts
+
+  @doc "Fill a prompt's variables. See `Mcpd.Prompts.render/2`."
+  defdelegate render_prompt(prompt, variables \\ %{}), to: Mcpd.Prompts, as: :render
+
+  @doc "`render_prompt/2`, raising `Mcpd.PromptRenderError`. See `Mcpd.Prompts.render!/2`."
+  defdelegate render_prompt!(prompt, variables \\ %{}), to: Mcpd.Prompts, as: :render!
 
   @doc false
   # Exposed for the test that pins the wire timestamp format. The daemon rejects
@@ -591,7 +702,16 @@ defmodule Mcpd do
 
         nil ->
           t = opts[:trace_id] || Ids.trace_id()
-          {t, nil, config != nil and sampled?(config.sample, t)}
+          # `sampled:` overrides the ratio at a root only, for a run that must
+          # be kept whatever the rate, such as an experiment's case. A child
+          # still inherits its root's decision (B4).
+          keep =
+            case opts[:sampled] do
+              decided when is_boolean(decided) -> decided
+              _ -> config != nil and sampled?(config.sample, t)
+            end
+
+          {t, nil, keep}
       end
 
     %{
@@ -828,6 +948,12 @@ defmodule Mcpd do
       "message" => if(String.trim(message) == "", do: kind, else: message),
       "stack" => stack(stacktrace)
     }
+  end
+
+  defp failure_of(:error, reason, trace), do: error_of(Exception.normalize(:error, reason, trace), trace)
+
+  defp failure_of(kind, reason, trace) do
+    %{"kind" => to_string(kind), "message" => Exception.format_exit(reason), "stack" => stack(trace)}
   end
 
   defp stack(stacktrace), do: stacktrace |> Exception.format_stacktrace() |> String.slice(0, 4_000)

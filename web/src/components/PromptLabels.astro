@@ -1,0 +1,175 @@
+---
+/**
+ * One prompt's history: versions stored in order, labels moved between them,
+ * and the version a fetch with no selector returns after each step.
+ *
+ * Every frame is folded out of the step list below by the SDK's own rule: the
+ * version `production` points at, or the latest when no version carries it.
+ * So the release and the roll back the figure shows are the ones the daemon
+ * would answer, and editing a step moves the answer with it.
+ *
+ * The markup is the last frame. Playing replays the steps that led there.
+ */
+
+interface Props {
+  name?: string
+  class?: string
+}
+const { name = 'support/reply', class: className = '' } = Astro.props
+
+type Step = { create: number } | { label: string; version: number }
+const STEPS: Step[] = [
+  { create: 1 },
+  { label: 'production', version: 1 },
+  { create: 2 },
+  { label: 'staging', version: 2 },
+  { label: 'production', version: 2 },
+  { create: 3 },
+  { label: 'staging', version: 3 },
+  { label: 'production', version: 3 },
+  { label: 'production', version: 2 },
+]
+const LABELS = ['production', 'staging']
+const VERSIONS = Math.max(...STEPS.map((s) => ('create' in s ? s.create : 0)))
+
+interface Frame {
+  versions: number
+  at: Record<string, number>
+  fetched: number
+  call: string
+}
+const frames: Frame[] = []
+{
+  let versions = 0
+  const at: Record<string, number> = {}
+  for (const s of STEPS) {
+    let call: string
+    if ('create' in s) {
+      versions = s.create
+      call = `POST /v1/api/prompts → v${s.create}`
+    } else {
+      const back = at[s.label] !== undefined && s.version < at[s.label]
+      at[s.label] = s.version
+      call = `PUT labels/${s.label} {version: ${s.version}}${back ? ', a roll back' : ''}`
+    }
+    frames.push({ versions, at: { ...at }, fetched: at['production'] ?? versions, call })
+  }
+}
+const last = frames[frames.length - 1]
+
+const W = 760
+const BOX_W = 150
+const GAP = (W - 80 - BOX_W * VERSIONS) / Math.max(1, VERSIONS - 1)
+const boxX = (v: number) => 40 + (v - 1) * (BOX_W + GAP)
+const ROW = { production: 34, staging: 62 } as Record<string, number>
+const BOX_Y = 92
+const BOX_H = 50
+const chipX = (v: number) => boxX(v) + BOX_W / 2
+---
+
+<figure class={`fig ${className}`} data-motion data-prompt-labels data-frames={JSON.stringify(frames)}>
+  <div class="fig-head">
+    <span class="legend">{name}</span>
+    <span class="data pl-call ml-auto text-[0.75rem] text-ink-2">{last.call}</span>
+  </div>
+  <div class="px-3 py-3 sm:px-5">
+    <svg viewBox={`0 0 ${W} 214`} class="block h-auto w-full" role="img" aria-label={`Versions of ${name}, the labels that point at them, and the version a fetch returns`}>
+      {Array.from({ length: VERSIONS }, (_, i) => i + 1).map((v) => (
+        <g class="pl-box" data-v={v} opacity={v <= last.versions ? 1 : 0.2}>
+          <rect
+            x={boxX(v)} y={BOX_Y} width={BOX_W} height={BOX_H} rx="6"
+            fill="var(--color-panel-1)"
+            stroke={v === last.fetched ? 'var(--color-accent)' : 'var(--color-scribe)'}
+            stroke-width={v === last.fetched ? 1.5 : 1}
+          />
+          <text x={boxX(v) + BOX_W / 2} y={BOX_Y + BOX_H / 2} text-anchor="middle" dominant-baseline="central" fill="var(--color-ink)" style="font-family:var(--font-data);font-size:13px">v{v}</text>
+        </g>
+      ))}
+      {LABELS.map((l) => (
+        <g class="pl-chip" data-label={l} opacity={last.at[l] ? 1 : 0} style={`transform: translate(${chipX(last.at[l] ?? 1)}px, ${ROW[l]}px)`}>
+          <rect x="-48" y="-10" width="96" height="20" rx="4" fill={l === 'production' ? 'color-mix(in oklab, var(--color-accent) 16%, transparent)' : 'var(--color-well)'} stroke={l === 'production' ? 'var(--color-accent)' : 'var(--color-scribe)'} stroke-width="0.75" />
+          <text x="0" y="0" text-anchor="middle" dominant-baseline="central" fill={l === 'production' ? 'var(--color-accent)' : 'var(--color-ink-2)'} style="font-family:var(--font-data);font-size:11px">{l}</text>
+          <line x1="0" y1="10" x2="0" y2={BOX_Y - ROW[l] - 2} stroke="var(--color-scribe)" stroke-dasharray="2 3" />
+        </g>
+      ))}
+      <g class="pl-fetch" style={`transform: translateX(${chipX(last.fetched)}px)`}>
+        <path d={`M0,${BOX_Y + BOX_H + 4} L-5,${BOX_Y + BOX_H + 13} L5,${BOX_Y + BOX_H + 13} Z`} fill="var(--color-accent)" />
+      </g>
+      <text class="pl-result" x={W / 2} y="196" text-anchor="middle" fill="var(--color-ink)" style="font-family:var(--font-data);font-size:12px">fetch {name} → v{last.fetched}</text>
+    </svg>
+  </div>
+  <figcaption class="fig-foot">
+    Each step is a request. The fetch with no label asks for <code>production</code>, and gets the
+    latest version while no version carries it. The last step moves <code>production</code> back to
+    v{last.fetched} and no code is deployed.
+  </figcaption>
+</figure>
+
+<style>
+  .pl-box rect { transition: stroke 200ms var(--ease-out); }
+</style>
+
+<script>
+  import { animate, each, easeOut } from '@/lib/motion'
+
+  interface Frame {
+    versions: number
+    at: Record<string, number>
+    fetched: number
+    call: string
+  }
+
+  each('[data-prompt-labels]', (fig) => {
+    const frames: Frame[] = JSON.parse(fig.dataset.frames ?? '[]')
+    if (!frames.length) return
+    const svg = fig.querySelector('svg')!
+    const boxes = [...svg.querySelectorAll<SVGGElement>('.pl-box')]
+    const centre = (v: number) => {
+      const r = boxes[v - 1]?.querySelector('rect')
+      return r ? Number(r.getAttribute('x')) + Number(r.getAttribute('width')) / 2 : 0
+    }
+    const chips = [...svg.querySelectorAll<SVGGElement>('.pl-chip')].map((g) => ({
+      g,
+      label: g.dataset.label!,
+      y: Number(/,\s*([\d.]+)px/.exec(g.style.transform)?.[1] ?? 0),
+    }))
+    const fetch = svg.querySelector<SVGGElement>('.pl-fetch')!
+    const result = svg.querySelector<SVGTextElement>('.pl-result')!
+    const call = fig.querySelector<HTMLElement>('.pl-call')!
+    const base = result.textContent!.replace(/v\d+$/, '')
+
+    const STEP = 1.4
+    const CYCLE = STEP * frames.length + 2.5
+    animate(fig, (time) => {
+      const k = time % CYCLE
+      const i = Math.min(frames.length - 1, Math.floor(k / STEP))
+      const f = frames[i]
+      const prev = frames[i - 1] ?? f
+      // The move takes the first half of a step, so the reader sees where a
+      // label came from before the fetch below it changes its answer.
+      const p = easeOut(Math.min(1, (k - i * STEP) / (STEP * 0.5)))
+      boxes.forEach((g, n) => {
+        g.setAttribute('opacity', n + 1 <= f.versions ? '1' : '0.2')
+        const r = g.querySelector('rect')!
+        const on = n + 1 === f.fetched && p === 1
+        r.setAttribute('stroke', on ? 'var(--color-accent)' : 'var(--color-scribe)')
+        r.setAttribute('stroke-width', on ? '1.5' : '1')
+      })
+      for (const c of chips) {
+        const to = f.at[c.label]
+        if (to === undefined) {
+          c.g.setAttribute('opacity', '0')
+          continue
+        }
+        const from = prev.at[c.label] ?? to
+        c.g.setAttribute('opacity', prev.at[c.label] === undefined ? String(p) : '1')
+        const x = centre(from) + (centre(to) - centre(from)) * p
+        c.g.style.transform = `translate(${x}px, ${c.y}px)`
+      }
+      const fx = centre(prev.fetched) + (centre(f.fetched) - centre(prev.fetched)) * p
+      fetch.style.transform = `translateX(${fx}px)`
+      result.textContent = `${base}v${p === 1 ? f.fetched : prev.fetched}`
+      call.textContent = f.call
+    })
+  })
+</script>

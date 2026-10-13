@@ -163,6 +163,26 @@ assert_eq!(sink.spans()[1].name, "support agent");
 # }
 ```
 
+`mcpd_sdk::testing::TestClient` does that wiring for you. Hand
+`test.client()` to the code under test, then read back finished spans, one
+per span id. Every accessor flushes first, and `TestClient::new()` stays on
+when the environment sets `MCPD_ENABLED=false`:
+
+```rust
+# use mcpd_sdk::testing::TestClient;
+# async fn f() {
+let test = TestClient::new();
+test.client().trace("support agent").end();
+
+let run = test.span("support agent").await.expect("one span by that name");
+assert!(run.end_time.is_some());
+assert_eq!(test.trees().await.len(), 1);
+# }
+```
+
+`spans(name, kind)`, `logs()`, `metrics()`, `scores()`,
+`recorded_feedback()` and `reset()` read the rest.
+
 `mcpd.stats()` answers `queued`, `dropped`, `capacity`, `exported`, `failed`
 and `rejected`, the same six names as every other SDK.
 
@@ -236,6 +256,26 @@ Recording a failure sets the status to `error`, and the message is required:
 let tool = mcpd.span("notify_customer", SpanKind::ToolCall);
 tool.set_error("sms gateway timed out after 5s");
 tool.end();
+# }
+```
+
+A streamed model call goes through `record_stream`. Read the stream it gives
+back instead of the provider's: every item comes through unchanged, and when
+the stream ends, yields an `Err` or is dropped, the span gets the model, the
+usage, the finish reason, the time to first token and the text, then ends.
+
+```rust
+# use mcpd_sdk::{Mcpd, SpanKind};
+# async fn f(mcpd: &Mcpd, chunks: Vec<serde_json::Value>) {
+use futures::StreamExt;
+
+let provider_stream = futures::stream::iter(chunks.into_iter().map(Ok::<_, String>));
+let call = mcpd.span("answer", SpanKind::ModelGeneration);
+let mut stream = call.record_stream(provider_stream, None);
+while let Some(Ok(chunk)) = stream.next().await {
+    // use each chunk as you would have
+#   let _ = chunk;
+}
 # }
 ```
 
@@ -475,6 +515,11 @@ for trace in &failures.traces {
 `list_spans`, `list_logs`, `query_metrics`, `list_scores`, `list_feedback`,
 `analytics_summary`, `analytics_cost` and `health` are all there, with the same
 shape.
+
+For experiments, `get_trajectory`, `list_dataset_items`, `create_experiment`,
+`score_experiment` and `experiment_results` mirror their endpoints, and
+`run_experiment` runs an async closure over every case of a dataset, each in
+its own root span, then scores the answers and returns the results.
 
 ## Flushing
 

@@ -7,10 +7,12 @@
  */
 
 import { responseFacts } from './model-call.js'
+import { StreamAccumulator } from './stream.js'
 import type {
   Correlation,
   EntityKind,
   ModelParameters,
+  Prompt,
   Span as SpanData,
   SpanKind,
   SpanLink,
@@ -18,6 +20,7 @@ import type {
   TokenUsage,
 } from './generated.js'
 import { modelParametersDefaults } from './generated.js'
+import { promptAttributes } from './prompts.js'
 import type { SpanContext } from './context.js'
 import { formatTraceparent, newSpanId, nowNs, formatTimestamp } from './context.js'
 
@@ -380,6 +383,57 @@ export class McpdSpan {
   }
 
   /**
+   * Record a streamed model call: wrap the provider's stream and read the
+   * wrapper instead. Every chunk comes through unchanged. The first chunk with
+   * text or a tool call marks the first token, and when the stream ends, raises
+   * or is abandoned with a `break`, the span gets what `recordResponse` would
+   * have recorded for the same call unstreamed, the text as its output, and
+   * ends. An error from the stream marks the span and is rethrown unchanged.
+   *
+   * Text and tool-call arguments past 32,768 code points are not kept, and
+   * `mcpd.stream.truncated` says so.
+   */
+  recordStream<T>(stream: AsyncIterable<T> | Iterable<T>, provider?: string): AsyncGenerator<T, void, undefined> {
+    const acc = new StreamAccumulator()
+    let done = false
+    const finish = (failure?: { error: unknown }): void => {
+      if (done) return
+      done = true
+      this.#set('recordStream', () => {
+        const response = acc.response()
+        if (response !== undefined) this.recordResponse(response, provider)
+        const output = acc.output()
+        if (output !== undefined) this.setOutput(output)
+        if (acc.truncated) this.setAttributes({ 'mcpd.stream.truncated': true })
+        if (failure !== undefined) {
+          const e = failure.error
+          const message = e instanceof Error ? e.message : String(e)
+          this.setError(message, e instanceof Error ? { kind: e.name } : {})
+        }
+      })
+      this.end()
+    }
+    const observe = (chunk: T): void => {
+      this.#set('recordStream', () => {
+        if (acc.add(chunk)) this.markFirstToken()
+      })
+    }
+    return (async function* () {
+      try {
+        for await (const chunk of stream) {
+          observe(chunk)
+          yield chunk
+        }
+      } catch (error) {
+        finish({ error })
+        throw error
+      } finally {
+        finish()
+      }
+    })()
+  }
+
+  /**
    * Record a guardrail's outcome as `mcpd.guardrail.tripped` and, when given,
    * `mcpd.guardrail.reason`. Tripping is not an error by itself; call
    * `setError` as well if it should fail the span.
@@ -389,6 +443,19 @@ export class McpdSpan {
       const add: Record<string, unknown> = { 'mcpd.guardrail.tripped': tripped }
       if (reason !== undefined) add['mcpd.guardrail.reason'] = reason
       this.#data.attributes = { ...(this.#data.attributes as object), ...add }
+    })
+  }
+
+  /**
+   * Link the prompt this step used, as `mcpd.prompt.name` and
+   * `mcpd.prompt.version`, so `listSpans({ prompt, promptVersion })` finds it.
+   * A fallback (version 0) sets the name only, and anything that is not a
+   * prompt sets nothing: instrumentation must not break the call it watches.
+   */
+  setPrompt(prompt: Prompt | null | undefined): this {
+    return this.#set('setPrompt', () => {
+      const add = promptAttributes(prompt)
+      if (add !== undefined) this.#data.attributes = { ...(this.#data.attributes as object), ...add }
     })
   }
 

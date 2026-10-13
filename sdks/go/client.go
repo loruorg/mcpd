@@ -258,6 +258,10 @@ type Client struct {
 
 	logMu   sync.Mutex
 	lastLog time.Time
+
+	// prompts holds what GetPrompt fetched, so a daemon outage after the
+	// first fetch never breaks the agent that reads them.
+	prompts promptCache
 }
 
 type flushRequest struct {
@@ -599,7 +603,7 @@ func (c *Client) startSpan(ctx context.Context, name string, req spanRequest) *A
 	sampled := parent.Sampled
 	if !hasParent {
 		traceID = newTraceID()
-		sampled = c.sampledTrace(traceID)
+		sampled = cfg.keep || c.sampledTrace(traceID)
 	}
 
 	start := cfg.startTime
@@ -833,6 +837,9 @@ func applyCorrelation(cor *Correlation, cfg *spanConfig) {
 	}
 	if cfg.release != "" {
 		cor.Release = strPtr(cfg.release)
+	}
+	if cfg.experimentID != "" {
+		cor.ExperimentID = strPtr(cfg.experimentID)
 	}
 }
 

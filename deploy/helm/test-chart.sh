@@ -153,6 +153,33 @@ lacks '^kind: Secret'
 has 'name: MCPD_POSTGRES_URL'
 has 'name: mine'
 
+RUNS_PG=(--set runs.store=postgres --set runs.postgresUrl=postgres://u:p@db:5432/mcpd)
+
+render "runs on postgres too, three replicas" "${KEYS[@]}" "${PG[@]}" "${RUNS_PG[@]}" \
+  --set replicaCount=3
+has '^  replicas: 3$'
+has 'type: RollingUpdate'
+lacks '^kind: PersistentVolumeClaim'
+has 'key: runs-postgres-url'
+has 'runs-postgres-url: "postgres://u:p@db:5432/mcpd"'
+lacks 'mcpd.runs.db'
+
+render "runs on postgres beside the embedded signal store" "${KEYS[@]}" "${RUNS_PG[@]}"
+has '^  replicas: 1$'
+has '^kind: PersistentVolumeClaim'
+has 'key: runs-postgres-url'
+has 'name: MCPD_DATA$'
+
+render "runs on postgres with the URL only in your own Secret" \
+  --set keys.existingSecret=mine --set externalStore.type=postgres --set runs.store=postgres
+lacks '^kind: Secret'
+has 'key: runs-postgres-url'
+
+render "runs off ignore runs.store" "${KEYS[@]}" "${PG[@]}" --set runs.enabled=false \
+  --set runs.store=postgres
+has 'value: "off"'
+lacks 'runs-postgres-url'
+
 render "clickhouse with a user and password" "${KEYS[@]}" \
   --set externalStore.type=clickhouse --set externalStore.clickhouseUrl=http://ch:8123 \
   --set externalStore.clickhouseUser=mcpd --set externalStore.clickhousePassword=pw
@@ -310,8 +337,16 @@ refuse "a budget with neither bound" "neither minAvailable nor maxUnavailable" \
   --set podDisruptionBudget.enabled=true --set-string podDisruptionBudget.minAvailable=
 refuse "two replicas on the embedded store" "replicaCount is 2, but the signals are stored in an embedded SQLite file" \
   "${KEYS[@]}" --set replicaCount=2
-refuse "two replicas with runs on" "Set runs.enabled=false to scale out" \
+refuse "two replicas with runs on" "Set runs.store=postgres with runs.postgresUrl" \
   "${KEYS[@]}" "${PG[@]}" --set replicaCount=2
+refuse "an unknown run store" "Set it to sqlite or postgres" \
+  "${KEYS[@]}" --set runs.store=mysql
+refuse "a run store URL with runs.store sqlite" "Set runs.store=postgres, or clear runs.postgresUrl" \
+  "${KEYS[@]}" --set runs.postgresUrl=postgres://db/mcpd
+refuse "runs.store postgres with no URL" "Set runs.postgresUrl" \
+  "${KEYS[@]}" --set runs.store=postgres
+refuse "a run store URL beside an existing Secret" "under runs-postgres-url" \
+  --set keys.existingSecret=mine "${RUNS_PG[@]}"
 refuse "no replicas" "Set it to 1 or more" "${KEYS[@]}" --set replicaCount=0
 refuse "a Postgres URL with type none" "Set externalStore.type=postgres" \
   "${KEYS[@]}" --set externalStore.postgresUrl=postgres://db/mcpd

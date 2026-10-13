@@ -237,6 +237,10 @@ pub struct ProjectConfig {
     /// its own request. Only [`ServerConfig::quota_per_minute`] bounds those.
     #[serde(default)]
     pub quota_per_minute: Option<u32>,
+    /// Tail sampling for this project: which finished runs to keep, and the
+    /// share of the rest. Unset keeps every run.
+    #[serde(default)]
+    pub tail_sampling: Option<crate::tail::TailPolicy>,
 }
 
 impl ProjectConfig {
