@@ -725,9 +725,10 @@ client with `enabled = false`, because none of its runs would reach the daemon
 to be scored.
 
 The target's shape follows the language: a function that may return a promise
-in TypeScript, a plain or async function in Python, a suspend function in
-Kotlin, a function taking a `context.Context` in Go, an async closure in Rust,
-and a one-argument function in Elixir, run in a task per case.
+in TypeScript, a plain or async function in Python (with `arun_experiment` to
+await from async code), a suspend function in Kotlin, a function taking a
+`context.Context` in Go, an async closure in Rust, and a one-argument function
+in Elixir, run in a task per case.
 
 ## 6. Wire format
 
