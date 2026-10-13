@@ -2,6 +2,7 @@
 import Doc from '@/layouts/Doc.astro'
 import SearchDemo from '@/components/SearchDemo.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const loc = localeOf(Astro.url.pathname)
@@ -313,8 +314,8 @@ while True:
         <td>구간. 실행의 시작 시각을 기준으로 잽니다.</td>
       </tr>
       <tr>
-        <td><code>min_duration_ms</code></td>
-        <td>적어도 이만큼 느린 실행. 밀리초 단위입니다.</td>
+        <td><code>min_duration_ms</code>, <code>max_duration_ms</code></td>
+        <td>적어도, 또는 많아야 이만큼 느린 실행. 밀리초 단위입니다.</td>
       </tr>
       <tr>
         <td><code>min_cost</code></td>
@@ -324,12 +325,41 @@ while True:
         </td>
       </tr>
       <tr>
+        <td><code>max_cost</code></td>
+        <td>많아야 이만큼 비용이 든 실행.</td>
+      </tr>
+      <tr>
+        <td><code>min_tokens</code></td>
+        <td>입력과 출력을 합쳐 적어도 이만큼의 토큰을 쓴 실행.</td>
+      </tr>
+      <tr>
         <td><code>has_score</code></td>
         <td>이 스코어러 id의 점수를 달고 있는 실행.</td>
       </tr>
       <tr>
         <td><code>score_below</code></td>
         <td><code>has_score</code>와 함께 쓰면, 그 스코어러가 이 값 아래로 매긴 실행.</td>
+      </tr>
+      <tr>
+        <td><code>score_above</code></td>
+        <td>
+          <code>has_score</code>와 함께 쓰면, 그 스코어러가 이 값 위로 매긴 실행.
+          <code>score_below</code>도 함께 쓰면 점수 하나가 두 값 사이에 있어야 합니다.
+        </td>
+      </tr>
+      <tr>
+        <td><code>preview</code></td>
+        <td>
+          <code>true</code>이면 각 실행의 <code>input_preview</code>와
+          <code>output_preview</code>를 채웁니다. 감사 로그에 기록됩니다.
+        </td>
+      </tr>
+      <tr>
+        <td><code>has_feedback</code></td>
+        <td>
+          <code>true</code>이면 사람이 피드백을 남긴 실행, <code>false</code>이면
+          피드백이 없는 실행.
+        </td>
       </tr>
       <tr>
         <td><code>sort</code></td>
@@ -372,9 +402,13 @@ while True:
   <h2>목록 한 줄이 치르는 비용</h2>
   <p>
     더 가벼운 두 번째 실행 목록은 없습니다. 첫 번째가 이미 가볍기 때문입니다. 저장된
-    트레이스 요약본은 입력도, 출력도, 속성도 전혀 싣지 않습니다. 이름, 개수, 시각,
-    비용, 태그, 상관 정보뿐이고, 모델이 한 말은 하나도 없습니다. 페이로드를 가져오는
-    것은 실행을 열 때입니다.
+    트레이스 요약본은 입력도, 출력도, 속성도 싣지 않습니다. 이름, 개수, 시각, 비용,
+    태그, 상관 정보뿐입니다. <code>preview=true</code>로 요청하면 각 행에
+    <code>input_preview</code>와 <code>output_preview</code>가 더해집니다. 루트 단계의
+    입력과 출력 앞부분을 일반 텍스트로, 각각 최대 240자까지 담습니다. 채팅 입력이면
+    미리보기는 마지막 사용자 메시지입니다. 미리보기가 붙은 목록 읽기는 모델이 본 텍스트를
+    싣기 때문에 감사 로그에 기록됩니다. 페이로드 전체를 가져오는 것은 실행을 열
+    때입니다.
   </p>
   <p>
     현실적인 실행 하나로 재 보았습니다. 정책 문서 세 건을 검색하고, 도구를 두 번
@@ -420,10 +454,17 @@ while True:
     이 규칙은 실행 목록만의 것이 아닙니다. <code>GET /v1/api/spans</code>,
     <code>/v1/api/logs</code>, <code>/v1/api/scores</code>,
     <code>/v1/api/metrics</code>, <code>/v1/api/feedback</code>이 각각 자기 어휘를 같은
-    방식으로 강제합니다. 마주치기 전에 알아 둘 만한 것이 둘 있습니다. 점수 목록은
-    <code>order</code>를 받지 않습니다. 최신순으로 고정되어 있고 그 커서가 한 방향으로만
-    비교하기 때문입니다. 그리고 피드백 목록은 <code>trace_id</code>를 요구합니다.
-    피드백은 한 번에 실행 하나씩 읽기 때문입니다.
+    방식으로 강제합니다. 점수 목록은 <code>order</code>를 받지 않습니다. 최신순으로
+    고정되어 있고 그 커서가 한 방향으로만 비교하기 때문입니다. 피드백 목록은 프로젝트
+    전체를 최신순으로 읽고, <code>trace_id</code>, <code>span_id</code>,
+    <code>kind</code>, <code>author_kind</code>, 그리고 <code>from</code>과
+    <code>to</code> 구간으로 좁히며, 다음 페이지를 위한 커서를 줍니다. 로그 목록은 한
+    줄의 상관 정보로 거릅니다. <code>environment</code>, <code>service_name</code>,
+    <code>service_version</code>, <code>session_id</code>,
+    <code>thread_id</code>, <code>user_id</code>, <code>run_id</code>,
+    <code>request_id</code>, <code>experiment_id</code>,
+    <code>release</code>이고, 각각 정확히 일치해야 합니다. 사용자 id는 알고 있는 그대로
+    보내십시오. 저장된 값과 같은 방식으로 해시됩니다.
   </p>
 
   <h2 id="filling-a-filter-box">필터 상자 채우기</h2>
@@ -485,6 +526,21 @@ while True:
     도착 시각이 없어서, 그 위의 워터마크는 늦게 온 행을 건너뛰거나 모든 행을 영원히
     반복하게 됩니다. <code>signal=scores</code>는 빈 페이지로 답하는 대신 거절됩니다.
   </p>
+
+  <h3>실시간 테일</h3>
+  <p>
+    같은 요청을 <code>Accept: text/event-stream</code>과 함께 보내면 연결이 열린 채로
+    남습니다. 데몬은 1초마다 폴링하고, 행을 가져온 배치마다 위의 응답을 담은
+    <code>delta</code> 이벤트 하나를 보내며, 그 뒤의 커서를 이벤트 id로 붙입니다. 연결이
+    끊긴 클라이언트는 그 커서로 다시 연결하고 아무것도 놓치지 않습니다. 테일은 30분 뒤에
+    닫히고, 클라이언트는 같은 방식으로 다시 연결합니다.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="새 실행이 들어오는 대로 따라가기"
+    command="curl -N -H 'accept: text/event-stream' 'localhost:4317/v1/api/deltas?signal=traces'"
+  />
 
   <h2>이 배포가 할 수 있는 것</h2>
   <p>
@@ -557,7 +613,8 @@ while True:
   </p>
   <p>
     <code>q</code>, <code>kind</code>, <code>status</code>, <code>name</code>,
-    <code>model</code>, <code>trace_id</code>, <code>from</code>, <code>to</code>,
+    <code>model</code>, <code>trace_id</code>, <code>prompt</code>,
+    <code>prompt_version</code>, <code>from</code>, <code>to</code>,
     <code>min_duration_ms</code>, <code>sort</code>, <code>order</code>,
     <code>limit</code>, <code>cursor</code>를 같은 뜻과 같은 기본값으로 받습니다.
     여기에는 <code>tags</code>, <code>session_id</code>, <code>user_id</code> 필터가
