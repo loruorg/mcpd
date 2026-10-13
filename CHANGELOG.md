@@ -44,6 +44,13 @@ rather than every commit.
 - **Per-organisation quotas.** An organisation's projects share one ceiling on
   signals per minute, `--org-quota-per-minute` (60000 with `--signup`), and a
   retention default, `--org-retention-days`. Usage is shown in the interface.
+- **A themes screen in the interface.** Pick an agent, workflow or tool and
+  read how far each aspect has got towards a snapshot, the themes the latest
+  pass found with their share and how each moved over recent snapshots, and the
+  flow of runs across two to four aspects. A theme opens its history and the
+  notes behind it, each linked to its run, and the run panel lists the aspect
+  notes written about that run. `mcpd demo` now seeds notes and four snapshots
+  so the screen has something to show.
 
 ### Changed
 
@@ -139,6 +146,10 @@ rather than every commit.
 
 ### Fixed
 
+- **The derived `outcome` aspect reaches a snapshot.** Its notes were stamped
+  with the time of the pass that wrote them, which put them outside the window
+  that pass reads, and each later pass moved them again. They are now stamped
+  with the time the run ended.
 - **A page of aspect notes or snapshots on ClickHouse could repeat the last
   row of the page before.** The cursor's timestamp went through a float and
   rounded by a few hundred nanoseconds. It is now exact.
