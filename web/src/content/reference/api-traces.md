@@ -12,7 +12,7 @@ generated: true
 
 <div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/traces</code></div>
 
-The trace list. Filter on status, kind, name, tags, session, thread, user, environment, model, time window, duration, cost and score, and sort by start time, duration, cost, span count or score. Unlike a plain span dump, this reads the materialised trace projection rather than aggregating spans on every request.
+The trace list. Filter on status, kind, name, tags, session, thread, user, environment, model, time window, duration, cost, tokens, score and feedback, and sort by start time, duration, cost, span count, tokens or score. Each trace carries a short preview of its input and output. Unlike a plain span dump, this reads the materialised trace projection rather than aggregating spans on every request.
 
 **Query parameters**
 
@@ -32,9 +32,14 @@ The trace list. Filter on status, kind, name, tags, session, thread, user, envir
 | `from` | `timestamp` | · | Start of the time window, inclusive. |
 | `to` | `timestamp` | · | End of the time window, exclusive. |
 | `min_duration_ms` | `u64` | · | Only traces at least this slow. |
+| `max_duration_ms` | `u64` | · | Only traces at most this slow. |
 | `min_cost` | `f64` | · | Only traces at least this expensive. |
+| `max_cost` | `f64` | · | Only traces at most this expensive. |
+| `min_tokens` | `u64` | · | Only traces that used at least this many tokens, input and output together. |
 | `has_score` | `string` | · | Only traces carrying a score from this scorer. |
 | `score_below` | `f64` | · | Combined with `has_score`: only traces where that scorer came in under this value. This is the query that finds bad answers. |
+| `score_above` | `f64` | · | Combined with `has_score`: only traces where that scorer came in over this value. |
+| `has_feedback` | `bool` | · | `true` for only traces a person gave feedback on, `false` for only traces with none. |
 | `sort` | `string` | `start_time` | One of `start_time`, `duration`, `cost`, `span_count`, `tokens`, `score`. Defaults to `start_time`. |
 | `order` | `string` | `desc` | `asc` or `desc`. Defaults to `desc`. |
 | `limit` | `u32` | `50` | Page size, 1 to 500. |

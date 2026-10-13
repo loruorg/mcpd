@@ -542,6 +542,15 @@ How an organisation's members log in with single sign-on.
 | `oidc` | Any OpenID Connect provider, such as Google, Microsoft Entra ID, Okta or Auth0, found through its issuer's discovery document. Authorization code flow with PKCE, state and nonce. |
 | `github` | GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub user id and the email is the primary verified address GitHub reports. |
 
+### PromptKind
+
+The shape of a prompt's body.
+
+| Value | Meaning |
+| --- | --- |
+| `text` | One template string, for a completion-style call. |
+| `chat` | An ordered list of messages, each with a `role` and a `content` template, for a chat-style call. |
+
 ## Entities
 
 ### InputTokenDetails
@@ -2175,6 +2184,37 @@ What the provider sent back to the redirect URL.
 | `code` | `string` <span class="req">required</span> | The `code` parameter. |
 | `binding` | `string` <span class="req">required</span> | The binding from the start of the flow. |
 
+### CreatePromptRequest
+
+A new version of a prompt. Posting a body identical to the latest version stores nothing new and returns that version, so a deploy that posts its prompts on every start is a no-op when nothing changed.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | `string` <span class="req">required</span> | The prompt's name. A new name creates the prompt at version 1. |
+| `kind` | [`PromptKind`](#promptkind) | `text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`. |
+| `template` | `string` | The template, for a `text` prompt. |
+| `messages` | `json` | The messages, for a `chat` prompt. |
+| `config` | `json` | Model settings to store with it. |
+| `note` | `string` | What changed. |
+| `labels` | `string`[] | Labels to point at the stored version once it is stored, such as `staging`. |
+
+### PromptLabelRequest
+
+Which version a label should point at.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `version` | `u32` <span class="req">required</span> | The version. It must exist. |
+
+### PromptVersionsResponse
+
+Every version of one prompt, newest first.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | `string` <span class="req">required</span> | The prompt's name. |
+| `versions` | [`Prompt`](#prompt)[] <span class="req">required</span> | Its versions, newest first, each with the labels that point at it. |
+
 ### Span
 
 One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.
@@ -2246,6 +2286,8 @@ Stored in the `traces` table.
 | `cost` | [`Cost`](#cost) | Cost summed across the trace. This is the number a bill is reconciled against. |
 | `model_count` | `u32` <span class="req">required</span> | How many model calls the run made. |
 | `tool_count` | `u32` <span class="req">required</span> | How many tool calls the run made. |
+| `input_preview` | `string` | The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list; the full input is on the span. |
+| `output_preview` | `string` | The start of the root step's output as plain text, up to 240 characters. Filled by the trace list; the full output is on the span. |
 | `tags` | `string`[] | Tags from the root span. |
 | `correlation` | [`Correlation`](#correlation) <span class="req">required</span> | Context inherited from the root span. |
 | `score_summary` | `json` | Mean score per scorer id, maintained as scores arrive, so the list can sort by quality without a join. |
@@ -2676,3 +2718,26 @@ Stored in the `themes` table.
 **Indexes**
 
 - `theme_id, aspect`: One theme across every snapshot that holds it, which is what a history reads.
+
+### Prompt
+
+One version of a named prompt. A version never changes once stored: a new body is a new version, and labels such as `production` and `staging` point at the version a caller should use. SDKs fetch a prompt by name and label, render it with variables, and link the spans that used it, so a trace shows which version produced an answer.
+
+Stored in the `documents` table.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `project` | `string` <span class="req">required</span> | Which project owns it. |
+| `name` | `string` <span class="req">required</span> | The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and `/`, up to 128 characters. |
+| `version` | `u32` <span class="req">required</span> | Its version, from 1, assigned by the daemon in the order versions arrive. |
+| `kind` | [`PromptKind`](#promptkind) <span class="req">required</span> | Whether the body is one template or a list of messages. |
+| `template` | `string` | The template, for a `text` prompt. Variables are written `{{name}}`. |
+| `messages` | `json` | The messages, for a `chat` prompt: an array of objects with `role` and `content`, where `content` is a template. |
+| `config` | `json` | Model settings stored with the prompt, such as `model` and `temperature`. The daemon stores them and does not read them. |
+| `variables` | `string`[] <span class="req">required</span> | Every variable the body names, in order of first use, without duplicates. |
+| `labels` | `string`[] <span class="req">required</span> | The labels that point at this version now. |
+| `note` | `string` | What changed in this version, written by whoever stored it. |
+| `created_by` | `string` | Which key or account stored it. |
+| `created_at` | `timestamp` <span class="req">required</span> | When this version was stored. |
+
+**Primary key:** `project`, `name`, `version`

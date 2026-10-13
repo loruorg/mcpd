@@ -1045,6 +1045,21 @@ export type SsoProvider = typeof SsoProvider[keyof typeof SsoProvider]
 export const ALL_SSO_PROVIDER: readonly SsoProvider[] = ['oidc', 'github']
 
 /**
+  * The shape of a prompt's body. */
+export const PromptKind = {
+  // One template string, for a completion-style call.
+  Text: 'text',
+  // An ordered list of messages, each with a `role` and a `content` template, for a
+  // chat-style call.
+  Chat: 'chat',
+} as const
+
+export type PromptKind = typeof PromptKind[keyof typeof PromptKind]
+
+/** Every `PromptKind` value, in declaration order. */
+export const ALL_PROMPT_KIND: readonly PromptKind[] = ['text', 'chat']
+
+/**
  * Input tokens broken down by how the provider billed them. Every field is optional;
  * absent means the provider did not report it, which is different from zero.
  */
@@ -4902,6 +4917,66 @@ export interface SsoCallbackRequest {
 }
 
 /**
+ * A new version of a prompt. Posting a body identical to the latest version stores
+ * nothing new and returns that version, so a deploy that posts its prompts on every
+ * start is a no-op when nothing changed.
+ */
+export interface CreatePromptRequest {
+  /**
+   * The prompt's name. A new name creates the prompt at version 1.
+   */
+  name: string
+  /**
+   * `text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`.
+   */
+  kind?: PromptKind
+  /**
+   * The template, for a `text` prompt.
+   */
+  template?: string
+  /**
+   * The messages, for a `chat` prompt.
+   */
+  messages?: unknown
+  /**
+   * Model settings to store with it.
+   */
+  config?: unknown
+  /**
+   * What changed.
+   */
+  note?: string
+  /**
+   * Labels to point at the stored version once it is stored, such as `staging`.
+   */
+  labels?: string[]
+}
+
+/**
+ * Which version a label should point at.
+ */
+export interface PromptLabelRequest {
+  /**
+   * The version. It must exist.
+   */
+  version: number
+}
+
+/**
+ * Every version of one prompt, newest first.
+ */
+export interface PromptVersionsResponse {
+  /**
+   * The prompt's name.
+   */
+  name: string
+  /**
+   * Its versions, newest first, each with the labels that point at it.
+   */
+  versions: Prompt[]
+}
+
+/**
  * One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback
  * all hang off a span or a trace.
  * Stored in the `spans` table.
@@ -5103,6 +5178,17 @@ export interface Trace {
    * How many tool calls the run made.
    */
   tool_count: number
+  /**
+   * The start of the root step's input as plain text, up to 240 characters, for a list
+   * column. For a chat input it is the last user message. Filled by the trace list; the
+   * full input is on the span.
+   */
+  input_preview?: string
+  /**
+   * The start of the root step's output as plain text, up to 240 characters. Filled by
+   * the trace list; the full output is on the span.
+   */
+  output_preview?: string
   /**
    * Tags from the root span.
    */
@@ -6127,4 +6213,65 @@ export interface Theme {
    * share of what was read.
    */
   coverage: number
+}
+
+/**
+ * One version of a named prompt. A version never changes once stored: a new body is a
+ * new version, and labels such as `production` and `staging` point at the version a
+ * caller should use. SDKs fetch a prompt by name and label, render it with variables,
+ * and link the spans that used it, so a trace shows which version produced an answer.
+ * Stored in the `documents` table.
+ */
+export interface Prompt {
+  /**
+   * Which project owns it.
+   */
+  project: string
+  /**
+   * The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and
+   * `/`, up to 128 characters.
+   */
+  name: string
+  /**
+   * Its version, from 1, assigned by the daemon in the order versions arrive.
+   */
+  version: number
+  /**
+   * Whether the body is one template or a list of messages.
+   */
+  kind: PromptKind
+  /**
+   * The template, for a `text` prompt. Variables are written `{{name}}`.
+   */
+  template?: string
+  /**
+   * The messages, for a `chat` prompt: an array of objects with `role` and `content`,
+   * where `content` is a template.
+   */
+  messages?: unknown
+  /**
+   * Model settings stored with the prompt, such as `model` and `temperature`. The daemon
+   * stores them and does not read them.
+   */
+  config?: unknown
+  /**
+   * Every variable the body names, in order of first use, without duplicates.
+   */
+  variables: string[]
+  /**
+   * The labels that point at this version now.
+   */
+  labels: string[]
+  /**
+   * What changed in this version, written by whoever stored it.
+   */
+  note?: string
+  /**
+   * Which key or account stored it.
+   */
+  created_by?: string
+  /**
+   * When this version was stored.
+   */
+  created_at: string
 }

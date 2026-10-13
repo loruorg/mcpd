@@ -570,6 +570,31 @@ fn documented_answers() -> Answers {
     // Runs sorted by the tokens they used, input and output together.
     e.insert("runs sort by tokens", "big,mid,small".into());
 
+    // The rest of the trace filter vocabulary, and the list previews.
+    e.insert("runs filter on a duration and cost ceiling", "mid,quick".into());
+    e.insert("runs filter on tokens", "mid,slow".into());
+    e.insert("runs filter on a score between two bounds", "mid".into());
+    e.insert("runs filter on feedback, both ways", "mid;quick,slow".into());
+    e.insert(
+        "a run carries previews of its input and output",
+        "Ticket mid: my order is late|Reply to mid".into(),
+    );
+
+    // Versioned documents: prompts, scorer definitions, evaluation rules.
+    e.insert(
+        "a document's versions are assigned, and a repeat is confirmed",
+        "1:true,1:false,2:true".into(),
+    );
+    e.insert("documents list the latest of each, by id", "greet:2,other:1".into());
+    e.insert("a document's versions list newest first", "2,1".into());
+    e.insert("an old version reads back unchanged", "\"Hi\"".into());
+    e.insert("documents are kept apart by kind", "0".into());
+    e.insert("a label points at a stored version and no other", "true,false".into());
+    e.insert("a label reads back", "production:1".into());
+    e.insert("a moved label points at its new version", "production:2".into());
+    e.insert("a removed label is gone", "true,false,".into());
+    e.insert("spans filter on the prompt they used, and its version", "3,2,0".into());
+
     // A project's feedback, newest first, filtered and keyset paged.
     e.insert("feedback lists newest first", "f3,f2".into());
     e.insert("feedback pages on", "f1".into());
@@ -2178,6 +2203,256 @@ async fn observe_log_correlation(store: &dyn Store, project: String) -> Answers 
     a
 }
 
+async fn observe_documents(store: &dyn Store, project: String) -> Answers {
+    use mcpd_store::{DocKind, NewDocument, SpanQuery};
+    let mut a = Answers::new();
+    let now = OffsetDateTime::now_utc();
+    let doc = |id: &str, body: serde_json::Value| NewDocument {
+        project: project.clone(),
+        kind: DocKind::Prompt,
+        id: id.to_owned(),
+        body,
+        note: Some("n".into()),
+        created_by: None,
+        created_at: now,
+    };
+    let put = |d: NewDocument| async move {
+        let (s, created) = store.put_document(&d).await.expect("put a document");
+        format!("{}:{created}", s.version)
+    };
+    let first = put(doc("greet", json!({"template": "Hi"}))).await;
+    let again = put(doc("greet", json!({"template": "Hi"}))).await;
+    let second = put(doc("greet", json!({"template": "Hello"}))).await;
+    put(doc("other", json!({"template": "x"}))).await;
+    a.insert(
+        "a document's versions are assigned, and a repeat is confirmed",
+        [first, again, second].join(","),
+    );
+
+    let latest = store.list_documents(&project, DocKind::Prompt, None).await.expect("list latest");
+    a.insert(
+        "documents list the latest of each, by id",
+        latest.iter().map(|d| format!("{}:{}", d.id, d.version)).collect::<Vec<_>>().join(","),
+    );
+    let versions =
+        store.list_documents(&project, DocKind::Prompt, Some("greet")).await.expect("versions");
+    a.insert(
+        "a document's versions list newest first",
+        versions.iter().map(|d| d.version.to_string()).collect::<Vec<_>>().join(","),
+    );
+    let v1 = store.get_document(&project, DocKind::Prompt, "greet", Some(1)).await.expect("v1");
+    a.insert(
+        "an old version reads back unchanged",
+        v1.map(|d| d.body["template"].to_string()).unwrap_or_default(),
+    );
+    let other_kind = store.list_documents(&project, DocKind::Scorer, None).await.expect("kind");
+    a.insert("documents are kept apart by kind", other_kind.len().to_string());
+
+    let labels = || {
+        let project = project.clone();
+        async move {
+            store
+                .list_document_labels(&project, DocKind::Prompt, Some("greet"))
+                .await
+                .expect("labels")
+                .iter()
+                .map(|l| format!("{}:{}", l.label, l.version))
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+    };
+    let set = store
+        .set_document_label(&project, DocKind::Prompt, "greet", "production", Some(1))
+        .await
+        .expect("label");
+    let missing = store
+        .set_document_label(&project, DocKind::Prompt, "greet", "production", Some(9))
+        .await
+        .expect("label a missing version");
+    a.insert("a label points at a stored version and no other", format!("{set},{missing}"));
+    a.insert("a label reads back", labels().await);
+    store
+        .set_document_label(&project, DocKind::Prompt, "greet", "production", Some(2))
+        .await
+        .expect("move");
+    a.insert("a moved label points at its new version", labels().await);
+    let removed = store
+        .set_document_label(&project, DocKind::Prompt, "greet", "production", None)
+        .await
+        .expect("remove");
+    let again = store
+        .set_document_label(&project, DocKind::Prompt, "greet", "production", None)
+        .await
+        .expect("remove again");
+    a.insert("a removed label is gone", format!("{removed},{again},{}", labels().await));
+
+    // Spans linked to a prompt, by the attributes an SDK writes.
+    let spans: Vec<Span> = [("p1", 1), ("p2", 2), ("p3", 2)]
+        .iter()
+        .enumerate()
+        .map(|(i, (label, v))| {
+            let mut s = root(
+                &project,
+                label,
+                now - Duration::seconds(i as i64 + 1),
+                only_project(&project),
+            );
+            s.attributes = Some(json!({
+                mcpd_store::PROMPT_NAME_ATTRIBUTE: "greet",
+                mcpd_store::PROMPT_VERSION_ATTRIBUTE: v,
+            }));
+            s
+        })
+        .collect();
+    store.ingest(Batch { spans, ..Batch::default() }).await.expect("the prompt spans ingest");
+    let count = |prompt: &str, version: Option<u32>| {
+        let q = SpanQuery {
+            project: project.clone(),
+            prompt: Some(prompt.to_owned()),
+            prompt_version: version,
+            limit: 50,
+            ..Default::default()
+        };
+        async move { store.list_spans(&q).await.expect("spans by prompt").items.len() }
+    };
+    a.insert(
+        "spans filter on the prompt they used, and its version",
+        format!(
+            "{},{},{}",
+            count("greet", None).await,
+            count("greet", Some(2)).await,
+            count("nope", None).await
+        ),
+    );
+    a
+}
+
+async fn observe_trace_filters(store: &dyn Store, project: String) -> Answers {
+    let mut a = Answers::new();
+    let now = OffsetDateTime::now_utc();
+    // Three runs: cheap and quick, dear and slow, and one in between.
+    let runs =
+        [("quick", 5, 0.01, 10, 5), ("mid", 50, 0.10, 300, 100), ("slow", 500, 1.0, 900, 300)];
+    let mut spans = Vec::new();
+    for (i, (label, ms, cost, input, output)) in runs.iter().enumerate() {
+        let at = now - Duration::seconds(i as i64 + 1);
+        let mut s = root(&project, label, at, only_project(&project));
+        s.end_time = Some(at + Duration::milliseconds(*ms));
+        s.usage = Some(tokens(*input, *output));
+        s.cost = Some(Cost {
+            input_cost: None,
+            output_cost: None,
+            total_cost: Some(*cost),
+            currency: "USD".into(),
+            price_book: None,
+            is_estimated: false,
+        });
+        s.input = Some(json!({"messages": [
+            {"role": "system", "content": "You sort tickets."},
+            {"role": "user", "content": format!("Ticket {label}: my order is late")}
+        ]}));
+        s.output = Some(json!(format!("Reply to {label}")));
+        spans.push(s);
+    }
+    store
+        .ingest(Batch { spans, ..Batch::default() })
+        .await
+        .expect("the filter fixture must ingest");
+    let scores = ["quick", "mid", "slow"]
+        .iter()
+        .zip([0.9, 0.5, 0.1])
+        .map(|(label, value)| mcpd_core::Score {
+            score_id: format!("{project}-{label}-s"),
+            trace_id: Some(trace_id(&project, label)),
+            span_id: None,
+            scorer_id: "relevance".into(),
+            scorer_version: None,
+            source: mcpd_core::ScoreSource::Offline,
+            value,
+            min: Some(0.0),
+            max: Some(1.0),
+            label: None,
+            reason: None,
+            score_trace_id: None,
+            cost: None,
+            metadata: None,
+            timestamp: now,
+            correlation: only_project(&project),
+        })
+        .collect();
+    let fb = Feedback {
+        feedback_id: format!("{project}-fb"),
+        trace_id: Some(trace_id(&project, "mid")),
+        span_id: None,
+        kind: FeedbackKind::Thumbs,
+        value: json!(false),
+        comment: None,
+        author_id: None,
+        author_kind: None,
+        timestamp: now,
+        metadata: None,
+        correlation: only_project(&project),
+    };
+    store
+        .ingest(Batch { scores, feedback: vec![fb], ..Batch::default() })
+        .await
+        .expect("the filter scores must ingest");
+    let names = |q: TraceQuery| async move {
+        let mut n: Vec<String> = store
+            .list_traces(&q)
+            .await
+            .expect("list runs")
+            .items
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        n.sort();
+        n.join(",")
+    };
+    let base = || TraceQuery { project: project.clone(), limit: 50, ..Default::default() };
+    a.insert(
+        "runs filter on a duration and cost ceiling",
+        names(TraceQuery { max_duration_ms: Some(100), max_cost: Some(0.5), ..base() }).await,
+    );
+    a.insert("runs filter on tokens", names(TraceQuery { min_tokens: Some(400), ..base() }).await);
+    a.insert(
+        "runs filter on a score between two bounds",
+        names(TraceQuery {
+            has_score: Some("relevance".into()),
+            score_above: Some(0.2),
+            score_below: Some(0.8),
+            ..base()
+        })
+        .await,
+    );
+    a.insert(
+        "runs filter on feedback, both ways",
+        format!(
+            "{};{}",
+            names(TraceQuery { has_feedback: Some(true), ..base() }).await,
+            names(TraceQuery { has_feedback: Some(false), ..base() }).await
+        ),
+    );
+    let page = store
+        .list_traces(&TraceQuery { name: Some("mid".into()), ..base() })
+        .await
+        .expect("list one run");
+    a.insert(
+        "a run carries previews of its input and output",
+        page.items
+            .first()
+            .map(|t| {
+                format!(
+                    "{}|{}",
+                    t.input_preview.clone().unwrap_or_default(),
+                    t.output_preview.clone().unwrap_or_default()
+                )
+            })
+            .unwrap_or_default(),
+    );
+    a
+}
+
 async fn observe_token_sort(store: &dyn Store, project: String) -> Answers {
     let mut a = Answers::new();
     let now = OffsetDateTime::now_utc();
@@ -2669,6 +2944,8 @@ async fn every_backend_gives_the_documented_answer_to_the_same_question() {
         answers.extend(observe_metric_points(store.as_ref(), unique(&format!("mp-{name}"))).await);
         answers.extend(observe_feedback_list(store.as_ref(), unique(&format!("fb-{name}"))).await);
         answers.extend(observe_token_sort(store.as_ref(), unique(&format!("tok-{name}"))).await);
+        answers.extend(observe_documents(store.as_ref(), unique(&format!("doc-{name}"))).await);
+        answers.extend(observe_trace_filters(store.as_ref(), unique(&format!("tf-{name}"))).await);
         answers
             .extend(observe_log_correlation(store.as_ref(), unique(&format!("lc-{name}"))).await);
         answers.extend(observe_themes(store.as_ref(), unique(&format!("thm-{name}"))).await);

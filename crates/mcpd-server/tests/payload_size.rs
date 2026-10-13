@@ -1,8 +1,9 @@
 //! What a run list costs, against what opening one run costs.
 //!
 //! mcpd's trace list is light by construction: the stored `Trace` projection
-//! carries no input, no output and no attributes at all, so there is no second
-//! "light" endpoint to add. What there was no answer to is how much that
+//! carries no input, no output and no attributes, and a list row adds two
+//! previews of at most 240 characters each, so there is no second "light"
+//! endpoint to add. What there was no answer to is how much that
 //! actually saves, and a number copied from another project's documentation is
 //! not an answer about this one.
 //!
@@ -27,12 +28,13 @@ const TRACE_ID: &str = "0123456789abcdef0123456789abcdef";
 
 /// The floor the documentation quotes, in tenths of a percent.
 ///
-/// Measured, not chosen. The fixture below produced 94.6%, and the floor is set
-/// just under it so that ordinary drift in a field name does not fail the
-/// build while a projection that starts carrying payload does. Whole percent
-/// was not enough resolution: integer division of 577 into 10717 rounds the
-/// ratio down and reports the saving as one point better than it is.
-const DOCUMENTED_REDUCTION_TENTHS: usize = 940;
+/// Measured, not chosen. The fixture below produced 90.1% once the row carried
+/// its input and output previews, and the floor is set just under it so that
+/// ordinary drift in a field name does not fail the build while a projection
+/// that starts carrying payload does. Whole percent was not enough resolution:
+/// integer division of 1060 into 10717 rounds the ratio down and reports the
+/// saving as one point better than it is.
+const DOCUMENTED_REDUCTION_TENTHS: usize = 895;
 
 fn temp_db() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};

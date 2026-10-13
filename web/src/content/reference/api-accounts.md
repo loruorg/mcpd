@@ -1,7 +1,7 @@
 ---
 title: "Accounts"
 description: "The accounts endpoints of the mcpd HTTP API."
-order: 18
+order: 19
 generated: true
 ---
 

@@ -604,6 +604,47 @@ mod tests {
             ) -> mcpd_store::Result<Vec<mcpd_core::Experiment>> {
                 unimplemented!()
             }
+            async fn put_document(
+                &self,
+                _: &mcpd_store::NewDocument,
+            ) -> mcpd_store::Result<(mcpd_store::StoredDocument, bool)> {
+                unimplemented!()
+            }
+            async fn list_documents(
+                &self,
+                _: &str,
+                _: mcpd_store::DocKind,
+                _: Option<&str>,
+            ) -> mcpd_store::Result<Vec<mcpd_store::StoredDocument>> {
+                unimplemented!()
+            }
+            async fn get_document(
+                &self,
+                _: &str,
+                _: mcpd_store::DocKind,
+                _: &str,
+                _: Option<u32>,
+            ) -> mcpd_store::Result<Option<mcpd_store::StoredDocument>> {
+                unimplemented!()
+            }
+            async fn set_document_label(
+                &self,
+                _: &str,
+                _: mcpd_store::DocKind,
+                _: &str,
+                _: &str,
+                _: Option<u32>,
+            ) -> mcpd_store::Result<bool> {
+                unimplemented!()
+            }
+            async fn list_document_labels(
+                &self,
+                _: &str,
+                _: mcpd_store::DocKind,
+                _: Option<&str>,
+            ) -> mcpd_store::Result<Vec<mcpd_store::DocumentLabel>> {
+                unimplemented!()
+            }
             async fn record_audit(&self, _: &mcpd_core::AuditEvent) -> mcpd_store::Result<()> {
                 Ok(())
             }

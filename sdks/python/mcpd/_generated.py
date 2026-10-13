@@ -648,6 +648,14 @@ class SsoProvider(str, Enum):
     GITHUB = "github"
     """GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub user id and the email is the primary verified address GitHub reports."""
 
+class PromptKind(str, Enum):
+    """The shape of a prompt's body."""
+
+    TEXT = "text"
+    """One template string, for a completion-style call."""
+    CHAT = "chat"
+    """An ordered list of messages, each with a `role` and a `content` template, for a chat-style call."""
+
 @dataclass(**_SLOTS)
 class InputTokenDetails:
     """Input tokens broken down by how the provider billed them. Every field is optional; absent means the provider did not report it, which is different from zero.
@@ -2793,6 +2801,44 @@ class SsoCallbackRequest:
     """The binding from the start of the flow."""
 
 @dataclass(**_SLOTS)
+class CreatePromptRequest:
+    """A new version of a prompt. Posting a body identical to the latest version stores nothing new and returns that version, so a deploy that posts its prompts on every start is a no-op when nothing changed.
+    """
+
+    name: str
+    """The prompt's name. A new name creates the prompt at version 1."""
+    kind: PromptKind | None = None
+    """`text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`."""
+    template: str | None = None
+    """The template, for a `text` prompt."""
+    messages: Any | None = None
+    """The messages, for a `chat` prompt."""
+    config: Any | None = None
+    """Model settings to store with it."""
+    note: str | None = None
+    """What changed."""
+    labels: list[str] | None = None
+    """Labels to point at the stored version once it is stored, such as `staging`."""
+
+@dataclass(**_SLOTS)
+class PromptLabelRequest:
+    """Which version a label should point at.
+    """
+
+    version: int
+    """The version. It must exist."""
+
+@dataclass(**_SLOTS)
+class PromptVersionsResponse:
+    """Every version of one prompt, newest first.
+    """
+
+    name: str
+    """The prompt's name."""
+    versions: list[Prompt] = field(default_factory=list)
+    """Its versions, newest first, each with the labels that point at it."""
+
+@dataclass(**_SLOTS)
 class Span:
     """One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.
 
@@ -2903,6 +2949,10 @@ class Trace:
     """Token usage summed across every model span in the trace."""
     cost: Cost | None = None
     """Cost summed across the trace. This is the number a bill is reconciled against."""
+    input_preview: str | None = None
+    """The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list; the full input is on the span."""
+    output_preview: str | None = None
+    """The start of the root step's output as plain text, up to 240 characters. Filled by the trace list; the full output is on the span."""
     tags: list[str] | None = None
     """Tags from the root span."""
     score_summary: Any | None = None
@@ -3459,6 +3509,40 @@ class Theme:
     """This theme's share of the notes the snapshot read for this aspect, between 0 and 1. The denominator is the snapshot's `note_count`, so in a capped snapshot it is a share of what was read."""
 
     TABLE = "themes"
+
+@dataclass(**_SLOTS)
+class Prompt:
+    """One version of a named prompt. A version never changes once stored: a new body is a new version, and labels such as `production` and `staging` point at the version a caller should use. SDKs fetch a prompt by name and label, render it with variables, and link the spans that used it, so a trace shows which version produced an answer.
+
+    Stored in the `documents` table.
+    """
+
+    project: str
+    """Which project owns it."""
+    name: str
+    """The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and `/`, up to 128 characters."""
+    version: int
+    """Its version, from 1, assigned by the daemon in the order versions arrive."""
+    kind: PromptKind
+    """Whether the body is one template or a list of messages."""
+    created_at: datetime
+    """When this version was stored."""
+    variables: list[str] = field(default_factory=list)
+    """Every variable the body names, in order of first use, without duplicates."""
+    labels: list[str] = field(default_factory=list)
+    """The labels that point at this version now."""
+    template: str | None = None
+    """The template, for a `text` prompt. Variables are written `{{name}}`."""
+    messages: Any | None = None
+    """The messages, for a `chat` prompt: an array of objects with `role` and `content`, where `content` is a template."""
+    config: Any | None = None
+    """Model settings stored with the prompt, such as `model` and `temperature`. The daemon stores them and does not read them."""
+    note: str | None = None
+    """What changed in this version, written by whoever stored it."""
+    created_by: str | None = None
+    """Which key or account stored it."""
+
+    TABLE = "documents"
 
 #: Wire name -> attribute name, for the fields Python could not spell.
 RESERVED_FIELD_NAMES = {

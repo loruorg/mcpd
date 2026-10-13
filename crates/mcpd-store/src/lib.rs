@@ -254,10 +254,21 @@ pub struct TraceQuery {
     pub min_duration_ms: Option<u64>,
     /// Only runs at least this expensive.
     pub min_cost: Option<f64>,
+    /// Only runs at most this slow.
+    pub max_duration_ms: Option<u64>,
+    /// Only runs at most this expensive.
+    pub max_cost: Option<f64>,
+    /// Only runs that used at least this many tokens, input and output
+    /// together.
+    pub min_tokens: Option<u64>,
     /// Only runs carrying a score from this scorer.
     pub has_score: Option<String>,
     /// With `has_score`: only runs whose score came in under this value.
     pub score_below: Option<f64>,
+    /// With `has_score`: only runs whose score came in over this value.
+    pub score_above: Option<f64>,
+    /// Only runs with feedback (`true`) or with none (`false`).
+    pub has_feedback: Option<bool>,
     /// Sort key.
     pub sort: TraceSort,
     /// Sort direction.
@@ -291,6 +302,12 @@ pub struct SpanQuery {
     pub to: Option<OffsetDateTime>,
     /// Only spans at least this slow.
     pub min_duration_ms: Option<u64>,
+    /// Only spans an SDK linked to this prompt, by the `mcpd.prompt.name`
+    /// attribute.
+    pub prompt: Option<String>,
+    /// With `prompt`: only spans linked to this version, by the
+    /// `mcpd.prompt.version` attribute.
+    pub prompt_version: Option<u32>,
     /// Sort key.
     pub sort: SpanSort,
     /// Sort direction.
@@ -299,6 +316,191 @@ pub struct SpanQuery {
     pub limit: u32,
     /// Opaque cursor.
     pub cursor: Option<String>,
+}
+
+/// How many characters a trace list preview holds.
+pub const PREVIEW_CHARS: usize = 240;
+
+/// How many bytes of a payload a backend reads to build a preview.
+///
+/// More than the preview needs, so a chat input whose last user message sits
+/// after a long system prompt is still found, and small enough that a page of
+/// fifty runs never reads fifty whole prompts.
+pub const PREVIEW_READ_BYTES: usize = 8192;
+
+/// A payload as one short line of plain text, for a list column.
+///
+/// `raw` is the stored JSON, possibly cut short at [`PREVIEW_READ_BYTES`].
+/// What a person recognises a run by is chosen when the JSON parses: the text
+/// of a string, the last user message of a chat, or the value under a key
+/// such as `input`, `question` or `query`. A payload cut mid-way is read as
+/// text with the JSON punctuation taken out. `None` for an empty payload.
+#[must_use]
+pub fn payload_preview(raw: &str) -> Option<String> {
+    let text = match serde_json::from_str::<Value>(raw) {
+        Ok(v) => preview_text(&v),
+        Err(_) => raw
+            .chars()
+            .filter(|c| !matches!(c, '"' | '\\'))
+            .map(|c| if matches!(c, '{' | '}' | '[' | ']') { ' ' } else { c })
+            .collect(),
+    };
+    let mut out = String::with_capacity(PREVIEW_CHARS + 3);
+    let mut count = 0usize;
+    for word in text.split_whitespace() {
+        if count > 0 {
+            out.push(' ');
+            count += 1;
+        }
+        for c in word.chars() {
+            if count >= PREVIEW_CHARS {
+                out.push('…');
+                return Some(out);
+            }
+            out.push(c);
+            count += 1;
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn preview_text(v: &Value) -> String {
+    const KEYS: [&str; 9] =
+        ["input", "question", "query", "prompt", "message", "text", "content", "output", "answer"];
+    match v {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Array(items) => {
+            // A chat: the last thing the user said is what the run was about.
+            let is_chat = !items.is_empty() && items.iter().all(|m| m.get("role").is_some());
+            if is_chat {
+                let pick = items
+                    .iter()
+                    .rev()
+                    .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+                    .or_else(|| items.last());
+                return pick.and_then(|m| m.get("content")).map(preview_text).unwrap_or_default();
+            }
+            items.iter().map(preview_text).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ")
+        }
+        Value::Object(map) => {
+            if let Some(msgs) = map.get("messages").filter(|m| m.is_array()) {
+                return preview_text(msgs);
+            }
+            if let Some(found) = KEYS.iter().find_map(|k| map.get(*k)) {
+                return preview_text(found);
+            }
+            // A content part, `{"type": "text", "text": ...}`, is caught above.
+            map.values().map(preview_text).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ")
+        }
+    }
+}
+
+/// The attribute an SDK writes the name of the prompt a span used under.
+pub const PROMPT_NAME_ATTRIBUTE: &str = "mcpd.prompt.name";
+/// The attribute an SDK writes the version of the prompt a span used under.
+pub const PROMPT_VERSION_ATTRIBUTE: &str = "mcpd.prompt.version";
+
+/// What a stored document is.
+///
+/// Prompts, scorer definitions and evaluation rules share one versioned table.
+/// They have the same life: a body that never changes once stored, a version
+/// number the store assigns, and labels that point at a version. One table
+/// keeps that rule in one place per backend rather than three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocKind {
+    /// A prompt template.
+    Prompt,
+    /// A scorer definition: a judge rubric or a configured code scorer.
+    Scorer,
+    /// An online evaluation rule.
+    EvalRule,
+}
+
+impl DocKind {
+    /// The value stored in the `kind` column.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt",
+            Self::Scorer => "scorer",
+            Self::EvalRule => "eval_rule",
+        }
+    }
+}
+
+/// A document to store as the next version of `id`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewDocument {
+    /// Which project owns it.
+    pub project: String,
+    /// What it is.
+    pub kind: DocKind,
+    /// Its name within the project and kind.
+    pub id: String,
+    /// The body. Compared whole against the latest version: an equal body is
+    /// not stored again.
+    pub body: Value,
+    /// What changed, from whoever stored it.
+    pub note: Option<String>,
+    /// Which key or account stored it.
+    pub created_by: Option<String>,
+    /// When it was stored.
+    pub created_at: OffsetDateTime,
+}
+
+/// One stored version of a document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredDocument {
+    /// Which project owns it.
+    pub project: String,
+    /// What it is.
+    pub kind: DocKind,
+    /// Its name within the project and kind.
+    pub id: String,
+    /// Its version, from 1.
+    pub version: u32,
+    /// The body as stored.
+    pub body: Value,
+    /// What changed.
+    pub note: Option<String>,
+    /// Which key or account stored it.
+    pub created_by: Option<String>,
+    /// When it was stored.
+    pub created_at: OffsetDateTime,
+}
+
+/// A label and the version of a document it points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentLabel {
+    /// The document's name.
+    pub id: String,
+    /// The label.
+    pub label: String,
+    /// The version it points at.
+    pub version: u32,
+}
+
+/// Pick the latest version of each document id from rows in any order.
+///
+/// Shared so every backend answers "the latest of each" by the same rule,
+/// sorted by id.
+#[must_use]
+pub fn latest_per_id(rows: Vec<StoredDocument>) -> Vec<StoredDocument> {
+    let mut by: std::collections::BTreeMap<String, StoredDocument> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        match by.get(&row.id) {
+            Some(held) if held.version >= row.version => {}
+            _ => {
+                by.insert(row.id.clone(), row);
+            }
+        }
+    }
+    by.into_values().collect()
 }
 
 /// Filters for a log search.
@@ -1890,6 +2092,59 @@ pub trait Store: Send + Sync + 'static {
     /// Every experiment in a project, newest first.
     async fn list_experiments(&self, project: &str) -> Result<Vec<Experiment>>;
 
+    // ------------------------------------------------------ versioned documents
+
+    /// Store `doc` as the next version of its id, or confirm the latest.
+    ///
+    /// The store assigns the number: one more than the highest stored for
+    /// the same project, kind and id, starting at 1. When the latest version
+    /// holds a body equal to `doc.body`, nothing is written and that version
+    /// comes back with `false`, so a caller that posts the same body on every
+    /// start does not grow a version per start. `true` means a new version
+    /// was stored.
+    async fn put_document(&self, doc: &NewDocument) -> Result<(StoredDocument, bool)>;
+
+    /// Stored documents of one kind in a project.
+    ///
+    /// With `id`, every version of that document, newest first. Without it,
+    /// the latest version of each document, sorted by id.
+    async fn list_documents(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: Option<&str>,
+    ) -> Result<Vec<StoredDocument>>;
+
+    /// One version of a document, or the latest when `version` is `None`.
+    async fn get_document(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: &str,
+        version: Option<u32>,
+    ) -> Result<Option<StoredDocument>>;
+
+    /// Point `label` at `version` of a document, or remove it with `None`.
+    ///
+    /// Returns `false` when `version` names no stored version, or when there
+    /// was no label to remove, and writes nothing in either case.
+    async fn set_document_label(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: &str,
+        label: &str,
+        version: Option<u32>,
+    ) -> Result<bool>;
+
+    /// The labels on documents of one kind, for one id or for all of them.
+    async fn list_document_labels(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: Option<&str>,
+    ) -> Result<Vec<DocumentLabel>>;
+
     // --------------------------------------------------------- aspect analysis
 
     /// Read aspect notes.
@@ -2445,5 +2700,25 @@ mod tests {
         assert_eq!(Order::default(), Order::Desc);
         assert_eq!(TraceSort::default(), TraceSort::StartTime);
         assert_eq!(SpanSort::default(), SpanSort::StartTime);
+    }
+
+    #[test]
+    fn a_preview_is_what_a_person_recognises_a_run_by() {
+        let chat = r#"[{"role":"system","content":"rules"},{"role":"user","content":"Where is my order?"}]"#;
+        assert_eq!(payload_preview(chat).as_deref(), Some("Where is my order?"));
+        assert_eq!(
+            payload_preview(r#"{"question":"  two   words "}"#).as_deref(),
+            Some("two words")
+        );
+        assert_eq!(payload_preview("null"), None);
+        // Cut off mid-way, as a backend reads it: the text survives.
+        assert_eq!(
+            payload_preview(r#"{"input": "half a sen"#).as_deref(),
+            Some("input: half a sen")
+        );
+        let long = format!("\"{}\"", "word ".repeat(200));
+        let p = payload_preview(&long).unwrap_or_default();
+        assert_eq!(p.chars().count(), PREVIEW_CHARS + 1);
+        assert!(p.ends_with('…'));
     }
 }

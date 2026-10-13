@@ -1600,6 +1600,33 @@ func (v SsoProvider) Valid() bool {
 	return false
 }
 
+// The shape of a prompt's body.
+type PromptKind string
+
+const (
+	// One template string, for a completion-style call.
+	PromptKindText PromptKind = "text"
+	// An ordered list of messages, each with a `role` and a `content` template, for a
+	// chat-style call.
+	PromptKindChat PromptKind = "chat"
+)
+
+// AllPromptKinds lists every PromptKind value, in declaration order.
+var AllPromptKinds = []PromptKind{PromptKindText, PromptKindChat}
+
+// String returns the wire representation.
+func (v PromptKind) String() string { return string(v) }
+
+// Valid reports whether v is a value this version of the spec defines.
+func (v PromptKind) Valid() bool {
+	for _, c := range AllPromptKinds {
+		if c == v {
+			return true
+		}
+	}
+	return false
+}
+
 // Input tokens broken down by how the provider billed them. Every field is optional;
 // absent means the provider did not report it, which is different from zero.
 type InputTokenDetails struct {
@@ -3897,6 +3924,40 @@ type SsoCallbackRequest struct {
 	Binding string `json:"binding"`
 }
 
+// A new version of a prompt. Posting a body identical to the latest version stores
+// nothing new and returns that version, so a deploy that posts its prompts on every
+// start is a no-op when nothing changed.
+type CreatePromptRequest struct {
+	// The prompt's name. A new name creates the prompt at version 1.
+	Name string `json:"name"`
+	// `text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`.
+	Kind *PromptKind `json:"kind,omitempty"`
+	// The template, for a `text` prompt.
+	Template *string `json:"template,omitempty"`
+	// The messages, for a `chat` prompt.
+	Messages json.RawMessage `json:"messages,omitempty"`
+	// Model settings to store with it.
+	Config json.RawMessage `json:"config,omitempty"`
+	// What changed.
+	Note *string `json:"note,omitempty"`
+	// Labels to point at the stored version once it is stored, such as `staging`.
+	Labels []string `json:"labels,omitempty"`
+}
+
+// Which version a label should point at.
+type PromptLabelRequest struct {
+	// The version. It must exist.
+	Version uint32 `json:"version"`
+}
+
+// Every version of one prompt, newest first.
+type PromptVersionsResponse struct {
+	// The prompt's name.
+	Name string `json:"name"`
+	// Its versions, newest first, each with the labels that point at it.
+	Versions []Prompt `json:"versions"`
+}
+
 // One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback
 // all hang off a span or a trace.
 // Stored in the spans table.
@@ -4010,6 +4071,13 @@ type Trace struct {
 	ModelCount uint32 `json:"model_count"`
 	// How many tool calls the run made.
 	ToolCount uint32 `json:"tool_count"`
+	// The start of the root step's input as plain text, up to 240 characters, for a list
+	// column. For a chat input it is the last user message. Filled by the trace list; the
+	// full input is on the span.
+	InputPreview *string `json:"input_preview,omitempty"`
+	// The start of the root step's output as plain text, up to 240 characters. Filled by
+	// the trace list; the full output is on the span.
+	OutputPreview *string `json:"output_preview,omitempty"`
 	// Tags from the root span.
 	Tags []string `json:"tags,omitempty"`
 	// Context inherited from the root span.
@@ -4667,3 +4735,41 @@ type Theme struct {
 
 // Table is the storage table Theme lives in.
 func (Theme) Table() string { return "themes" }
+
+// One version of a named prompt. A version never changes once stored: a new body is a
+// new version, and labels such as `production` and `staging` point at the version a
+// caller should use. SDKs fetch a prompt by name and label, render it with variables,
+// and link the spans that used it, so a trace shows which version produced an answer.
+// Stored in the documents table.
+type Prompt struct {
+	// Which project owns it.
+	Project string `json:"project"`
+	// The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and
+	// `/`, up to 128 characters.
+	Name string `json:"name"`
+	// Its version, from 1, assigned by the daemon in the order versions arrive.
+	Version uint32 `json:"version"`
+	// Whether the body is one template or a list of messages.
+	Kind PromptKind `json:"kind"`
+	// The template, for a `text` prompt. Variables are written `{{name}}`.
+	Template *string `json:"template,omitempty"`
+	// The messages, for a `chat` prompt: an array of objects with `role` and `content`,
+	// where `content` is a template.
+	Messages json.RawMessage `json:"messages,omitempty"`
+	// Model settings stored with the prompt, such as `model` and `temperature`. The daemon
+	// stores them and does not read them.
+	Config json.RawMessage `json:"config,omitempty"`
+	// Every variable the body names, in order of first use, without duplicates.
+	Variables []string `json:"variables"`
+	// The labels that point at this version now.
+	Labels []string `json:"labels"`
+	// What changed in this version, written by whoever stored it.
+	Note *string `json:"note,omitempty"`
+	// Which key or account stored it.
+	CreatedBy *string `json:"created_by,omitempty"`
+	// When this version was stored.
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Table is the storage table Prompt lives in.
+func (Prompt) Table() string { return "documents" }

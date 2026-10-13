@@ -34,6 +34,7 @@ use time::OffsetDateTime;
 
 mod aspects;
 mod convert;
+mod documents;
 mod queries;
 use aspects::*;
 use convert::*;
@@ -71,7 +72,10 @@ use queries::*;
 /// resource, run, request, experiment and release. Added by `ALTER TABLE` in
 /// `migrate` rather than in `schema.sql`, which a released database has
 /// already run; each column is nullable, so no row is rewritten.
-const SCHEMA_VERSION: u32 = 6;
+///
+/// 7 adds `documents` and `document_labels`, two new tables and additive in
+/// the sense of 2 to 4.
+const SCHEMA_VERSION: u32 = 7;
 
 /// The columns version 6 adds to `logs`, in the order every log query reads
 /// them after the original fourteen.
@@ -1194,6 +1198,64 @@ impl Store for SqliteStore {
     async fn list_experiments(&self, project: &str) -> Result<Vec<Experiment>> {
         let p = project.to_owned();
         self.with_read(move |conn| list_experiments_sync(conn, &p)).await
+    }
+
+    async fn put_document(
+        &self,
+        doc: &crate::NewDocument,
+    ) -> Result<(crate::StoredDocument, bool)> {
+        let d = doc.clone();
+        self.with_write(move |conn| documents::put_document_sync(conn, &d)).await
+    }
+
+    async fn list_documents(
+        &self,
+        project: &str,
+        kind: crate::DocKind,
+        id: Option<&str>,
+    ) -> Result<Vec<crate::StoredDocument>> {
+        let (p, i) = (project.to_owned(), id.map(str::to_owned));
+        self.with_read(move |conn| documents::list_documents_sync(conn, &p, kind, i.as_deref()))
+            .await
+    }
+
+    async fn get_document(
+        &self,
+        project: &str,
+        kind: crate::DocKind,
+        id: &str,
+        version: Option<u32>,
+    ) -> Result<Option<crate::StoredDocument>> {
+        let (p, i) = (project.to_owned(), id.to_owned());
+        self.with_read(move |conn| documents::get_document_sync(conn, &p, kind, &i, version)).await
+    }
+
+    async fn set_document_label(
+        &self,
+        project: &str,
+        kind: crate::DocKind,
+        id: &str,
+        label: &str,
+        version: Option<u32>,
+    ) -> Result<bool> {
+        let (p, i, l) = (project.to_owned(), id.to_owned(), label.to_owned());
+        self.with_write(move |conn| {
+            documents::set_document_label_sync(conn, &p, kind, &i, &l, version)
+        })
+        .await
+    }
+
+    async fn list_document_labels(
+        &self,
+        project: &str,
+        kind: crate::DocKind,
+        id: Option<&str>,
+    ) -> Result<Vec<crate::DocumentLabel>> {
+        let (p, i) = (project.to_owned(), id.map(str::to_owned));
+        self.with_read(move |conn| {
+            documents::list_document_labels_sync(conn, &p, kind, i.as_deref())
+        })
+        .await
     }
 
     async fn record_audit(&self, event: &AuditEvent) -> Result<()> {

@@ -2582,6 +2582,47 @@ impl std::fmt::Display for SsoProvider {
     }
 }
 
+/// The shape of a prompt's body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptKind {
+    /// One template string, for a completion-style call.
+    Text,
+    /// An ordered list of messages, each with a `role` and a `content` template, for a
+    /// chat-style call.
+    Chat,
+}
+
+impl PromptKind {
+    /// The wire representation, exactly as it appears in JSON.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Chat => "chat",
+        }
+    }
+
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[Self::Text, Self::Chat];
+}
+
+impl std::str::FromStr for PromptKind {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "text" => Ok(Self::Text),
+            "chat" => Ok(Self::Chat),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for PromptKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Input tokens broken down by how the provider billed them. Every field is optional;
 /// absent means the provider did not report it, which is different from zero.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5543,6 +5584,50 @@ pub struct SsoCallbackRequest {
     pub binding: String,
 }
 
+/// A new version of a prompt. Posting a body identical to the latest version stores
+/// nothing new and returns that version, so a deploy that posts its prompts on every
+/// start is a no-op when nothing changed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatePromptRequest {
+    /// The prompt's name. A new name creates the prompt at version 1.
+    pub name: String,
+    /// `text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PromptKind>,
+    /// The template, for a `text` prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// The messages, for a `chat` prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<serde_json::Value>,
+    /// Model settings to store with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+    /// What changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Labels to point at the stored version once it is stored, such as `staging`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+}
+
+/// Which version a label should point at.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptLabelRequest {
+    /// The version. It must exist.
+    pub version: u32,
+}
+
+/// Every version of one prompt, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptVersionsResponse {
+    /// The prompt's name.
+    pub name: String,
+    /// Its versions, newest first, each with the labels that point at it.
+    #[serde(default)]
+    pub versions: Vec<Prompt>,
+}
+
 /// One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback
 /// all hang off a span or a trace.
 /// Stored in the `spans` table.
@@ -5692,6 +5777,15 @@ pub struct Trace {
     pub model_count: u32,
     /// How many tool calls the run made.
     pub tool_count: u32,
+    /// The start of the root step's input as plain text, up to 240 characters, for a list
+    /// column. For a chat input it is the last user message. Filled by the trace list; the
+    /// full input is on the span.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_preview: Option<String>,
+    /// The start of the root step's output as plain text, up to 240 characters. Filled by
+    /// the trace list; the full output is on the span.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_preview: Option<String>,
     /// Tags from the root span.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
@@ -6540,4 +6634,55 @@ impl Theme {
     pub const PRIMARY_KEY: &'static [&'static str] = &["snapshot_id", "aspect", "theme_id"];
     /// The storage table this entity lives in.
     pub const TABLE: &'static str = "themes";
+}
+
+/// One version of a named prompt. A version never changes once stored: a new body is a
+/// new version, and labels such as `production` and `staging` point at the version a
+/// caller should use. SDKs fetch a prompt by name and label, render it with variables,
+/// and link the spans that used it, so a trace shows which version produced an answer.
+/// Stored in the `documents` table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Prompt {
+    /// Which project owns it.
+    pub project: String,
+    /// The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and
+    /// `/`, up to 128 characters.
+    pub name: String,
+    /// Its version, from 1, assigned by the daemon in the order versions arrive.
+    pub version: u32,
+    /// Whether the body is one template or a list of messages.
+    pub kind: PromptKind,
+    /// The template, for a `text` prompt. Variables are written `{{name}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// The messages, for a `chat` prompt: an array of objects with `role` and `content`,
+    /// where `content` is a template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<serde_json::Value>,
+    /// Model settings stored with the prompt, such as `model` and `temperature`. The daemon
+    /// stores them and does not read them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+    /// Every variable the body names, in order of first use, without duplicates.
+    #[serde(default)]
+    pub variables: Vec<String>,
+    /// The labels that point at this version now.
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// What changed in this version, written by whoever stored it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Which key or account stored it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    /// When this version was stored.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+}
+
+impl Prompt {
+    /// The primary key, as declared in the spec.
+    pub const PRIMARY_KEY: &'static [&'static str] = &["project", "name", "version"];
+    /// The storage table this entity lives in.
+    pub const TABLE: &'static str = "documents";
 }

@@ -1,7 +1,7 @@
 ---
 title: "Workers"
 description: "The workers endpoints of the mcpd HTTP API."
-order: 15
+order: 16
 generated: true
 ---
 

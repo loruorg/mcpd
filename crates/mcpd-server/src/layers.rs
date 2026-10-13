@@ -172,6 +172,8 @@ pub fn cors_for(origins: &[String]) -> Option<CorsLayer> {
             .allow_methods([
                 axum::http::Method::GET,
                 axum::http::Method::POST,
+                axum::http::Method::PUT,
+                axum::http::Method::PATCH,
                 axum::http::Method::DELETE,
             ])
             .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])

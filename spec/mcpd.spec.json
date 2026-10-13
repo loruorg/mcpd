@@ -1118,6 +1118,19 @@
           "doc": "GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub user id and the email is the primary verified address GitHub reports."
         }
       ]
+    },
+    "PromptKind": {
+      "doc": "The shape of a prompt's body.",
+      "values": [
+        {
+          "name": "text",
+          "doc": "One template string, for a completion-style call."
+        },
+        {
+          "name": "chat",
+          "doc": "An ordered list of messages, each with a `role` and a `content` template, for a chat-style call."
+        }
+      ]
     }
   },
   "types": {
@@ -5091,6 +5104,71 @@
           "doc": "The binding from the start of the flow."
         }
       ]
+    },
+    "CreatePromptRequest": {
+      "doc": "A new version of a prompt. Posting a body identical to the latest version stores nothing new and returns that version, so a deploy that posts its prompts on every start is a no-op when nothing changed.",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The prompt's name. A new name creates the prompt at version 1."
+        },
+        {
+          "name": "kind",
+          "type": "PromptKind?",
+          "doc": "`text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`."
+        },
+        {
+          "name": "template",
+          "type": "string?",
+          "doc": "The template, for a `text` prompt."
+        },
+        {
+          "name": "messages",
+          "type": "json?",
+          "doc": "The messages, for a `chat` prompt."
+        },
+        {
+          "name": "config",
+          "type": "json?",
+          "doc": "Model settings to store with it."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed."
+        },
+        {
+          "name": "labels",
+          "type": "string[]?",
+          "doc": "Labels to point at the stored version once it is stored, such as `staging`."
+        }
+      ]
+    },
+    "PromptLabelRequest": {
+      "doc": "Which version a label should point at.",
+      "fields": [
+        {
+          "name": "version",
+          "type": "u32",
+          "doc": "The version. It must exist."
+        }
+      ]
+    },
+    "PromptVersionsResponse": {
+      "doc": "Every version of one prompt, newest first.",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The prompt's name."
+        },
+        {
+          "name": "versions",
+          "type": "Prompt[]",
+          "doc": "Its versions, newest first, each with the labels that point at it."
+        }
+      ]
     }
   },
   "entities": {
@@ -5366,6 +5444,16 @@
           "name": "tool_count",
           "type": "u32",
           "doc": "How many tool calls the run made."
+        },
+        {
+          "name": "input_preview",
+          "type": "string?",
+          "doc": "The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list; the full input is on the span."
+        },
+        {
+          "name": "output_preview",
+          "type": "string?",
+          "doc": "The start of the root step's output as plain text, up to 240 characters. Filled by the trace list; the full output is on the span."
         },
         {
           "name": "tags",
@@ -6647,6 +6735,77 @@
           "doc": "One theme across every snapshot that holds it, which is what a history reads."
         }
       ]
+    },
+    "Prompt": {
+      "doc": "One version of a named prompt. A version never changes once stored: a new body is a new version, and labels such as `production` and `staging` point at the version a caller should use. SDKs fetch a prompt by name and label, render it with variables, and link the spans that used it, so a trace shows which version produced an answer.",
+      "table": "documents",
+      "fields": [
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "Which project owns it."
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and `/`, up to 128 characters."
+        },
+        {
+          "name": "version",
+          "type": "u32",
+          "doc": "Its version, from 1, assigned by the daemon in the order versions arrive."
+        },
+        {
+          "name": "kind",
+          "type": "PromptKind",
+          "doc": "Whether the body is one template or a list of messages."
+        },
+        {
+          "name": "template",
+          "type": "string?",
+          "doc": "The template, for a `text` prompt. Variables are written `{{name}}`."
+        },
+        {
+          "name": "messages",
+          "type": "json?",
+          "doc": "The messages, for a `chat` prompt: an array of objects with `role` and `content`, where `content` is a template."
+        },
+        {
+          "name": "config",
+          "type": "json?",
+          "doc": "Model settings stored with the prompt, such as `model` and `temperature`. The daemon stores them and does not read them."
+        },
+        {
+          "name": "variables",
+          "type": "string[]",
+          "doc": "Every variable the body names, in order of first use, without duplicates."
+        },
+        {
+          "name": "labels",
+          "type": "string[]",
+          "doc": "The labels that point at this version now."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed in this version, written by whoever stored it."
+        },
+        {
+          "name": "created_by",
+          "type": "string?",
+          "doc": "Which key or account stored it."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When this version was stored."
+        }
+      ],
+      "primaryKey": [
+        "project",
+        "name",
+        "version"
+      ]
     }
   },
   "endpoints": [
@@ -6808,7 +6967,7 @@
       "method": "GET",
       "path": "/v1/api/traces",
       "summary": "List traces",
-      "doc": "The trace list. Filter on status, kind, name, tags, session, thread, user, environment, model, time window, duration, cost and score, and sort by start time, duration, cost, span count or score. Unlike a plain span dump, this reads the materialised trace projection rather than aggregating spans on every request.",
+      "doc": "The trace list. Filter on status, kind, name, tags, session, thread, user, environment, model, time window, duration, cost, tokens, score and feedback, and sort by start time, duration, cost, span count, tokens or score. Each trace carries a short preview of its input and output. Unlike a plain span dump, this reads the materialised trace projection rather than aggregating spans on every request.",
       "query": [
         {
           "name": "project",
@@ -6881,9 +7040,24 @@
           "doc": "Only traces at least this slow."
         },
         {
+          "name": "max_duration_ms",
+          "type": "u64?",
+          "doc": "Only traces at most this slow."
+        },
+        {
           "name": "min_cost",
           "type": "f64?",
           "doc": "Only traces at least this expensive."
+        },
+        {
+          "name": "max_cost",
+          "type": "f64?",
+          "doc": "Only traces at most this expensive."
+        },
+        {
+          "name": "min_tokens",
+          "type": "u64?",
+          "doc": "Only traces that used at least this many tokens, input and output together."
         },
         {
           "name": "has_score",
@@ -6894,6 +7068,16 @@
           "name": "score_below",
           "type": "f64?",
           "doc": "Combined with `has_score`: only traces where that scorer came in under this value. This is the query that finds bad answers."
+        },
+        {
+          "name": "score_above",
+          "type": "f64?",
+          "doc": "Combined with `has_score`: only traces where that scorer came in over this value."
+        },
+        {
+          "name": "has_feedback",
+          "type": "bool?",
+          "doc": "`true` for only traces a person gave feedback on, `false` for only traces with none."
         },
         {
           "name": "sort",
@@ -7114,6 +7298,16 @@
           "name": "trace_id",
           "type": "string?",
           "doc": "Restrict to one trace."
+        },
+        {
+          "name": "prompt",
+          "type": "string?",
+          "doc": "Only spans that used this prompt, as linked by an SDK's prompt helper."
+        },
+        {
+          "name": "prompt_version",
+          "type": "u32?",
+          "doc": "With `prompt`: only spans that used this version of it."
         },
         {
           "name": "from",
@@ -7868,6 +8062,189 @@
       },
       "response": {
         "type": "Experiment"
+      },
+      "auth": "write"
+    },
+    {
+      "id": "list_prompts",
+      "tag": "Prompts",
+      "method": "GET",
+      "path": "/v1/api/prompts",
+      "summary": "List prompts",
+      "doc": "The latest version of every prompt in the project, each with its labels, sorted by name.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "response": {
+        "type": "Prompt[]"
+      },
+      "auth": "read"
+    },
+    {
+      "id": "create_prompt",
+      "tag": "Prompts",
+      "method": "POST",
+      "path": "/v1/api/prompts",
+      "summary": "Store a prompt version",
+      "doc": "Stores a new version of a prompt and returns it. A `text` prompt needs `template`, a `chat` prompt needs `messages`. A body identical to the latest version is not stored again: the latest version comes back, with any `labels` applied.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "request": {
+        "type": "CreatePromptRequest"
+      },
+      "response": {
+        "type": "Prompt"
+      },
+      "auth": "write"
+    },
+    {
+      "id": "get_prompt",
+      "tag": "Prompts",
+      "method": "GET",
+      "path": "/v1/api/prompts/{name}",
+      "summary": "Get a prompt",
+      "doc": "One version of a prompt: the one `label` points at, or the one numbered `version`, or the latest when neither is given. This is what an SDK reads before it renders a prompt.",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The prompt's name."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        },
+        {
+          "name": "label",
+          "type": "string?",
+          "doc": "Read the version this label points at, such as `production`."
+        },
+        {
+          "name": "version",
+          "type": "u32?",
+          "doc": "Read this version. Not with `label`."
+        }
+      ],
+      "response": {
+        "type": "Prompt"
+      },
+      "responses": {
+        "404": {
+          "doc": "No prompt with that name in the project, no version with that number, or no version carries that label."
+        }
+      },
+      "auth": "read"
+    },
+    {
+      "id": "list_prompt_versions",
+      "tag": "Prompts",
+      "method": "GET",
+      "path": "/v1/api/prompts/{name}/versions",
+      "summary": "List a prompt's versions",
+      "doc": "Every version of one prompt, newest first, with the labels that point at each.",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The prompt's name."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "response": {
+        "type": "PromptVersionsResponse"
+      },
+      "responses": {
+        "404": {
+          "doc": "No prompt with that name in the project."
+        }
+      },
+      "auth": "read"
+    },
+    {
+      "id": "set_prompt_label",
+      "tag": "Prompts",
+      "method": "PUT",
+      "path": "/v1/api/prompts/{name}/labels/{label}",
+      "summary": "Point a label at a version",
+      "doc": "Moves a label to a version, creating the label if it is new. Moving `production` is how a prompt change is released, and moving it back is how one is rolled back; no code is deployed for either. `latest` is reserved: it always means the newest version.",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The prompt's name."
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "doc": "The label. Letters, digits, `-`, `_` and `.`, up to 64 characters."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "request": {
+        "type": "PromptLabelRequest"
+      },
+      "response": {
+        "type": "Prompt"
+      },
+      "responses": {
+        "404": {
+          "doc": "No prompt with that name, or no version with that number."
+        }
+      },
+      "auth": "write"
+    },
+    {
+      "id": "delete_prompt_label",
+      "tag": "Prompts",
+      "method": "DELETE",
+      "path": "/v1/api/prompts/{name}/labels/{label}",
+      "summary": "Remove a label",
+      "doc": "Removes a label from whichever version holds it. A caller that then asks for the label is answered 404, so remove a label only once nothing reads it.",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": "The prompt's name."
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "doc": "The label."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "response": {
+        "type": "DeleteResult"
       },
       "auth": "write"
     },
