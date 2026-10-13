@@ -322,10 +322,12 @@ defmodule Mcpd.PromptsTest do
                min_tokens: 1_000,
                has_score: "relevance",
                score_above: 0.8,
-               has_feedback: false
+               has_feedback: false,
+               experiment_id: "exp-1",
+               preview: false
              )
 
-    assert {:ok, _} = Mcpd.list_traces(c, has_feedback: true)
+    assert {:ok, _} = Mcpd.list_traces(c, has_feedback: true, preview: true)
 
     [first, second] = FakeDaemon.requests(daemon)
 
@@ -336,10 +338,12 @@ defmodule Mcpd.PromptsTest do
              "min_tokens" => "1000",
              "has_score" => "relevance",
              "score_above" => "0.8",
-             "has_feedback" => "false"
+             "has_feedback" => "false",
+             "experiment_id" => "exp-1",
+             "preview" => "false"
            }
 
-    assert query(second.head) == %{"project" => "shop", "has_feedback" => "true"}
+    assert query(second.head) == %{"project" => "shop", "has_feedback" => "true", "preview" => "true"}
 
     assert_raise ArgumentError, ~r/prompt/, fn -> Mcpd.list_traces(c, prompt: "support-reply") end
     assert length(FakeDaemon.requests(daemon)) == 2, "a refused filter makes no request"

@@ -256,7 +256,24 @@ The wire protocol, the definition document and every closed enum are in
 ```
 
 Also `list_spans`, `list_logs`, `list_scores`, `list_feedback`, `query_metrics`,
-`analytics_cost` and `health`.
+`analytics_cost`, `get_trajectory`, `list_dataset_items`, `experiment_results`
+and `health`.
+
+## Experiments
+
+`run_experiment` calls your function with each case of a dataset, each in a
+root span carrying the experiment and case ids, then scores the answers.
+
+```elixir
+{:ok, results} =
+  Mcpd.run_experiment(mcpd, "support-questions", &MyAgent.answer/1,
+    name: "answers-v2",
+    scorers: ["exact_match"]
+  )
+```
+
+`create_experiment` and `score_experiment` are the steps it takes, for when
+you run the cases yourself.
 
 ## Types
 
