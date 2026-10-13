@@ -793,6 +793,15 @@ async fn an_organisation_shares_one_ceiling_across_its_projects() {
     )
     .await;
     assert_eq!(rb.body["accepted"], json!(1), "{}", rb.body);
+    let b_org =
+        get(&d, "/v1/api/orgs", Some(&b.token)).await.body[0]["id"].as_str().unwrap().to_owned();
+    let b_usage = get(&d, &format!("/v1/api/orgs/{b_org}/usage"), Some(&b.token)).await;
+    assert_eq!(
+        b_usage.body["quota_per_minute"],
+        json!(3),
+        "a new tenant started with no ceiling: {}",
+        b_usage.body
+    );
     let usage = get(&d, &format!("/v1/api/orgs/{org}/usage"), Some(&a.token)).await;
     assert_eq!(usage.body["quota_per_minute"], json!(3), "{}", usage.body);
     assert_eq!(usage.body["admitted_total"], json!(3));
@@ -1029,6 +1038,29 @@ async fn oidc_never_takes_over_an_account_and_refuses_a_forged_or_replayed_callb
         StatusCode::FORBIDDEN,
         "an identity provider took over an account: {}",
         r.body
+    );
+    // Refused by the rule that an existing account is never linked, not by a
+    // later check that happens to catch it too.
+    assert!(
+        r.body["message"].as_str().unwrap_or("").contains("ask an admin to invite"),
+        "{}",
+        r.body
+    );
+    let log = d
+        .state
+        .store
+        .list_audit(&mcpd_store::AuditQuery {
+            project: "org_acme".into(),
+            action: Some("sso_login".into()),
+            from: None,
+            to: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert!(
+        log.iter().all(|r| r.result == mcpd_core::AuditResult::Refused),
+        "a refused login was audited as allowed"
     );
     assert_eq!(get(&d, "/v1/api/account", Some(&outsider.token)).await.status, StatusCode::OK);
     // An address outside the claimed domains.

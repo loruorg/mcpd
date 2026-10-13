@@ -1560,6 +1560,8 @@ pub async fn signup(
     let created = blocking(move || a.create_account(&wanted, &hash)).await?;
     match created {
         Some(account_id) => {
+            // The new organisation gets its ceiling before its first signal.
+            crate::orgs::sync_quotas(&state);
             let a = Arc::clone(&accounts);
             let token = blocking(move || {
                 a.issue_token(TokenPurpose::Verify, Some(&account_id), None, VERIFY_TTL_SECONDS)
