@@ -1421,6 +1421,26 @@ enum class SsoProvider(val wire: String) {
     }
 }
 
+/** The shape of a prompt's body. */
+@Serializable
+enum class PromptKind(val wire: String) {
+    /** One template string, for a completion-style call. */
+    @SerialName("text") TEXT("text"),
+    /**
+     * An ordered list of messages, each with a `role` and a `content` template, for a
+     * chat-style call.
+     */
+    @SerialName("chat") CHAT("chat"),
+    ;
+
+    override fun toString(): String = wire
+
+    companion object {
+        /** Parse a wire value, or null when this version of the spec does not define it. */
+        fun fromWire(s: String): PromptKind? = entries.firstOrNull { it.wire == s }
+    }
+}
+
 /**
  * Input tokens broken down by how the provider billed them. Every field is
  * optional; absent means the provider did not report it, which is different from
@@ -4414,6 +4434,48 @@ data class SsoCallbackRequest(
 }
 
 /**
+ * A new version of a prompt. Posting a body identical to the latest version stores
+ * nothing new and returns that version, so a deploy that posts its prompts on
+ * every start is a no-op when nothing changed.
+ */
+@Serializable
+data class CreatePromptRequest(
+    /** The prompt's name. A new name creates the prompt at version 1. */
+    @SerialName("name") val name: String,
+    /** `text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`. */
+    @SerialName("kind") val kind: PromptKind? = null,
+    /** The template, for a `text` prompt. */
+    @SerialName("template") val template: String? = null,
+    /** The messages, for a `chat` prompt. */
+    @SerialName("messages") val messages: JsonElement? = null,
+    /** Model settings to store with it. */
+    @SerialName("config") val config: JsonElement? = null,
+    /** What changed. */
+    @SerialName("note") val note: String? = null,
+    /** Labels to point at the stored version once it is stored, such as `staging`. */
+    @SerialName("labels") val labels: List<String>? = null
+) {
+}
+
+/** Which version a label should point at. */
+@Serializable
+data class PromptLabelRequest(
+    /** The version. It must exist. */
+    @SerialName("version") val version: Int
+) {
+}
+
+/** Every version of one prompt, newest first. */
+@Serializable
+data class PromptVersionsResponse(
+    /** The prompt's name. */
+    @SerialName("name") val name: String,
+    /** Its versions, newest first, each with the labels that point at it. */
+    @SerialName("versions") val versions: List<Prompt>
+) {
+}
+
+/**
  * One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and
  * feedback all hang off a span or a trace. Stored in the `spans` table.
  */
@@ -5396,5 +5458,54 @@ data class Theme(
     companion object {
         /** The storage table this entity lives in. */
         const val TABLE = "themes"
+    }
+}
+
+/**
+ * One version of a named prompt. A version never changes once stored: a new body
+ * is a new version, and labels such as `production` and `staging` point at the
+ * version a caller should use. SDKs fetch a prompt by name and label, render it
+ * with variables, and link the spans that used it, so a trace shows which version
+ * produced an answer. Stored in the `documents` table.
+ */
+@Serializable
+data class Prompt(
+    /** Which project owns it. */
+    @SerialName("project") val project: String,
+    /**
+     * The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and
+     * `/`, up to 128 characters.
+     */
+    @SerialName("name") val name: String,
+    /** Its version, from 1, assigned by the daemon in the order versions arrive. */
+    @SerialName("version") val version: Int,
+    /** Whether the body is one template or a list of messages. */
+    @SerialName("kind") val kind: PromptKind,
+    /** Every variable the body names, in order of first use, without duplicates. */
+    @SerialName("variables") val variables: List<String>,
+    /** The labels that point at this version now. */
+    @SerialName("labels") val labels: List<String>,
+    /** When this version was stored. */
+    @SerialName("created_at") val createdAt: Instant,
+    /** The template, for a `text` prompt. Variables are written `{{name}}`. */
+    @SerialName("template") val template: String? = null,
+    /**
+     * The messages, for a `chat` prompt: an array of objects with `role` and
+     * `content`, where `content` is a template.
+     */
+    @SerialName("messages") val messages: JsonElement? = null,
+    /**
+     * Model settings stored with the prompt, such as `model` and `temperature`. The
+     * daemon stores them and does not read them.
+     */
+    @SerialName("config") val config: JsonElement? = null,
+    /** What changed in this version, written by whoever stored it. */
+    @SerialName("note") val note: String? = null,
+    /** Which key or account stored it. */
+    @SerialName("created_by") val createdBy: String? = null
+) {
+    companion object {
+        /** The storage table this entity lives in. */
+        const val TABLE = "documents"
     }
 }

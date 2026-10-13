@@ -201,6 +201,47 @@ impl Store for Bare {
     ) -> mcpd_store::Result<Vec<mcpd_core::Experiment>> {
         self.0.list_experiments(project).await
     }
+    async fn put_document(
+        &self,
+        doc: &mcpd_store::NewDocument,
+    ) -> mcpd_store::Result<(mcpd_store::StoredDocument, bool)> {
+        self.0.put_document(doc).await
+    }
+    async fn list_documents(
+        &self,
+        project: &str,
+        kind: mcpd_store::DocKind,
+        id: Option<&str>,
+    ) -> mcpd_store::Result<Vec<mcpd_store::StoredDocument>> {
+        self.0.list_documents(project, kind, id).await
+    }
+    async fn get_document(
+        &self,
+        project: &str,
+        kind: mcpd_store::DocKind,
+        id: &str,
+        version: Option<u32>,
+    ) -> mcpd_store::Result<Option<mcpd_store::StoredDocument>> {
+        self.0.get_document(project, kind, id, version).await
+    }
+    async fn set_document_label(
+        &self,
+        project: &str,
+        kind: mcpd_store::DocKind,
+        id: &str,
+        label: &str,
+        version: Option<u32>,
+    ) -> mcpd_store::Result<bool> {
+        self.0.set_document_label(project, kind, id, label, version).await
+    }
+    async fn list_document_labels(
+        &self,
+        project: &str,
+        kind: mcpd_store::DocKind,
+        id: Option<&str>,
+    ) -> mcpd_store::Result<Vec<mcpd_store::DocumentLabel>> {
+        self.0.list_document_labels(project, kind, id).await
+    }
 }
 
 fn keyed() -> ServerConfig {

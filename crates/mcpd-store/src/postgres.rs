@@ -21,12 +21,12 @@
 use crate::{
     decode_delta_cursor, encode_delta_cursor, hashed_id_regex, is_hashed_identifier,
     unmatchable_identifiers, Aggregation, AspectNoteQuery, AspectNoteRollup, AspectRollupQuery,
-    AuditQuery, Batch, Delta, DeltaQuery, DeltaSignal, Discovered, DiscoveryQuery, ErasureOutcome,
-    Error, IdentifierProbe, Include, LogQuery, MetricQuery, Order, Paged, Partitioning,
-    PolledSignal, Result, RetentionOutcome, RetentionPolicy, ScoreQuery, SnapshotQuery,
-    SnapshotWrite, SpanQuery, SpanSort, Store, StoreCapabilities, StoredNote, StoredTheme,
-    TextSearch, ThemeLineage, ThemeMember, ThemeMemberQuery, ThemeQuery, TraceQuery, TraceSort,
-    ERASED_ITEM,
+    AuditQuery, Batch, Delta, DeltaQuery, DeltaSignal, Discovered, DiscoveryQuery, DocKind,
+    DocumentLabel, ErasureOutcome, Error, IdentifierProbe, Include, LogQuery, MetricQuery,
+    NewDocument, Order, Paged, Partitioning, PolledSignal, Result, RetentionOutcome,
+    RetentionPolicy, ScoreQuery, SnapshotQuery, SnapshotWrite, SpanQuery, SpanSort, Store,
+    StoreCapabilities, StoredDocument, StoredNote, StoredTheme, TextSearch, ThemeLineage,
+    ThemeMember, ThemeMemberQuery, ThemeQuery, TraceQuery, TraceSort, ERASED_ITEM,
 };
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use mcpd_core::{
@@ -221,7 +221,9 @@ const MIGRATION_LOCK: i64 = 0x6d63_7064_0001;
 /// `CREATE TABLE IF NOT EXISTS` cannot apply, so `migrate` drops the old table
 /// inside the migrating transaction and rebuilds every row from the spans. That
 /// is safe only because every column of `traces` is derived.
-const SCHEMA_VERSION: i32 = 6;
+///
+/// 7 adds `documents` and `document_labels`, two new tables.
+const SCHEMA_VERSION: i32 = 7;
 
 /// The first version whose `traces` table is keyed by project as well.
 const TRACES_BY_PROJECT: i32 = 5;
@@ -337,6 +339,40 @@ fn unreachable(e: deadpool_postgres::PoolError) -> Error {
 /// their escape characters escaped in turn.
 fn escape_like(raw: &str) -> String {
     raw.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
+/// A `documents` row read as `project, id, version, body, note, created_by,
+/// created_at`.
+fn pg_document(kind: DocKind, r: &Row) -> StoredDocument {
+    let body: String = r.get(3);
+    StoredDocument {
+        project: r.get(0),
+        kind,
+        id: r.get(1),
+        version: r.get::<_, i64>(2).clamp(0, i64::from(u32::MAX)) as u32,
+        body: serde_json::from_str(&body).unwrap_or(Value::Null),
+        note: r.get(4),
+        created_by: r.get(5),
+        created_at: from_nanos(r.get(6)),
+    }
+}
+
+async fn pg_latest_document(
+    conn: &tokio_postgres::Client,
+    project: &str,
+    kind: DocKind,
+    id: &str,
+) -> Result<Option<StoredDocument>> {
+    Ok(conn
+        .query_opt(
+            "SELECT project, id, version, body, note, created_by, created_at
+             FROM documents WHERE project = $1 AND kind = $2 AND id = $3
+             ORDER BY version DESC LIMIT 1",
+            &[&project, &kind.as_str(), &id],
+        )
+        .await
+        .map_err(be)?
+        .map(|r| pg_document(kind, &r)))
 }
 
 fn to_nanos(t: OffsetDateTime) -> i64 {
@@ -2456,6 +2492,23 @@ impl Store for PostgresStore {
         if let Some(ms) = q.min_duration_ms {
             w.push("duration_ns >= {}", (ms as i64).saturating_mul(1_000_000));
         }
+        // Compared as text, so a version an SDK sent as a number and one sent
+        // as a string both match.
+        if let Some(p) = &q.prompt {
+            w.push(
+                &format!("(attributes::jsonb ->> '{}') = {{}}", crate::PROMPT_NAME_ATTRIBUTE),
+                p.clone(),
+            );
+            if let Some(v) = q.prompt_version {
+                w.push(
+                    &format!(
+                        "(attributes::jsonb ->> '{}') = {{}}",
+                        crate::PROMPT_VERSION_ATTRIBUTE
+                    ),
+                    v.to_string(),
+                );
+            }
+        }
         if let Some(text) = q.q.as_deref().and_then(search_text) {
             w.push("search @@ plainto_tsquery('simple', {})", text);
         }
@@ -3508,6 +3561,179 @@ impl Store for PostgresStore {
                 error: r.get(10),
                 metadata: json_in(r.get(11)),
                 correlation: correlation_of(r.get(12), r.get(13)),
+            })
+            .collect())
+    }
+
+    // ------------------------------------------------- versioned documents
+
+    async fn put_document(&self, doc: &NewDocument) -> Result<(StoredDocument, bool)> {
+        let conn = self.conn().await?;
+        // Two replicas can read the same latest version and both try the next
+        // number. The primary key lets one of them in; the other sees no row
+        // inserted, reads again and tries the number after, or finds its body
+        // is now the latest and confirms it.
+        for _ in 0..8 {
+            let held = pg_latest_document(&conn, &doc.project, doc.kind, &doc.id).await?;
+            if let Some(held) = held.as_ref().filter(|h| h.body == doc.body) {
+                return Ok((held.clone(), false));
+            }
+            let version = held.map_or(1, |h| h.version.saturating_add(1));
+            let n = conn
+                .execute(
+                    "INSERT INTO documents
+                       (project, kind, id, version, body, note, created_by, created_at)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                     ON CONFLICT (project, kind, id, version) DO NOTHING",
+                    &[
+                        &doc.project,
+                        &doc.kind.as_str(),
+                        &doc.id,
+                        &i64::from(version),
+                        &doc.body.to_string(),
+                        &doc.note,
+                        &doc.created_by,
+                        &to_nanos(doc.created_at),
+                    ],
+                )
+                .await
+                .map_err(be)?;
+            if n == 1 {
+                return Ok((
+                    StoredDocument {
+                        project: doc.project.clone(),
+                        kind: doc.kind,
+                        id: doc.id.clone(),
+                        version,
+                        body: doc.body.clone(),
+                        note: doc.note.clone(),
+                        created_by: doc.created_by.clone(),
+                        created_at: doc.created_at,
+                    },
+                    true,
+                ));
+            }
+        }
+        Err(Error::Backend(format!(
+            "could not assign a version to {} {:?}: other writers took every number tried; \
+             post it again",
+            doc.kind.as_str(),
+            doc.id
+        )))
+    }
+
+    async fn list_documents(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: Option<&str>,
+    ) -> Result<Vec<StoredDocument>> {
+        let conn = self.conn().await?;
+        let rows = match id {
+            Some(id) => conn
+                .query(
+                    "SELECT project, id, version, body, note, created_by, created_at
+                     FROM documents WHERE project = $1 AND kind = $2 AND id = $3
+                     ORDER BY version DESC",
+                    &[&project, &kind.as_str(), &id],
+                )
+                .await
+                .map_err(be)?,
+            None => conn
+                .query(
+                    "SELECT DISTINCT ON (id) project, id, version, body, note, created_by,
+                            created_at
+                     FROM documents WHERE project = $1 AND kind = $2
+                     ORDER BY id, version DESC",
+                    &[&project, &kind.as_str()],
+                )
+                .await
+                .map_err(be)?,
+        };
+        let docs: Vec<StoredDocument> = rows.iter().map(|r| pg_document(kind, r)).collect();
+        Ok(if id.is_some() { docs } else { crate::latest_per_id(docs) })
+    }
+
+    async fn get_document(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: &str,
+        version: Option<u32>,
+    ) -> Result<Option<StoredDocument>> {
+        let conn = self.conn().await?;
+        let Some(v) = version else {
+            return pg_latest_document(&conn, project, kind, id).await;
+        };
+        Ok(conn
+            .query_opt(
+                "SELECT project, id, version, body, note, created_by, created_at
+                 FROM documents WHERE project = $1 AND kind = $2 AND id = $3 AND version = $4",
+                &[&project, &kind.as_str(), &id, &i64::from(v)],
+            )
+            .await
+            .map_err(be)?
+            .map(|r| pg_document(kind, &r)))
+    }
+
+    async fn set_document_label(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: &str,
+        label: &str,
+        version: Option<u32>,
+    ) -> Result<bool> {
+        let conn = self.conn().await?;
+        let n = match version {
+            None => conn
+                .execute(
+                    "DELETE FROM document_labels
+                     WHERE project = $1 AND kind = $2 AND id = $3 AND label = $4",
+                    &[&project, &kind.as_str(), &id, &label],
+                )
+                .await
+                .map_err(be)?,
+            // One statement, so the version is checked by the same snapshot
+            // that writes the label.
+            Some(v) => conn
+                .execute(
+                    "INSERT INTO document_labels (project, kind, id, label, version, updated_at)
+                     SELECT $1, $2, $3, $4, $5, $6
+                     WHERE EXISTS (SELECT 1 FROM documents
+                                   WHERE project = $1 AND kind = $2 AND id = $3
+                                     AND version = $5)
+                     ON CONFLICT (project, kind, id, label)
+                     DO UPDATE SET version = EXCLUDED.version, updated_at = EXCLUDED.updated_at",
+                    &[&project, &kind.as_str(), &id, &label, &i64::from(v), &now_nanos()],
+                )
+                .await
+                .map_err(be)?,
+        };
+        Ok(n > 0)
+    }
+
+    async fn list_document_labels(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: Option<&str>,
+    ) -> Result<Vec<DocumentLabel>> {
+        let conn = self.conn().await?;
+        Ok(conn
+            .query(
+                "SELECT id, label, version FROM document_labels
+                 WHERE project = $1 AND kind = $2 AND ($3::TEXT IS NULL OR id = $3)
+                 ORDER BY id, label",
+                &[&project, &kind.as_str(), &id],
+            )
+            .await
+            .map_err(be)?
+            .iter()
+            .map(|r| DocumentLabel {
+                id: r.get(0),
+                label: r.get(1),
+                version: r.get::<_, i64>(2).clamp(0, i64::from(u32::MAX)) as u32,
             })
             .collect())
     }

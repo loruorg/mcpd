@@ -1,7 +1,7 @@
 ---
 title: "Privacy"
 description: "The privacy endpoints of the mcpd HTTP API."
-order: 13
+order: 14
 generated: true
 ---
 

@@ -20,6 +20,15 @@ rather than every commit.
 
 ### Added
 
+- **Prompt management.** Store prompts as numbered versions, text or chat
+  messages with `{{variable}}` placeholders and model settings, and point
+  labels such as `production` and `staging` at a version. Releasing or rolling
+  back a prompt is moving a label; no deploy is needed. An identical body is
+  not stored twice. The span list filters on the prompt a step used
+  (`prompt`, `prompt_version`), and the new Prompts screen shows each
+  version, what changed from the one before, its labels, and the steps that
+  ran it. Prompts are stored on SQLite, Postgres and ClickHouse. Wire-contract
+  change: the `Prompt` entity and six `/v1/api/prompts` endpoints.
 - **Organisations, roles, single sign-on and SCIM.** An account can create
   organisations, which own projects, invite members by email and give each a
   role (owner, admin, member or viewer, optionally replaced on one project)

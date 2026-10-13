@@ -1054,6 +1054,21 @@ pub(super) fn list_spans_sync(conn: &Connection, q: &SpanQuery) -> Result<Paged<
     if let Some(d) = q.min_duration_ms {
         w.push("duration_ns >= ?", (d as i64).saturating_mul(1_000_000));
     }
+    if let Some(p) = &q.prompt {
+        w.push(
+            &format!("json_extract(attributes, '$.\"{}\"') = ?", crate::PROMPT_NAME_ATTRIBUTE),
+            p.clone(),
+        );
+        if let Some(v) = q.prompt_version {
+            w.push(
+                &format!(
+                    "CAST(json_extract(attributes, '$.\"{}\"') AS INTEGER) = ?",
+                    crate::PROMPT_VERSION_ATTRIBUTE
+                ),
+                i64::from(v),
+            );
+        }
+    }
     if let Some(raw) = &q.q {
         if let Some(fts) = fts_query(raw) {
             w.clauses.push(

@@ -1,7 +1,7 @@
 ---
 title: "SSO"
 description: "The sso endpoints of the mcpd HTTP API."
-order: 20
+order: 21
 generated: true
 ---
 

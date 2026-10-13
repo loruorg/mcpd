@@ -346,3 +346,20 @@ ALTER TABLE mcpd.logs ADD COLUMN IF NOT EXISTS run_id String DEFAULT '';
 ALTER TABLE mcpd.logs ADD COLUMN IF NOT EXISTS request_id String DEFAULT '';
 ALTER TABLE mcpd.logs ADD COLUMN IF NOT EXISTS experiment_id String DEFAULT '';
 ALTER TABLE mcpd.logs ADD COLUMN IF NOT EXISTS release String DEFAULT '';
+
+-- Versioned documents: prompts, scorer definitions and evaluation rules.
+-- Append only. Two writers that pick the same version both land, and every
+-- read takes the row with the smallest (created_at, writer) for a version, so
+-- all readers agree on one winner and the other writer tries the next number.
+CREATE TABLE IF NOT EXISTS mcpd.documents (
+    project LowCardinality(String), kind LowCardinality(String), id String,
+    version UInt32, body String, note String, created_by String,
+    created_at DateTime64(9,'UTC'), writer String
+) ENGINE = MergeTree ORDER BY (project, kind, id, version, created_at, writer);
+
+-- Labels. The newest row for a label wins, and a removal is a row with
+-- deleted = 1, so nothing is ever updated in place.
+CREATE TABLE IF NOT EXISTS mcpd.document_labels (
+    project LowCardinality(String), kind LowCardinality(String), id String,
+    label String, version UInt32, deleted UInt8, updated_at DateTime64(9,'UTC')
+) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (project, kind, id, label);

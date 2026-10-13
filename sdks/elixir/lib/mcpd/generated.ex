@@ -2013,6 +2013,40 @@ defmodule Mcpd.SsoProvider do
   def from_wire(_), do: :error
 end
 
+defmodule Mcpd.PromptKind do
+  @moduledoc """
+  The shape of a prompt's body.
+  """
+
+  @type t :: :text | :chat
+
+  @values [
+    :text,
+    :chat,
+  ]
+
+  @doc "Every value, in declaration order."
+  @spec values() :: [t()]
+  def values, do: @values
+
+  @doc "The wire representation of a value."
+  @spec to_wire(t()) :: String.t()
+  def to_wire(:text), do: "text"
+  def to_wire(:chat), do: "chat"
+
+  @doc """
+  Parse a wire value.
+
+  Returns `:error` on an unknown value rather than raising: a newer daemon
+  may send a value this build has never heard of, and an SDK that crashes on
+  one it does not recognise breaks the agent it is meant to be observing.
+  """
+  @spec from_wire(String.t()) :: {:ok, t()} | :error
+  def from_wire("text"), do: {:ok, :text}
+  def from_wire("chat"), do: {:ok, :chat}
+  def from_wire(_), do: :error
+end
+
 defmodule Mcpd.InputTokenDetails do
   @moduledoc """
   Input tokens broken down by how the provider billed them. Every field is optional; absent means the provider did not report it, which is different from zero.
@@ -5117,6 +5151,65 @@ defmodule Mcpd.SsoCallbackRequest do
   ]
 end
 
+defmodule Mcpd.CreatePromptRequest do
+  @moduledoc """
+  A new version of a prompt. Posting a body identical to the latest version stores nothing new and returns that version, so a deploy that posts its prompts on every start is a no-op when nothing changed.
+  """
+
+  @type t :: %__MODULE__{
+          name: String.t(),
+          kind: Mcpd.PromptKind.t() | nil,
+          template: String.t() | nil,
+          messages: term() | nil,
+          config: term() | nil,
+          note: String.t() | nil,
+          labels: [String.t()] | nil
+        }
+
+  @enforce_keys [:name]
+  defstruct [
+    name: nil,
+    kind: nil,
+    template: nil,
+    messages: nil,
+    config: nil,
+    note: nil,
+    labels: [],
+  ]
+end
+
+defmodule Mcpd.PromptLabelRequest do
+  @moduledoc """
+  Which version a label should point at.
+  """
+
+  @type t :: %__MODULE__{
+          version: non_neg_integer()
+        }
+
+  @enforce_keys [:version]
+  defstruct [
+    version: nil,
+  ]
+end
+
+defmodule Mcpd.PromptVersionsResponse do
+  @moduledoc """
+  Every version of one prompt, newest first.
+  """
+
+  @type t :: %__MODULE__{
+          name: String.t(),
+          versions: [Mcpd.Prompt.t()]
+        }
+
+  @enforce_keys [:name, :versions]
+  defstruct [
+    name: nil,
+    versions: [],
+  ]
+end
+
 defmodule Mcpd.Span do
   @moduledoc """
   One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.
@@ -6030,5 +6123,52 @@ defmodule Mcpd.Theme do
   @doc "The primary key, as declared in the spec."
   @spec primary_key() :: [String.t()]
   def primary_key, do: ["snapshot_id", "aspect", "theme_id"]
+end
+
+defmodule Mcpd.Prompt do
+  @moduledoc """
+  One version of a named prompt. A version never changes once stored: a new body is a new version, and labels such as `production` and `staging` point at the version a caller should use. SDKs fetch a prompt by name and label, render it with variables, and link the spans that used it, so a trace shows which version produced an answer.
+
+  Stored in the `documents` table.
+  """
+
+  @type t :: %__MODULE__{
+          project: String.t(),
+          name: String.t(),
+          version: non_neg_integer(),
+          kind: Mcpd.PromptKind.t(),
+          variables: [String.t()],
+          labels: [String.t()],
+          created_at: DateTime.t(),
+          template: String.t() | nil,
+          messages: term() | nil,
+          config: term() | nil,
+          note: String.t() | nil,
+          created_by: String.t() | nil
+        }
+
+  @enforce_keys [:project, :name, :version, :kind, :variables, :labels, :created_at]
+  defstruct [
+    project: nil,
+    name: nil,
+    version: nil,
+    kind: nil,
+    variables: [],
+    labels: [],
+    created_at: nil,
+    template: nil,
+    messages: nil,
+    config: nil,
+    note: nil,
+    created_by: nil,
+  ]
+
+  @doc "The storage table this entity lives in."
+  @spec table() :: String.t()
+  def table, do: "documents"
+
+  @doc "The primary key, as declared in the spec."
+  @spec primary_key() :: [String.t()]
+  def primary_key, do: ["project", "name", "version"]
 end
 

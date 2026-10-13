@@ -570,6 +570,21 @@ fn documented_answers() -> Answers {
     // Runs sorted by the tokens they used, input and output together.
     e.insert("runs sort by tokens", "big,mid,small".into());
 
+    // Versioned documents: prompts, scorer definitions, evaluation rules.
+    e.insert(
+        "a document's versions are assigned, and a repeat is confirmed",
+        "1:true,1:false,2:true".into(),
+    );
+    e.insert("documents list the latest of each, by id", "greet:2,other:1".into());
+    e.insert("a document's versions list newest first", "2,1".into());
+    e.insert("an old version reads back unchanged", "\"Hi\"".into());
+    e.insert("documents are kept apart by kind", "0".into());
+    e.insert("a label points at a stored version and no other", "true,false".into());
+    e.insert("a label reads back", "production:1".into());
+    e.insert("a moved label points at its new version", "production:2".into());
+    e.insert("a removed label is gone", "true,false,".into());
+    e.insert("spans filter on the prompt they used, and its version", "3,2,0".into());
+
     // A project's feedback, newest first, filtered and keyset paged.
     e.insert("feedback lists newest first", "f3,f2".into());
     e.insert("feedback pages on", "f1".into());
@@ -2178,6 +2193,130 @@ async fn observe_log_correlation(store: &dyn Store, project: String) -> Answers 
     a
 }
 
+async fn observe_documents(store: &dyn Store, project: String) -> Answers {
+    use mcpd_store::{DocKind, NewDocument, SpanQuery};
+    let mut a = Answers::new();
+    let now = OffsetDateTime::now_utc();
+    let doc = |id: &str, body: serde_json::Value| NewDocument {
+        project: project.clone(),
+        kind: DocKind::Prompt,
+        id: id.to_owned(),
+        body,
+        note: Some("n".into()),
+        created_by: None,
+        created_at: now,
+    };
+    let put = |d: NewDocument| async move {
+        let (s, created) = store.put_document(&d).await.expect("put a document");
+        format!("{}:{created}", s.version)
+    };
+    let first = put(doc("greet", json!({"template": "Hi"}))).await;
+    let again = put(doc("greet", json!({"template": "Hi"}))).await;
+    let second = put(doc("greet", json!({"template": "Hello"}))).await;
+    put(doc("other", json!({"template": "x"}))).await;
+    a.insert(
+        "a document's versions are assigned, and a repeat is confirmed",
+        [first, again, second].join(","),
+    );
+
+    let latest = store.list_documents(&project, DocKind::Prompt, None).await.expect("list latest");
+    a.insert(
+        "documents list the latest of each, by id",
+        latest.iter().map(|d| format!("{}:{}", d.id, d.version)).collect::<Vec<_>>().join(","),
+    );
+    let versions =
+        store.list_documents(&project, DocKind::Prompt, Some("greet")).await.expect("versions");
+    a.insert(
+        "a document's versions list newest first",
+        versions.iter().map(|d| d.version.to_string()).collect::<Vec<_>>().join(","),
+    );
+    let v1 = store.get_document(&project, DocKind::Prompt, "greet", Some(1)).await.expect("v1");
+    a.insert(
+        "an old version reads back unchanged",
+        v1.map(|d| d.body["template"].to_string()).unwrap_or_default(),
+    );
+    let other_kind = store.list_documents(&project, DocKind::Scorer, None).await.expect("kind");
+    a.insert("documents are kept apart by kind", other_kind.len().to_string());
+
+    let labels = || {
+        let project = project.clone();
+        async move {
+            store
+                .list_document_labels(&project, DocKind::Prompt, Some("greet"))
+                .await
+                .expect("labels")
+                .iter()
+                .map(|l| format!("{}:{}", l.label, l.version))
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+    };
+    let set = store
+        .set_document_label(&project, DocKind::Prompt, "greet", "production", Some(1))
+        .await
+        .expect("label");
+    let missing = store
+        .set_document_label(&project, DocKind::Prompt, "greet", "production", Some(9))
+        .await
+        .expect("label a missing version");
+    a.insert("a label points at a stored version and no other", format!("{set},{missing}"));
+    a.insert("a label reads back", labels().await);
+    store
+        .set_document_label(&project, DocKind::Prompt, "greet", "production", Some(2))
+        .await
+        .expect("move");
+    a.insert("a moved label points at its new version", labels().await);
+    let removed = store
+        .set_document_label(&project, DocKind::Prompt, "greet", "production", None)
+        .await
+        .expect("remove");
+    let again = store
+        .set_document_label(&project, DocKind::Prompt, "greet", "production", None)
+        .await
+        .expect("remove again");
+    a.insert("a removed label is gone", format!("{removed},{again},{}", labels().await));
+
+    // Spans linked to a prompt, by the attributes an SDK writes.
+    let spans: Vec<Span> = [("p1", 1), ("p2", 2), ("p3", 2)]
+        .iter()
+        .enumerate()
+        .map(|(i, (label, v))| {
+            let mut s = root(
+                &project,
+                label,
+                now - Duration::seconds(i as i64 + 1),
+                only_project(&project),
+            );
+            s.attributes = Some(json!({
+                mcpd_store::PROMPT_NAME_ATTRIBUTE: "greet",
+                mcpd_store::PROMPT_VERSION_ATTRIBUTE: v,
+            }));
+            s
+        })
+        .collect();
+    store.ingest(Batch { spans, ..Batch::default() }).await.expect("the prompt spans ingest");
+    let count = |prompt: &str, version: Option<u32>| {
+        let q = SpanQuery {
+            project: project.clone(),
+            prompt: Some(prompt.to_owned()),
+            prompt_version: version,
+            limit: 50,
+            ..Default::default()
+        };
+        async move { store.list_spans(&q).await.expect("spans by prompt").items.len() }
+    };
+    a.insert(
+        "spans filter on the prompt they used, and its version",
+        format!(
+            "{},{},{}",
+            count("greet", None).await,
+            count("greet", Some(2)).await,
+            count("nope", None).await
+        ),
+    );
+    a
+}
+
 async fn observe_token_sort(store: &dyn Store, project: String) -> Answers {
     let mut a = Answers::new();
     let now = OffsetDateTime::now_utc();
@@ -2669,6 +2808,7 @@ async fn every_backend_gives_the_documented_answer_to_the_same_question() {
         answers.extend(observe_metric_points(store.as_ref(), unique(&format!("mp-{name}"))).await);
         answers.extend(observe_feedback_list(store.as_ref(), unique(&format!("fb-{name}"))).await);
         answers.extend(observe_token_sort(store.as_ref(), unique(&format!("tok-{name}"))).await);
+        answers.extend(observe_documents(store.as_ref(), unique(&format!("doc-{name}"))).await);
         answers
             .extend(observe_log_correlation(store.as_ref(), unique(&format!("lc-{name}"))).await);
         answers.extend(observe_themes(store.as_ref(), unique(&format!("thm-{name}"))).await);

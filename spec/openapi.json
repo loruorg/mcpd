@@ -813,6 +813,18 @@
           "github": "GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub user id and the email is the primary verified address GitHub reports."
         }
       },
+      "PromptKind": {
+        "type": "string",
+        "description": "The shape of a prompt's body.",
+        "enum": [
+          "text",
+          "chat"
+        ],
+        "x-enumDescriptions": {
+          "text": "One template string, for a completion-style call.",
+          "chat": "An ordered list of messages, each with a `role` and a `content` template, for a chat-style call."
+        }
+      },
       "InputTokenDetails": {
         "type": "object",
         "description": "Input tokens broken down by how the provider billed them. Every field is optional; absent means the provider did not report it, which is different from zero.",
@@ -5493,6 +5505,80 @@
           "binding"
         ]
       },
+      "CreatePromptRequest": {
+        "type": "object",
+        "description": "A new version of a prompt. Posting a body identical to the latest version stores nothing new and returns that version, so a deploy that posts its prompts on every start is a no-op when nothing changed.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The prompt's name. A new name creates the prompt at version 1."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PromptKind",
+            "description": "`text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`."
+          },
+          "template": {
+            "type": "string",
+            "description": "The template, for a `text` prompt."
+          },
+          "messages": {
+            "description": "The messages, for a `chat` prompt."
+          },
+          "config": {
+            "description": "Model settings to store with it."
+          },
+          "note": {
+            "type": "string",
+            "description": "What changed."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Labels to point at the stored version once it is stored, such as `staging`."
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "PromptLabelRequest": {
+        "type": "object",
+        "description": "Which version a label should point at.",
+        "properties": {
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "The version. It must exist."
+          }
+        },
+        "required": [
+          "version"
+        ]
+      },
+      "PromptVersionsResponse": {
+        "type": "object",
+        "description": "Every version of one prompt, newest first.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The prompt's name."
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Prompt"
+            },
+            "description": "Its versions, newest first, each with the labels that point at it."
+          }
+        },
+        "required": [
+          "name",
+          "versions"
+        ]
+      },
       "Span": {
         "type": "object",
         "description": "One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.",
@@ -6840,6 +6926,77 @@
           "coverage"
         ],
         "x-table": "themes"
+      },
+      "Prompt": {
+        "type": "object",
+        "description": "One version of a named prompt. A version never changes once stored: a new body is a new version, and labels such as `production` and `staging` point at the version a caller should use. SDKs fetch a prompt by name and label, render it with variables, and link the spans that used it, so a trace shows which version produced an answer.",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "Which project owns it."
+          },
+          "name": {
+            "type": "string",
+            "description": "The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and `/`, up to 128 characters."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "Its version, from 1, assigned by the daemon in the order versions arrive."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PromptKind",
+            "description": "Whether the body is one template or a list of messages."
+          },
+          "template": {
+            "type": "string",
+            "description": "The template, for a `text` prompt. Variables are written `{{name}}`."
+          },
+          "messages": {
+            "description": "The messages, for a `chat` prompt: an array of objects with `role` and `content`, where `content` is a template."
+          },
+          "config": {
+            "description": "Model settings stored with the prompt, such as `model` and `temperature`. The daemon stores them and does not read them."
+          },
+          "variables": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every variable the body names, in order of first use, without duplicates."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The labels that point at this version now."
+          },
+          "note": {
+            "type": "string",
+            "description": "What changed in this version, written by whoever stored it."
+          },
+          "created_by": {
+            "type": "string",
+            "description": "Which key or account stored it."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this version was stored."
+          }
+        },
+        "required": [
+          "project",
+          "name",
+          "version",
+          "kind",
+          "variables",
+          "labels",
+          "created_at"
+        ],
+        "x-table": "documents"
       }
     },
     "securitySchemes": {
@@ -7976,6 +8133,26 @@
             "description": "Restrict to one trace.",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "prompt",
+            "in": "query",
+            "required": false,
+            "description": "Only spans that used this prompt, as linked by an SDK's prompt helper.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prompt_version",
+            "in": "query",
+            "required": false,
+            "description": "With `prompt`: only spans that used this version of it.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
             }
           },
           {
@@ -9666,6 +9843,390 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Experiment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/prompts": {
+      "get": {
+        "operationId": "list_prompts",
+        "tags": [
+          "Prompts"
+        ],
+        "summary": "List prompts",
+        "description": "The latest version of every prompt in the project, each with its labels, sorted by name.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Prompt"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create_prompt",
+        "tags": [
+          "Prompts"
+        ],
+        "summary": "Store a prompt version",
+        "description": "Stores a new version of a prompt and returns it. A `text` prompt needs `template`, a `chat` prompt needs `messages`. A body identical to the latest version is not stored again: the latest version comes back, with any `labels` applied.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePromptRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Prompt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/prompts/{name}": {
+      "get": {
+        "operationId": "get_prompt",
+        "tags": [
+          "Prompts"
+        ],
+        "summary": "Get a prompt",
+        "description": "One version of a prompt: the one `label` points at, or the one numbered `version`, or the latest when neither is given. This is what an SDK reads before it renders a prompt.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The prompt's name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "query",
+            "required": false,
+            "description": "Read the version this label points at, such as `production`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "description": "Read this version. Not with `label`.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Prompt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No prompt with that name in the project, no version with that number, or no version carries that label."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/prompts/{name}/versions": {
+      "get": {
+        "operationId": "list_prompt_versions",
+        "tags": [
+          "Prompts"
+        ],
+        "summary": "List a prompt's versions",
+        "description": "Every version of one prompt, newest first, with the labels that point at each.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The prompt's name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptVersionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No prompt with that name in the project."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/prompts/{name}/labels/{label}": {
+      "put": {
+        "operationId": "set_prompt_label",
+        "tags": [
+          "Prompts"
+        ],
+        "summary": "Point a label at a version",
+        "description": "Moves a label to a version, creating the label if it is new. Moving `production` is how a prompt change is released, and moving it back is how one is rolled back; no code is deployed for either. `latest` is reserved: it always means the newest version.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The prompt's name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "path",
+            "required": true,
+            "description": "The label. Letters, digits, `-`, `_` and `.`, up to 64 characters.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptLabelRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Prompt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No prompt with that name, or no version with that number."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "delete_prompt_label",
+        "tags": [
+          "Prompts"
+        ],
+        "summary": "Remove a label",
+        "description": "Removes a label from whichever version holds it. A caller that then asks for the label is answered 404, so remove a label only once nothing reads it.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The prompt's name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "path",
+            "required": true,
+            "description": "The label.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResult"
                 }
               }
             }

@@ -25,6 +25,8 @@ Search individual steps rather than whole runs. This is how you answer 'which to
 | `name` | `string` | · | Exact span name. |
 | `model` | `string` | · | Only spans against this model. |
 | `trace_id` | `string` | · | Restrict to one trace. |
+| `prompt` | `string` | · | Only spans that used this prompt, as linked by an SDK's prompt helper. |
+| `prompt_version` | `u32` | · | With `prompt`: only spans that used this version of it. |
 | `from` | `timestamp` | · | Start of the window. |
 | `to` | `timestamp` | · | End of the window. |
 | `min_duration_ms` | `u64` | · | Only spans at least this slow. |

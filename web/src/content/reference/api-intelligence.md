@@ -1,7 +1,7 @@
 ---
 title: "Intelligence"
 description: "The intelligence endpoints of the mcpd HTTP API."
-order: 17
+order: 18
 generated: true
 ---
 

@@ -14,12 +14,12 @@
 use crate::{
     decode_delta_cursor, encode_delta_cursor, hashed_id_regex, is_hashed_identifier,
     unmatchable_identifiers, Aggregation, AspectNoteQuery, AspectNoteRollup, AspectRollupQuery,
-    AuditQuery, Batch, Delta, DeltaQuery, DeltaSignal, Discovered, DiscoveryQuery, ErasureOutcome,
-    Error, IdentifierProbe, Include, LogQuery, MetricQuery, Order, Paged, Partitioning,
-    PolledSignal, Result, RetentionOutcome, RetentionPolicy, ScoreQuery, SnapshotQuery,
-    SnapshotWrite, SpanQuery, SpanSort, Store, StoreCapabilities, StoredNote, StoredTheme,
-    TextSearch, ThemeLineage, ThemeMember, ThemeMemberQuery, ThemeQuery, TraceQuery, TraceSort,
-    ERASED_ITEM,
+    AuditQuery, Batch, Delta, DeltaQuery, DeltaSignal, Discovered, DiscoveryQuery, DocKind,
+    DocumentLabel, ErasureOutcome, Error, IdentifierProbe, Include, LogQuery, MetricQuery,
+    NewDocument, Order, Paged, Partitioning, PolledSignal, Result, RetentionOutcome,
+    RetentionPolicy, ScoreQuery, SnapshotQuery, SnapshotWrite, SpanQuery, SpanSort, Store,
+    StoreCapabilities, StoredDocument, StoredNote, StoredTheme, TextSearch, ThemeLineage,
+    ThemeMember, ThemeMemberQuery, ThemeQuery, TraceQuery, TraceSort, ERASED_ITEM,
 };
 use mcpd_core::{
     AnalyticsSummary, AspectNote, AuditEvent, AuditResult, Correlation, Cost, CostBreakdown,
@@ -78,11 +78,13 @@ impl Default for ClickHouseConfig {
 /// Recorded in `mcpd.schema_version` beside a fingerprint of the statements
 /// that produced it, so `migrate` can tell "already applied" from "changed"
 /// without reading every table's definition.
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 // 4 adds `aspect_notes`, `theme_snapshots`, `themes` and `theme_members`. The
 // fingerprint above covers the schema file, so appending the four tables is
 // enough to make an existing deployment apply them on its next start.
+//
+// 5 adds `documents` and `document_labels` the same way.
 
 /// A ClickHouse-backed store.
 pub struct ClickHouseStore {
@@ -1628,6 +1630,23 @@ impl Store for ClickHouseStore {
         if let Some(d) = q.min_duration_ms {
             w.push(format!("duration_ns >= {}", d.saturating_mul(1_000_000)));
         }
+        if let Some(p) = &q.prompt {
+            w.push(format!(
+                "JSONExtractString(attributes, {}) = {}",
+                quote(crate::PROMPT_NAME_ATTRIBUTE),
+                quote(p)
+            ));
+            // Raw, so a version an SDK sent as a number and one sent as a
+            // string both match.
+            if let Some(v) = q.prompt_version {
+                w.push(format!(
+                    "JSONExtractRaw(attributes, {}) IN ({}, {})",
+                    quote(crate::PROMPT_VERSION_ATTRIBUTE),
+                    quote(&v.to_string()),
+                    quote(&format!("\"{v}\""))
+                ));
+            }
+        }
         if let Some(raw) = &q.q {
             for term in raw.split_whitespace() {
                 w.push(text_match_any(&["input", "output", "name"], term));
@@ -2616,6 +2635,158 @@ impl Store for ClickHouseStore {
             .collect())
     }
 
+    // ------------------------------------------------- versioned documents
+
+    async fn put_document(&self, doc: &NewDocument) -> Result<(StoredDocument, bool)> {
+        // No transaction to hold a number with. The row goes in, then the
+        // winner for that version is read back; a writer that lost tries the
+        // next number. See the comment over `documents` in the schema file.
+        let writer = mcpd_core::ids::new_trace_id();
+        for _ in 0..8 {
+            let held = self.get_document(&doc.project, doc.kind, &doc.id, None).await?;
+            if let Some(held) = held.as_ref().filter(|h| h.body == doc.body) {
+                return Ok((held.clone(), false));
+            }
+            let version = held.map_or(1, |h| h.version.saturating_add(1));
+            let row = json!({
+                "project": doc.project, "kind": doc.kind.as_str(), "id": doc.id,
+                "version": version, "body": doc.body.to_string(),
+                "note": doc.note.clone().unwrap_or_default(),
+                "created_by": doc.created_by.clone().unwrap_or_default(),
+                "created_at": ts_str(doc.created_at), "writer": writer,
+            });
+            self.post(
+                &format!("INSERT INTO {} FORMAT JSONEachRow", self.table("documents")),
+                Some(row.to_string()),
+            )
+            .await?;
+            #[derive(Deserialize)]
+            struct Won {
+                writer: String,
+            }
+            let won: Vec<Won> = self
+                .select(&format!(
+                    "SELECT writer FROM {} WHERE project = {} AND kind = {} AND id = {}
+                       AND version = {version}
+                     ORDER BY created_at ASC, writer ASC LIMIT 1",
+                    self.table("documents"),
+                    quote(&doc.project),
+                    quote(doc.kind.as_str()),
+                    quote(&doc.id)
+                ))
+                .await?;
+            if won.first().is_some_and(|w| w.writer == writer) {
+                return Ok((
+                    StoredDocument {
+                        project: doc.project.clone(),
+                        kind: doc.kind,
+                        id: doc.id.clone(),
+                        version,
+                        body: doc.body.clone(),
+                        note: doc.note.clone(),
+                        created_by: doc.created_by.clone(),
+                        created_at: doc.created_at,
+                    },
+                    true,
+                ));
+            }
+        }
+        Err(Error::Backend(format!(
+            "could not assign a version to {} {:?}: other writers took every number tried; \
+             post it again",
+            doc.kind.as_str(),
+            doc.id
+        )))
+    }
+
+    async fn list_documents(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: Option<&str>,
+    ) -> Result<Vec<StoredDocument>> {
+        let docs = self.ch_documents(project, kind, id, None).await?;
+        Ok(if id.is_some() { docs } else { crate::latest_per_id(docs) })
+    }
+
+    async fn get_document(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: &str,
+        version: Option<u32>,
+    ) -> Result<Option<StoredDocument>> {
+        Ok(self.ch_documents(project, kind, Some(id), version).await?.into_iter().next())
+    }
+
+    async fn set_document_label(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: &str,
+        label: &str,
+        version: Option<u32>,
+    ) -> Result<bool> {
+        let current = self
+            .list_document_labels(project, kind, Some(id))
+            .await?
+            .into_iter()
+            .find(|l| l.label == label);
+        let (to, deleted) = match version {
+            None if current.is_none() => return Ok(false),
+            None => (current.map_or(0, |c| c.version), 1u8),
+            Some(v) => {
+                if self.get_document(project, kind, id, Some(v)).await?.is_none() {
+                    return Ok(false);
+                }
+                (v, 0u8)
+            }
+        };
+        let row = json!({
+            "project": project, "kind": kind.as_str(), "id": id, "label": label,
+            "version": to, "deleted": deleted,
+            "updated_at": ts_str(OffsetDateTime::now_utc()),
+        });
+        self.post(
+            &format!("INSERT INTO {} FORMAT JSONEachRow", self.table("document_labels")),
+            Some(row.to_string()),
+        )
+        .await?;
+        Ok(true)
+    }
+
+    async fn list_document_labels(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: Option<&str>,
+    ) -> Result<Vec<DocumentLabel>> {
+        #[derive(Deserialize)]
+        struct Row {
+            id: String,
+            label: String,
+            version: u32,
+        }
+        // The newest row per label decides, removals included, whether or
+        // not the parts have merged yet.
+        let rows: Vec<Row> = self
+            .select(&format!(
+                "SELECT id, label, argMax(version, updated_at) AS version
+                 FROM {} WHERE project = {} AND kind = {}{}
+                 GROUP BY id, label HAVING argMax(deleted, updated_at) = 0
+                 ORDER BY id, label",
+                self.table("document_labels"),
+                quote(project),
+                quote(kind.as_str()),
+                id.map(|i| format!(" AND id = {}", quote(i))).unwrap_or_default()
+            ))
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| DocumentLabel { id: r.id, label: r.label, version: r.version })
+            .collect())
+    }
+
     async fn record_audit(&self, event: &AuditEvent) -> Result<()> {
         let row = json!({
             "audit_id": event.audit_id,
@@ -3448,6 +3619,60 @@ impl ClickHouseStore {
     /// different things: a fingerprint taken over the file rather than over the
     /// resolved statements would match across two different retention settings
     /// and skip the migration that applies the second one.
+    /// Stored documents, one winning row per id and version, newest version
+    /// first. Narrowed to one id, and to one version, when given.
+    async fn ch_documents(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: Option<&str>,
+        version: Option<u32>,
+    ) -> Result<Vec<StoredDocument>> {
+        #[derive(Deserialize)]
+        struct Row {
+            id: String,
+            version: u32,
+            body: String,
+            note: String,
+            created_by: String,
+            created_at: String,
+        }
+        let mut w = vec![
+            format!("project = {}", quote(project)),
+            format!("kind = {}", quote(kind.as_str())),
+        ];
+        if let Some(i) = id {
+            w.push(format!("id = {}", quote(i)));
+        }
+        if let Some(v) = version {
+            w.push(format!("version = {v}"));
+        }
+        // `LIMIT 1 BY` after ordering on the tie-break is the winner rule:
+        // the smallest (created_at, writer) for each id and version.
+        let rows: Vec<Row> = self
+            .select(&format!(
+                "SELECT id, version, body, note, created_by, created_at FROM {} WHERE {}
+                 ORDER BY id ASC, version DESC, created_at ASC, writer ASC
+                 LIMIT 1 BY id, version",
+                self.table("documents"),
+                w.join(" AND ")
+            ))
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| StoredDocument {
+                project: project.to_owned(),
+                kind,
+                id: r.id,
+                version: r.version,
+                body: serde_json::from_str(&r.body).unwrap_or(Value::Null),
+                note: opt(r.note),
+                created_by: opt(r.created_by),
+                created_at: parse_ts(&r.created_at),
+            })
+            .collect())
+    }
+
     fn resolved_schema(&self) -> Vec<String> {
         SCHEMA
             .split(';')

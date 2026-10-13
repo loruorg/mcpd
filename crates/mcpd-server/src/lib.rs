@@ -34,6 +34,7 @@ pub mod mail;
 pub mod monitor;
 pub mod orgs;
 pub mod pipeline;
+pub mod prompts;
 pub mod query;
 pub mod relay;
 pub mod runs;
@@ -47,7 +48,7 @@ pub mod ui;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use std::future::Future;
 use std::sync::Arc;
@@ -190,6 +191,12 @@ fn api_router(config: &ServerConfig) -> Router<Arc<AppState>> {
         .route("/v1/api/datasets/{id}/capture", post(query::capture_into_dataset))
         .route("/v1/api/experiments", get(query::list_experiments))
         .route("/v1/api/experiments", post(query::create_experiment))
+        .route("/v1/api/prompts", get(prompts::list_prompts))
+        .route("/v1/api/prompts", post(prompts::create_prompt))
+        .route("/v1/api/prompts/{name}", get(prompts::get_prompt))
+        .route("/v1/api/prompts/{name}/versions", get(prompts::list_prompt_versions))
+        .route("/v1/api/prompts/{name}/labels/{label}", put(prompts::set_prompt_label))
+        .route("/v1/api/prompts/{name}/labels/{label}", delete(prompts::delete_prompt_label))
         .route("/v1/api/monitors", get(query::list_monitors))
         .route("/v1/api/monitors/{id}/ack", post(query::ack_monitor))
         .route("/v1/api/slos", get(query::list_slos))

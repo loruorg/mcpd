@@ -291,6 +291,12 @@ pub struct SpanQuery {
     pub to: Option<OffsetDateTime>,
     /// Only spans at least this slow.
     pub min_duration_ms: Option<u64>,
+    /// Only spans an SDK linked to this prompt, by the `mcpd.prompt.name`
+    /// attribute.
+    pub prompt: Option<String>,
+    /// With `prompt`: only spans linked to this version, by the
+    /// `mcpd.prompt.version` attribute.
+    pub prompt_version: Option<u32>,
     /// Sort key.
     pub sort: SpanSort,
     /// Sort direction.
@@ -299,6 +305,111 @@ pub struct SpanQuery {
     pub limit: u32,
     /// Opaque cursor.
     pub cursor: Option<String>,
+}
+
+/// The attribute an SDK writes the name of the prompt a span used under.
+pub const PROMPT_NAME_ATTRIBUTE: &str = "mcpd.prompt.name";
+/// The attribute an SDK writes the version of the prompt a span used under.
+pub const PROMPT_VERSION_ATTRIBUTE: &str = "mcpd.prompt.version";
+
+/// What a stored document is.
+///
+/// Prompts, scorer definitions and evaluation rules share one versioned table.
+/// They have the same life: a body that never changes once stored, a version
+/// number the store assigns, and labels that point at a version. One table
+/// keeps that rule in one place per backend rather than three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocKind {
+    /// A prompt template.
+    Prompt,
+    /// A scorer definition: a judge rubric or a configured code scorer.
+    Scorer,
+    /// An online evaluation rule.
+    EvalRule,
+}
+
+impl DocKind {
+    /// The value stored in the `kind` column.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt",
+            Self::Scorer => "scorer",
+            Self::EvalRule => "eval_rule",
+        }
+    }
+}
+
+/// A document to store as the next version of `id`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewDocument {
+    /// Which project owns it.
+    pub project: String,
+    /// What it is.
+    pub kind: DocKind,
+    /// Its name within the project and kind.
+    pub id: String,
+    /// The body. Compared whole against the latest version: an equal body is
+    /// not stored again.
+    pub body: Value,
+    /// What changed, from whoever stored it.
+    pub note: Option<String>,
+    /// Which key or account stored it.
+    pub created_by: Option<String>,
+    /// When it was stored.
+    pub created_at: OffsetDateTime,
+}
+
+/// One stored version of a document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredDocument {
+    /// Which project owns it.
+    pub project: String,
+    /// What it is.
+    pub kind: DocKind,
+    /// Its name within the project and kind.
+    pub id: String,
+    /// Its version, from 1.
+    pub version: u32,
+    /// The body as stored.
+    pub body: Value,
+    /// What changed.
+    pub note: Option<String>,
+    /// Which key or account stored it.
+    pub created_by: Option<String>,
+    /// When it was stored.
+    pub created_at: OffsetDateTime,
+}
+
+/// A label and the version of a document it points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentLabel {
+    /// The document's name.
+    pub id: String,
+    /// The label.
+    pub label: String,
+    /// The version it points at.
+    pub version: u32,
+}
+
+/// Pick the latest version of each document id from rows in any order.
+///
+/// Shared so every backend answers "the latest of each" by the same rule,
+/// sorted by id.
+#[must_use]
+pub fn latest_per_id(rows: Vec<StoredDocument>) -> Vec<StoredDocument> {
+    let mut by: std::collections::BTreeMap<String, StoredDocument> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        match by.get(&row.id) {
+            Some(held) if held.version >= row.version => {}
+            _ => {
+                by.insert(row.id.clone(), row);
+            }
+        }
+    }
+    by.into_values().collect()
 }
 
 /// Filters for a log search.
@@ -1889,6 +2000,59 @@ pub trait Store: Send + Sync + 'static {
 
     /// Every experiment in a project, newest first.
     async fn list_experiments(&self, project: &str) -> Result<Vec<Experiment>>;
+
+    // ------------------------------------------------------ versioned documents
+
+    /// Store `doc` as the next version of its id, or confirm the latest.
+    ///
+    /// The store assigns the number: one more than the highest stored for
+    /// the same project, kind and id, starting at 1. When the latest version
+    /// holds a body equal to `doc.body`, nothing is written and that version
+    /// comes back with `false`, so a caller that posts the same body on every
+    /// start does not grow a version per start. `true` means a new version
+    /// was stored.
+    async fn put_document(&self, doc: &NewDocument) -> Result<(StoredDocument, bool)>;
+
+    /// Stored documents of one kind in a project.
+    ///
+    /// With `id`, every version of that document, newest first. Without it,
+    /// the latest version of each document, sorted by id.
+    async fn list_documents(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: Option<&str>,
+    ) -> Result<Vec<StoredDocument>>;
+
+    /// One version of a document, or the latest when `version` is `None`.
+    async fn get_document(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: &str,
+        version: Option<u32>,
+    ) -> Result<Option<StoredDocument>>;
+
+    /// Point `label` at `version` of a document, or remove it with `None`.
+    ///
+    /// Returns `false` when `version` names no stored version, or when there
+    /// was no label to remove, and writes nothing in either case.
+    async fn set_document_label(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: &str,
+        label: &str,
+        version: Option<u32>,
+    ) -> Result<bool>;
+
+    /// The labels on documents of one kind, for one id or for all of them.
+    async fn list_document_labels(
+        &self,
+        project: &str,
+        kind: DocKind,
+        id: Option<&str>,
+    ) -> Result<Vec<DocumentLabel>>;
 
     // --------------------------------------------------------- aspect analysis
 
