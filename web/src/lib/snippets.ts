@@ -32,7 +32,7 @@ const EXAMPLE_DIR: Record<LanguageId, string> = {
 }
 
 /** The example programs, by the name a docs page asks for. */
-export type ExampleName = 'quickstart' | 'workflow'
+export type ExampleName = 'quickstart' | 'workflow' | 'experiment'
 
 const EXAMPLE_FILE: Record<ExampleName, Partial<Record<LanguageId, string>>> = {
   quickstart: {
@@ -53,6 +53,15 @@ const EXAMPLE_FILE: Record<ExampleName, Partial<Record<LanguageId, string>>> = {
     go: 'workflow.go',
     kotlin: 'Workflow.kt',
     elixir: 'workflow.exs',
+  },
+  // The experiment runner. No curl: it calls your own code once per case.
+  experiment: {
+    typescript: 'experiment.ts',
+    python: 'experiment.py',
+    rust: 'experiment.rs',
+    go: 'experiment.go',
+    kotlin: 'Experiment.kt',
+    elixir: 'experiment.exs',
   },
 }
 

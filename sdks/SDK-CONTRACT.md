@@ -716,13 +716,13 @@ not apply.
    `summary` an object from each scorer's id to its mean.
 8. Return the `ExperimentResults`.
 
-When any step of the runner itself fails (a read, a write, the flush, a
-`concurrency` below 1), it posts the experiment with status `failed`,
-`finished_at` and `error` set to the message, if the experiment was created,
-and raises the original error. A failure to record the `failed` status is
+When any step of the runner itself fails (a read, a write, the flush), it
+posts the experiment with status `failed`, `finished_at` and `error` set to
+the message, if the experiment was created, and raises the original error. A failure to record the `failed` status is
 reported through the diagnostics channel and never hides the original error.
-A client with `enabled = false` refuses to run an experiment before the first
-request, because none of its runs would reach the daemon to be scored.
+A `concurrency` below 1 is refused before the first request, and so is a
+client with `enabled = false`, because none of its runs would reach the daemon
+to be scored.
 
 The target's shape follows the language: a function that may return a promise
 in TypeScript, a plain or async function in Python, a suspend function in
