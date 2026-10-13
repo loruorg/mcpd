@@ -2,14 +2,17 @@
 import Doc from '@/layouts/Doc.astro'
 import Command from '@/components/Command.astro'
 import Waterfall from '@/components/Waterfall.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { exampleLanguages } from '@/lib/snippets'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const code = localeOf(Astro.url.pathname)
+const experimentLangs = exampleLanguages('experiment')
 ---
 
 <Doc
   title="Pruebas de regresión"
-  description="Convierte una ejecución de producción que salió mal en un caso de prueba permanente, pasa los evaluadores integrados sobre ejecuciones guardadas y compara dos versiones con sus tamaños de muestra."
+  description="Convierte una ejecución de producción que salió mal en un caso de prueba permanente, pasa los evaluadores integrados de mcpd sobre ejecuciones guardadas y compara dos versiones de un agente con los tamaños de muestra junto a las diferencias."
   lede="La ejecución que se rompió el martes pasa a ser el caso que toda versión posterior tiene que aprobar."
   og="docs"
 >
@@ -48,6 +51,17 @@ const code = localeOf(Astro.url.pathname)
 
   <Waterfall class="not-prose my-8" />
 
+  <h2>Congelar un dataset</h2>
+  <p>
+    Un dataset crece a medida que se capturan ejecuciones en él. Para comparar
+    dos versiones de un agente sobre los mismos casos, congélalo primero:
+    <code>POST /v1/api/datasets/{'{id}'}/versions</code> copia los casos
+    actuales en una versión numerada que no cambia nunca, y congelar otra vez
+    los mismos casos confirma esa versión en vez de hacer una copia. Lee los
+    casos de una versión con <code>GET /v1/api/datasets/{'{id}'}/items?version=2</code>,
+    y lista las versiones con <code>GET /v1/api/datasets/{'{id}'}/versions</code>.
+  </p>
+
   <h2>La respuesta de la propia ejecución no es la respuesta esperada</h2>
   <p>
     <code>use_output_as_expected</code> está desactivado por defecto, y ese valor
@@ -64,7 +78,7 @@ const code = localeOf(Astro.url.pathname)
 
   <h2>Los evaluadores integrados</h2>
   <p>
-    mcpd trae trece evaluadores deterministas: código corriente que lee una
+    mcpd trae veintidós evaluadores deterministas: código corriente que lee una
     ejecución guardada y devuelve un número. No cuestan nada, nunca llaman a un
     modelo, y dan la misma respuesta dos veces, que es la propiedad que necesita
     una prueba de regresión y que un modelo juez no tiene.
@@ -87,12 +101,37 @@ const code = localeOf(Astro.url.pathname)
       <tr><td><code>no_leaked_secret</code></td><td>No aparece ninguna clave, token ni credencial en la respuesta.</td></tr>
       <tr><td><code>span_present</code></td><td>La ejecución registró un span del tipo o el nombre exigido.</td></tr>
       <tr><td><code>tool_succeeded</code></td><td>La herramienta exigida se ejecutó y al menos una llamada terminó bien.</td></tr>
+      <tr><td><code>excludes</code></td><td>La respuesta no contiene ninguna de las frases de <code>forbidden</code>.</td></tr>
+      <tr><td><code>keyword_coverage</code></td><td>Graduado: la proporción de <code>keywords</code> que menciona la respuesta.</td></tr>
+      <tr><td><code>similarity</code></td><td>Graduado: uno menos la distancia de edición a <code>expected</code> dividida por la longitud mayor.</td></tr>
+      <tr><td><code>matches_pattern</code></td><td>La respuesta coincide con la expresión regular <code>pattern</code>.</td></tr>
+      <tr><td><code>tool_call_accuracy</code></td><td>Graduado: la proporción de <code>expected_tools</code> que llamó la ejecución.</td></tr>
+      <tr><td><code>tool_order</code></td><td>La ejecución llamó a <code>expected_tools</code> en ese orden, con otras llamadas permitidas entre ellas.</td></tr>
+      <tr><td><code>tool_not_called</code></td><td>La ejecución no llamó a ninguna de <code>forbidden_tools</code>.</td></tr>
+      <tr><td><code>answer_length</code></td><td>La respuesta tiene entre <code>min_chars</code> y <code>max_chars</code> caracteres.</td></tr>
+      <tr><td><code>json_schema</code></td><td>La respuesta es JSON, en un bloque de código o suelto, que cumple <code>json_schema</code>.</td></tr>
+      <tr><td><code>trajectory</code></td><td>El camino de la ejecución: las herramientas que llamó frente a <code>expected_tools</code>, comparadas como indica <code>trajectory_match</code> (<code>strict</code>, <code>ordered</code> o <code>unordered</code>, con crédito parcial), sus pasos frente a <code>max_steps</code>, y si llegó a una respuesta. La media de las partes pedidas. <code>GET /v1/api/traces/{'{id}'}/trajectory</code> muestra el camino que lee.</td></tr>
     </tbody>
   </table>
   <p>
-    <code>GET /v1/api/scorers</code> devuelve esa misma lista con una marca
-    <code>needs_config</code>. Un evaluador que necesita una respuesta esperada y
-    no la recibe se abstiene en lugar de adivinar, y esa abstención se informa.
+    Las comparaciones de texto ignoran mayúsculas y minúsculas salvo que se fije
+    <code>case_sensitive</code>. Los nombres de herramienta se comparan
+    exactamente con los nombres de los spans de llamada a herramienta de
+    cualquiera de los cuatro tipos de herramienta. <code>json_schema</code>
+    comprueba <code>type</code>, <code>properties</code>, <code>required</code>,
+    <code>items</code>, <code>enum</code>, <code>minimum</code>,
+    <code>maximum</code>, <code>minLength</code>, <code>maxLength</code> y
+    <code>additionalProperties: false</code>, y nombra hasta cinco infracciones
+    en el motivo. Un patrón que no compila, o un esquema que no es un objeto, se
+    rechaza con un 400 antes de leer ninguna ejecución.
+  </p>
+  <p>
+    <code>GET /v1/api/scorers</code> devuelve todos los evaluadores que conoce
+    este daemon, con su <code>kind</code> (<code>code</code>,
+    <code>judge</code> o <code>criterion</code>), su <code>direction</code>,
+    las <code>config_keys</code> que lee y si está <code>available</code>. Un
+    evaluador que necesita un ajuste y no lo recibe se abstiene en lugar de
+    adivinar, y la abstención nombra el ajuste.
   </p>
 
   <h2>Cuando quien califica es un modelo</h2>
@@ -141,12 +180,52 @@ const code = localeOf(Astro.url.pathname)
     una columna en la que nadie puede confiar.
   </p>
   <p>
-    Los criterios configurados no aparecen en <code>GET /v1/api/scorers</code>.
-    Ese endpoint lista los trece evaluadores integrados y nada más, así que un
-    cliente que arme su menú de evaluadores a partir de ahí no ofrecerá tus
-    criterios. El único sitio donde el daemon te los nombra de vuelta es el error
-    que recibes por un identificador de evaluador desconocido, que lista juntos
-    los integrados y los criterios configurados.
+    Los criterios configurados aparecen en <code>GET /v1/api/scorers</code> con
+    el tipo <code>criterion</code>. Un criterio con el id de una rúbrica
+    incluida sustituye esa rúbrica en este daemon.
+  </p>
+
+  <h3>Las rúbricas incluidas</h3>
+  <p>
+    Con un bloque <code>judge</code> configurado, hay nueve rúbricas listas para
+    nombrar sin escribir ningún criterio. Cada una se ejecuta en cuatro pasos.
+    <strong>Preprocesar</strong>, en código, reúne la pregunta a partir de la
+    entrada del span raíz, la respuesta, la respuesta <code>expected</code> de la
+    configuración del evaluador y el contexto: cada pasaje de la salida de los
+    spans <code>retrieval</code> y <code>rag_vector_operation</code> de la
+    ejecución, o la lista <code>context</code> de la configuración.
+    <strong>Analizar</strong> es la única llamada al modelo: el juez descompone
+    la respuesta, la respuesta esperada o el contexto en elementos y da a cada
+    uno un veredicto de sí, no o dudoso. <strong>Puntuar</strong>, en código,
+    cuenta los veredictos, así que el número es aritmética sobre juicios
+    desglosados y nunca un número que eligió el modelo.
+    <strong>Razonar</strong>, en código, nombra los elementos que restaron
+    puntuación.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Rúbrica</th><th>Lee</th><th>Valor</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>faithfulness</code></td><td>respuesta, contexto</td><td>Proporción de las afirmaciones de la respuesta que respalda el contexto.</td></tr>
+      <tr><td><code>hallucination</code></td><td>respuesta, contexto</td><td>Proporción de las afirmaciones de la respuesta que contradice el contexto. Menos es mejor.</td></tr>
+      <tr><td><code>answer_relevance</code></td><td>pregunta, respuesta</td><td>Proporción de las frases de la respuesta que atienden a la pregunta.</td></tr>
+      <tr><td><code>answer_correctness</code></td><td>pregunta, respuesta, esperada</td><td>Proporción de los hechos de la respuesta esperada que transmite la respuesta.</td></tr>
+      <tr><td><code>context_precision</code></td><td>pregunta, contexto</td><td>Precisión media de los pasajes útiles sobre sus posiciones.</td></tr>
+      <tr><td><code>context_recall</code></td><td>esperada, contexto</td><td>Proporción de las frases de la respuesta esperada que cubre el contexto.</td></tr>
+      <tr><td><code>context_relevance</code></td><td>pregunta, contexto</td><td>Proporción de los pasajes que tienen que ver con la pregunta.</td></tr>
+      <tr><td><code>toxicity</code></td><td>respuesta</td><td>Proporción de las frases de la respuesta que son tóxicas. Menos es mejor.</td></tr>
+      <tr><td><code>bias</code></td><td>respuesta</td><td>Proporción de las opiniones de la respuesta que tienen sesgo. Menos es mejor.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Un veredicto dudoso cuenta la mitad. Una respuesta sin nada que juzgar
+    puntúa 0 en las tres rúbricas en las que menos es mejor y se abstiene en las
+    demás. Cada puntuación guarda los veredictos desglosados en
+    <code>metadata.steps</code>, el modelo, los intentos y los recuentos de
+    tokens en <code>metadata.judge</code>, y el coste de la llamada, calculado
+    con el libro de precios del daemon, en <code>cost</code>. Su
+    <code>scorer_version</code> nombra la versión de la rúbrica y el modelo.
   </p>
 
   <Command
@@ -203,7 +282,11 @@ const code = localeOf(Astro.url.pathname)
       </tr>
       <tr>
         <td>No se pudo contactar con el modelo</td>
-        <td>Se abstiene, con el estado y el cuerpo. Un límite de tasa es un motivo, no un cero.</td>
+        <td>Lo intenta dos veces más, con una pausa corta, cuando el endpoint respondió 429, 502, 503 o 504 o la conexión falló, y solo mientras el plazo deje margen. Después se abstiene, con el estado y el cuerpo. Un límite de tasa es un motivo, no un cero.</td>
+      </tr>
+      <tr>
+        <td>Un paso de la rúbrica no pudo terminar</td>
+        <td>Se abstiene y nombra el paso: <code>preprocess</code> cuando a la ejecución le falta una pieza que la rúbrica lee, <code>analyze</code> cuando la respuesta no es una lista de veredictos sí, no y dudoso, <code>score</code> cuando no había nada que contar.</td>
       </tr>
       <tr>
         <td>La respuesta pasaba de 1 MiB</td>
@@ -211,7 +294,7 @@ const code = localeOf(Astro.url.pathname)
       </tr>
       <tr>
         <td>El plazo de la solicitud no dejó tiempo para la llamada</td>
-        <td>Se niega sin llamar al modelo. La pasada responde con las puntuaciones que terminó, dentro del plazo, en vez de con un 503.</td>
+        <td>Se abstiene sin llamar al modelo. La pasada responde con las puntuaciones que terminó, dentro del plazo, en vez de con un 503.</td>
       </tr>
     </tbody>
   </table>
@@ -219,6 +302,72 @@ const code = localeOf(Astro.url.pathname)
     Toda puntuación con juez guarda el modelo como su
     <code>scorer_version</code>. Dos puntuaciones de dos jueces distintos no son
     comparables, y ese campo es lo que lo dice en el registro.
+  </p>
+  <p>
+    Toda puntuación con juez nombra además la ejecución de su propia llamada al
+    modelo en <code>score_trace_id</code>. Esa ejecución es un span
+    <code>scorer_run</code> que contiene el prompt que se envió al juez, la
+    respuesta que escribió, sus tokens y su coste, con un enlace a la ejecución
+    que puntuó. Una puntuación que parece errónea se abre y se lee como
+    cualquier otra llamada a un modelo; en la aplicación, el enlace
+    <em>llamada al juez</em> junto a la puntuación la abre.
+  </p>
+
+  <h2>Evaluadores que defines tú</h2>
+  <p>
+    Un proyecto guarda sus propios evaluadores con <code>POST /v1/api/scorer-definitions</code>.
+    Una definición <code>judge</code> es un criterio escrito para tu agente,
+    como <q>La respuesta nombra la sección de la política de reembolsos en la que
+    se apoya</q>, calificado de 0 a 1 por el juez configurado. Una definición
+    <code>code</code> es uno de los evaluadores de arriba con sus ajustes
+    fijados, como <code>keyword_coverage</code> con las palabras clave que tus
+    respuestas deben mencionar.
+  </p>
+  <p>
+    Cada guardado es una versión nueva, y un cuerpo idéntico no se guarda otra
+    vez. Nombra una definición en cualquier sitio donde se acepte un id de
+    evaluador: <code>cites_policy</code> ejecuta la última versión y
+    <code>cites_policy@2</code> ejecuta la versión 2. La versión va en cada
+    puntuación, así que cambiar un prompt nunca cambia lo que significaba una
+    puntuación antigua. Una definición no puede usar el id de un evaluador que
+    trae mcpd ni el de un criterio del archivo de configuración.
+    <code>GET /v1/api/scorers?project=</code> lista las definiciones de un
+    proyecto junto a los evaluadores incluidos, con el tipo
+    <code>custom</code>. La pantalla Evaluaciones de la aplicación las crea y
+    las edita.
+  </p>
+
+  <h2>Puntuación en vivo</h2>
+  <p>
+    Una regla de evaluación puntúa las ejecuciones según terminan, en segundo
+    plano, y escribe puntuaciones con origen <code>live</code>. Nombra los
+    evaluadores que se ejecutan, la proporción de ejecuciones que se puntúan y
+    para qué ejecuciones es: un nombre de paso raíz, un tipo, un entorno, un
+    resultado, etiquetas. Guarda una con
+    <code>POST /v1/api/evaluation-rules</code>.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="puntuar una décima parte de las ejecuciones de checkout según terminan"
+    command={`curl -X POST 'localhost:4317/v1/api/evaluation-rules?project=support-desk' \\
+  -H 'content-type: application/json' \\
+  -d '{"id": "checkout-quality", "enabled": true, "scorers": ["answered", "cites_policy"],
+       "sample_rate": 0.1, "name": "checkout"}'`}
+  />
+
+  <p>
+    Una regla se guarda desactivada salvo que la solicitud la active, y cada
+    evaluador que nombra se resuelve al guardarla. Qué ejecuciones entran en la
+    muestra lo decide un hash del id de la regla y del id de traza, así que la
+    misma ejecución entra o queda fuera en todas las réplicas y tras cada
+    reinicio, y dos reglas al 10% puntúan décimas partes distintas. Cada
+    ejecución la puntúa una regla una sola vez.
+    <code>max_judged_per_minute</code>, 30 por defecto, limita las llamadas al
+    modelo que hace una regla; una ejecución por encima del límite se salta, no
+    se encola. Un cambio en una regla es una versión nueva y se aplica desde la
+    siguiente pasada, cada 15 segundos. Envía la regla con
+    <code>"enabled": false</code> para detenerla.
   </p>
 
   <h2>Puntuar ocurre a posteriori</h2>
@@ -258,8 +407,39 @@ const code = localeOf(Astro.url.pathname)
     pasada toma las <code>limit</code> ejecuciones más recientes del proyecto, de
     más nueva a más antigua, y <code>from</code> acota esa página: una pasada
     enviada con <code>from</code> lee solo las ejecuciones que empezaron en ese
-    momento o después, que es como puntuas todo lo ocurrido desde un despliegue
+    momento o después, que es como puntúas todo lo ocurrido desde un despliegue
     sin listar identificadores.
+  </p>
+
+  <h2>Ejecutar un experimento desde el código</h2>
+  <p>
+    Cada SDK tiene un ejecutor de experimentos. Dale un dataset y tu propia
+    función: registra un experimento, llama a la función una vez por caso dentro
+    de una ejecución que nombra el experimento y el caso, puntúa cada respuesta
+    frente a la respuesta esperada de ese caso, y devuelve los resultados caso
+    por caso con una media por evaluador.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    example="experiment"
+    region="experiment"
+    only={experimentLangs}
+    title="pasar un dataset por tu código"
+  />
+
+  <p>
+    Se ejecutan cuatro casos a la vez salvo que pases otro
+    <code>concurrency</code>. Un caso cuya función lanza un error se registra
+    como una ejecución fallida con su error, y los casos siguientes se ejecutan
+    igualmente. El span raíz de cada ejecución lleva
+    <code>correlation.experiment_id</code> y el atributo
+    <code>mcpd.dataset_item_id</code>, y los spans que abre tu función se anidan
+    debajo, así que un caso fallido se abre en la cascada como cualquier otra
+    ejecución. Cuando el propio ejecutor no puede terminar, el experimento se
+    marca como <code>failed</code> con el motivo. Vuelve a leer los resultados
+    más tarde con <code>GET /v1/api/experiments/{'{id}'}/results</code>, y el
+    camino de una ejecución con <code>GET /v1/api/traces/{'{id}'}/trajectory</code>.
   </p>
 
   <h2>Comparar dos versiones</h2>
@@ -277,16 +457,41 @@ const code = localeOf(Astro.url.pathname)
 
   <p>
     La respuesta es una diferencia por evaluador con el tamaño de muestra de cada
-    lado, y una marca <code>decidable</code>. Por debajo de veinte observaciones
-    mcpd dice que la comparación no se puede decidir, en vez de informar de un
-    movimiento.
+    lado, un intervalo de confianza del 95% sobre la diferencia
+    (<code>ci_low</code>, <code>ci_high</code>) y un <code>p_value</code>
+    bilateral, ambos de la prueba t de Welch, que no supone que las dos
+    versiones varíen igual. Por debajo de veinte observaciones por lado,
+    <code>decidable</code> es falso y nada se considera una regresión.
   </p>
   <p>
-    Es una regla deliberadamente tosca, no una prueba de significación. El fallo
-    que evita es el habitual: una media que se movió sobre cuatro ejecuciones,
-    impresa sin su recuento, leída como un resultado y llevada a producción.
-    Imprimir los recuentos junto a la diferencia es lo que impide confundir el
-    ruido con un hallazgo.
+    Un evaluador ha hecho <code>regressed</code> cuando es decidible y todo el
+    intervalo queda en el lado peor del cero. Peor sigue la
+    <code>direction</code> del evaluador: una caída en
+    <code>faithfulness</code> es una regresión y una caída en
+    <code>toxicity</code> es una mejora. Una media que se movió dentro de su
+    propio ruido se informa con su intervalo y no como un hallazgo.
+  </p>
+
+  <h3>Condicionar un despliegue a ello</h3>
+  <p>
+    <code>mcpd eval</code> pide la misma comparación a un daemon en marcha y la
+    convierte en un código de salida: 0 cuando ningún evaluador empeoró, 1
+    cuando alguno lo hizo, 2 cuando no se pudo hacer la comparación. Ponlo en el
+    trabajo de CI que pasa tu candidata por el dataset, después de guardar las
+    puntuaciones.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="hacer fallar la compilación ante una regresión"
+    command="mcpd eval --baseline v3 --candidate v4 --endpoint https://mcpd.internal"
+  />
+
+  <p>
+    Lee <code>MCPD_ENDPOINT</code> y <code>MCPD_API_KEY</code> como los SDK,
+    imprime una tabla de cada evaluador con su intervalo, o JSON con
+    <code>--json</code>, y con <code>--require-decidable</code> también falla
+    cuando un evaluador tiene menos de veinte observaciones por lado.
   </p>
 
   <h2>Dónde se ejecuta esto</h2>
