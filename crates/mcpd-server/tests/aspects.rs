@@ -1190,6 +1190,18 @@ async fn the_daemon_fills_the_outcome_aspect_with_no_model_anywhere() {
     mcpd_server::aspects::run_once(&state, OffsetDateTime::now_utc()).await.expect("a second pass");
     let res = get(&app, &format!("/v1/api/traces/{}/aspects", run_id(1))).await;
     assert_eq!(res.json()["notes"].as_array().map(Vec::len), Some(1), "{}", res.text());
+
+    // And the notes reach a snapshot. A derived note stamped with the pass's
+    // own time sat outside the window that pass reads, and every later pass
+    // moved it again, so the outcome aspect never left `processing`.
+    let res =
+        get(&app, &format!("/v1/api/aspects/progress?entity_kind=agent&entity_name={AGENT}")).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.text());
+    let outcome = res.json()["aspects"]
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["aspect"] == json!("outcome")).cloned())
+        .expect("an outcome row");
+    assert_eq!(outcome["readiness"], json!("ready"), "{}", res.text());
 }
 
 // -------------------------------------------------------------- plumbing ---
