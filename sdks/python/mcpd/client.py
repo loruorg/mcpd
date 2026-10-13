@@ -30,7 +30,10 @@ from . import _generated as records
 from ._generated import (
     AnalyticsSummary,
     CostBreakdown,
+    DatasetItem,
     DeleteResult,
+    Experiment,
+    ExperimentResults,
     FeedbackKind,
     FeedbackListResponse,
     HealthStatus,
@@ -43,13 +46,17 @@ from ._generated import (
     PromptKind,
     PromptLabelRequest,
     ScoreListResponse,
+    ScoreRunResult,
     ScoreSource,
+    ScorerConfig,
     SpanKind,
     SpanListResponse,
     SpanStatus,
     TraceDetail,
     TraceListResponse,
+    Trajectory,
 )
+from . import experiment as _experiment
 from .context import (
     EPOCH,
     TraceContext,
@@ -68,7 +75,8 @@ from .queue import BoundedQueue, Throttle
 from .runs import DefinitionsApi, EventsApi, RunsApi, StepsApi
 from .sinks import Sink, TransportSink
 from .span import Span
-from .transport import Transport, TransportError, decode, encode, encode_params
+from .experiment import ExperimentTarget
+from .transport import McpdError, Transport, TransportError, decode, encode, encode_params
 
 __all__ = ["Mcpd", "Stats"]
 
@@ -557,7 +565,7 @@ class Mcpd:
 
     def _start(self, *, name: str, kind: Union[SpanKind, str], parent: Optional[Span] = None,
                traceparent: Optional[str] = None, root: bool = False, is_event: bool = False,
-               **fields: Any) -> Span:
+               always_sample: bool = False, **fields: Any) -> Span:
         """Build a span, decide whether it is recorded, and export its start."""
         upstream: Optional[TraceContext] = parse_traceparent(traceparent)
         if parent is None and not root:
@@ -581,7 +589,7 @@ class Mcpd:
         else:
             trace_id = new_trace_id()
             parent_span_id = None
-            sampled = self._decide(trace_id)
+            sampled = True if always_sample else self._decide(trace_id)
 
         correlation = self._correlation(corr_fields, parent)
         capture = options.get("capture_payloads")
@@ -965,9 +973,9 @@ class Mcpd:
                     min_cost: Optional[float] = None, max_cost: Optional[float] = None,
                     min_tokens: Optional[int] = None, has_score: Optional[str] = None,
                     score_below: Optional[float] = None, score_above: Optional[float] = None,
-                    has_feedback: Optional[bool] = None,
-                    sort: Optional[str] = None, order: Optional[str] = None,
-                    limit: Optional[int] = None, cursor: Optional[str] = None) -> TraceListResponse:
+                    has_feedback: Optional[bool] = None, experiment_id: Optional[str] = None,
+                    preview: Optional[bool] = None, sort: Optional[str] = None,
+                    order: Optional[str] = None, limit: Optional[int] = None, cursor: Optional[str] = None) -> TraceListResponse:
         """A page of runs. `from_`/`to` take a datetime or a shorthand like `-1h`."""
         return decode(TraceListResponse, self._transport.get("/v1/api/traces", {
             "project": project or self.project, "q": q, "status": status, "kind": kind,
@@ -978,6 +986,8 @@ class Mcpd:
             "has_score": has_score, "score_below": score_below, "score_above": score_above,
             # A bool, so `_param` writes `true` or `false`, the only values the daemon reads.
             "has_feedback": None if has_feedback is None else bool(has_feedback),
+            "experiment_id": experiment_id,
+            "preview": None if preview is None else bool(preview),
             "sort": sort, "order": order, "limit": limit, "cursor": cursor,
         }))
 
@@ -1176,6 +1186,110 @@ class Mcpd:
             "PUT", f"/v1/api/prompts/{_segment(name)}/labels/{_segment(label)}?{query}",
             body=body, headers={"content-type": "application/json"},
         ))
+
+    # --------------------------------------------------------------- experiments
+
+    def get_trajectory(self, trace_id: str, *, project: Optional[str] = None) -> Trajectory:
+        """A run as the tool calls, model generations and handoffs its agent took."""
+        return decode(Trajectory, self._transport.get(
+            f"/v1/api/traces/{_segment(trace_id)}/trajectory",
+            {"project": project or self.project},
+        ))
+
+    def list_dataset_items(self, dataset_id: str, *,
+                           limit: Optional[int] = None) -> List[DatasetItem]:
+        """The cases of a dataset.
+
+        Sends `limit` only: the daemon finds the project from the dataset, and
+        refuses a parameter the endpoint does not document.
+        """
+        found = self._transport.get(f"/v1/api/datasets/{_segment(dataset_id)}/items",
+                                    {"limit": limit})
+        if not isinstance(found, list):
+            raise TransportError(f"expected a JSON array of dataset items, got "
+                                 f"{type(found).__name__}")
+        return [decode(DatasetItem, item) for item in found]
+
+    def create_experiment(self, experiment: Experiment) -> Experiment:
+        """Record an experiment, or replace one.
+
+        The daemon upserts on `experiment_id`, and an empty id gets a new one,
+        so posting the same id again is how a status is moved. The client's
+        project is used when the correlation names none.
+        """
+        correlation = dataclasses.replace(experiment.correlation) \
+            if experiment.correlation is not None else records.Correlation(project="")
+        if not correlation.project:
+            correlation.project = self.project
+        return decode(Experiment, self._transport.post(
+            "/v1/api/experiments", dataclasses.replace(experiment, correlation=correlation)))
+
+    def score_experiment(self, experiment_id: str, scorers: Sequence[str] = (),
+                         config: Optional[Union[ScorerConfig, Mapping[str, Any]]] = None, *,
+                         project: Optional[str] = None) -> ScoreRunResult:
+        """Score every run of an experiment against its own dataset case.
+
+        No scorers runs the code scorers that need no settings. Each case's
+        expected answer is filled in by the daemon.
+        """
+        body: Dict[str, Any] = {"scorers": list(scorers)}
+        if config is not None:
+            body["config"] = config
+        query = encode_params({"project": project or self.project})
+        return decode(ScoreRunResult, self._transport.post(
+            f"/v1/api/experiments/{_segment(experiment_id)}/score?{query}", body))
+
+    def experiment_results(self, experiment_id: str, *,
+                           project: Optional[str] = None) -> ExperimentResults:
+        """An experiment case by case, with a summary per scorer."""
+        return decode(ExperimentResults, self._transport.get(
+            f"/v1/api/experiments/{_segment(experiment_id)}/results",
+            {"project": project or self.project},
+        ))
+
+    def run_experiment(self, dataset_id: str, target: ExperimentTarget, *,
+                       name: Optional[str] = None, scorers: Optional[Sequence[str]] = None,
+                       config: Optional[Union[ScorerConfig, Mapping[str, Any]]] = None,
+                       concurrency: int = 4, metadata: Any = None) -> ExperimentResults:
+        """Run `target` over every case of a dataset and score the answers.
+
+        Each case runs inside a root span named after the experiment, carrying
+        the experiment id and the case id, at most `concurrency` at a time on a
+        pool of threads. A target that raises fails its own run and the next
+        case still runs. Then the runs are flushed and scored, the experiment
+        is marked `succeeded` with each scorer's mean, and the results are
+        returned. When the runner itself fails, the experiment is marked
+        `failed` and the error is raised.
+
+        An `async def` target runs on one event loop, `concurrency` cases at a
+        time. From code that already has a running loop, use
+        `await mcpd.arun_experiment(...)`.
+        """
+        p = _experiment.plan(self, dataset_id, target, name, scorers, config, concurrency,
+                            metadata)
+        if _experiment.is_async_target(target):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(_experiment.run_async(self, p))
+            raise McpdError("run_experiment would block the running event loop to await an "
+                            "async target; call `await mcpd.arun_experiment(...)` instead")
+        return _experiment.run_sync(self, p)
+
+    async def arun_experiment(self, dataset_id: str, target: ExperimentTarget, *,
+                              name: Optional[str] = None,
+                              scorers: Optional[Sequence[str]] = None,
+                              config: Optional[Union[ScorerConfig, Mapping[str, Any]]] = None,
+                              concurrency: int = 4, metadata: Any = None) -> ExperimentResults:
+        """`run_experiment` on the running event loop.
+
+        An `async def` target is awaited on this loop, so it can use what the
+        loop owns, such as an open HTTP session. A plain function runs on the
+        loop's default executor.
+        """
+        p = _experiment.plan(self, dataset_id, target, name, scorers, config, concurrency,
+                            metadata)
+        return await _experiment.run_async(self, p)
 
     def health(self) -> HealthStatus:
         """Whether the server is alive, and which spec version it implements."""
