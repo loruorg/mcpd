@@ -484,9 +484,12 @@ Named so a reader can tell a decision from neglect.
   travel) and effect epochs.
 - `POST /v1/api/steps/{lease_id}/deltas` and token streaming out of the daemon.
   In-process streaming is the worker's own business.
-- A Postgres or ClickHouse run store. The run store is an embedded SQLite file
-  beside the signal store, whatever the signal store is, so the run surface is
-  one daemon replica in v1. The docs say so on the deploy page.
+- A ClickHouse run store. Every mutating call in this contract is one
+  transaction, and ClickHouse has no multi-statement transaction to hold it.
+  The run store is an embedded SQLite file, or Postgres
+  (`--runs-data postgres://...`), whatever the signal store is. On Postgres
+  every transaction is serializable, so several replicas sharing it answer
+  every call in this contract as one daemon would.
 - Definitions of kind `agent`, the in-process agent loop, tool contracts, model
   routing, memory. An `agent` node in v1 is a claimable step whose body is the
   user's own loop; the trace shows the model calls it records.

@@ -8,35 +8,23 @@
 //! without a writer is a compile error in this file rather than a defect
 //! somebody has to read four documents to find.
 
+mod common;
+
+use common::TestStore;
 use mcpd_runs::model::{
     Attempt, AttemptStatus, ConstructKind, DefinitionKind, Effect, EventOutcome, InboundEvent,
     RunEventKind, RunStatus, StepErrorClass, StepKind, TimerKind,
 };
-use mcpd_runs::store::{
-    DefinitionDocument, RunConfig, RunStore, StartRun, StepCompletion, StepError,
-};
-use mcpd_runs::{tick, SqliteRunStore};
+use mcpd_runs::store::{DefinitionDocument, RunConfig, StartRun, StepCompletion, StepError};
+use mcpd_runs::tick;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use time::{Duration, OffsetDateTime};
 
 /// A fixed clock. Every test passes `now` in rather than reading one, so an
 /// expiry test costs nothing and never flakes.
 fn t0() -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("a valid instant")
-}
-
-/// A pid alone is not unique: pids are recycled, and a recycled one reopens
-/// the previous run's database, so every count is off by a whole prior suite.
-static STAMP: AtomicU64 = AtomicU64::new(0);
-
-fn temp_db() -> PathBuf {
-    let n = STAMP.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("mcpd-runs-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    dir.join("runs.db")
 }
 
 /// A completion carrying an output and nothing else.
@@ -55,8 +43,7 @@ fn fatal(message: &str) -> StepError {
 }
 
 struct Harness {
-    store: SqliteRunStore,
-    path: PathBuf,
+    store: TestStore,
 }
 
 impl Harness {
@@ -65,16 +52,7 @@ impl Harness {
     }
 
     async fn with_config(config: RunConfig) -> Self {
-        let path = temp_db();
-        let store = SqliteRunStore::open(&path, config).expect("open");
-        store.migrate().await.expect("migrate");
-        Self { store, path }
-    }
-
-    /// A second connection to the same file, which is how the crash tests
-    /// delete the rows a crash would lose.
-    fn raw(&self) -> rusqlite::Connection {
-        rusqlite::Connection::open(&self.path).expect("raw connection")
+        Self { store: TestStore::open(config).await }
     }
 
     async fn define(&self, id: &str, body: Value) {
@@ -147,18 +125,10 @@ impl Harness {
             .unwrap_or_else(|| panic!("no attempt {attempt} of step {step_key}"))
     }
 
-    fn child_count(&self, run_id: &str) -> i64 {
-        self.raw()
-            .query_row("SELECT COUNT(*) FROM runs WHERE parent_run_id = ?1", [run_id], |r| r.get(0))
-            .expect("child count")
-    }
-}
-
-impl Drop for Harness {
-    fn drop(&mut self) {
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
+    /// Read on a connection of its own, which is also how the crash tests
+    /// delete the rows a crash would lose.
+    async fn child_count(&self, run_id: &str) -> i64 {
+        self.store.count("SELECT COUNT(*) FROM runs WHERE parent_run_id = ?1", &[run_id]).await
     }
 }
 
@@ -312,7 +282,7 @@ async fn harness_with_cases() -> Harness {
     h
 }
 
-#[tokio::test]
+backend_tests! {
 async fn advancing_onto_every_construct_writes_the_rows_it_requires() {
     let h = harness_with_cases().await;
     for kind in ConstructKind::ALL {
@@ -331,14 +301,15 @@ async fn advancing_onto_every_construct_writes_the_rows_it_requires() {
         let want_slots: HashSet<String> = case.slots.iter().map(|s| (*s).to_string()).collect();
         assert_eq!(h.pending_set(&run_id).await, want_slots, "slots for {label}");
 
-        assert_eq!(h.child_count(&run_id), case.children, "children for {label}");
+        assert_eq!(h.child_count(&run_id).await, case.children, "children for {label}");
 
         let run = h.store.get_run(&run_id).await.expect("run");
         assert_eq!(run.status.is_terminal(), case.terminal, "terminal for {label}");
     }
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_crash_between_the_cursor_and_its_rows_is_repaired_for_every_construct() {
     // The failure, exactly: `complete` advanced the cursor and did not create
     // the next construct's row. The run then has no lease to expire and no
@@ -353,22 +324,20 @@ async fn a_crash_between_the_cursor_and_its_rows_is_repaired_for_every_construct
             h.start_with(&format!("case_{}", kind.as_str()), case.input.clone(), t0()).await;
 
         {
-            let raw = h.raw();
             for table in ["timers", "waits", "step_attempts"] {
-                raw.execute(&format!("DELETE FROM {table} WHERE run_id = ?1"), [&run_id])
-                    .expect("lose the rows a crash would lose");
+                h.store.exec(&format!("DELETE FROM {table} WHERE run_id = ?1"), &[&run_id]).await;
             }
             // A subworkflow child is a whole run row, and losing it is the same
             // failure one table over. Its stream goes with it, because the two
             // were written by one transaction and a crash cannot split them.
-            raw.execute(
-                "DELETE FROM run_events WHERE run_id IN
-                    (SELECT run_id FROM runs WHERE parent_run_id = ?1)",
-                [&run_id],
-            )
-            .expect("lose the child's stream");
-            raw.execute("DELETE FROM runs WHERE parent_run_id = ?1", [&run_id])
-                .expect("lose the child");
+            h.store
+                .exec(
+                    "DELETE FROM run_events WHERE run_id IN
+                        (SELECT run_id FROM runs WHERE parent_run_id = ?1)",
+                    &[&run_id],
+                )
+                .await;
+            h.store.exec("DELETE FROM runs WHERE parent_run_id = ?1", &[&run_id]).await;
         }
 
         let label = format!("{kind:?}");
@@ -390,11 +359,12 @@ async fn a_crash_between_the_cursor_and_its_rows_is_repaired_for_every_construct
         assert_eq!(h.wait_set(&run_id).await, want_waits, "waits re-derived for {label}");
         let want_slots: HashSet<String> = case.slots.iter().map(|s| (*s).to_string()).collect();
         assert_eq!(h.pending_set(&run_id).await, want_slots, "slots re-derived for {label}");
-        assert_eq!(h.child_count(&run_id), case.children, "children re-derived for {label}");
+        assert_eq!(h.child_count(&run_id).await, case.children, "children re-derived for {label}");
     }
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_run_at_a_claimable_task_with_no_lease_no_wait_and_no_timer_is_selected_again() {
     // The case round five named by hand: a run whose cursor names a claimable
     // task, holding no lease, no wait row and no timer row, which no tick would
@@ -403,27 +373,26 @@ async fn a_run_at_a_claimable_task_with_no_lease_no_wait_and_no_timer_is_selecte
     h.define("one", json!({"steps": [{"kind": "task", "id": "work"}]})).await;
     let run_id = h.start("one", t0()).await;
 
-    h.raw()
-        .execute("DELETE FROM step_attempts WHERE run_id = ?1", [&run_id])
-        .expect("lose the slot");
+    h.store.exec("DELETE FROM step_attempts WHERE run_id = ?1", &[&run_id]).await;
 
     let nothing = h.store.claim("checkout", "worker-1", 10, None, t0()).await.expect("claim");
     assert!(nothing.is_empty(), "the run should be unreachable before the reconciler runs");
 
     let later = t0() + Duration::minutes(10);
-    let report = tick(&h.store, later).await.expect("tick");
+    let report = tick(&*h.store, later).await.expect("tick");
     assert_eq!(report.reconcile.runs_repaired, 1);
 
     let leases = h.store.claim("checkout", "worker-1", 10, None, later).await.expect("claim");
     assert_eq!(leases.len(), 1, "a tick should reach the run again");
     assert_eq!(leases[0].step_key, "work");
 }
+}
 
 // ---------------------------------------------------------------------------
 // The deadline table
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn every_timer_kind_has_a_writer() {
     // Five rounds of review kept finding a `timers.kind` that no code path
     // wrote: `step_timeout` in round four, and again in round five on the line
@@ -511,6 +480,7 @@ async fn every_timer_kind_has_a_writer() {
         );
     }
 }
+}
 
 /// Every enum this crate writes to a column carries an `ALL` array and an
 /// exhaustive `index`. The match inside `index` is what stops a new variant
@@ -572,7 +542,7 @@ async fn leased_run(h: &Harness, effect: &str) -> (String, String) {
     (run_id, leases[0].lease_id.clone())
 }
 
-#[tokio::test]
+backend_tests! {
 async fn an_expired_lease_becomes_orphaned_rather_than_being_requeued_at_once() {
     let h = Harness::open().await;
     let (run_id, _lease) = leased_run(&h, "at_least_once").await;
@@ -597,8 +567,9 @@ async fn an_expired_lease_becomes_orphaned_rather_than_being_requeued_at_once() 
         .expect("claim");
     assert!(again.is_empty(), "an orphaned attempt is not runnable");
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_pending_slot_beside_an_orphaned_attempt_is_still_refused() {
     // Two things keep a second body off a step whose window is open, and this
     // covers the second one.
@@ -621,13 +592,13 @@ async fn a_pending_slot_beside_an_orphaned_attempt_is_still_refused() {
     h.store.run_due_timers(t0() + Duration::seconds(31)).await.expect("expiry tick");
     assert_eq!(h.attempt(&run_id, "work", 0).await.status, AttemptStatus::Orphaned);
 
-    h.raw()
-        .execute(
+    h.store
+        .exec(
             "INSERT INTO step_attempts (run_id, step_key, attempt, kind, effect, status, span_id)
              VALUES (?1, 'work', 1, 'task', 'at_least_once', 'pending', 'aaaaaaaaaaaaaaaa')",
-            [&run_id],
+            &[&run_id],
         )
-        .expect("a slot beside an open window");
+        .await;
 
     let refused = h
         .store
@@ -636,8 +607,9 @@ async fn a_pending_slot_beside_an_orphaned_attempt_is_still_refused() {
         .expect("claim");
     assert!(refused.is_empty(), "no second lease for a step key while its reclaim window is open");
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn an_expired_lease_is_reclaimed_and_the_attempt_is_not_lost() {
     let h = Harness::open().await;
     let (run_id, _lease) = leased_run(&h, "at_least_once").await;
@@ -665,8 +637,9 @@ async fn an_expired_lease_is_reclaimed_and_the_attempt_is_not_lost() {
     assert_eq!(leases.len(), 1);
     assert_eq!(leases[0].attempt, 1, "the requeue is a new attempt");
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_heartbeat_extends_a_lease_and_closes_an_open_reclaim_window() {
     let h = Harness::open().await;
     let (run_id, lease) = leased_run(&h, "at_least_once").await;
@@ -698,8 +671,9 @@ async fn a_heartbeat_extends_a_lease_and_closes_an_open_reclaim_window() {
     h.store.run_due_timers(t0() + Duration::seconds(62)).await.expect("tick");
     assert_eq!(h.attempt(&run_id, "work", 0).await.status, AttemptStatus::Leased);
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_started_at_most_once_step_fails_its_run_when_the_window_closes() {
     let h = Harness::open().await;
     let (run_id, lease) = leased_run(&h, "at_most_once").await;
@@ -716,8 +690,9 @@ async fn a_started_at_most_once_step_fails_its_run_when_the_window_closes() {
         run.error
     );
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_started_at_least_once_step_is_requeued_when_the_window_closes() {
     let h = Harness::open().await;
     let (run_id, lease) = leased_run(&h, "at_least_once").await;
@@ -729,8 +704,9 @@ async fn a_started_at_least_once_step_is_requeued_when_the_window_closes() {
     assert_eq!(h.store.get_run(&run_id).await.expect("run").status, RunStatus::Running);
     assert_eq!(h.attempt(&run_id, "work", 1).await.status, AttemptStatus::Pending);
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_worker_a_later_attempt_replaced_cannot_complete_its_step() {
     let h = Harness::open().await;
     let (run_id, lease) = leased_run(&h, "at_least_once").await;
@@ -745,12 +721,13 @@ async fn a_worker_a_later_attempt_replaced_cannot_complete_its_step() {
     assert!(format!("{err}").contains("fenced"), "got {err}");
     assert_eq!(h.store.get_run(&run_id).await.expect("run").status, RunStatus::Running);
 }
+}
 
 // ---------------------------------------------------------------------------
 // Movers
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn a_sleep_coming_due_moves_the_run_on() {
     let h = Harness::open().await;
     h.define(
@@ -769,8 +746,9 @@ async fn a_sleep_coming_due_moves_the_run_on() {
     assert_eq!(h.pending_set(&run_id).await, HashSet::from(["after".to_string()]));
     assert!(h.timer_set(&run_id).await.is_empty(), "the sleep is over");
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_parallel_advances_only_when_every_branch_is_terminal() {
     let h = Harness::open().await;
     h.define(
@@ -798,8 +776,9 @@ async fn a_parallel_advances_only_when_every_branch_is_terminal() {
     assert!(h.pending_set(&run_id).await.contains("join"));
     assert_eq!(h.store.get_run(&run_id).await.expect("run").steps_used, 2);
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_loop_runs_its_bound_and_then_leaves() {
     let h = Harness::open().await;
     h.define(
@@ -821,8 +800,9 @@ async fn a_loop_runs_its_bound_and_then_leaves() {
     }
     assert_eq!(h.store.get_run(&run_id).await.expect("run").status, RunStatus::Succeeded);
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_child_run_ending_moves_its_parent_past_the_subworkflow_step() {
     let h = Harness::open().await;
     h.define("child", json!({"steps": [{"kind": "task", "id": "inner"}]})).await;
@@ -857,8 +837,9 @@ async fn a_child_run_ending_moves_its_parent_past_the_subworkflow_step() {
     // Ceilings are enforced against the root, so a child's step counts there.
     assert_eq!(h.store.get_run(&parent).await.expect("parent").steps_used, 1);
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn the_run_ceiling_is_spent_by_a_child_and_refuses_the_next_lease() {
     let h = Harness::open().await;
     h.define("child", json!({"steps": [{"kind": "task", "id": "inner"}]})).await;
@@ -887,8 +868,9 @@ async fn the_run_ceiling_is_spent_by_a_child_and_refuses_the_next_lease() {
         "max_steps 1 was spent by the child, so the parent's next step is refused"
     );
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_run_timeout_ends_the_run_and_takes_its_deadlines_and_waits_with_it() {
     let h = Harness::open().await;
     h.define(
@@ -915,8 +897,9 @@ async fn a_run_timeout_ends_the_run_and_takes_its_deadlines_and_waits_with_it() 
         "a leftover wait row eats the next run's approval"
     );
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_step_timeout_bounds_a_worker_that_heartbeats_for_ever() {
     let h = Harness::open().await;
     h.define(
@@ -946,12 +929,13 @@ async fn a_step_timeout_bounds_a_worker_that_heartbeats_for_ever() {
         run.error
     );
 }
+}
 
 // ---------------------------------------------------------------------------
 // Waits and events
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn an_event_moves_the_run_that_was_waiting_for_it() {
     let h = Harness::open().await;
     h.define(
@@ -989,8 +973,9 @@ async fn an_event_moves_the_run_that_was_waiting_for_it() {
     assert!(h.timer_set(&run_id).await.is_empty(), "the wait's deadline goes with the wait");
     assert!(h.pending_set(&run_id).await.contains("refund"));
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn an_event_that_arrived_early_is_consumed_when_the_run_reaches_the_wait() {
     let h = Harness::open().await;
     h.define(
@@ -1025,8 +1010,9 @@ async fn an_event_that_arrived_early_is_consumed_when_the_run_reaches_the_wait()
     assert_eq!(h.attempt(&run_id, "approval", 0).await.output, Some(json!({"by": "ops"})));
     assert!(h.pending_set(&run_id).await.contains("refund"));
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_second_delivery_of_one_event_id_is_a_no_op() {
     let h = Harness::open().await;
     h.define(
@@ -1056,8 +1042,9 @@ async fn a_second_delivery_of_one_event_id_is_a_no_op() {
         "the provider's fifth retry must not become a spare event"
     );
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_wait_that_expires_moves_the_run_when_it_says_so() {
     // `on_timeout: continue` is the documented way to reach a step that reads
     // `steps.approval.status`. The default, `fail`, ends the run and is held
@@ -1081,8 +1068,9 @@ async fn a_wait_that_expires_moves_the_run_when_it_says_so() {
     assert!(h.wait_set(&run_id).await.is_empty());
     assert!(h.pending_set(&run_id).await.contains("escalate"));
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn an_ended_runs_leftover_wait_cannot_eat_the_next_runs_approval() {
     let h = Harness::open().await;
     h.define(
@@ -1132,8 +1120,9 @@ async fn an_ended_runs_leftover_wait_cannot_eat_the_next_runs_approval() {
         "the approval belongs to the live run"
     );
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn the_reconciler_sweeps_rows_an_ended_run_left_behind_and_counts_them() {
     // Deliberately outside the "not terminal" predicate: the stale rows this
     // catches belong to runs that already ended, which is precisely why the
@@ -1148,17 +1137,16 @@ async fn the_reconciler_sweeps_rows_an_ended_run_left_behind_and_counts_them() {
     )
     .await;
     let run_id = h.start("approver", t0()).await;
-    h.raw()
-        .execute("UPDATE runs SET status = 'cancelled' WHERE run_id = ?1", [&run_id])
-        .expect("a terminator that forgot its cleanup");
+    h.store.exec("UPDATE runs SET status = 'cancelled' WHERE run_id = ?1", &[&run_id]).await;
 
     let report = h.store.reconcile(t0() + Duration::minutes(10)).await.expect("reconcile");
     assert_eq!(report.stale_rows_deleted, 2, "one waits row and one wait_timeout row");
     assert!(h.wait_set(&run_id).await.is_empty());
     assert!(h.timer_set(&run_id).await.is_empty());
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn the_reconciler_repairs_nothing_on_a_healthy_run() {
     let h = Harness::open().await;
     h.define(
@@ -1178,12 +1166,13 @@ async fn the_reconciler_repairs_nothing_on_a_healthy_run() {
     );
     assert_eq!(h.wait_set(&run_id).await.len(), 1);
 }
+}
 
 // ---------------------------------------------------------------------------
 // Fields with a reader
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn a_run_carries_its_input_its_definition_and_a_gapless_event_stream() {
     let h = Harness::open().await;
     h.define("two", json!({"steps": [{"kind": "task", "id": "a"}, {"kind": "task", "id": "b"}]}))
@@ -1230,8 +1219,9 @@ async fn a_run_carries_its_input_its_definition_and_a_gapless_event_stream() {
         "reattaching after seq 0 skips exactly one row"
     );
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn an_expired_lease_records_when_the_window_opened_and_when_the_attempt_ended() {
     let h = Harness::open().await;
     let (run_id, _lease) = leased_run(&h, "at_least_once").await;
@@ -1244,8 +1234,9 @@ async fn an_expired_lease_records_when_the_window_opened_and_when_the_attempt_en
     h.store.run_due_timers(t0() + Duration::seconds(90)).await.expect("reclaim tick");
     assert_eq!(h.attempt(&run_id, "work", 0).await.ended_at, Some(t0() + Duration::seconds(90)));
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn an_event_goes_to_the_wait_that_expires_soonest() {
     let h = Harness::open().await;
     h.define(
@@ -1293,8 +1284,9 @@ async fn an_event_goes_to_the_wait_that_expires_soonest() {
         "one event, one wait: the other run keeps waiting"
     );
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_definition_that_names_itself_is_refused_before_it_is_stored() {
     // A self-referencing definition is a run tree no ceiling bounds, so the
     // validator refuses it at write time rather than the depth bound refusing
@@ -1316,16 +1308,16 @@ async fn a_definition_that_names_itself_is_refused_before_it_is_stored() {
     let message = format!("{err}");
     assert!(message.contains("names the definition it is part of"), "got {message}");
 
-    let stored: i64 =
-        h.raw().query_row("SELECT COUNT(*) FROM definitions", [], |r| r.get(0)).expect("count");
+    let stored = h.store.count("SELECT COUNT(*) FROM definitions", &[]).await;
     assert_eq!(stored, 0, "nothing is stored for a refused document");
+}
 }
 
 // ---------------------------------------------------------------------------
 // A worker calling twice
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn a_worker_that_calls_fail_after_completing_cannot_kill_the_run_it_finished() {
     // `complete_step` and `heartbeat` both refuse a lease whose attempt has
     // ended. `fail_step` did not, so a retried callback from a worker that had
@@ -1352,8 +1344,9 @@ async fn a_worker_that_calls_fail_after_completing_cannot_kill_the_run_it_finish
     assert_eq!(a.output, Some(json!({"paid": true})));
     assert!(h.pending_set(&run_id).await.contains("b"));
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_worker_that_declares_a_body_after_completing_cannot_reopen_the_attempt() {
     // The worst version of the same missing guard. `started` restored a
     // succeeded attempt to `started` and gave it a fresh lease deadline, so the
@@ -1393,12 +1386,13 @@ async fn a_worker_that_declares_a_body_after_completing_cannot_reopen_the_attemp
         .collect();
     assert_eq!(offered, HashSet::from(["b".to_string()]), "step a is done and stays done");
 }
+}
 
 // ---------------------------------------------------------------------------
 // Positions with no mover
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+backend_tests! {
 async fn a_fan_out_over_nothing_advances_rather_than_stopping_the_run_for_ever() {
     // A fan-out with no branches writes no slot, so no completion arrives to
     // move it, and it holds no deadline and no wait either. The run stopped
@@ -1424,8 +1418,9 @@ async fn a_fan_out_over_nothing_advances_rather_than_stopping_the_run_for_ever()
         assert_eq!(h.store.get_run(&run_id).await.expect("run").status, RunStatus::Running);
     }
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_loop_bounded_at_zero_and_a_parallel_with_no_branch_are_refused() {
     // Both used to be accepted and both were positions nothing could move.
     // The schema and the validator now agree that a bound of zero is not a
@@ -1454,8 +1449,9 @@ async fn a_loop_bounded_at_zero_and_a_parallel_with_no_branch_are_refused() {
         assert!(matches!(err, mcpd_runs::Error::Invalid(_)), "{id}: got {err}");
     }
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn an_expired_wait_does_not_take_the_event_a_live_run_is_waiting_for() {
     // The delivery lookup prefers the nearest expiry, and it did not check that
     // the expiry was still in the future. That ordering therefore guaranteed
@@ -1510,7 +1506,9 @@ async fn an_expired_wait_does_not_take_the_event_a_live_run_is_waiting_for() {
         "the expired run keeps its row until its own deadline settles it"
     );
 }
+}
 
+backend_tests! {
 /// `node_attempts` counts repetition, which means it has to fold three things
 /// that look different in the journal into one number.
 ///
@@ -1518,7 +1516,6 @@ async fn an_expired_wait_does_not_take_the_event_a_live_run_is_waiting_for() {
 /// writes a new step key at the same node. A `foreach` item does too. All three
 /// are the same node running again, and the count a monitor reads has to say so
 /// without the monitor having to hold the definition to work it out.
-#[tokio::test]
 async fn node_attempts_folds_retries_and_iterations_onto_one_node() {
     let h = Harness::open().await;
     h.define(
@@ -1612,10 +1609,11 @@ async fn node_attempts_folds_retries_and_iterations_onto_one_node() {
         "the skipped row does exist, so its absence above is the filter and not the fixture"
     );
 }
+}
 
+backend_tests! {
 /// Rows for many runs come back in one order, and a run that is asked about but
 /// has nothing is absent rather than present with a zero.
-#[tokio::test]
 async fn node_attempts_is_ordered_and_leaves_out_what_it_has_nothing_for() {
     let h = Harness::open().await;
     h.define("plain", json!({"steps": [{"kind": "task", "id": "work"}]})).await;
@@ -1641,4 +1639,5 @@ async fn node_attempts_is_ordered_and_leaves_out_what_it_has_nothing_for() {
         h.store.node_attempts(&[]).await.expect("no run ids").is_empty(),
         "asking about no runs asks the database nothing"
     );
+}
 }

@@ -128,7 +128,11 @@ an endpoint touches all of these:
    first or the change is a bug.
 3. `crates/mcpd-runs` and its tests (`tests/contract.rs` covers every enum
    value and every 409 reason), then `crates/mcpd-server/src/runs.rs` and
-   `tests/runs.rs`.
+   `tests/runs.rs`. The rules live once, in `src/engine.rs`; a table or a
+   column goes in both `src/schema.sql` and `src/postgres_schema.sql`, and the
+   second needs `SCHEMA_VERSION` in `src/postgres.rs` raised. Write each new
+   test inside `backend_tests!`, so it runs on SQLite and on Postgres, and run
+   it once with `MCPD_TEST_POSTGRES_URL` set.
 4. All six workers: `sdks/typescript/src/{workflow,runs,worker}.ts`,
    `sdks/python/mcpd/{workflow,runs,worker}.py`, `crates/mcpd-sdk/src/{workflow,runs,worker}.rs`,
    `sdks/go/{workflow,runs,worker}.go`, `sdks/kotlin/.../{Workflow,Runs,Worker}.kt`,

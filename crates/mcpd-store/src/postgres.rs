@@ -814,40 +814,55 @@ impl PostgresStore {
     /// Returns [`Error::Backend`] if the connection string cannot be parsed or
     /// the pool cannot be built.
     pub fn new(config: PostgresConfig) -> Result<Self> {
-        let (url, tls) = split_tls(&config.url)?;
-        // The connection string is not repeated in the error: it carries the
-        // password, and this message reaches the start-up log.
-        let pg: tokio_postgres::Config = url.parse().map_err(|e| {
-            Error::Backend(format!("postgres: the connection string is not usable: {e}"))
-        })?;
-
-        // Built from the parsed configuration as a whole, so every option the
-        // string carries reaches the connection: `connect_timeout`, a second
-        // host, `application_name`. Copying five fields out of it dropped the
-        // rest without a word.
-        let manager_config = ManagerConfig { recycling_method: RecyclingMethod::Fast };
-        let manager = if pg.get_ssl_mode() == SslMode::Require {
-            let connector = tokio_postgres_rustls::MakeRustlsConnect::new(tls.client_config()?);
-            Manager::from_config(pg, connector, manager_config)
-        } else {
-            Manager::from_config(pg, NoTls, manager_config)
-        };
-
-        // Bounded waits. A pool with none holds a request, or a background
-        // loop, for ever on a server that accepts the connection and never
-        // answers, and the request timeout above it is then the only thing
-        // that ends it.
-        let pool = Pool::builder(manager)
-            .max_size(config.pool_size.max(2))
-            .wait_timeout(Some(POOL_WAIT))
-            .create_timeout(Some(POOL_WAIT))
-            .recycle_timeout(Some(POOL_WAIT))
-            .runtime(Runtime::Tokio1)
-            .build()
-            .map_err(|e| Error::Backend(format!("postgres: could not build a pool: {e}")))?;
-        Ok(Self { pool })
+        Ok(Self { pool: connect_pool(&config)? })
     }
+}
 
+/// Build a connection pool the way this store builds its own: the TLS
+/// settings read out of the connection string, and bounded waits.
+///
+/// Public so the run store, which is a separate crate with its own schema,
+/// reaches the same server through the same rules rather than a second copy of
+/// them. No connection is made until the first query.
+///
+/// # Errors
+/// Returns [`Error::Backend`] if the connection string cannot be parsed, its
+/// `sslrootcert` cannot be read, or the pool cannot be built.
+pub fn connect_pool(config: &PostgresConfig) -> Result<Pool> {
+    let (url, tls) = split_tls(&config.url)?;
+    // The connection string is not repeated in the error: it carries the
+    // password, and this message reaches the start-up log.
+    let pg: tokio_postgres::Config = url.parse().map_err(|e| {
+        Error::Backend(format!("postgres: the connection string is not usable: {e}"))
+    })?;
+
+    // Built from the parsed configuration as a whole, so every option the
+    // string carries reaches the connection: `connect_timeout`, a second
+    // host, `application_name`. Copying five fields out of it dropped the
+    // rest without a word.
+    let manager_config = ManagerConfig { recycling_method: RecyclingMethod::Fast };
+    let manager = if pg.get_ssl_mode() == SslMode::Require {
+        let connector = tokio_postgres_rustls::MakeRustlsConnect::new(tls.client_config()?);
+        Manager::from_config(pg, connector, manager_config)
+    } else {
+        Manager::from_config(pg, NoTls, manager_config)
+    };
+
+    // Bounded waits. A pool with none holds a request, or a background
+    // loop, for ever on a server that accepts the connection and never
+    // answers, and the request timeout above it is then the only thing
+    // that ends it.
+    Pool::builder(manager)
+        .max_size(config.pool_size.max(2))
+        .wait_timeout(Some(POOL_WAIT))
+        .create_timeout(Some(POOL_WAIT))
+        .recycle_timeout(Some(POOL_WAIT))
+        .runtime(Runtime::Tokio1)
+        .build()
+        .map_err(|e| Error::Backend(format!("postgres: could not build a pool: {e}")))
+}
+
+impl PostgresStore {
     /// Whether the schema is already at the version this build writes.
     ///
     /// `to_regclass` returns NULL rather than raising for a table that does not

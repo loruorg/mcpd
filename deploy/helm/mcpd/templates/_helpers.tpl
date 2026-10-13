@@ -83,6 +83,24 @@ true
 {{- end -}}
 {{- end -}}
 
+{{/* Where the run store lives, from runs.store and never from the URL, for
+     the same reason as mcpd.storeType: a URL that lives only in a Secret you
+     manage still selects the backend. */}}
+{{- define "mcpd.runsStore" -}}
+{{- $s := lower (toString (default "sqlite" .Values.runs.store)) -}}
+{{- if not (has $s (list "sqlite" "postgres")) -}}
+{{- fail (printf "runs.store is %q. Set it to sqlite or postgres." (toString .Values.runs.store)) -}}
+{{- end -}}
+{{- $s -}}
+{{- end -}}
+
+{{/* True when the run surface is on and its store is a file on the volume. */}}
+{{- define "mcpd.runsLocal" -}}
+{{- if and (include "mcpd.runsEnabled" .) (eq (include "mcpd.runsStore" .) "sqlite") -}}
+true
+{{- end -}}
+{{- end -}}
+
 {{/* The run store's path. Always written out rather than left for the daemon
      to derive: with an external store the daemon would derive it from a data
      path that nothing mounts. Derived the way the daemon does it, with `.runs`
@@ -99,14 +117,15 @@ true
 {{- end -}}
 
 {{/* True when the pod keeps an SQLite file: the signal store on the embedded
-     store, and the run store whenever runs are on. A file has one writer, so
-     this is what holds the Deployment to one replica and to Recreate. */}}
+     store, and the run store whenever runs are on and not on Postgres. A file
+     has one writer, so this is what holds the Deployment to one replica and to
+     Recreate. */}}
 {{- define "mcpd.localState" -}}
 {{- if eq .Values.mode "relay" -}}
 {{- if .Values.persistence.enabled -}}
 true
 {{- end -}}
-{{- else if or (not (include "mcpd.externalStore" .)) (include "mcpd.runsEnabled" .) -}}
+{{- else if or (not (include "mcpd.externalStore" .)) (include "mcpd.runsLocal" .) -}}
 true
 {{- end -}}
 {{- end -}}
@@ -184,11 +203,21 @@ Secret
 {{- if and (gt $replicas 1) (ne .Values.mode "relay") (not (include "mcpd.externalStore" .)) -}}
 {{- fail (printf "replicaCount is %d, but the signals are stored in an embedded SQLite file, which has one writer: two pods on it corrupt the database. Set replicaCount=1, or set externalStore.type (postgres or clickhouse) and runs.enabled=false to run more than one pod." $replicas) -}}
 {{- end -}}
-{{- if and (gt $replicas 1) (ne .Values.mode "relay") (include "mcpd.runsEnabled" .) -}}
-{{- fail (printf "replicaCount is %d, but runs.enabled is true, and the run store is an embedded SQLite file whatever the signal store is: each pod would hold its own run store, and a run started on one pod would be invisible to the others. Set runs.enabled=false to scale out with no run surface, or replicaCount=1 to keep it." $replicas) -}}
+{{- if and (gt $replicas 1) (ne .Values.mode "relay") (include "mcpd.runsLocal" .) -}}
+{{- fail (printf "replicaCount is %d, but runs.enabled is true and runs.store is sqlite, so the run store is an embedded file: each pod would hold its own run store, and a run started on one pod would be invisible to the others. Set runs.store=postgres with runs.postgresUrl to share one run store, runs.enabled=false to scale out with no run surface, or replicaCount=1." $replicas) -}}
+{{- end -}}
+{{- $runsStore := include "mcpd.runsStore" . -}}
+{{- if and (ne $runsStore "postgres") .Values.runs.postgresUrl -}}
+{{- fail (printf "runs.postgresUrl is set but runs.store is %s, so the chart would not use it. Set runs.store=postgres, or clear runs.postgresUrl." $runsStore) -}}
+{{- end -}}
+{{- if and .Values.keys.existingSecret .Values.runs.postgresUrl -}}
+{{- fail "keys.existingSecret is set, so the chart creates no Secret, and runs.postgresUrl would be ignored. Put the value in your Secret under runs-postgres-url, and clear it here." -}}
+{{- end -}}
+{{- if and (eq $runsStore "postgres") (include "mcpd.runsEnabled" .) (not .Values.keys.existingSecret) (not .Values.runs.postgresUrl) -}}
+{{- fail "runs.store is postgres but no connection string is set. Set runs.postgresUrl, or point keys.existingSecret at a Secret that carries it under runs-postgres-url." -}}
 {{- end -}}
 {{- $runsPath := toString .Values.config.runsPath -}}
-{{- if and (include "mcpd.runsEnabled" .) $runsPath (ne $runsPath ":memory:") -}}
+{{- if and (include "mcpd.runsLocal" .) $runsPath (ne $runsPath ":memory:") -}}
 {{- $dataDir := dir .Values.config.dataPath -}}
 {{- if not (hasPrefix (printf "%s/" $dataDir) $runsPath) -}}
 {{- fail (printf "config.runsPath is %s, outside %s, which is the directory of config.dataPath and the only writable mount, so the daemon could not create it. Put it inside %s, or leave it empty to derive it." $runsPath $dataDir $dataDir) -}}
