@@ -52,6 +52,9 @@ generation.setUsage({
   inputDetails: { cacheRead: 640 },
 })
 
+// Comment le modèle a été appelé. Des réglages, pas du payload, gardés même sans capture.
+generation.setModelParameters({ temperature: 0, seed: 0, maxTokens: 1024 })
+
 // Un échec que vous avez intercepté et traité vous-même.
 generation.setError('the provider timed out', {
   kind: 'TimeoutError',
@@ -166,7 +169,8 @@ const serverless = `export default async function handler(request: Request): Pro
   <p>
     <code>capturePayloads: false</code> garde les prompts et les complétions
     dans le processus. Le span est toujours enregistré avec ses temps, son
-    statut, sa consommation, son modèle, sa corrélation et ses erreurs ;
+    statut, sa consommation, son modèle, ses paramètres de modèle, sa
+    corrélation et ses erreurs ;
     <code>input</code> et <code>output</code> sont écartés avant d’atteindre la
     file d’attente, si bien que rien de sensible ne peut sortir lors d’un flush.
     Un span change ce réglage pour lui-même avec <code>capturePayloads</code>
@@ -239,12 +243,42 @@ const serverless = `export default async function handler(request: Request): Pro
     sur <code>error</code>, si bien que les deux ne peuvent jamais se
     contredire.
   </p>
+  <p>
+    <code>setModelParameters</code> enregistre les réglages avec lesquels
+    l’appel a été fait : <code>temperature</code>, <code>topP</code>,
+    <code>topK</code>, <code>maxTokens</code>, <code>seed</code>,
+    <code>stopSequences</code> et <code>hasResponseFormat</code>. Ce sont des
+    réglages et non du payload, ils survivent donc à
+    <code>capturePayloads: false</code>, et c’est le cas qui compte : ce sont
+    eux que doit reproduire quiconque rejoue l’exécution. Un champ que vous
+    omettez est absent et un champ que vous passez est gardé quelle que soit sa
+    valeur, donc <code>seed: 0</code> est une graine. Le schéma derrière
+    <code>hasResponseFormat</code> n’est pas enregistré, seulement le fait qu’un
+    schéma était en vigueur.
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
     title="ce que porte un span"
     samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: payload }]}
   />
+
+  <h3>Appels en streaming</h3>
+  <p>
+    Passez le flux du fournisseur à <code>span.recordStream</code> et lisez le
+    wrapper à sa place. Il accepte les fragments chat-completion d’OpenAI et
+    les événements de message d’Anthropic, et chaque fragment passe sans
+    changement. Le premier fragment qui porte du texte ou un appel d’outil
+    marque le délai jusqu’au premier token. Quand le flux se termine, lève une
+    exception ou est quitté par un <code>break</code>, le span reçoit ce que
+    <code>recordResponse</code> aurait enregistré pour le même appel sans
+    streaming, avec le texte comme sortie, puis se termine. Une erreur du flux
+    marque le span et vous parvient sans changement. Le texte conservé est
+    plafonné à 32 768 caractères, et <code>mcpd.stream.truncated</code> est posé
+    quand le plafond a été atteint.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="stream" title="un appel en streaming" />
 
   <h2>Exécutions durables</h2>
   <p>
@@ -333,6 +367,22 @@ const serverless = `export default async function handler(request: Request): Pro
   </p>
 
   <h2>Vérifier ce que vous avez enregistré</h2>
+  <p>
+    <code>TestClient</code>, de <code>@mcpd/sdk/testing</code>, est un
+    <code>Mcpd</code> qui enregistre en mémoire. Passez-le partout où votre code
+    prend un client, puis relisez ce qu’il a enregistré : <code>spans()</code>
+    par nom ou par type, <code>span(name)</code> pour le span qui doit exister,
+    <code>trees()</code> pour chaque exécution sous forme d’arbre,
+    <code>logs()</code>, <code>metrics()</code>, <code>scores()</code>,
+    <code>recordedFeedback()</code> et <code>reset()</code>. Chaque accesseur
+    fait d’abord un flush. Ce qu’il détient est passé par l’échantillonnage, la
+    capture des payloads et <code>redact</code> comme en route vers un daemon,
+    et il reste actif quand <code>MCPD_ENABLED=false</code> est posé pour
+    l’exécution des tests.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="testing" title="un test unitaire" />
+
   <p>
     Un <code>RecordingSink</code> remplace le réseau par la mémoire, si bien
     qu’un test relit les spans, les logs, les métriques, les scores et le
