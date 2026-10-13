@@ -306,6 +306,16 @@ const TITLES: Record<string, Row> = {
     tr: 'Temalar ve anlık görüntüler',
     pt: 'Temas e instantâneos',
   },
+  '/docs/prompts': {
+    fr: 'Prompts',
+    es: 'Prompts',
+    zh: '提示词',
+    ja: 'プロンプト',
+    ko: '프롬프트',
+    it: 'Prompt',
+    tr: 'İstemler',
+    pt: 'Prompts',
+  },
   '/docs/testing': {
     fr: 'Tests de régression',
     es: 'Pruebas de regresión',

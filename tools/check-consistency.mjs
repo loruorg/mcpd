@@ -52,7 +52,7 @@ function checkDocsNav() {
 const MOTION = [
   'LiveTrace', 'RunViews', 'Waterfall', 'SignalFlow', 'PipelineDiagram',
   'SearchDemo', 'TerminalCast', 'MonitorChart', 'DurableRun', 'LeaseProtocol',
-  'SamplingGate',
+  'SamplingGate', 'PromptLabels',
 ]
 
 function walk(dir, out = []) {
@@ -1634,6 +1634,10 @@ function checkEndpointScopes() {
     'crates/mcpd-server/src/orgs.rs',
     'crates/mcpd-server/src/sso.rs',
     'crates/mcpd-server/src/scim.rs',
+    'crates/mcpd-server/src/prompts.rs',
+    'crates/mcpd-server/src/definitions.rs',
+    'crates/mcpd-server/src/experiments.rs',
+    'crates/mcpd-server/src/curation.rs',
   ]
   if (!exists(router)) {
     fail(router, 'is missing; the scope check cannot run without the route table')
