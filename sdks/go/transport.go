@@ -364,6 +364,11 @@ type TraceQuery struct {
 	// HasFeedback, when set, keeps only traces a person gave feedback on
 	// (true) or only traces with none (false). Nil sends nothing.
 	HasFeedback *bool
+	// ExperimentID keeps only the runs recorded under this experiment.
+	ExperimentID string
+	// Preview, when set to true, fills each trace's InputPreview and
+	// OutputPreview. Nil sends nothing.
+	Preview *bool
 	// Sort is start_time, duration, cost or span_count.
 	Sort string
 	// Order is asc or desc.
@@ -403,6 +408,10 @@ func (c *Client) ListTraces(ctx context.Context, query TraceQuery) (*TraceListRe
 	}
 	if query.HasFeedback != nil {
 		values.Set("has_feedback", strconv.FormatBool(*query.HasFeedback))
+	}
+	setString(values, "experiment_id", query.ExperimentID)
+	if query.Preview != nil {
+		values.Set("preview", strconv.FormatBool(*query.Preview))
 	}
 	setString(values, "sort", query.Sort)
 	setString(values, "order", query.Order)

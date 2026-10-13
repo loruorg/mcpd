@@ -469,10 +469,11 @@ func TestListFiltersSendTheDocumentedParametersOnly(t *testing.T) {
 	defer client.Shutdown(context.Background())
 	ctx := context.Background()
 
-	no := false
+	no, yes := false, true
 	if _, err := client.ListTraces(ctx, TraceQuery{
 		MaxDurationMs: 5000, MaxCost: 0.25, MinTokens: 1000,
 		HasScore: "relevance", ScoreAbove: floatPtr(0.8), HasFeedback: &no,
+		ExperimentID: "exp-1", Preview: &yes,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +489,7 @@ func TestListFiltersSendTheDocumentedParametersOnly(t *testing.T) {
 	want := url.Values{
 		"project": {"support"}, "max_duration_ms": {"5000"}, "max_cost": {"0.25"},
 		"min_tokens": {"1000"}, "has_score": {"relevance"}, "score_above": {"0.8"},
-		"has_feedback": {"false"},
+		"has_feedback": {"false"}, "experiment_id": {"exp-1"}, "preview": {"true"},
 	}
 	if !reflect.DeepEqual(captured[0], want) {
 		t.Errorf("trace query %v, want %v", captured[0], want)

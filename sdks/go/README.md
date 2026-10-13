@@ -289,7 +289,10 @@ cost, err := m.AnalyticsCost(ctx, from, to, "provider", "1h")
 ```
 
 Also `ListSpans`, `ListLogs`, `QueryMetrics`, `ListScores`, `ListFeedback`,
-`DeleteTrace` and `Health`.
+`DeleteTrace` and `Health`. For experiments: `GetTrajectory`,
+`ListDatasetItems`, `CreateExperiment`, `ScoreExperiment`, `ExperimentResults`
+and `RunExperiment`, which runs your code over every case of a dataset and
+scores the answers.
 
 ## Durable runs
 
