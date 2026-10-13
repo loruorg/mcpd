@@ -39,6 +39,9 @@ with mcpd.trace("handler", traceparent=request.headers.get("traceparent")) as ru
 const payload = `generation.set_model("gpt-4o-mini", provider="openai")
 generation.set_usage(input_tokens=812, output_tokens=96, cache_read=128)
 
+# How the model was called. Settings, not payload: kept with capture off.
+generation.set_model_parameters(temperature=0, seed=0, max_tokens=1024)
+
 # A failure you caught and decided about yourself.
 generation.set_error("the provider timed out", kind="TimeoutError", retryable=True)
 
@@ -203,6 +206,19 @@ const serverless = `def handler(event, context):
     excepción, pone <code>status</code> en <code>error</code> en el mismo
     movimiento y siempre rellena un mensaje: «algo falló» no sirve para actuar.
   </p>
+  <p>
+    <code>set_model_parameters</code> registra los ajustes con los que se hizo
+    la llamada: <code>temperature</code>, <code>top_p</code>,
+    <code>top_k</code>, <code>max_tokens</code>, <code>seed</code>,
+    <code>stop_sequences</code> y <code>has_response_format</code>. Son
+    ajustes y no payload, así que sobreviven a
+    <code>capture_payloads=False</code>, que es el caso que importa: son lo que
+    tiene que igualar quien reproduzca la ejecución. Un argumento que omites
+    está ausente y uno que pasas se guarda sea cual sea, así que
+    <code>seed=0</code> es una semilla. El esquema que hay detrás de
+    <code>has_response_format</code> no se registra, solo si había uno en
+    vigor.
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -221,6 +237,25 @@ const serverless = `def handler(event, context):
     usa para anidar.
   </p>
 
+  <h3>Llamadas en streaming</h3>
+  <p>
+    Pasa el stream del proveedor a <code>span.record_stream</code> y lee en su
+    lugar el envoltorio: un generador para un iterador, un generador asíncrono
+    para un iterador asíncrono. Acepta fragmentos de chat completion de OpenAI
+    y eventos de mensaje de Anthropic, como dicts o como los propios objetos
+    del SDK del proveedor, y cada fragmento pasa sin cambios. El primer
+    fragmento con texto o con una llamada a herramienta marca el tiempo hasta
+    el primer token. Cuando el stream termina, lanza una excepción o se
+    abandona con un <code>break</code>, el span recibe lo que
+    <code>record_response</code> habría registrado para la misma llamada sin
+    streaming, con el texto como su salida, y termina. Un error del stream
+    marca el span y te llega sin cambios. El texto que se guarda tiene un tope
+    de 32,768 caracteres, y <code>mcpd.stream.truncated</code> se fija cuando
+    se llegó al tope.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="stream" title="una llamada en streaming" />
+
   <h2>Payloads, sinks y spans ya terminados</h2>
   <p>
     Un sink es adonde va un lote vaciado. El transporte HTTP es el valor por
@@ -237,6 +272,24 @@ const serverless = `def handler(event, context):
     title="comprobar lo que se registró"
     samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: sinks }]}
   />
+
+  <p>
+    <code>TestClient</code> de <code>mcpd.testing</code> es un
+    <code>Mcpd</code> que registra en memoria. Pásalo allí donde tu código
+    acepte un cliente, y luego vuelve a leer lo que registró:
+    <code>spans()</code> por nombre o por tipo, <code>recorded_span(name)</code>
+    para el único span que tiene que existir, <code>trees()</code> para cada
+    ejecución como un árbol, <code>logs()</code>, <code>metrics()</code>,
+    <code>scores()</code>, <code>recorded_feedback()</code> y
+    <code>reset()</code>. Cada accesor hace flush primero. Lo que guarda pasó
+    por el muestreo, la captura de payloads y <code>redact</code> igual que de
+    camino a un daemon, y sigue activo cuando se fija
+    <code>MCPD_ENABLED=false</code> para la ejecución de las pruebas.
+    <code>recorded_span</code> lanza <code>AssertionError</code>, así que un
+    span que falta hace fallar la prueba con los nombres que sí vio.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="testing" title="una prueba unitaria" />
 
   <p>
     <code>mcpd.record(span)</code> encola un <code>SpanRecord</code> que ya
