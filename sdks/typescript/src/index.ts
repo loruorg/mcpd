@@ -40,6 +40,7 @@ export type {
 export { McpdSpan } from './span.js'
 export { responseFacts, responseShape, usageFromAnthropic, usageFromOpenAI } from './model-call.js'
 export type { ResponseFacts } from './model-call.js'
+export { STREAM_MAX_TOOL_CALLS, STREAM_TEXT_BUDGET } from './stream.js'
 export type { ErrorOptions, ModelParameterInput, SpanHost, SpanOptions, UsageReport } from './span.js'
 
 // Where batches go: the HTTP transport by default, memory for a test, the
