@@ -4,7 +4,7 @@
  * Every screen reads the same daemon: the runs explorer, one run read back as
  * the conversation its steps encode, the threads those runs group into, the
  * log stream, the spend breakdown and the durable runs, then evaluations,
- * datasets, metrics and monitors (`more-screens.tsx`). They are one
+ * datasets, themes, metrics and monitors (`more-screens.tsx`). They are one
  * application rather than six pages because the whole interface is a static
  * bundle that the daemon serves itself, and because moving from a log line to
  * the run that wrote it should not cost a page load.
