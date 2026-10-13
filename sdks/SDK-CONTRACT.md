@@ -202,7 +202,8 @@ the daemon would have received, and nothing leaves the process.
 - `span(name)` answers the one finished span with that name, and fails with a
   message giving the count when there is none or more than one. It is the one
   call here that raises, because it is called from a test and a failed
-  assertion is its purpose.
+  assertion is its purpose. Python spells it `recorded_span(name)`, because
+  its client already has a `span` that starts one.
 - `logs()`, `metrics()`, `scores()` and `recorded_feedback()` answer the
   other signals in arrival order. The last is not `feedback()` because the
   client already has a `feedback` that records one.
@@ -379,7 +380,8 @@ Four rules hold in every language.
   built from what was collected, sets the output, and ends the span. A stream
   that raised also gets `set_error` with the error's message, and the error
   reaches the caller unchanged: it is the provider's error, not
-  instrumentation's.
+  instrumentation's. An error the caller's own code raises while reading is
+  an early stop, not a failed call, and ends the span with no error.
 - **Memory is bounded.** The collected text and the tool calls' arguments
   share one budget of 32,768 Unicode code points. What arrives past it is not
   kept, and `mcpd.stream.truncated = true` is set on the span. At most 64 tool
