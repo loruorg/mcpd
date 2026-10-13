@@ -654,6 +654,81 @@ malformed prompt sets nothing. `list_spans(prompt=, prompt_version=)` then
 finds every span that used a prompt or one version of it. Elixir has no mutable
 span handle and returns the attributes instead, for the `attributes:` option.
 
+### 5.2 Experiments
+
+An experiment runs one version of an agent over every case of a dataset and
+scores each answer against its own case. The daemon never calls the agent: the
+SDK does, in the caller's process, so the target can be any function.
+
+```
+get_trajectory(trace_id) -> Trajectory
+list_dataset_items(dataset_id, limit?) -> DatasetItem[]
+create_experiment(experiment) -> Experiment
+score_experiment(experiment_id, scorers, config?) -> ScoreRunResult
+experiment_results(experiment_id) -> ExperimentResults
+run_experiment(dataset_id, target, name?, scorers?, config?, concurrency? = 4,
+               metadata?) -> ExperimentResults
+```
+
+`list_traces` also takes `experiment_id` and `preview` (a boolean sent as
+`true` or `false`, which fills `input_preview` and `output_preview`).
+
+**The reads and writes.** `get_trajectory` reads
+`GET /v1/api/traces/{trace_id}/trajectory`. `list_dataset_items` reads
+`GET /v1/api/datasets/{dataset_id}/items` and sends `limit` only, because the
+endpoint documents nothing else; the daemon finds the project from the
+dataset. `create_experiment` posts an `Experiment` to `/v1/api/experiments`
+with the client's project in its correlation when the caller left it empty. It
+is an upsert on `experiment_id`: an empty id gets a new one, and posting the
+same id again replaces the record, which is how a status is moved.
+`score_experiment` posts `ExperimentScoreRequest` to
+`/v1/api/experiments/{id}/score` and `experiment_results` reads
+`/v1/api/experiments/{id}/results`, both with the client's project. Each of
+these raises on an error answer: it is the caller's own code path, so B1 does
+not apply.
+
+**The runner.** `run_experiment` does these steps in order:
+
+1. Create the experiment: `name` (the dataset id when not given), the dataset
+   id, status `running`, `started_at` now, and `metadata` when given.
+2. Read the cases with `list_dataset_items(dataset_id, 5000)`, the most the
+   daemon answers in one page.
+3. For each case, open a root span of kind `agent_run` named after the
+   experiment, with `correlation.experiment_id` set to the experiment's id, the
+   attribute `mcpd.dataset_item_id` set to the case's `item_id`, and the
+   case's `input` as the span's input. The span is always kept, whatever the
+   sample rate, because a sampled-out case would be a case with no answer.
+   Call `target` with the case's input inside that span, so spans the target
+   opens are its children. Record what it returns as the output and end the
+   span `ok`. When the target raises, record the error on the span (B10), end
+   it `error`, and carry on with the next case: one failing case is a result,
+   not a reason to stop.
+4. At most `concurrency` cases run at once (4 by default, and at least 1). The
+   runner holds the cases it read and the targets in flight, and never the
+   answers once their spans have ended.
+5. `flush()`. A flush that does not deliver every run before its deadline
+   fails the runner, because scoring would read an experiment with runs
+   missing.
+6. `score_experiment(id, scorers, config)`. With no scorers given the daemon
+   runs the code scorers that need no settings.
+7. `experiment_results(id)`, then post the experiment again with status
+   `succeeded`, `finished_at` now, `item_count` the number of cases, and
+   `summary` an object from each scorer's id to its mean.
+8. Return the `ExperimentResults`.
+
+When any step of the runner itself fails (a read, a write, the flush, a
+`concurrency` below 1), it posts the experiment with status `failed`,
+`finished_at` and `error` set to the message, if the experiment was created,
+and raises the original error. A failure to record the `failed` status is
+reported through the diagnostics channel and never hides the original error.
+A client with `enabled = false` refuses to run an experiment before the first
+request, because none of its runs would reach the daemon to be scored.
+
+The target's shape follows the language: a function that may return a promise
+in TypeScript, a plain or async function in Python, a suspend function in
+Kotlin, a function taking a `context.Context` in Go, an async closure in Rust,
+and a one-argument function in Elixir, run in a task per case.
+
 ## 6. Wire format
 
 Batches go to `POST {endpoint}/v1/ingest` as `IngestBatch`, gzip-compressed
@@ -881,6 +956,13 @@ error. `start_and_wait` is the two in one call.
   both attributes without raising on a bad prompt.
 - Tests that `list_traces` and `list_spans` send the filters of section 5 and
   nothing else.
+- Tests for the experiments of section 5.2: each read and write on its path
+  with its body; a run of several cases creating the experiment as `running`,
+  opening one root span per case with the experiment id, the case id and the
+  input, recording each output, recording a target's error on its own span and
+  running the cases after it, scoring with the scorers given, and posting
+  `succeeded` with the summary; no more than `concurrency` targets in flight;
+  and a failed read posting `failed` with the error and raising.
 - Tests for `record_stream` (section 3.2): an OpenAI stream and an Anthropic
   stream each recording the model, usage, id, finish reason and output that
   `record_response` and `set_output` would; tool-call deltas joined; every
