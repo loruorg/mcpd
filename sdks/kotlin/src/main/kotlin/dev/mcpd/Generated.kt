@@ -307,6 +307,51 @@ enum class ScoreSource(val wire: String) {
     }
 }
 
+/** How a scorer reaches its answer. */
+@Serializable
+enum class ScorerKind(val wire: String) {
+    /** Deterministic code in the daemon. Free, and gives the same answer twice. */
+    @SerialName("code") CODE("code"),
+    /**
+     * A built-in rubric graded by the configured judge model, in steps: preprocess,
+     * analyze, score, reason.
+     */
+    @SerialName("judge") JUDGE("judge"),
+    /**
+     * A criterion the operator wrote under `judge.criteria`, graded by the judge model
+     * in one call.
+     */
+    @SerialName("criterion") CRITERION("criterion"),
+    ;
+
+    override fun toString(): String = wire
+
+    companion object {
+        /** Parse a wire value, or null when this version of the spec does not define it. */
+        fun fromWire(s: String): ScorerKind? = entries.firstOrNull { it.wire == s }
+    }
+}
+
+/**
+ * Which way a scorer's value is better. A comparison reads a fall in `toxicity` as
+ * an improvement and a fall in `faithfulness` as a regression.
+ */
+@Serializable
+enum class ScoreDirection(val wire: String) {
+    /** A larger value is a better run. */
+    @SerialName("higher_is_better") HIGHER_IS_BETTER("higher_is_better"),
+    /** A smaller value is a better run, as for `toxicity`, `bias` and `hallucination`. */
+    @SerialName("lower_is_better") LOWER_IS_BETTER("lower_is_better"),
+    ;
+
+    override fun toString(): String = wire
+
+    companion object {
+        /** Parse a wire value, or null when this version of the spec does not define it. */
+        fun fromWire(s: String): ScoreDirection? = entries.firstOrNull { it.wire == s }
+    }
+}
+
 /** The shape of a human judgement. */
 @Serializable
 enum class FeedbackKind(val wire: String) {
@@ -1843,7 +1888,18 @@ data class ScorerInfo(
      * Whether it needs settings to mean anything. A scorer that needs an expected
      * answer cannot run without one.
      */
-    @SerialName("needs_config") val needsConfig: Boolean
+    @SerialName("needs_config") val needsConfig: Boolean,
+    /** How the scorer reaches its answer. */
+    @SerialName("kind") val kind: ScorerKind,
+    /** Which way its value is better. */
+    @SerialName("direction") val direction: ScoreDirection,
+    /** The `ScorerConfig` settings it reads. Empty when it needs none. */
+    @SerialName("config_keys") val configKeys: List<String>,
+    /**
+     * Whether this daemon can run it now. A judged scorer is unavailable until a
+     * `judge` block names an endpoint and a model.
+     */
+    @SerialName("available") val available: Boolean = true
 ) {
 }
 
@@ -1853,6 +1909,26 @@ data class ScorerInfo(
  */
 @Serializable
 data class ScorerConfig(
+    /** Text the answer must not contain, for `excludes`. Any one of them fails the run. */
+    @SerialName("forbidden") val forbidden: List<String>,
+    /**
+     * Words or phrases the answer should mention, for `keyword_coverage`. The score is
+     * the share that appear.
+     */
+    @SerialName("keywords") val keywords: List<String>,
+    /**
+     * The tools the run should call, for `tool_call_accuracy`, and the order it should
+     * call them in, for `tool_order`. Matched exactly against tool-call span names.
+     */
+    @SerialName("expected_tools") val expectedTools: List<String>,
+    /** Tools the run must not call, for `tool_not_called`. */
+    @SerialName("forbidden_tools") val forbiddenTools: List<String>,
+    /**
+     * The passages the answer should rest on, for the judged scorers that read
+     * context. When empty, the outputs of the run's `retrieval` and
+     * `rag_vector_operation` spans are used.
+     */
+    @SerialName("context") val context: List<String>,
     /** Case sensitivity for text comparisons. */
     @SerialName("case_sensitive") val caseSensitive: Boolean = false,
     /** Text the answer must contain, for `contains`. */
@@ -1877,7 +1953,19 @@ data class ScorerConfig(
      * exactly against the `name` of a span whose kind is `tool_call`,
      * `client_tool_call`, `provider_tool_call` or `mcp_tool_call`.
      */
-    @SerialName("tool_name") val toolName: String? = null
+    @SerialName("tool_name") val toolName: String? = null,
+    /** A regular expression the answer must match somewhere, for `matches_pattern`. */
+    @SerialName("pattern") val pattern: String? = null,
+    /** The shortest acceptable answer in characters, for `answer_length`. */
+    @SerialName("min_chars") val minChars: Int? = null,
+    /** The longest acceptable answer in characters, for `answer_length`. */
+    @SerialName("max_chars") val maxChars: Int? = null,
+    /**
+     * A JSON Schema the answer must satisfy, for `json_schema`. `type`, `properties`,
+     * `required`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and
+     * `additionalProperties: false` are checked.
+     */
+    @SerialName("json_schema") val jsonSchema: JsonElement? = null
 ) {
 }
 
@@ -1960,12 +2048,31 @@ data class ScorerDelta(
      * than dressing noise up as a finding.
      */
     @SerialName("decidable") val decidable: Boolean,
+    /**
+     * Which way this scorer's value is better, from the catalogue. Scorers the daemon
+     * does not know read as higher is better.
+     */
+    @SerialName("direction") val direction: ScoreDirection,
+    /**
+     * Whether this scorer moved the wrong way: decidable, and the whole interval on
+     * the worse side of zero.
+     */
+    @SerialName("regressed") val regressed: Boolean = false,
     /** Mean on the baseline, when it ran there. */
     @SerialName("baseline_mean") val baselineMean: Double? = null,
     /** Mean on the candidate. */
     @SerialName("candidate_mean") val candidateMean: Double? = null,
     /** Candidate minus baseline. */
-    @SerialName("delta") val delta: Double? = null
+    @SerialName("delta") val delta: Double? = null,
+    /**
+     * Lower end of the 95% confidence interval on `delta`, from Welch's t-test. Absent
+     * when either side has fewer than two observations.
+     */
+    @SerialName("ci_low") val ciLow: Double? = null,
+    /** Upper end of that interval. */
+    @SerialName("ci_high") val ciHigh: Double? = null,
+    /** Two-sided p-value for the difference in means. */
+    @SerialName("p_value") val pValue: Double? = null
 ) {
 }
 

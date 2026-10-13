@@ -363,6 +363,63 @@ func (v ScoreSource) Valid() bool {
 	return false
 }
 
+// How a scorer reaches its answer.
+type ScorerKind string
+
+const (
+	// Deterministic code in the daemon. Free, and gives the same answer twice.
+	ScorerKindCode ScorerKind = "code"
+	// A built-in rubric graded by the configured judge model, in steps: preprocess,
+	// analyze, score, reason.
+	ScorerKindJudge ScorerKind = "judge"
+	// A criterion the operator wrote under `judge.criteria`, graded by the judge model in
+	// one call.
+	ScorerKindCriterion ScorerKind = "criterion"
+)
+
+// AllScorerKinds lists every ScorerKind value, in declaration order.
+var AllScorerKinds = []ScorerKind{ScorerKindCode, ScorerKindJudge, ScorerKindCriterion}
+
+// String returns the wire representation.
+func (v ScorerKind) String() string { return string(v) }
+
+// Valid reports whether v is a value this version of the spec defines.
+func (v ScorerKind) Valid() bool {
+	for _, c := range AllScorerKinds {
+		if c == v {
+			return true
+		}
+	}
+	return false
+}
+
+// Which way a scorer's value is better. A comparison reads a fall in `toxicity` as an
+// improvement and a fall in `faithfulness` as a regression.
+type ScoreDirection string
+
+const (
+	// A larger value is a better run.
+	ScoreDirectionHigherIsBetter ScoreDirection = "higher_is_better"
+	// A smaller value is a better run, as for `toxicity`, `bias` and `hallucination`.
+	ScoreDirectionLowerIsBetter ScoreDirection = "lower_is_better"
+)
+
+// AllScoreDirections lists every ScoreDirection value, in declaration order.
+var AllScoreDirections = []ScoreDirection{ScoreDirectionHigherIsBetter, ScoreDirectionLowerIsBetter}
+
+// String returns the wire representation.
+func (v ScoreDirection) String() string { return string(v) }
+
+// Valid reports whether v is a value this version of the spec defines.
+func (v ScoreDirection) Valid() bool {
+	for _, c := range AllScoreDirections {
+		if c == v {
+			return true
+		}
+	}
+	return false
+}
+
 // The shape of a human judgement.
 type FeedbackKind string
 
@@ -1912,6 +1969,22 @@ type ScorerInfo struct {
 	// Whether it needs settings to mean anything. A scorer that needs an expected answer
 	// cannot run without one.
 	NeedsConfig bool `json:"needs_config"`
+	// How the scorer reaches its answer.
+	Kind ScorerKind `json:"kind"`
+	// Which way its value is better.
+	Direction ScoreDirection `json:"direction"`
+	// The `ScorerConfig` settings it reads. Empty when it needs none.
+	ConfigKeys []string `json:"config_keys"`
+	// Whether this daemon can run it now. A judged scorer is unavailable until a `judge`
+	// block names an endpoint and a model.
+	Available bool `json:"available"`
+}
+
+// NewScorerInfo returns a ScorerInfo with every spec-declared default applied.
+func NewScorerInfo() ScorerInfo {
+	return ScorerInfo{
+		Available: true,
+	}
 }
 
 // Settings shared by the scorers that need them. Every field is optional; a scorer
@@ -1936,6 +2009,30 @@ type ScorerConfig struct {
 	// against the `name` of a span whose kind is `tool_call`, `client_tool_call`,
 	// `provider_tool_call` or `mcp_tool_call`.
 	ToolName *string `json:"tool_name,omitempty"`
+	// Text the answer must not contain, for `excludes`. Any one of them fails the run.
+	Forbidden []string `json:"forbidden"`
+	// Words or phrases the answer should mention, for `keyword_coverage`. The score is the
+	// share that appear.
+	Keywords []string `json:"keywords"`
+	// A regular expression the answer must match somewhere, for `matches_pattern`.
+	Pattern *string `json:"pattern,omitempty"`
+	// The tools the run should call, for `tool_call_accuracy`, and the order it should
+	// call them in, for `tool_order`. Matched exactly against tool-call span names.
+	ExpectedTools []string `json:"expected_tools"`
+	// Tools the run must not call, for `tool_not_called`.
+	ForbiddenTools []string `json:"forbidden_tools"`
+	// The shortest acceptable answer in characters, for `answer_length`.
+	MinChars *uint32 `json:"min_chars,omitempty"`
+	// The longest acceptable answer in characters, for `answer_length`.
+	MaxChars *uint32 `json:"max_chars,omitempty"`
+	// A JSON Schema the answer must satisfy, for `json_schema`. `type`, `properties`,
+	// `required`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and
+	// `additionalProperties: false` are checked.
+	JSONSchema json.RawMessage `json:"json_schema,omitempty"`
+	// The passages the answer should rest on, for the judged scorers that read context.
+	// When empty, the outputs of the run's `retrieval` and `rag_vector_operation` spans
+	// are used.
+	Context []string `json:"context"`
 	// Case sensitivity for text comparisons.
 	CaseSensitive bool `json:"case_sensitive"`
 }
@@ -2021,6 +2118,26 @@ type ScorerDelta struct {
 	// side, mcpd says the comparison is not decidable rather than dressing noise up as a
 	// finding.
 	Decidable bool `json:"decidable"`
+	// Which way this scorer's value is better, from the catalogue. Scorers the daemon does
+	// not know read as higher is better.
+	Direction ScoreDirection `json:"direction"`
+	// Lower end of the 95% confidence interval on `delta`, from Welch's t-test. Absent
+	// when either side has fewer than two observations.
+	CiLow *float64 `json:"ci_low,omitempty"`
+	// Upper end of that interval.
+	CiHigh *float64 `json:"ci_high,omitempty"`
+	// Two-sided p-value for the difference in means.
+	PValue *float64 `json:"p_value,omitempty"`
+	// Whether this scorer moved the wrong way: decidable, and the whole interval on the
+	// worse side of zero.
+	Regressed bool `json:"regressed"`
+}
+
+// NewScorerDelta returns a ScorerDelta with every spec-declared default applied.
+func NewScorerDelta() ScorerDelta {
+	return ScorerDelta{
+		Regressed: false,
+	}
 }
 
 // Two experiments, compared. The point of an experiment is the comparison, so this

@@ -1114,7 +1114,7 @@ pub async fn list_scorers(
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<crate::eval::ScorerInfo>>> {
     authorize(&state, &headers, Scope::Read)?;
-    Ok(Json(crate::eval::catalogue()))
+    Ok(Json(crate::eval::catalogue(state.config.judge.as_ref())))
 }
 
 /// `POST /v1/api/score` — run scorers over stored runs.

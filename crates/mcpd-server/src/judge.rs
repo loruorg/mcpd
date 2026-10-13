@@ -24,7 +24,8 @@
 //! a value outside the declared scale is a decline rather than a clamp.
 
 use crate::state::AppState;
-use mcpd_core::scoring::{judge_request, Target};
+use mcpd_core::judged::{Judged, StepDecline};
+use mcpd_core::scoring::{judge_request, ScorerConfig, Target};
 use mcpd_core::{Correlation, Score, ScoreSource};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -146,6 +147,9 @@ pub enum Declined {
     Oversized,
     /// The request deadline had too little time left to make the call.
     OutOfTime,
+    /// A step of a judged-library scorer could not produce what the next
+    /// step needs.
+    Step(StepDecline),
 }
 
 impl std::fmt::Display for Declined {
@@ -176,6 +180,7 @@ impl std::fmt::Display for Declined {
                 "the request deadline left no time to call the judge for this run; send fewer \
                  runs per request, or raise --request-timeout-seconds"
             ),
+            Self::Step(d) => write!(f, "{d}"),
         }
     }
 }
@@ -219,12 +224,173 @@ fn extract_json(reply: &str) -> Option<&str> {
 /// connection and a reply, so the call would only be paid for and cut off.
 const MIN_CALL: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Grade one run against one configured criterion.
+/// How many times one grading call is tried when the endpoint answers that it
+/// is busy (429, 502, 503 or 504) or the connection fails before a reply.
+/// A call that times out is not retried: it may already have been paid for.
+pub const ATTEMPTS: u32 = 3;
+
+/// What one chat call returned.
+struct Reply {
+    /// The assistant message's text.
+    content: String,
+    /// The token counts the endpoint reported, when it reported any.
+    usage: Option<mcpd_core::TokenUsage>,
+    /// How many attempts the call took.
+    attempts: u32,
+}
+
+/// The token counts an OpenAI-shaped completion reports.
+fn usage_of(body: &serde_json::Value) -> Option<mcpd_core::TokenUsage> {
+    let u = body.get("usage")?;
+    let n = |k: &str| u.get(k).and_then(serde_json::Value::as_u64);
+    let cached = u
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(serde_json::Value::as_u64);
+    let input = n("prompt_tokens");
+    Some(mcpd_core::TokenUsage {
+        input_tokens: input,
+        output_tokens: n("completion_tokens"),
+        total_tokens: n("total_tokens"),
+        input_details: cached.map(|c| mcpd_core::InputTokenDetails {
+            cache_read: Some(c),
+            text: input.map(|i| i.saturating_sub(c)),
+            ..Default::default()
+        }),
+        output_details: None,
+    })
+}
+
+/// Send one prompt to the judge and read the reply, retrying a busy endpoint.
 ///
 /// `latest` is when the call must have finished, so the request it serves can
-/// still answer inside its deadline. The call is held to whichever comes
+/// still answer inside its deadline. Each attempt is held to whichever comes
 /// first, that or `judge.timeout_seconds`, and the decline names the one that
 /// cut it short.
+async fn chat(
+    state: &Arc<AppState>,
+    cfg: &JudgeConfig,
+    prompt: &str,
+    latest: std::time::Instant,
+) -> Result<Reply, Declined> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match chat_once(state, cfg, prompt, latest).await {
+            Ok((content, usage)) => return Ok(Reply { content, usage, attempts: attempt }),
+            Err((declined, retryable)) => {
+                let backoff = std::time::Duration::from_millis(250 * (1 << (attempt - 1)));
+                let room = latest.saturating_duration_since(std::time::Instant::now());
+                if !retryable || attempt >= ATTEMPTS || room < backoff + MIN_CALL {
+                    return Err(declined);
+                }
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
+}
+
+/// One attempt. The flag says whether a failure is worth another attempt.
+async fn chat_once(
+    state: &Arc<AppState>,
+    cfg: &JudgeConfig,
+    prompt: &str,
+    latest: std::time::Instant,
+) -> Result<(String, Option<mcpd_core::TokenUsage>), (Declined, bool)> {
+    let mut http = state
+        .outbound
+        .post(format!("{}/chat/completions", cfg.endpoint.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "model": cfg.model,
+            // Zero, because a judge that gives a different number for the same
+            // run each time cannot be compared with itself, which is the only
+            // thing scores are for.
+            "temperature": 0,
+            "messages": [{ "role": "user", "content": prompt }],
+        }));
+    if !cfg.api_key.is_empty() {
+        http = http.header("Authorization", format!("Bearer {}", cfg.api_key));
+    }
+
+    // Per request, so it beats the client's own ten seconds, which are the
+    // forwarding client's and were chosen for a collector, not a model.
+    //
+    // And never past `latest`. The run cap divides the deadline by this
+    // timeout and leaves nothing over, so a judge that never answered used the
+    // whole deadline and the client got a 503 instead of the declines.
+    let configured = std::time::Duration::from_secs(cfg.timeout_seconds.max(1));
+    let left = latest.saturating_duration_since(std::time::Instant::now());
+    if left < MIN_CALL {
+        return Err((Declined::OutOfTime, false));
+    }
+    let cut_by_deadline = left < configured;
+    let wait = configured.min(left);
+    let unreachable = |e: reqwest::Error| {
+        Declined::Unreachable(if e.is_timeout() && cut_by_deadline {
+            format!(
+                "no answer within {:.1}s, which is all the request deadline left; send fewer \
+                 runs per request, or raise --request-timeout-seconds",
+                wait.as_secs_f64()
+            )
+        } else if e.is_timeout() {
+            format!(
+                "no answer within {}s; raise judge.timeout_seconds if the model needs longer",
+                wait.as_secs()
+            )
+        } else {
+            // Without the URL: a judge endpoint is where a key in a query
+            // string is most likely to be, and this reason is handed back to
+            // the caller.
+            crate::outbound_error(e)
+        })
+    };
+    let res = match http.timeout(wait).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            let retry = e.is_connect();
+            return Err((unreachable(e), retry));
+        }
+    };
+    let status = res.status();
+    if !status.is_success() {
+        // The body is only there to be quoted, so a part of it is enough, and
+        // a body too large to read is a refusal with nothing to quote.
+        let body = read_capped(res, &unreachable).await.unwrap_or_default();
+        let body = String::from_utf8_lossy(&body);
+        let busy = matches!(status.as_u16(), 429 | 502 | 503 | 504);
+        return Err((Declined::Unreachable(format!("{status}: {}", truncate(&body))), busy));
+    }
+    let body = read_capped(res, &unreachable).await.map_err(|d| (d, false))?;
+
+    let raw: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|e| (Declined::Unparsable(e.to_string()), false))?;
+    let completion: Completion = serde_json::from_value(raw.clone())
+        .map_err(|e| (Declined::Unparsable(e.to_string()), false))?;
+    let reply =
+        completion.choices.first().and_then(|c| c.message.content.clone()).unwrap_or_default();
+    Ok((reply, usage_of(&raw)))
+}
+
+/// What a judge call cost, priced with the daemon's own book, and the record
+/// of the call kept on the score.
+fn call_record(
+    state: &AppState,
+    cfg: &JudgeConfig,
+    reply: &Reply,
+) -> (Option<mcpd_core::Cost>, serde_json::Value) {
+    let cost = reply
+        .usage
+        .as_ref()
+        .and_then(|u| mcpd_core::cost::compute(&state.price_book, &cfg.model, u));
+    let record = serde_json::json!({
+        "model": cfg.model,
+        "attempts": reply.attempts,
+        "usage": reply.usage,
+    });
+    (cost, record)
+}
+
+/// Grade one run against one configured criterion.
 ///
 /// # Errors
 /// Returns [`Declined`] rather than an error type, because none of these is a
@@ -252,77 +418,17 @@ pub async fn grade(
     }
 
     let req = judge_request(scorer_id, criterion, target);
+    let reply = chat(state, cfg, &req.prompt, latest).await?;
 
-    let mut http = state
-        .outbound
-        .post(format!("{}/chat/completions", cfg.endpoint.trim_end_matches('/')))
-        .json(&serde_json::json!({
-            "model": cfg.model,
-            // Zero, because a judge that gives a different number for the same
-            // run each time cannot be compared with itself, which is the only
-            // thing scores are for.
-            "temperature": 0,
-            "messages": [{ "role": "user", "content": req.prompt }],
-        }));
-    if !cfg.api_key.is_empty() {
-        http = http.header("Authorization", format!("Bearer {}", cfg.api_key));
-    }
-
-    // Per request, so it beats the client's own ten seconds, which are the
-    // forwarding client's and were chosen for a collector, not a model.
-    //
-    // And never past `latest`. The run cap divides the deadline by this
-    // timeout and leaves nothing over, so a judge that never answered used the
-    // whole deadline and the client got a 503 instead of the declines.
-    let configured = std::time::Duration::from_secs(cfg.timeout_seconds.max(1));
-    let left = latest.saturating_duration_since(std::time::Instant::now());
-    if left < MIN_CALL {
-        return Err(Declined::OutOfTime);
-    }
-    let cut_by_deadline = left < configured;
-    let wait = configured.min(left);
-    let unreachable = |e: reqwest::Error| {
-        Declined::Unreachable(if e.is_timeout() && cut_by_deadline {
-            format!(
-                "no answer within {:.1}s, which is all the request deadline left; send fewer \
-                 runs per request, or raise --request-timeout-seconds",
-                wait.as_secs_f64()
-            )
-        } else if e.is_timeout() {
-            format!(
-                "no answer within {}s; raise judge.timeout_seconds if the model needs longer",
-                wait.as_secs()
-            )
-        } else {
-            // Without the URL: a judge endpoint is where a key in a query
-            // string is most likely to be, and this reason is handed back to
-            // the caller.
-            crate::outbound_error(e)
-        })
-    };
-    let res = http.timeout(wait).send().await.map_err(unreachable)?;
-    let status = res.status();
-    if !status.is_success() {
-        // The body is only there to be quoted, so a part of it is enough, and
-        // a body too large to read is a refusal with nothing to quote.
-        let body = read_capped(res, &unreachable).await.unwrap_or_default();
-        let body = String::from_utf8_lossy(&body);
-        return Err(Declined::Unreachable(format!("{status}: {}", truncate(&body))));
-    }
-    let body = read_capped(res, &unreachable).await?;
-
-    let completion: Completion =
-        serde_json::from_slice(&body).map_err(|e| Declined::Unparsable(e.to_string()))?;
-    let reply =
-        completion.choices.first().and_then(|c| c.message.content.as_deref()).unwrap_or_default();
-
-    let json = extract_json(reply).ok_or_else(|| Declined::Unparsable(truncate(reply)))?;
+    let json = extract_json(&reply.content)
+        .ok_or_else(|| Declined::Unparsable(truncate(&reply.content)))?;
     let verdict: Verdict =
-        serde_json::from_str(json).map_err(|_| Declined::Unparsable(truncate(reply)))?;
+        serde_json::from_str(json).map_err(|_| Declined::Unparsable(truncate(&reply.content)))?;
 
     if !verdict.value.is_finite() || verdict.value < req.min || verdict.value > req.max {
         return Err(Declined::OutOfScale(verdict.value));
     }
+    let (cost, call) = call_record(state, cfg, &reply);
 
     Ok(Score {
         score_id: mcpd_core::ids::new_trace_id(),
@@ -339,11 +445,84 @@ pub async fn grade(
         label: None,
         reason: (!verdict.reason.trim().is_empty()).then_some(verdict.reason),
         score_trace_id: None,
-        cost: None,
-        metadata: None,
+        cost,
+        metadata: Some(serde_json::json!({ "judge": call })),
         timestamp: now,
         correlation,
     })
+}
+
+/// Grade one run with a scorer from the judged library, in its four steps.
+///
+/// The model is called once, at the analyze step. A decline names the step
+/// it happened at, and the score keeps every itemised verdict, so the number
+/// can be checked against the workings.
+///
+/// # Errors
+/// [`Declined`] as for [`grade`], and [`Declined::Step`] for a step that could
+/// not produce what the next one needs.
+#[allow(clippy::too_many_arguments)]
+pub async fn grade_judged(
+    state: &Arc<AppState>,
+    scorer: Judged,
+    config: &ScorerConfig,
+    target: &Target<'_>,
+    trace_id: &str,
+    correlation: Correlation,
+    now: OffsetDateTime,
+    latest: std::time::Instant,
+) -> Result<Score, Declined> {
+    let cfg = state.config.judge.as_ref().ok_or(Declined::NotConfigured)?;
+    let inputs = scorer.preprocess(target, config).map_err(Declined::Step)?;
+    let reply = chat(state, cfg, &scorer.analyze_prompt(&inputs), latest).await?;
+    let json = extract_json(&reply.content).ok_or_else(|| {
+        Declined::Step(StepDecline {
+            step: "analyze",
+            reason: format!("the judge did not answer with JSON: {}", truncate(&reply.content)),
+        })
+    })?;
+    let items = scorer.parse_analysis(json).map_err(Declined::Step)?;
+    let (value, reason) = scorer.score(&items).map_err(Declined::Step)?;
+    let (cost, call) = call_record(state, cfg, &reply);
+    Ok(Score {
+        score_id: mcpd_core::ids::new_trace_id(),
+        trace_id: Some(trace_id.to_owned()),
+        span_id: None,
+        scorer_id: scorer.id().to_owned(),
+        // The rubric and the model together are the version: a change to
+        // either makes the scores incomparable.
+        scorer_version: Some(format!("{}:{}", scorer.version(), cfg.model)),
+        source: ScoreSource::Offline,
+        value,
+        min: Some(0.0),
+        max: Some(1.0),
+        label: None,
+        reason: Some(reason),
+        score_trace_id: None,
+        cost,
+        metadata: Some(serde_json::json!({
+            "judge": call,
+            "steps": {
+                "preprocess": {
+                    "question": inputs.question.is_some(),
+                    "answer": inputs.answer.is_some(),
+                    "expected": inputs.expected.is_some(),
+                    "context_passages": inputs.context.len(),
+                },
+                "analyze": { "items": items },
+                "score": { "value": value },
+                "reason": { "text": reason_text(&items) },
+            }
+        })),
+        timestamp: now,
+        correlation,
+    })
+}
+
+/// How many items took each verdict, for the reason step's record.
+fn reason_text(items: &[mcpd_core::judged::Item]) -> String {
+    let count = |v: &str| items.iter().filter(|i| i.verdict == v).count();
+    format!("{} yes, {} no, {} unsure", count("yes"), count("no"), count("unsure"))
 }
 
 /// Read a reply, refusing it once it passes [`REPLY_BYTES_MAX`].

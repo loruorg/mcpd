@@ -13,6 +13,7 @@
 pub mod cost;
 pub mod generated;
 pub mod ids;
+pub mod judged;
 pub mod metrics;
 pub mod otlp;
 pub mod price_catalogue;
@@ -20,6 +21,7 @@ pub mod redact;
 pub mod sampling;
 pub mod scoring;
 pub mod sketch;
+pub mod stats;
 
 pub use generated::*;
 

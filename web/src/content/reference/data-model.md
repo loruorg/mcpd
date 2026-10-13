@@ -133,6 +133,25 @@ Where a score came from. Kept separate from the scorer's identity so the same sc
 | `experiment` | Produced by an experiment run against a dataset. |
 | `manual` | Entered by a person, through the API or the UI. |
 
+### ScorerKind
+
+How a scorer reaches its answer.
+
+| Value | Meaning |
+| --- | --- |
+| `code` | Deterministic code in the daemon. Free, and gives the same answer twice. |
+| `judge` | A built-in rubric graded by the configured judge model, in steps: preprocess, analyze, score, reason. |
+| `criterion` | A criterion the operator wrote under `judge.criteria`, graded by the judge model in one call. |
+
+### ScoreDirection
+
+Which way a scorer's value is better. A comparison reads a fall in `toxicity` as an improvement and a fall in `faithfulness` as a regression.
+
+| Value | Meaning |
+| --- | --- |
+| `higher_is_better` | A larger value is a better run. |
+| `lower_is_better` | A smaller value is a better run, as for `toxicity`, `bias` and `hallucination`. |
+
 ### FeedbackKind
 
 The shape of a human judgement.
@@ -835,6 +854,10 @@ One scorer mcpd can run, as described to a caller.
 | `id` | `string` <span class="req">required</span> | Stable identifier, recorded on every score it produces. |
 | `description` | `string` <span class="req">required</span> | What it measures, in one line. |
 | `needs_config` | `bool` <span class="req">required</span> | Whether it needs settings to mean anything. A scorer that needs an expected answer cannot run without one. |
+| `kind` | [`ScorerKind`](#scorerkind) <span class="req">required</span> | How the scorer reaches its answer. |
+| `direction` | [`ScoreDirection`](#scoredirection) <span class="req">required</span> | Which way its value is better. |
+| `config_keys` | `string`[] <span class="req">required</span> | The `ScorerConfig` settings it reads. Empty when it needs none. |
+| `available` | `bool` <span class="req">required</span> | Whether this daemon can run it now. A judged scorer is unavailable until a `judge` block names an endpoint and a model. |
 
 ### ScorerConfig
 
@@ -850,6 +873,15 @@ Settings shared by the scorers that need them. Every field is optional; a scorer
 | `span_kind` | [`SpanKind`](#spankind) | The kind of span that must be present in the run, for `span_present`. |
 | `span_name` | `string` | The span name that must be present in the run, for `span_present`. Matched exactly against `Span.name`. |
 | `tool_name` | `string` | The tool that must have run and ended `ok`, for `tool_succeeded`. Matched exactly against the `name` of a span whose kind is `tool_call`, `client_tool_call`, `provider_tool_call` or `mcp_tool_call`. |
+| `forbidden` | `string`[] <span class="req">required</span> | Text the answer must not contain, for `excludes`. Any one of them fails the run. |
+| `keywords` | `string`[] <span class="req">required</span> | Words or phrases the answer should mention, for `keyword_coverage`. The score is the share that appear. |
+| `pattern` | `string` | A regular expression the answer must match somewhere, for `matches_pattern`. |
+| `expected_tools` | `string`[] <span class="req">required</span> | The tools the run should call, for `tool_call_accuracy`, and the order it should call them in, for `tool_order`. Matched exactly against tool-call span names. |
+| `forbidden_tools` | `string`[] <span class="req">required</span> | Tools the run must not call, for `tool_not_called`. |
+| `min_chars` | `u32` | The shortest acceptable answer in characters, for `answer_length`. |
+| `max_chars` | `u32` | The longest acceptable answer in characters, for `answer_length`. |
+| `json_schema` | `json` | A JSON Schema the answer must satisfy, for `json_schema`. `type`, `properties`, `required`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and `additionalProperties: false` are checked. |
+| `context` | `string`[] <span class="req">required</span> | The passages the answer should rest on, for the judged scorers that read context. When empty, the outputs of the run's `retrieval` and `rag_vector_operation` spans are used. |
 | `case_sensitive` | `bool` <span class="req">required</span> | Case sensitivity for text comparisons. |
 
 ### ScoreRunRequest
@@ -903,6 +935,11 @@ How one scorer moved between two experiments.
 | `candidate_n` | `u64` <span class="req">required</span> | Number of candidate observations. |
 | `delta` | `f64` | Candidate minus baseline. |
 | `decidable` | `bool` <span class="req">required</span> | Whether the sample is large enough for the delta to mean anything. A deliberately blunt rule rather than a significance test: below twenty observations on either side, mcpd says the comparison is not decidable rather than dressing noise up as a finding. |
+| `direction` | [`ScoreDirection`](#scoredirection) <span class="req">required</span> | Which way this scorer's value is better, from the catalogue. Scorers the daemon does not know read as higher is better. |
+| `ci_low` | `f64` | Lower end of the 95% confidence interval on `delta`, from Welch's t-test. Absent when either side has fewer than two observations. |
+| `ci_high` | `f64` | Upper end of that interval. |
+| `p_value` | `f64` | Two-sided p-value for the difference in means. |
+| `regressed` | `bool` <span class="req">required</span> | Whether this scorer moved the wrong way: decidable, and the whole interval on the worse side of zero. |
 
 ### ExperimentComparison
 

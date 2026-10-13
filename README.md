@@ -121,9 +121,11 @@ mcpd maps both semantic conventions the ecosystem actually uses: OpenTelemetry's
 
 ## Evaluate it
 
-Thirteen deterministic scorers run over stored runs, never inline, so an
+Twenty-two deterministic scorers run over stored runs, never inline, so an
 evaluation can never add latency to the thing it is judging. A model can grade
-as well, against any OpenAI-shaped endpoint including one on your own machine.
+as well, against any OpenAI-shaped endpoint including one on your own machine:
+nine shipped rubrics, from faithfulness to toxicity, score the model's itemised
+verdicts rather than a number it picked.
 Capture a production run that went wrong into a dataset and it becomes a
 regression case every later version has to pass.
 

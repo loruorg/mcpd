@@ -483,6 +483,77 @@ defmodule Mcpd.ScoreSource do
   def from_wire(_), do: :error
 end
 
+defmodule Mcpd.ScorerKind do
+  @moduledoc """
+  How a scorer reaches its answer.
+  """
+
+  @type t :: :code | :judge | :criterion
+
+  @values [
+    :code,
+    :judge,
+    :criterion,
+  ]
+
+  @doc "Every value, in declaration order."
+  @spec values() :: [t()]
+  def values, do: @values
+
+  @doc "The wire representation of a value."
+  @spec to_wire(t()) :: String.t()
+  def to_wire(:code), do: "code"
+  def to_wire(:judge), do: "judge"
+  def to_wire(:criterion), do: "criterion"
+
+  @doc """
+  Parse a wire value.
+
+  Returns `:error` on an unknown value rather than raising: a newer daemon
+  may send a value this build has never heard of, and an SDK that crashes on
+  one it does not recognise breaks the agent it is meant to be observing.
+  """
+  @spec from_wire(String.t()) :: {:ok, t()} | :error
+  def from_wire("code"), do: {:ok, :code}
+  def from_wire("judge"), do: {:ok, :judge}
+  def from_wire("criterion"), do: {:ok, :criterion}
+  def from_wire(_), do: :error
+end
+
+defmodule Mcpd.ScoreDirection do
+  @moduledoc """
+  Which way a scorer's value is better. A comparison reads a fall in `toxicity` as an improvement and a fall in `faithfulness` as a regression.
+  """
+
+  @type t :: :higher_is_better | :lower_is_better
+
+  @values [
+    :higher_is_better,
+    :lower_is_better,
+  ]
+
+  @doc "Every value, in declaration order."
+  @spec values() :: [t()]
+  def values, do: @values
+
+  @doc "The wire representation of a value."
+  @spec to_wire(t()) :: String.t()
+  def to_wire(:higher_is_better), do: "higher_is_better"
+  def to_wire(:lower_is_better), do: "lower_is_better"
+
+  @doc """
+  Parse a wire value.
+
+  Returns `:error` on an unknown value rather than raising: a newer daemon
+  may send a value this build has never heard of, and an SDK that crashes on
+  one it does not recognise breaks the agent it is meant to be observing.
+  """
+  @spec from_wire(String.t()) :: {:ok, t()} | :error
+  def from_wire("higher_is_better"), do: {:ok, :higher_is_better}
+  def from_wire("lower_is_better"), do: {:ok, :lower_is_better}
+  def from_wire(_), do: :error
+end
+
 defmodule Mcpd.FeedbackKind do
   @moduledoc """
   The shape of a human judgement.
@@ -2463,14 +2534,22 @@ defmodule Mcpd.ScorerInfo do
   @type t :: %__MODULE__{
           id: String.t(),
           description: String.t(),
-          needs_config: boolean()
+          needs_config: boolean(),
+          kind: Mcpd.ScorerKind.t(),
+          direction: Mcpd.ScoreDirection.t(),
+          config_keys: [String.t()],
+          available: boolean()
         }
 
-  @enforce_keys [:id, :description, :needs_config]
+  @enforce_keys [:id, :description, :needs_config, :kind, :direction, :config_keys]
   defstruct [
     id: nil,
     description: nil,
     needs_config: nil,
+    kind: nil,
+    direction: nil,
+    config_keys: [],
+    available: true,
   ]
 end
 
@@ -2480,6 +2559,11 @@ defmodule Mcpd.ScorerConfig do
   """
 
   @type t :: %__MODULE__{
+          forbidden: [String.t()],
+          keywords: [String.t()],
+          expected_tools: [String.t()],
+          forbidden_tools: [String.t()],
+          context: [String.t()],
           case_sensitive: boolean(),
           needle: String.t() | nil,
           expected: String.t() | nil,
@@ -2488,10 +2572,20 @@ defmodule Mcpd.ScorerConfig do
           max_tool_calls: non_neg_integer() | nil,
           span_kind: Mcpd.SpanKind.t() | nil,
           span_name: String.t() | nil,
-          tool_name: String.t() | nil
+          tool_name: String.t() | nil,
+          pattern: String.t() | nil,
+          min_chars: non_neg_integer() | nil,
+          max_chars: non_neg_integer() | nil,
+          json_schema: term() | nil
         }
 
+  @enforce_keys [:forbidden, :keywords, :expected_tools, :forbidden_tools, :context]
   defstruct [
+    forbidden: [],
+    keywords: [],
+    expected_tools: [],
+    forbidden_tools: [],
+    context: [],
     case_sensitive: false,
     needle: nil,
     expected: nil,
@@ -2501,6 +2595,10 @@ defmodule Mcpd.ScorerConfig do
     span_kind: nil,
     span_name: nil,
     tool_name: nil,
+    pattern: nil,
+    min_chars: nil,
+    max_chars: nil,
+    json_schema: nil,
   ]
 end
 
@@ -2585,20 +2683,30 @@ defmodule Mcpd.ScorerDelta do
           baseline_n: non_neg_integer(),
           candidate_n: non_neg_integer(),
           decidable: boolean(),
+          direction: Mcpd.ScoreDirection.t(),
+          regressed: boolean(),
           baseline_mean: float() | nil,
           candidate_mean: float() | nil,
-          delta: float() | nil
+          delta: float() | nil,
+          ci_low: float() | nil,
+          ci_high: float() | nil,
+          p_value: float() | nil
         }
 
-  @enforce_keys [:scorer_id, :baseline_n, :candidate_n, :decidable]
+  @enforce_keys [:scorer_id, :baseline_n, :candidate_n, :decidable, :direction]
   defstruct [
     scorer_id: nil,
     baseline_n: nil,
     candidate_n: nil,
     decidable: nil,
+    direction: nil,
+    regressed: false,
     baseline_mean: nil,
     candidate_mean: nil,
     delta: nil,
+    ci_low: nil,
+    ci_high: nil,
+    p_value: nil,
   ]
 end
 

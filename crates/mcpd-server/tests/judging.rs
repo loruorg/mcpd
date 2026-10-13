@@ -379,3 +379,94 @@ async fn an_unreachable_judge_is_declined_without_its_url() {
     assert!(reason.contains("could not be reached"), "{body}");
     assert!(!body.to_string().contains("s3cr3t-token"), "the key was handed back: {body}");
 }
+
+// ------------------------------------------------ the judged scorer library ---
+
+/// A judge that answers the analyze step of a rubric: busy once, then a list
+/// of itemised verdicts with the token counts a real endpoint reports.
+async fn rubric_judge() -> (String, Arc<Mutex<usize>>) {
+    let calls = Arc::new(Mutex::new(0usize));
+    let counted = Arc::clone(&calls);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counted = Arc::clone(&counted);
+            async move {
+                let n = {
+                    let mut c = counted.lock().expect("the call count");
+                    *c += 1;
+                    *c
+                };
+                if n == 1 {
+                    return (StatusCode::SERVICE_UNAVAILABLE, "busy".to_owned());
+                }
+                let content = json!({ "items": [
+                    { "item": "it ships tomorrow", "verdict": "yes", "reason": "addresses it" },
+                    { "item": "have a nice day", "verdict": "no", "reason": "off topic" }
+                ]})
+                .to_string();
+                let body = json!({
+                    "choices": [{ "message": { "content": content } }],
+                    "usage": { "prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100 }
+                });
+                (StatusCode::OK, body.to_string())
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind a port");
+    let addr = listener.local_addr().expect("the bound address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}/v1"), calls)
+}
+
+/// A shipped rubric needs no criterion in the config: a judge block is
+/// enough. The score is counted from the verdicts, keeps them, is priced with
+/// the daemon's book, and a busy endpoint is tried again.
+#[tokio::test]
+async fn a_shipped_rubric_is_graded_in_steps_and_priced() {
+    let (url, calls) = rubric_judge().await;
+    let mut cfg = judge_config(&url, 5);
+    cfg.model = "gpt-4o".to_owned();
+    let (app, state, ids) = daemon(cfg, 30, 1).await;
+    let req = json!({ "trace_ids": ids, "scorers": ["answer_relevance"] });
+    let (status, body) = send(&app, "/v1/api/score", &req).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["scores_written"], json!(1), "{body}");
+    assert_eq!(*calls.lock().expect("the call count"), 2, "the busy reply was not retried");
+    let score = &body["scores"][0];
+    assert_eq!(score["value"], json!(0.5));
+    assert!(score["reason"].as_str().unwrap_or_default().contains("have a nice day"), "{score}");
+    assert_eq!(score["metadata"]["steps"]["analyze"]["items"].as_array().map(Vec::len), Some(2));
+    assert_eq!(score["metadata"]["judge"]["attempts"], json!(2));
+    assert!(score["cost"]["total_cost"].as_f64().is_some_and(|c| c > 0.0), "{score}");
+    assert_eq!(stored_scores(&state).await, 1);
+}
+
+/// A rubric that needs retrieved context declines at the first step, naming
+/// it, and calls no model.
+#[tokio::test]
+async fn a_rubric_without_its_context_declines_at_preprocess_without_a_call() {
+    let (url, calls) = rubric_judge().await;
+    let (app, _state, ids) = daemon(judge_config(&url, 5), 30, 1).await;
+    let req = json!({ "trace_ids": ids, "scorers": ["faithfulness"] });
+    let (status, body) = send(&app, "/v1/api/score", &req).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let reason = body["skipped"][0]["reason"].as_str().unwrap_or_default();
+    assert!(reason.starts_with("declined at preprocess"), "{body}");
+    assert_eq!(*calls.lock().expect("the call count"), 0);
+}
+
+/// Without a judge block, naming a rubric is the request's mistake.
+#[tokio::test]
+async fn a_rubric_with_no_judge_configured_is_refused_with_the_fix() {
+    let store = SqliteStore::open(temp_db(), 2).expect("open the store");
+    store.migrate().await.expect("migrate the store");
+    let state = Arc::new(AppState::new(Arc::new(store) as Arc<dyn Store>, ServerConfig::default()));
+    let app = router(Arc::clone(&state));
+    let req = json!({ "trace_ids": ["0".repeat(32)], "scorers": ["toxicity"] });
+    let (status, body) = send(&app, "/v1/api/score", &req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("judge"), "{body}");
+}

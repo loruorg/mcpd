@@ -596,6 +596,93 @@ impl std::fmt::Display for ScoreSource {
     }
 }
 
+/// How a scorer reaches its answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScorerKind {
+    /// Deterministic code in the daemon. Free, and gives the same answer twice.
+    Code,
+    /// A built-in rubric graded by the configured judge model, in steps: preprocess,
+    /// analyze, score, reason.
+    Judge,
+    /// A criterion the operator wrote under `judge.criteria`, graded by the judge model in
+    /// one call.
+    Criterion,
+}
+
+impl ScorerKind {
+    /// The wire representation, exactly as it appears in JSON.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Code => "code",
+            Self::Judge => "judge",
+            Self::Criterion => "criterion",
+        }
+    }
+
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[Self::Code, Self::Judge, Self::Criterion];
+}
+
+impl std::str::FromStr for ScorerKind {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "code" => Ok(Self::Code),
+            "judge" => Ok(Self::Judge),
+            "criterion" => Ok(Self::Criterion),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for ScorerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Which way a scorer's value is better. A comparison reads a fall in `toxicity` as an
+/// improvement and a fall in `faithfulness` as a regression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScoreDirection {
+    /// A larger value is a better run.
+    HigherIsBetter,
+    /// A smaller value is a better run, as for `toxicity`, `bias` and `hallucination`.
+    LowerIsBetter,
+}
+
+impl ScoreDirection {
+    /// The wire representation, exactly as it appears in JSON.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::HigherIsBetter => "higher_is_better",
+            Self::LowerIsBetter => "lower_is_better",
+        }
+    }
+
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[Self::HigherIsBetter, Self::LowerIsBetter];
+}
+
+impl std::str::FromStr for ScoreDirection {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "higher_is_better" => Ok(Self::HigherIsBetter),
+            "lower_is_better" => Ok(Self::LowerIsBetter),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for ScoreDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The shape of a human judgement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -3020,6 +3107,22 @@ pub struct ScorerInfo {
     /// Whether it needs settings to mean anything. A scorer that needs an expected answer
     /// cannot run without one.
     pub needs_config: bool,
+    /// How the scorer reaches its answer.
+    pub kind: ScorerKind,
+    /// Which way its value is better.
+    pub direction: ScoreDirection,
+    /// The `ScorerConfig` settings it reads. Empty when it needs none.
+    #[serde(default)]
+    pub config_keys: Vec<String>,
+    /// Whether this daemon can run it now. A judged scorer is unavailable until a `judge`
+    /// block names an endpoint and a model.
+    #[serde(default = "scorer_info_default_available")]
+    pub available: bool,
+}
+
+/// Spec-declared default for [`ScorerInfo::available`].
+fn scorer_info_default_available() -> bool {
+    true
 }
 
 /// Settings shared by the scorers that need them. Every field is optional; a scorer
@@ -3053,6 +3156,39 @@ pub struct ScorerConfig {
     /// `provider_tool_call` or `mcp_tool_call`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    /// Text the answer must not contain, for `excludes`. Any one of them fails the run.
+    #[serde(default)]
+    pub forbidden: Vec<String>,
+    /// Words or phrases the answer should mention, for `keyword_coverage`. The score is the
+    /// share that appear.
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    /// A regular expression the answer must match somewhere, for `matches_pattern`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    /// The tools the run should call, for `tool_call_accuracy`, and the order it should
+    /// call them in, for `tool_order`. Matched exactly against tool-call span names.
+    #[serde(default)]
+    pub expected_tools: Vec<String>,
+    /// Tools the run must not call, for `tool_not_called`.
+    #[serde(default)]
+    pub forbidden_tools: Vec<String>,
+    /// The shortest acceptable answer in characters, for `answer_length`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_chars: Option<u32>,
+    /// The longest acceptable answer in characters, for `answer_length`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chars: Option<u32>,
+    /// A JSON Schema the answer must satisfy, for `json_schema`. `type`, `properties`,
+    /// `required`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and
+    /// `additionalProperties: false` are checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_schema: Option<serde_json::Value>,
+    /// The passages the answer should rest on, for the judged scorers that read context.
+    /// When empty, the outputs of the run's `retrieval` and `rag_vector_operation` spans
+    /// are used.
+    #[serde(default)]
+    pub context: Vec<String>,
     /// Case sensitivity for text comparisons.
     #[serde(default = "scorer_config_default_case_sensitive")]
     pub case_sensitive: bool,
@@ -3074,6 +3210,15 @@ impl Default for ScorerConfig {
             span_kind: None,
             span_name: None,
             tool_name: None,
+            forbidden: Vec::new(),
+            keywords: Vec::new(),
+            pattern: None,
+            expected_tools: Vec::new(),
+            forbidden_tools: Vec::new(),
+            min_chars: None,
+            max_chars: None,
+            json_schema: None,
+            context: Vec::new(),
             case_sensitive: scorer_config_default_case_sensitive(),
         }
     }
@@ -3184,6 +3329,28 @@ pub struct ScorerDelta {
     /// side, mcpd says the comparison is not decidable rather than dressing noise up as a
     /// finding.
     pub decidable: bool,
+    /// Which way this scorer's value is better, from the catalogue. Scorers the daemon does
+    /// not know read as higher is better.
+    pub direction: ScoreDirection,
+    /// Lower end of the 95% confidence interval on `delta`, from Welch's t-test. Absent
+    /// when either side has fewer than two observations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_low: Option<f64>,
+    /// Upper end of that interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_high: Option<f64>,
+    /// Two-sided p-value for the difference in means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p_value: Option<f64>,
+    /// Whether this scorer moved the wrong way: decidable, and the whole interval on the
+    /// worse side of zero.
+    #[serde(default = "scorer_delta_default_regressed")]
+    pub regressed: bool,
+}
+
+/// Spec-declared default for [`ScorerDelta::regressed`].
+fn scorer_delta_default_regressed() -> bool {
+    false
 }
 
 /// Two experiments, compared. The point of an experiment is the comparison, so this

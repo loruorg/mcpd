@@ -103,7 +103,7 @@ impl<'a> Target<'a> {
 /// Handles the three shapes a completion actually arrives in: a bare string, a
 /// `{ text | content | answer }` object, and a chat message list where the last
 /// assistant turn is the answer.
-fn text_of(v: &Value) -> Option<String> {
+pub(crate) fn text_of(v: &Value) -> Option<String> {
     match v {
         Value::String(s) => Some(s.clone()),
         Value::Object(map) => {
@@ -111,7 +111,15 @@ fn text_of(v: &Value) -> Option<String> {
             // a question does. A payload keyed `question` is as common as one
             // keyed `text`, and missing it made the input side silently empty.
             for key in [
-                "text", "content", "answer", "output", "message", "question", "prompt", "query",
+                "text",
+                "content",
+                "page_content",
+                "answer",
+                "output",
+                "message",
+                "question",
+                "prompt",
+                "query",
                 "input",
             ] {
                 if let Some(found) = map.get(key).and_then(text_of) {
@@ -208,6 +216,24 @@ pub enum Builtin {
     SpanPresent,
     /// The tool named by `tool_name` ran, and at least one call of it ended `ok`.
     ToolSucceeded,
+    /// The answer contains none of the `forbidden` phrases.
+    Excludes,
+    /// The share of `keywords` the answer mentions.
+    KeywordCoverage,
+    /// How close the answer is to `expected`, by edit distance.
+    Similarity,
+    /// The answer matches the regular expression `pattern`.
+    MatchesPattern,
+    /// The share of `expected_tools` the run called.
+    ToolCallAccuracy,
+    /// The run called `expected_tools` in that order.
+    ToolOrder,
+    /// The run called none of `forbidden_tools`.
+    ToolNotCalled,
+    /// The answer's length is within `min_chars` and `max_chars`.
+    AnswerLength,
+    /// The answer is JSON that satisfies `json_schema`.
+    JsonSchema,
 }
 
 impl Builtin {
@@ -228,6 +254,15 @@ impl Builtin {
             Self::NoLeakedSecret => "no_leaked_secret",
             Self::SpanPresent => "span_present",
             Self::ToolSucceeded => "tool_succeeded",
+            Self::Excludes => "excludes",
+            Self::KeywordCoverage => "keyword_coverage",
+            Self::Similarity => "similarity",
+            Self::MatchesPattern => "matches_pattern",
+            Self::ToolCallAccuracy => "tool_call_accuracy",
+            Self::ToolOrder => "tool_order",
+            Self::ToolNotCalled => "tool_not_called",
+            Self::AnswerLength => "answer_length",
+            Self::JsonSchema => "json_schema",
         }
     }
 
@@ -248,6 +283,15 @@ impl Builtin {
             Self::NoLeakedSecret => "The answer carries no obvious unredacted secret.",
             Self::SpanPresent => "The run recorded a span of the required kind or name.",
             Self::ToolSucceeded => "The required tool ran and ended ok.",
+            Self::Excludes => "The answer contains none of the forbidden phrases.",
+            Self::KeywordCoverage => "Share of the required keywords the answer mentions.",
+            Self::Similarity => "How close the answer is to the expected text, by edit distance.",
+            Self::MatchesPattern => "The answer matches the required regular expression.",
+            Self::ToolCallAccuracy => "Share of the expected tools the run called.",
+            Self::ToolOrder => "The run called the expected tools in order.",
+            Self::ToolNotCalled => "The run called none of the forbidden tools.",
+            Self::AnswerLength => "The answer's length is within bounds.",
+            Self::JsonSchema => "The answer is JSON that satisfies the schema.",
         }
     }
 
@@ -266,6 +310,15 @@ impl Builtin {
         Self::NoLeakedSecret,
         Self::SpanPresent,
         Self::ToolSucceeded,
+        Self::Excludes,
+        Self::KeywordCoverage,
+        Self::Similarity,
+        Self::MatchesPattern,
+        Self::ToolCallAccuracy,
+        Self::ToolOrder,
+        Self::ToolNotCalled,
+        Self::AnswerLength,
+        Self::JsonSchema,
     ];
 
     /// Parse an identifier.
@@ -287,6 +340,15 @@ impl Builtin {
                 | Self::ToolEfficiency
                 | Self::SpanPresent
                 | Self::ToolSucceeded
+                | Self::Excludes
+                | Self::KeywordCoverage
+                | Self::Similarity
+                | Self::MatchesPattern
+                | Self::ToolCallAccuracy
+                | Self::ToolOrder
+                | Self::ToolNotCalled
+                | Self::AnswerLength
+                | Self::JsonSchema
         )
     }
 
@@ -308,12 +370,50 @@ impl Builtin {
             Self::ToolEfficiency => &["max_tool_calls"],
             Self::SpanPresent => &["span_kind", "span_name"],
             Self::ToolSucceeded => &["tool_name"],
+            Self::Excludes => &["forbidden"],
+            Self::KeywordCoverage => &["keywords"],
+            Self::Similarity => &["expected"],
+            Self::MatchesPattern => &["pattern"],
+            Self::ToolCallAccuracy | Self::ToolOrder => &["expected_tools"],
+            Self::ToolNotCalled => &["forbidden_tools"],
+            Self::AnswerLength => &["min_chars", "max_chars"],
+            Self::JsonSchema => &["json_schema"],
             Self::Answered
             | Self::NoErrors
             | Self::JsonValid
             | Self::NoToolLoop
             | Self::NotARefusal
             | Self::NoLeakedSecret => &[],
+        }
+    }
+
+    /// Refuse a setting that can never work, before any run is read: a
+    /// pattern that does not compile, or a schema that is not an object, would
+    /// otherwise decline on every run in the request with the same complaint.
+    ///
+    /// # Errors
+    /// A message naming the setting and what is wrong with it.
+    pub fn check_config(&self, config: &ScorerConfig) -> Result<(), String> {
+        match self {
+            Self::MatchesPattern => match &config.pattern {
+                Some(p) => compile_pattern(p, config.case_sensitive)
+                    .map(|_| ())
+                    .map_err(|e| format!("config.pattern is not a regular expression: {e}")),
+                None => Ok(()),
+            },
+            Self::JsonSchema => match &config.json_schema {
+                Some(s) if !s.is_object() => {
+                    Err("config.json_schema must be a JSON Schema object".to_owned())
+                }
+                _ => Ok(()),
+            },
+            Self::AnswerLength => match (config.min_chars, config.max_chars) {
+                (Some(a), Some(b)) if a > b => {
+                    Err(format!("config.min_chars ({a}) is larger than config.max_chars ({b})"))
+                }
+                _ => Ok(()),
+            },
+            _ => Ok(()),
         }
     }
 
@@ -589,6 +689,206 @@ impl Builtin {
                     },
                 ))
             }
+
+            Self::Excludes => {
+                if config.forbidden.is_empty() {
+                    return None;
+                }
+                let got = target.output_text()?;
+                let hay = normalise(&got);
+                let hits: Vec<String> = config
+                    .forbidden
+                    .iter()
+                    .filter(|f| !f.is_empty() && hay.contains(&normalise(f)))
+                    .map(|f| format!("{f:?}"))
+                    .collect();
+                Some(Verdict::binary(
+                    hits.is_empty(),
+                    if hits.is_empty() {
+                        format!(
+                            "the answer contains none of the {} forbidden phrase(s)",
+                            config.forbidden.len()
+                        )
+                    } else {
+                        format!("the answer contains {}", hits.join(", "))
+                    },
+                ))
+            }
+
+            Self::KeywordCoverage => {
+                if config.keywords.is_empty() {
+                    return None;
+                }
+                let got = target.output_text()?;
+                let hay = normalise(&got);
+                let (found, missing): (Vec<&String>, Vec<&String>) =
+                    config.keywords.iter().partition(|k| hay.contains(&normalise(k)));
+                let n = config.keywords.len();
+                Some(Verdict::graded(
+                    found.len() as f64 / n as f64,
+                    if missing.is_empty() {
+                        format!("the answer mentions all {n} keyword(s)")
+                    } else {
+                        format!(
+                            "the answer mentions {} of {n} keyword(s); missing: {}",
+                            found.len(),
+                            sample(missing.iter().map(|m| format!("{m:?}")))
+                        )
+                    },
+                ))
+            }
+
+            Self::Similarity => {
+                let expected = config.expected.as_ref()?;
+                let got = target.output_text()?;
+                let v = similarity(&normalise(&got), &normalise(expected));
+                Some(Verdict::graded(
+                    v,
+                    format!("{:.0}% similar to the expected answer, by edit distance", v * 100.0),
+                ))
+            }
+
+            Self::MatchesPattern => {
+                let pattern = config.pattern.as_ref()?;
+                let got = target.output_text()?;
+                // Checked by `check_config` before any run is read, so a bad
+                // pattern is a 400 for the request rather than a decline on
+                // every run in it.
+                let re = compile_pattern(pattern, config.case_sensitive).ok()?;
+                let hit = re.find(&got);
+                Some(Verdict::binary(
+                    hit.is_some(),
+                    match hit {
+                        Some(m) => format!("matches {pattern:?} at {:?}", truncate(m.as_str(), 80)),
+                        None => format!("the answer does not match {pattern:?}"),
+                    },
+                ))
+            }
+
+            Self::ToolCallAccuracy => {
+                if config.expected_tools.is_empty() {
+                    return None;
+                }
+                let called = tool_names(target);
+                let set: BTreeSet<&str> = called.iter().copied().collect();
+                let (hit, missing): (Vec<&String>, Vec<&String>) =
+                    config.expected_tools.iter().partition(|t| set.contains(t.as_str()));
+                let expected: BTreeSet<&str> =
+                    config.expected_tools.iter().map(String::as_str).collect();
+                let extra: Vec<&str> = set.difference(&expected).copied().collect();
+                let n = config.expected_tools.len();
+                let mut reason = format!("called {} of {n} expected tool(s)", hit.len());
+                if !missing.is_empty() {
+                    reason.push_str(&format!(
+                        "; never called: {}",
+                        sample(missing.iter().map(|m| (*m).clone()))
+                    ));
+                }
+                if !extra.is_empty() {
+                    reason.push_str(&format!(
+                        "; also called: {}",
+                        sample(extra.iter().map(|e| (*e).to_owned()))
+                    ));
+                }
+                Some(Verdict::graded(hit.len() as f64 / n as f64, reason))
+            }
+
+            Self::ToolOrder => {
+                if config.expected_tools.is_empty() {
+                    return None;
+                }
+                let called = tool_names(target);
+                // A subsequence, not an exact match: retries and lookups
+                // between the expected calls are not a wrong order.
+                let mut want = config.expected_tools.iter().peekable();
+                for name in &called {
+                    if want.peek().is_some_and(|w| w.as_str() == *name) {
+                        want.next();
+                    }
+                }
+                let next = want.peek().map(|w| (*w).clone());
+                Some(Verdict::binary(
+                    next.is_none(),
+                    match next {
+                        None => format!(
+                            "called {} in the expected order",
+                            config.expected_tools.join(" then ")
+                        ),
+                        Some(w) => format!(
+                            "{w:?} was not called after the tools before it; the run called: {}",
+                            truncate(&called.join(", "), 300)
+                        ),
+                    },
+                ))
+            }
+
+            Self::ToolNotCalled => {
+                if config.forbidden_tools.is_empty() {
+                    return None;
+                }
+                let called = tool_names(target);
+                let hits: BTreeSet<&str> = called
+                    .iter()
+                    .copied()
+                    .filter(|c| config.forbidden_tools.iter().any(|f| f == c))
+                    .collect();
+                Some(Verdict::binary(
+                    hits.is_empty(),
+                    if hits.is_empty() {
+                        format!(
+                            "none of the {} forbidden tool(s) was called",
+                            config.forbidden_tools.len()
+                        )
+                    } else {
+                        format!(
+                            "called forbidden tool(s): {}",
+                            sample(hits.iter().map(|h| (*h).to_owned()))
+                        )
+                    },
+                ))
+            }
+
+            Self::AnswerLength => {
+                if config.min_chars.is_none() && config.max_chars.is_none() {
+                    return None;
+                }
+                let got = target.output_text()?;
+                let n = got.trim().chars().count();
+                let lo = config.min_chars.map_or(0, |m| m as usize);
+                let hi = config.max_chars.map_or(usize::MAX, |m| m as usize);
+                let bounds = match (config.min_chars, config.max_chars) {
+                    (Some(a), Some(b)) => format!("between {a} and {b}"),
+                    (Some(a), None) => format!("at least {a}"),
+                    (None, Some(b)) => format!("at most {b}"),
+                    (None, None) => String::new(),
+                };
+                Some(Verdict::binary(
+                    n >= lo && n <= hi,
+                    format!("the answer is {n} characters, against {bounds}"),
+                ))
+            }
+
+            Self::JsonSchema => {
+                let schema = config.json_schema.as_ref()?;
+                let got = target.output_text()?;
+                let Some(value) = parse_json_answer(&got) else {
+                    return Some(Verdict::binary(false, "the answer is not valid JSON"));
+                };
+                let mut errors = Vec::new();
+                schema_errors(schema, &value, "$", 0, &mut errors);
+                Some(Verdict::binary(
+                    errors.is_empty(),
+                    if errors.is_empty() {
+                        "the answer satisfies the schema".to_owned()
+                    } else {
+                        format!(
+                            "{} schema violation(s): {}",
+                            errors.len(),
+                            errors.iter().take(5).cloned().collect::<Vec<_>>().join("; ")
+                        )
+                    },
+                ))
+            }
         }
     }
 
@@ -623,6 +923,175 @@ impl Builtin {
             timestamp: now,
             correlation,
         }
+    }
+}
+
+/// Every tool-call span's name, in start order.
+fn tool_names<'a>(target: &'a Target<'_>) -> Vec<&'a str> {
+    target.spans.iter().filter(|s| is_tool_call(s.kind)).map(|s| s.name.as_str()).collect()
+}
+
+/// The longest text `similarity` compares, in characters. Edit distance is
+/// quadratic, and a scorer must not let one long answer hold a scoring pass.
+const SIMILARITY_MAX: usize = 4000;
+
+/// One minus the edit distance over the longer length: 1 for identical text,
+/// 0 for text with nothing in common.
+fn similarity(a: &str, b: &str) -> f64 {
+    let a: Vec<char> = a.chars().take(SIMILARITY_MAX).collect();
+    let b: Vec<char> = b.chars().take(SIMILARITY_MAX).collect();
+    let longest = a.len().max(b.len());
+    if longest == 0 {
+        return 1.0;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let swap = prev[j] + usize::from(ca != cb);
+            cur[j + 1] = swap.min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    1.0 - prev[b.len()] as f64 / longest as f64
+}
+
+/// A pattern as `matches_pattern` runs it, with a size bound so a pattern
+/// sent in a request cannot take the daemon's memory.
+fn compile_pattern(pattern: &str, case_sensitive: bool) -> Result<regex::Regex, String> {
+    regex::RegexBuilder::new(pattern)
+        .case_insensitive(!case_sensitive)
+        .size_limit(1 << 20)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// The answer as JSON, accepting the fenced code block models wrap it in.
+fn parse_json_answer(text: &str) -> Option<Value> {
+    let t = text.trim();
+    if let Ok(v) = serde_json::from_str(t) {
+        return Some(v);
+    }
+    let inner = t.strip_prefix("```")?;
+    let inner = inner.split_once('\n').map_or(inner, |(_, rest)| rest);
+    let inner = inner.trim_end().strip_suffix("```")?;
+    serde_json::from_str(inner.trim()).ok()
+}
+
+/// The most violations `json_schema` collects before it stops looking.
+const SCHEMA_ERRORS_MAX: usize = 20;
+/// The deepest a schema is followed.
+const SCHEMA_DEPTH_MAX: usize = 32;
+
+fn json_type(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Collect the ways `v` breaks `schema`, as `path: problem`.
+///
+/// A deliberate subset of JSON Schema: the keywords a structured answer is
+/// usually held to. A keyword outside it is ignored rather than refused, so a
+/// schema written for a full validator still checks what it can here.
+fn schema_errors(schema: &Value, v: &Value, path: &str, depth: usize, out: &mut Vec<String>) {
+    if out.len() >= SCHEMA_ERRORS_MAX || depth > SCHEMA_DEPTH_MAX {
+        return;
+    }
+    let Some(s) = schema.as_object() else { return };
+    if let Some(t) = s.get("type") {
+        let have = json_type(v);
+        let ok = |want: &str| want == have || (want == "number" && have == "integer");
+        let fits = match t {
+            Value::String(w) => ok(w),
+            Value::Array(ws) => ws.iter().filter_map(Value::as_str).any(ok),
+            _ => true,
+        };
+        if !fits {
+            out.push(format!("{path}: expected {t}, got {have}"));
+            return;
+        }
+    }
+    if let Some(Value::Array(allowed)) = s.get("enum") {
+        if !allowed.contains(v) {
+            out.push(format!("{path}: {v} is not one of the allowed values"));
+        }
+    }
+    if let Some(n) = v.as_f64() {
+        if let Some(min) = s.get("minimum").and_then(Value::as_f64) {
+            if n < min {
+                out.push(format!("{path}: {n} is below the minimum {min}"));
+            }
+        }
+        if let Some(max) = s.get("maximum").and_then(Value::as_f64) {
+            if n > max {
+                out.push(format!("{path}: {n} is above the maximum {max}"));
+            }
+        }
+    }
+    if let Some(text) = v.as_str() {
+        let len = text.chars().count() as u64;
+        if let Some(min) = s.get("minLength").and_then(Value::as_u64) {
+            if len < min {
+                out.push(format!("{path}: shorter than {min} characters"));
+            }
+        }
+        if let Some(max) = s.get("maxLength").and_then(Value::as_u64) {
+            if len > max {
+                out.push(format!("{path}: longer than {max} characters"));
+            }
+        }
+    }
+    if let Some(obj) = v.as_object() {
+        if let Some(Value::Array(req)) = s.get("required") {
+            for key in req.iter().filter_map(Value::as_str) {
+                if !obj.contains_key(key) {
+                    out.push(format!("{path}: missing required key {key:?}"));
+                }
+            }
+        }
+        let props = s.get("properties").and_then(Value::as_object);
+        for (k, child) in obj {
+            match props.and_then(|p| p.get(k)) {
+                Some(sub) => schema_errors(sub, child, &format!("{path}.{k}"), depth + 1, out),
+                None if s.get("additionalProperties") == Some(&Value::Bool(false)) => {
+                    out.push(format!("{path}: key {k:?} is not allowed"));
+                }
+                None => {}
+            }
+        }
+    }
+    if let (Some(items), Some(arr)) = (s.get("items"), v.as_array()) {
+        for (i, child) in arr.iter().enumerate() {
+            schema_errors(items, child, &format!("{path}[{i}]"), depth + 1, out);
+        }
+    }
+}
+
+/// Every passage in a retrieval span's output.
+///
+/// Retrievers record a list of documents, or an object holding one under a
+/// handful of keys, and each document is its own passage: joining them would
+/// lose the ranking that `context_precision` judges.
+pub(crate) fn chunks_of(v: &Value) -> Vec<String> {
+    match v {
+        Value::Array(items) => items.iter().filter_map(text_of).collect(),
+        Value::Object(map) => {
+            for key in ["documents", "results", "chunks", "contexts", "passages", "matches"] {
+                if let Some(Value::Array(items)) = map.get(key) {
+                    return items.iter().filter_map(text_of).collect();
+                }
+            }
+            text_of(v).into_iter().collect()
+        }
+        _ => text_of(v).into_iter().collect(),
     }
 }
 
@@ -1279,5 +1748,114 @@ mod tests {
         assert!(r.prompt.contains("It shipped Tuesday."));
         assert!(r.prompt.contains("Does the answer address"));
         assert_eq!((r.min, r.max), (0.0, 1.0));
+    }
+
+    fn tools(names: &[&str]) -> Vec<Span> {
+        let mut spans = run_with_answer("done");
+        for n in names {
+            spans.push(span(SpanKind::ToolCall, n));
+        }
+        spans
+    }
+
+    #[test]
+    fn the_text_scorers_read_their_settings_and_decline_without_them() {
+        let spans = run_with_answer("Your order ships on Tuesday from Leeds.");
+        let cfg = |f: fn(&mut ScorerConfig)| {
+            let mut c = ScorerConfig::default();
+            f(&mut c);
+            c
+        };
+        for b in [Builtin::Excludes, Builtin::KeywordCoverage, Builtin::MatchesPattern] {
+            assert!(score(b, &spans, ScorerConfig::default()).is_none(), "{}", b.id());
+        }
+        let v = score(Builtin::Excludes, &spans, cfg(|c| c.forbidden = vec!["refund".into()]));
+        assert_eq!(v.unwrap().value, 1.0);
+        let v = score(Builtin::Excludes, &spans, cfg(|c| c.forbidden = vec!["LEEDS".into()]));
+        assert_eq!(v.unwrap().value, 0.0, "case-insensitive by default");
+        let v = score(
+            Builtin::KeywordCoverage,
+            &spans,
+            cfg(|c| c.keywords = vec!["tuesday".into(), "leeds".into(), "tracking".into()]),
+        )
+        .unwrap();
+        assert!((v.value - 2.0 / 3.0).abs() < 1e-9, "{}", v.reason);
+        assert!(v.reason.contains("tracking"));
+        let v = score(
+            Builtin::MatchesPattern,
+            &spans,
+            cfg(|c| c.pattern = Some(r"ships on \w+day".into())),
+        );
+        assert_eq!(v.unwrap().value, 1.0);
+        let v = score(
+            Builtin::Similarity,
+            &spans,
+            cfg(|c| c.expected = Some("Your order ships on Tuesday from Leeds".into())),
+        );
+        assert!(v.unwrap().value > 0.95);
+        let v = score(Builtin::AnswerLength, &spans, cfg(|c| c.max_chars = Some(10)));
+        assert_eq!(v.unwrap().value, 0.0);
+    }
+
+    #[test]
+    fn a_bad_pattern_or_schema_is_refused_before_scoring() {
+        let bad = ScorerConfig { pattern: Some("(".into()), ..Default::default() };
+        assert!(Builtin::MatchesPattern.check_config(&bad).is_err());
+        let bad = ScorerConfig { json_schema: Some(json!(3)), ..Default::default() };
+        assert!(Builtin::JsonSchema.check_config(&bad).is_err());
+        let bad = ScorerConfig { min_chars: Some(5), max_chars: Some(2), ..Default::default() };
+        assert!(Builtin::AnswerLength.check_config(&bad).is_err());
+    }
+
+    #[test]
+    fn the_tool_scorers_read_the_trace() {
+        let spans = tools(&["search", "lookup", "search", "refund"]);
+        let want = |t: &[&str]| ScorerConfig {
+            expected_tools: t.iter().map(|s| (*s).to_owned()).collect(),
+            ..Default::default()
+        };
+        let v =
+            score(Builtin::ToolCallAccuracy, &spans, want(&["search", "refund", "email"])).unwrap();
+        assert!((v.value - 2.0 / 3.0).abs() < 1e-9);
+        assert!(v.reason.contains("email") && v.reason.contains("lookup"), "{}", v.reason);
+        assert_eq!(
+            score(Builtin::ToolOrder, &spans, want(&["search", "refund"])).unwrap().value,
+            1.0
+        );
+        assert_eq!(
+            score(Builtin::ToolOrder, &spans, want(&["refund", "lookup"])).unwrap().value,
+            0.0
+        );
+        let no = ScorerConfig { forbidden_tools: vec!["refund".into()], ..Default::default() };
+        assert_eq!(score(Builtin::ToolNotCalled, &spans, no).unwrap().value, 0.0);
+    }
+
+    #[test]
+    fn json_schema_names_each_violation() {
+        let spans =
+            run_with_answer("```json\n{\"status\": \"late\", \"days\": -1, \"extra\": 1}\n```");
+        let cfg = ScorerConfig {
+            json_schema: Some(json!({
+                "type": "object",
+                "required": ["status", "eta"],
+                "additionalProperties": false,
+                "properties": {
+                    "status": { "enum": ["shipped", "pending"] },
+                    "days": { "type": "integer", "minimum": 0 }
+                }
+            })),
+            ..Default::default()
+        };
+        let v = score(Builtin::JsonSchema, &spans, cfg).unwrap();
+        assert_eq!(v.value, 0.0);
+        for part in ["eta", "status", "minimum", "extra"] {
+            assert!(v.reason.contains(part), "{part} missing from {}", v.reason);
+        }
+    }
+
+    #[test]
+    fn retrieval_output_is_split_into_passages() {
+        let docs = json!({ "documents": [{ "page_content": "a" }, { "text": "b" }, "c"] });
+        assert_eq!(chunks_of(&docs), vec!["a", "b", "c"]);
     }
 }

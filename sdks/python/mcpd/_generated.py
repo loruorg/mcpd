@@ -190,6 +190,24 @@ class ScoreSource(str, Enum):
     MANUAL = "manual"
     """Entered by a person, through the API or the UI."""
 
+class ScorerKind(str, Enum):
+    """How a scorer reaches its answer."""
+
+    CODE = "code"
+    """Deterministic code in the daemon. Free, and gives the same answer twice."""
+    JUDGE = "judge"
+    """A built-in rubric graded by the configured judge model, in steps: preprocess, analyze, score, reason."""
+    CRITERION = "criterion"
+    """A criterion the operator wrote under `judge.criteria`, graded by the judge model in one call."""
+
+class ScoreDirection(str, Enum):
+    """Which way a scorer's value is better. A comparison reads a fall in `toxicity` as an improvement and a fall in `faithfulness` as a regression."""
+
+    HIGHER_IS_BETTER = "higher_is_better"
+    """A larger value is a better run."""
+    LOWER_IS_BETTER = "lower_is_better"
+    """A smaller value is a better run, as for `toxicity`, `bias` and `hallucination`."""
+
 class FeedbackKind(str, Enum):
     """The shape of a human judgement."""
 
@@ -1049,12 +1067,30 @@ class ScorerInfo:
     """What it measures, in one line."""
     needs_config: bool
     """Whether it needs settings to mean anything. A scorer that needs an expected answer cannot run without one."""
+    kind: ScorerKind
+    """How the scorer reaches its answer."""
+    direction: ScoreDirection
+    """Which way its value is better."""
+    config_keys: list[str] = field(default_factory=list)
+    """The `ScorerConfig` settings it reads. Empty when it needs none."""
+    available: bool = True
+    """Whether this daemon can run it now. A judged scorer is unavailable until a `judge` block names an endpoint and a model."""
 
 @dataclass(**_SLOTS)
 class ScorerConfig:
     """Settings shared by the scorers that need them. Every field is optional; a scorer that needs one and does not get it declines instead of guessing.
     """
 
+    forbidden: list[str] = field(default_factory=list)
+    """Text the answer must not contain, for `excludes`. Any one of them fails the run."""
+    keywords: list[str] = field(default_factory=list)
+    """Words or phrases the answer should mention, for `keyword_coverage`. The score is the share that appear."""
+    expected_tools: list[str] = field(default_factory=list)
+    """The tools the run should call, for `tool_call_accuracy`, and the order it should call them in, for `tool_order`. Matched exactly against tool-call span names."""
+    forbidden_tools: list[str] = field(default_factory=list)
+    """Tools the run must not call, for `tool_not_called`."""
+    context: list[str] = field(default_factory=list)
+    """The passages the answer should rest on, for the judged scorers that read context. When empty, the outputs of the run's `retrieval` and `rag_vector_operation` spans are used."""
     case_sensitive: bool = False
     """Case sensitivity for text comparisons."""
     needle: str | None = None
@@ -1073,6 +1109,14 @@ class ScorerConfig:
     """The span name that must be present in the run, for `span_present`. Matched exactly against `Span.name`."""
     tool_name: str | None = None
     """The tool that must have run and ended `ok`, for `tool_succeeded`. Matched exactly against the `name` of a span whose kind is `tool_call`, `client_tool_call`, `provider_tool_call` or `mcp_tool_call`."""
+    pattern: str | None = None
+    """A regular expression the answer must match somewhere, for `matches_pattern`."""
+    min_chars: int | None = None
+    """The shortest acceptable answer in characters, for `answer_length`."""
+    max_chars: int | None = None
+    """The longest acceptable answer in characters, for `answer_length`."""
+    json_schema: Any | None = None
+    """A JSON Schema the answer must satisfy, for `json_schema`. `type`, `properties`, `required`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and `additionalProperties: false` are checked."""
 
 @dataclass(**_SLOTS)
 class ScoreRunRequest:
@@ -1137,12 +1181,22 @@ class ScorerDelta:
     """Number of candidate observations."""
     decidable: bool
     """Whether the sample is large enough for the delta to mean anything. A deliberately blunt rule rather than a significance test: below twenty observations on either side, mcpd says the comparison is not decidable rather than dressing noise up as a finding."""
+    direction: ScoreDirection
+    """Which way this scorer's value is better, from the catalogue. Scorers the daemon does not know read as higher is better."""
+    regressed: bool = False
+    """Whether this scorer moved the wrong way: decidable, and the whole interval on the worse side of zero."""
     baseline_mean: float | None = None
     """Mean on the baseline, when it ran there."""
     candidate_mean: float | None = None
     """Mean on the candidate."""
     delta: float | None = None
     """Candidate minus baseline."""
+    ci_low: float | None = None
+    """Lower end of the 95% confidence interval on `delta`, from Welch's t-test. Absent when either side has fewer than two observations."""
+    ci_high: float | None = None
+    """Upper end of that interval."""
+    p_value: float | None = None
+    """Two-sided p-value for the difference in means."""
 
 @dataclass(**_SLOTS)
 class ExperimentComparison:

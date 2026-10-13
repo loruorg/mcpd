@@ -237,6 +237,24 @@ rather than every commit.
 
 ### Added
 
+- **Nine shipped judge rubrics and nine more code scorers** (wire contract).
+  With a `judge` block configured, `faithfulness`, `hallucination`,
+  `answer_relevance`, `answer_correctness`, `context_precision`,
+  `context_recall`, `context_relevance`, `toxicity` and `bias` run with no
+  criteria written. Each runs in steps: the run's question, answer, expected
+  answer and retrieved context are gathered in code, the model gives itemised
+  yes, no or unsure verdicts, and the score is counted from them. The verdicts,
+  the token counts and the priced cost of the call are kept on the score, and a
+  busy judge endpoint is retried. The new code scorers are `excludes`,
+  `keyword_coverage`, `similarity`, `matches_pattern`, `tool_call_accuracy`,
+  `tool_order`, `tool_not_called`, `answer_length` and `json_schema`, set
+  through new `ScorerConfig` fields. `GET /v1/api/scorers` now lists each
+  scorer's kind, direction, settings and availability, configured criteria
+  included.
+- **Experiment comparison with confidence intervals** (wire contract). Each
+  scorer's delta carries a 95% interval and a p-value from Welch's t-test, and
+  `regressed` follows the scorer's direction, so a fall in `toxicity` reads as
+  an improvement. A shift inside the noise is no longer a regression.
 - **Prices for every major provider, and your own price book.** The built-in
   book now holds list prices for OpenAI, Anthropic, Google, Mistral, xAI,
   DeepSeek, Cohere, Perplexity, Moonshot, Z.AI, Alibaba and MiniMax, with
