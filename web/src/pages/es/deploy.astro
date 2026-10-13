@@ -517,6 +517,7 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
       { out: 'identity        off' },
       { out: 'client ip       peer address' },
       { out: 'sampling        keep everything' },
+      { out: 'tail sampling   off' },
       { out: 'quota           unlimited' },
       { out: 'redaction       on' },
       { out: 'redact key      set', tone: 'ok' },
@@ -648,17 +649,24 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
   </p>
   <p>
     Eso mueve las señales y deja un archivo en disco: el almacén de
-    ejecuciones, que es SQLite incorporado sea cual sea el almacén de señales.
-    Con <code>runs.enabled</code> a true, el valor por defecto, el chart lo
-    guarda en el volumen y ejecuta una réplica. Para ejecutar varios pods,
-    apaga la superficie de ejecuciones. El chart ejecuta entonces
-    <code>replicaCount</code> pods, cambia de <code>Recreate</code> a una
-    actualización progresiva y deja caer el PersistentVolumeClaim, porque ya no
-    queda nada local por lo que pelearse, y el daemon responde a los endpoints
-    de ejecuciones con un 503 que lo dice. El chart rechaza un
-    <code>replicaCount</code> mayor que 1 mientras las ejecuciones están
-    encendidas, en vez de arrancar pods que tengan cada uno su propio almacén de
-    ejecuciones.
+    ejecuciones, que por defecto es SQLite incorporado. Con
+    <code>runs.enabled</code> a true, el valor por defecto, el chart lo guarda
+    en el volumen y ejecuta una réplica. Para ejecutar varios pods, lleva
+    también las ejecuciones a Postgres: fija <code>runs.store</code> a
+    <code>postgres</code> y la cadena de conexión en
+    <code>runs.postgresUrl</code>, que puede nombrar la misma base de datos. El
+    chart ejecuta entonces <code>replicaCount</code> pods, cambia de
+    <code>Recreate</code> a una actualización progresiva y deja caer el
+    PersistentVolumeClaim, porque ya no queda nada local por lo que pelearse.
+    Todos los pods sirven las ejecuciones desde el mismo almacén. Fuera del
+    chart, el mismo ajuste es <code>--runs-data postgres://...</code>.
+  </p>
+  <p>
+    Apagar la superficie de ejecuciones con <code>runs.enabled=false</code>
+    escala igual, y el daemon responde a los endpoints de ejecuciones con un 503
+    que lo dice. El chart rechaza un <code>replicaCount</code> mayor que 1
+    mientras las ejecuciones están en un archivo incorporado, en vez de arrancar
+    pods que tengan cada uno su propio almacén de ejecuciones.
   </p>
 
   <pre><code class="language-bash">{`helm install mcpd ./deploy/helm/mcpd \\
@@ -666,7 +674,8 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
   --set keys.read=$READ_KEY \\
   --set externalStore.type=postgres \\
   --set externalStore.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
-  --set runs.enabled=false \\
+  --set runs.store=postgres \\
+  --set runs.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
   --set replicaCount=3`}</code></pre>
 
   <p>
