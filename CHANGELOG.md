@@ -20,6 +20,8 @@ rather than every commit.
 
 ### Added
 
+- **`--skip-email-verification`.** Sign-up opens the account at once, with no
+  confirmation mail, for a daemon without a mail server.
 - **Prompt management.** Store prompts as numbered versions, text or chat
   messages with `{{variable}}` placeholders and model settings, and point
   labels such as `production` and `staging` at a version. Releasing or rolling
@@ -69,6 +71,14 @@ rather than every commit.
   that failed, were slow, cost too much, scored low or got feedback, keeps
   the rest at a rate, and deletes what it drops. Wire-contract change: two
   entities, four types and five endpoints.
+- **Experiments from code in every SDK.** `run_experiment` runs your own
+  function over every case of a dataset, a few at a time, each case in a run
+  that names the experiment and the case; a case that raises is recorded as a
+  failed run and the rest carry on. It then scores the answers against each
+  case's expected answer, marks the experiment `succeeded` with a mean per
+  scorer, and returns the results case by case. The SDKs also read
+  trajectories, dataset cases and experiment results, write experiments, and
+  filter the trace list on `experiment_id` with optional previews.
 - **Streamed model calls and a test client in every SDK.** Wrap a provider's
   OpenAI- or Anthropic-shaped stream with `record_stream` and read the
   wrapper: every chunk passes through unchanged, and the span gets the time to

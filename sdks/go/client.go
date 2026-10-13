@@ -603,7 +603,7 @@ func (c *Client) startSpan(ctx context.Context, name string, req spanRequest) *A
 	sampled := parent.Sampled
 	if !hasParent {
 		traceID = newTraceID()
-		sampled = c.sampledTrace(traceID)
+		sampled = cfg.keep || c.sampledTrace(traceID)
 	}
 
 	start := cfg.startTime
@@ -837,6 +837,9 @@ func applyCorrelation(cor *Correlation, cfg *spanConfig) {
 	}
 	if cfg.release != "" {
 		cor.Release = strPtr(cfg.release)
+	}
+	if cfg.experimentID != "" {
+		cor.ExperimentID = strPtr(cfg.experimentID)
 	}
 }
 

@@ -329,14 +329,18 @@ class PromptTest {
                 hasScore = "relevance",
                 scoreAbove = 0.8,
                 hasFeedback = false,
+                experimentId = "exp/1",
+                preview = false,
             )
             assertEquals(
                 "/v1/api/traces?project=test&max_duration_ms=900&max_cost=0.5&min_tokens=1000" +
-                    "&has_score=relevance&score_above=0.8&has_feedback=false",
+                    "&has_score=relevance&score_above=0.8&has_feedback=false&experiment_id=exp%2F1&preview=false",
                 server.requests.single().path,
             )
             mcpd.listTraces(hasFeedback = true)
             assertEquals("/v1/api/traces?project=test&has_feedback=true", server.requests.last().path)
+            mcpd.listTraces(preview = true)
+            assertEquals("/v1/api/traces?project=test&preview=true", server.requests.last().path)
             mcpd.shutdown()
         }
     }

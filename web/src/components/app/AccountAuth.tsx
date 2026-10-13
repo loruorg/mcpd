@@ -221,8 +221,16 @@ export function AuthScreen({
           return
         }
         const n = await api.signup(email, password, o)
-        setNotice(n.message)
-        setPassword('')
+        // A daemon that opens accounts without a confirmation mail lets the
+        // new account log in at once; one that mails a link refuses, and the
+        // notice says to open it.
+        try {
+          done(await api.login(email, password, undefined, o))
+          return
+        } catch {
+          setNotice(n.message)
+          setPassword('')
+        }
       } else if (mode === 'login') {
         try {
           done(await api.login(email, password, needCode ? code : undefined, o))

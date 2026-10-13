@@ -264,6 +264,29 @@ async fn signup_creates_an_account_with_its_own_project_and_logs_it_in() {
 }
 
 #[tokio::test]
+async fn without_verification_a_new_account_logs_in_at_once_with_no_mail() {
+    let mut config = ServerConfig { signup: true, ..ServerConfig::default() };
+    config.account_settings.mail = mcpd_server::mail::MailConfig::Refuse;
+    config.account_settings.skip_email_verification = true;
+    let app = app(config).await;
+    let r = signup_from(&app, "cy@example.com", "192.0.2.50:5000").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let login = post(
+        &app,
+        "/v1/api/account/login",
+        None,
+        json!({ "email": "cy@example.com", "password": "a long enough password" }),
+    )
+    .await;
+    assert_eq!(login.status, StatusCode::OK, "{}", login.body);
+    assert!(login.body["token"].as_str().is_some_and(|t| t.starts_with("mcpds_")));
+    // A taken address gets the same answer and no second account.
+    let again = signup_from(&app, "cy@example.com", "192.0.2.51:5000").await;
+    assert_eq!(again.status, StatusCode::OK);
+    assert_eq!(again.body["message"], r.body["message"]);
+}
+
+#[tokio::test]
 async fn signup_refuses_a_bad_email_a_short_password_and_a_taken_email() {
     let app = app(signup_config()).await;
     let r = post(

@@ -1126,6 +1126,10 @@ pub struct TraceFilter {
     /// `true` for only traces a person gave feedback on, `false` for only
     /// traces with none.
     pub has_feedback: Option<bool>,
+    /// Only the runs recorded under this experiment.
+    pub experiment_id: Option<String>,
+    /// `true` to fill each trace's `input_preview` and `output_preview`.
+    pub preview: Option<bool>,
     /// `start_time`, `duration`, `cost`, `span_count`, `tokens` or `score`.
     pub sort: Option<String>,
     /// `asc` or `desc`.
@@ -1162,6 +1166,8 @@ impl TraceFilter {
         put(&mut p, "score_below", &self.score_below);
         put(&mut p, "score_above", &self.score_above);
         put(&mut p, "has_feedback", &self.has_feedback);
+        put(&mut p, "experiment_id", &self.experiment_id);
+        put(&mut p, "preview", &self.preview);
         put(&mut p, "sort", &self.sort);
         put(&mut p, "order", &self.order);
         put(&mut p, "limit", &self.limit);

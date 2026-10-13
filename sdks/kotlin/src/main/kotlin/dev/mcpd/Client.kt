@@ -20,9 +20,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Clock
 import kotlin.time.Instant
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.util.UUID
 import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.atomic.AtomicBoolean
@@ -533,7 +536,12 @@ class Mcpd(
 
     // ------------------------------------------------------------- reads ----
 
-    /** A page of runs. Every filter is optional except the project. */
+    /**
+     * A page of runs. Every filter is optional except the project.
+     *
+     * [experimentId] keeps the runs an experiment recorded. [preview] fills
+     * each run's `input_preview` and `output_preview`.
+     */
     suspend fun listTraces(
         q: String? = null,
         status: SpanStatus? = null,
@@ -556,6 +564,8 @@ class Mcpd(
         scoreBelow: Double? = null,
         scoreAbove: Double? = null,
         hasFeedback: Boolean? = null,
+        experimentId: String? = null,
+        preview: Boolean? = null,
         sort: String? = null,
         order: String? = null,
         limit: Int? = null,
@@ -570,8 +580,8 @@ class Mcpd(
             "min_duration_ms" to minDurationMs, "max_duration_ms" to maxDurationMs,
             "min_cost" to minCost, "max_cost" to maxCost, "min_tokens" to minTokens,
             "has_score" to hasScore, "score_below" to scoreBelow, "score_above" to scoreAbove,
-            "has_feedback" to hasFeedback, "sort" to sort, "order" to order, "limit" to limit,
-            "cursor" to cursor,
+            "has_feedback" to hasFeedback, "experiment_id" to experimentId, "preview" to preview,
+            "sort" to sort, "order" to order, "limit" to limit, "cursor" to cursor,
         ),
         TraceListResponse.serializer(),
     )
@@ -821,6 +831,101 @@ class Mcpd(
         project: String = config.project,
     ): Prompt = prompts.setLabel(name, label, version, project)
 
+    // ------------------------------------------------------- experiments ----
+
+    /** A run as the tool calls, model generations and handoffs its agent took. */
+    suspend fun getTrajectory(traceId: String, project: String = config.project): Trajectory =
+        transport.getJson(
+            "/v1/api/traces/${segment(traceId)}/trajectory",
+            query("project" to project),
+            Trajectory.serializer(),
+        )
+
+    /**
+     * The cases of a dataset. Sends [limit] only: the daemon finds the project
+     * from the dataset.
+     */
+    suspend fun listDatasetItems(datasetId: String, limit: Int? = null): List<DatasetItem> =
+        transport.getJson(
+            "/v1/api/datasets/${segment(datasetId)}/items",
+            query("limit" to limit),
+            ListSerializer(DatasetItem.serializer()),
+        )
+
+    /**
+     * Record an experiment, or replace one: the daemon upserts on
+     * `experiment_id`, and an empty id gets a new one. This client's project
+     * is used when the correlation names none.
+     */
+    suspend fun createExperiment(experiment: Experiment): Experiment {
+        val correlation = experiment.correlation
+        val scoped = experiment.copy(correlation = correlation.copy(project = correlation.project.ifBlank { config.project }))
+        return transport.postJson(
+            "/v1/api/experiments",
+            emptyList(),
+            json.encodeToString(Experiment.serializer(), scoped),
+            Experiment.serializer(),
+        )
+    }
+
+    /**
+     * Score every run of an experiment, each against the expected answer of
+     * the dataset case it names. No [scorers] runs the code scorers that need
+     * no settings.
+     */
+    suspend fun scoreExperiment(
+        experimentId: String,
+        scorers: List<String> = emptyList(),
+        config: ScorerConfig? = null,
+        project: String = this.config.project,
+    ): ScoreRunResult {
+        // Built by hand so the body carries what was given and nothing else:
+        // the generated request would add `dry_run` to every call.
+        val body = buildMap<String, JsonElement> {
+            put("scorers", JsonArray(scorers.map(::JsonPrimitive)))
+            if (config != null) put("config", json.encodeToJsonElement(ScorerConfig.serializer(), config))
+        }
+        return transport.postJson(
+            "/v1/api/experiments/${segment(experimentId)}/score",
+            query("project" to project),
+            json.encodeToString(JsonObject.serializer(), JsonObject(body)),
+            ScoreRunResult.serializer(),
+        )
+    }
+
+    /** An experiment case by case, with a summary per scorer. */
+    suspend fun experimentResults(experimentId: String, project: String = config.project): ExperimentResults =
+        transport.getJson(
+            "/v1/api/experiments/${segment(experimentId)}/results",
+            query("project" to project),
+            ExperimentResults.serializer(),
+        )
+
+    /**
+     * Run [target] over every case of a dataset and score the answers.
+     *
+     * Each case runs inside a root span named after the experiment, carrying
+     * the experiment id and the case id, with at most [concurrency] cases at
+     * once. The span is in the coroutine context, so spans [target] opens are
+     * its children. A target that throws fails its own run and the next case
+     * still runs. Then the runs are flushed and scored, the experiment is
+     * marked `succeeded` with each scorer's mean, and the results are
+     * returned. When the runner itself fails, the experiment is marked
+     * `failed` and the error is thrown.
+     *
+     * [name] defaults to the dataset id. [metadata] is kept with the
+     * experiment, such as the prompt version under test.
+     */
+    suspend fun runExperiment(
+        datasetId: String,
+        name: String = datasetId,
+        scorers: List<String> = emptyList(),
+        config: ScorerConfig? = null,
+        concurrency: Int = 4,
+        metadata: Map<String, Any?>? = null,
+        target: ExperimentTarget,
+    ): ExperimentResults = ExperimentRunner(this).run(datasetId, name, scorers, config, concurrency, metadata, target)
+
     // ------------------------------------------------------------ lifecycle --
 
     /**
@@ -927,6 +1032,8 @@ class Mcpd(
         output: Any? = null,
         externalParentSpanId: String? = null,
         capturePayloads: Boolean? = null,
+        experimentId: String? = null,
+        alwaysSampled: Boolean = false,
     ): ActiveSpan {
         val created = guard("span-start") {
             // The sampling decision is made once, at the root, and inherited.
@@ -934,6 +1041,7 @@ class Mcpd(
             val sampled = when {
                 parent != null -> parent.sampled
                 remote != null -> remote.sampled
+                alwaysSampled -> true
                 else -> decideSampling()
             }
             val parentSpanId = parent?.spanId ?: remote?.parentSpanId
@@ -956,6 +1064,7 @@ class Mcpd(
                     userId = userId ?: inherited.userId,
                     runId = runId ?: inherited.runId,
                     requestId = requestId ?: inherited.requestId,
+                    experimentId = experimentId ?: inherited.experimentId,
                 ),
                 capturesPayloads = capturePayloads ?: config.capturePayloads,
                 externalParentSpanId = externalParentSpanId,

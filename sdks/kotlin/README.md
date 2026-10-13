@@ -346,8 +346,25 @@ val cost = mcpd.analyticsCost(from, to, groupBy = "model")
 ```
 
 Also `listSpans`, `listLogs`, `queryMetrics`, `listScores`, `listFeedback`,
-`analyticsSummary` and `health`. These are the only methods that throw, and
-they throw `McpdException`.
+`analyticsSummary`, `getTrajectory`, `listDatasetItems`, `experimentResults`
+and `health`. These and the experiment methods below are the only methods
+that throw, and they throw `McpdException`.
+
+## Experiments
+
+`runExperiment` calls your own suspend function once per case of a dataset,
+each inside a root span that names the experiment and the case, then has the
+daemon score the answers and returns the results.
+
+```kotlin
+val results = mcpd.runExperiment("support-questions", scorers = listOf("exact_match")) { input ->
+    answer(input)
+}
+```
+
+At most `concurrency` cases run at once, 4 by default. A case that throws is
+recorded as a failed run and the others still run. `createExperiment` and
+`scoreExperiment` are the two writes underneath, for a runner of your own.
 
 ## Shutting down
 

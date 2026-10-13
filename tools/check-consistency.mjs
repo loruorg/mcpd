@@ -129,6 +129,16 @@ const WORKFLOW_EXAMPLES = {
   elixir: 'examples/elixir/workflow.exs',
 }
 
+/** The experiment runners, read by the testing page. */
+const EXPERIMENT_EXAMPLES = {
+  typescript: 'examples/typescript/experiment.ts',
+  python: 'examples/python/experiment.py',
+  rust: 'examples/rust/experiment.rs',
+  go: 'examples/go/experiment.go',
+  kotlin: 'examples/kotlin/Experiment.kt',
+  elixir: 'examples/elixir/experiment.exs',
+}
+
 /** Regions only an SDK can show, read by the SDK pages and the integrating page. */
 const SDK_REGIONS = ['stream', 'testing']
 const SDK_EXAMPLES = Object.fromEntries(Object.entries(EXAMPLES).filter(([lang]) => lang !== 'curl'))
@@ -137,6 +147,7 @@ function checkExamples() {
   checkExampleSet(EXAMPLES, REQUIRED_REGIONS, 'LANGUAGES')
   checkExampleSet(SDK_EXAMPLES, SDK_REGIONS, 'the SDK pages')
   checkExampleSet(WORKFLOW_EXAMPLES, WORKFLOW_REGIONS, 'the workflow pages')
+  checkExampleSet(EXPERIMENT_EXAMPLES, ['experiment'], 'the testing page')
   notes.push(`examples: ${Object.keys(EXAMPLES).length} quickstart and ${Object.keys(WORKFLOW_EXAMPLES).length} workflow programs present with all regions`)
 }
 
@@ -477,6 +488,7 @@ const CONFIG_LINE_OF = {
   '--smtp-password': 'signup',
   '--smtp-from': 'signup',
   '--smtp-tls': 'signup',
+  '--skip-email-verification': 'signup',
   '--org-quota-per-minute': 'signup',
   '--org-retention-days': 'signup',
   '--sample': 'sampling',

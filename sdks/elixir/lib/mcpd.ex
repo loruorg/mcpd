@@ -138,6 +138,9 @@ defmodule Mcpd do
   The span goes on the wire when it opens and again when it closes, contract
   behaviour B8: a run that crashes mid-flight is exactly the run you need to
   see, and a span sent only on the way out is never seen at all.
+
+  `sampled: true` keeps a root span and its trace whatever the sample rate,
+  and `sampled: false` drops them. A child span ignores it and follows its root.
   """
   @spec with_span(pid(), String.t(), keyword(), (-> any())) :: any()
   def with_span(client, name, opts \\ [], fun) do
@@ -413,7 +416,8 @@ defmodule Mcpd do
   # with the list a caller can pick from.
   @trace_filters ~w(project q status kind name tags session_id thread_id user_id environment
                     model from to min_duration_ms max_duration_ms min_cost max_cost min_tokens
-                    has_score score_below score_above has_feedback sort order limit cursor)a
+                    has_score score_below score_above has_feedback experiment_id preview sort order
+                    limit cursor)a
   @span_filters ~w(project q kind status name model trace_id prompt prompt_version from to
                    min_duration_ms sort order limit cursor)a
 
@@ -422,7 +426,8 @@ defmodule Mcpd do
   list: `status`, `kind`, `name`, `tags`, `session_id`, `from`, `to`,
   `min_duration_ms`, `max_duration_ms`, `min_cost`, `max_cost`, `min_tokens`,
   `has_score` with `score_below` or `score_above`, `has_feedback` (a boolean),
-  `limit`, `cursor` and the rest. `from` and `to` take a `DateTime` or a
+  `experiment_id`, `preview` (a boolean, which fills `input_preview` and
+  `output_preview`), `limit`, `cursor` and the rest. `from` and `to` take a `DateTime` or a
   shorthand such as `"-1h"`. A key the endpoint does not take raises
   `ArgumentError` before a request is made.
   """
@@ -547,6 +552,28 @@ defmodule Mcpd do
     filters = Keyword.merge(opts, from: from, to: to)
     read(client, "/analytics/cost", filters, Mcpd.CostBreakdown)
   end
+
+  # ------------------------------------------------------------- experiments
+
+  # The experiment surface, in full in `Mcpd.Experiments` (contract section 5.2).
+
+  @doc "A run as the steps its agent took. See `Mcpd.Experiments.get_trajectory/2`."
+  defdelegate get_trajectory(client, trace_id), to: Mcpd.Experiments
+
+  @doc "The cases of a dataset. See `Mcpd.Experiments.list_dataset_items/3`."
+  defdelegate list_dataset_items(client, dataset_id, opts \\ []), to: Mcpd.Experiments
+
+  @doc "Record or replace an experiment. See `Mcpd.Experiments.create_experiment/2`."
+  defdelegate create_experiment(client, experiment), to: Mcpd.Experiments
+
+  @doc "Score an experiment's runs. See `Mcpd.Experiments.score_experiment/4`."
+  defdelegate score_experiment(client, experiment_id, scorers \\ [], config \\ nil), to: Mcpd.Experiments
+
+  @doc "An experiment case by case. See `Mcpd.Experiments.experiment_results/2`."
+  defdelegate experiment_results(client, experiment_id), to: Mcpd.Experiments
+
+  @doc "Run a function over a dataset and score it. See `Mcpd.Experiments.run_experiment/4`."
+  defdelegate run_experiment(client, dataset_id, target, opts \\ []), to: Mcpd.Experiments
 
   @doc """
   Whether the daemon is alive, and which spec version it implements.
@@ -675,7 +702,16 @@ defmodule Mcpd do
 
         nil ->
           t = opts[:trace_id] || Ids.trace_id()
-          {t, nil, config != nil and sampled?(config.sample, t)}
+          # `sampled:` overrides the ratio at a root only, for a run that must
+          # be kept whatever the rate, such as an experiment's case. A child
+          # still inherits its root's decision (B4).
+          keep =
+            case opts[:sampled] do
+              decided when is_boolean(decided) -> decided
+              _ -> config != nil and sampled?(config.sample, t)
+            end
+
+          {t, nil, keep}
       end
 
     %{

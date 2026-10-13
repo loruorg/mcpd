@@ -162,6 +162,9 @@ pub struct AccountSettings {
     pub public_url: Option<String>,
     /// Where mail goes.
     pub mail: crate::mail::MailConfig,
+    /// Open accounts at sign-up without a confirmation mail.
+    /// `--skip-email-verification`.
+    pub skip_email_verification: bool,
     /// The signals-per-minute ceiling an organisation gets when it sets none.
     /// `--org-quota-per-minute`.
     pub org_quota_per_minute: Option<u32>,
@@ -1544,7 +1547,10 @@ pub async fn signup(
         ));
     }
     let accounts = store(&state)?;
-    require_mail(&state)?;
+    let skip = state.config.account_settings.skip_email_verification;
+    if !skip {
+        require_mail(&state)?;
+    }
     let email = normalise_email(&req.email)?;
     check_password(&req.password)?;
     state
@@ -1558,6 +1564,18 @@ pub async fn signup(
     let a = Arc::clone(&accounts);
     let wanted = email.clone();
     let created = blocking(move || a.create_account(&wanted, &hash)).await?;
+    if skip {
+        // No mail to confirm by: the account is confirmed now, and a taken
+        // address gets the same answer, so the reply says nothing about it.
+        if let Some(account_id) = created {
+            crate::orgs::sync_quotas(&state);
+            let a = Arc::clone(&accounts);
+            blocking(move || a.mark_verified(&account_id)).await?;
+        }
+        return Ok(Json(AccountNotice {
+            message: format!("Your account is ready. Log in as {email} with your password."),
+        }));
+    }
     match created {
         Some(account_id) => {
             // The new organisation gets its ceiling before its first signal.

@@ -334,6 +334,10 @@ class QueryFilterTest(unittest.TestCase):
         ])
         c.list_traces(has_feedback=True)
         self.assertEqual(t.reads[1][1], "project=tests&has_feedback=true")
+        c.list_traces(experiment_id="exp-1", preview=True)
+        self.assertEqual(t.reads[2][1], "project=tests&experiment_id=exp-1&preview=true")
+        c.list_traces(preview=False)
+        self.assertEqual(t.reads[3][1], "project=tests&preview=false")
         c.shutdown()
 
     def test_list_spans_sends_the_prompt_filters(self):

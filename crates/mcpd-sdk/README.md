@@ -516,6 +516,11 @@ for trace in &failures.traces {
 `analytics_summary`, `analytics_cost` and `health` are all there, with the same
 shape.
 
+For experiments, `get_trajectory`, `list_dataset_items`, `create_experiment`,
+`score_experiment` and `experiment_results` mirror their endpoints, and
+`run_experiment` runs an async closure over every case of a dataset, each in
+its own root span, then scores the answers and returns the results.
+
 ## Flushing
 
 `flush` sends what is queued. `shutdown` flushes, stops the worker and is safe to

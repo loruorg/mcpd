@@ -374,6 +374,12 @@ struct AccountFlags {
     /// days, and the longest it may set. Falls back to --retention-days.
     #[arg(long, env = "MCPD_ORG_RETENTION_DAYS", global = true)]
     org_retention_days: Option<u32>,
+
+    /// Open accounts at sign-up without a confirmation mail. The account can
+    /// log in at once. For a daemon with no mail server; password reset still
+    /// needs one.
+    #[arg(long, env = "MCPD_SKIP_EMAIL_VERIFICATION", global = true)]
+    skip_email_verification: bool,
 }
 
 /// The `accounts` block of the config file.
@@ -459,6 +465,7 @@ fn account_settings(
         mail,
         org_quota_per_minute: org_quota,
         org_retention_days: f.org_retention_days,
+        skip_email_verification: f.skip_email_verification,
         allow_org_creation: block.allow_org_creation,
         allow_private_issuers: block.allow_private_issuers,
         orgs: block.orgs,
