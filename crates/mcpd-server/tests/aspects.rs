@@ -1022,8 +1022,21 @@ async fn a_pass_over_the_floor_writes_a_snapshot_the_routes_can_read() {
     let snapshots = res.json()["snapshots"].as_array().expect("snapshots").clone();
     assert_eq!(snapshots.len(), 1, "one pass writes one snapshot: {}", res.text());
     let snapshot = snapshots[0]["snapshot"].clone();
-    assert_eq!(snapshot["aspects"], json!(["goal"]));
-    assert_eq!(snapshot["note_count"], json!(60));
+    // The pass derives the outcome notes before it clusters, so the same pass
+    // covers them beside the sixty goal notes the fixture wrote.
+    assert_eq!(snapshot["aspects"], json!(["goal", "outcome"]));
+    let res = get(
+        &app,
+        &format!("/v1/api/aspects/progress?project=default&entity_kind=agent&entity_name={AGENT}"),
+    )
+    .await;
+    let outcome_notes = res.json()["aspects"]
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["aspect"] == json!("outcome")).cloned())
+        .and_then(|r| r["note_count"].as_u64())
+        .expect("an outcome row");
+    assert!(outcome_notes > 0, "the pass wrote outcome notes: {}", res.text());
+    assert_eq!(snapshot["note_count"], json!(60 + outcome_notes));
     assert_eq!(snapshot["capped"], json!(false));
     let snapshot_id = snapshot["snapshot_id"].as_str().expect("an id").to_owned();
 
