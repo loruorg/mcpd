@@ -562,6 +562,11 @@ fn documented_answers() -> Answers {
     e.insert("a policy with no window keeps everything", "0,1".into());
     e.insert("expiring runs removes them", "0".into());
 
+    // A log line keeps its whole correlation, and the list filters on it.
+    e.insert("a log keeps its thread, run and release", "t-1,r-1,v2".into());
+    e.insert("logs filter on thread", "l1".into());
+    e.insert("logs filter on run and release together", "l1".into());
+
     // Runs sorted by the tokens they used, input and output together.
     e.insert("runs sort by tokens", "big,mid,small".into());
 
@@ -2109,6 +2114,70 @@ async fn observe_themes(store: &dyn Store, project: String) -> Answers {
     a
 }
 
+async fn observe_log_correlation(store: &dyn Store, project: String) -> Answers {
+    let mut a = Answers::new();
+    let now = OffsetDateTime::now_utc();
+    let line = |id: &str, thread: Option<&str>, run: Option<&str>| {
+        let mut correlation = only_project(&project);
+        correlation.thread_id = thread.map(str::to_owned);
+        correlation.run_id = run.map(str::to_owned);
+        correlation.release = Some("v2".into());
+        LogRecord {
+            log_id: format!("{project}-{id}"),
+            trace_id: None,
+            span_id: None,
+            timestamp: now,
+            level: LogLevel::Info,
+            message: "a correlated line".into(),
+            fields: None,
+            logger: None,
+            correlation,
+            received_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    };
+    store
+        .ingest(Batch {
+            logs: vec![line("l1", Some("t-1"), Some("r-1")), line("l2", Some("t-2"), None)],
+            ..Batch::default()
+        })
+        .await
+        .expect("the log fixture must ingest");
+    let strip = |items: &[LogRecord]| {
+        items
+            .iter()
+            .map(|l| l.log_id.trim_start_matches(&format!("{project}-")).to_owned())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let q = |pairs: &[(&str, &str)]| LogQuery {
+        project: project.clone(),
+        correlation: pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
+        limit: 10,
+        ..Default::default()
+    };
+    let by_thread = store.list_logs(&q(&[("thread_id", "t-1")])).await.expect("filter by thread");
+    a.insert("logs filter on thread", strip(&by_thread.items));
+    let c = by_thread.items.first().map(|l| l.correlation.clone());
+    a.insert(
+        "a log keeps its thread, run and release",
+        c.map(|c| {
+            format!(
+                "{},{},{}",
+                c.thread_id.unwrap_or_default(),
+                c.run_id.unwrap_or_default(),
+                c.release.unwrap_or_default()
+            )
+        })
+        .unwrap_or_default(),
+    );
+    let both = store
+        .list_logs(&q(&[("run_id", "r-1"), ("release", "v2")]))
+        .await
+        .expect("filter by run and release");
+    a.insert("logs filter on run and release together", strip(&both.items));
+    a
+}
+
 async fn observe_token_sort(store: &dyn Store, project: String) -> Answers {
     let mut a = Answers::new();
     let now = OffsetDateTime::now_utc();
@@ -2600,6 +2669,8 @@ async fn every_backend_gives_the_documented_answer_to_the_same_question() {
         answers.extend(observe_metric_points(store.as_ref(), unique(&format!("mp-{name}"))).await);
         answers.extend(observe_feedback_list(store.as_ref(), unique(&format!("fb-{name}"))).await);
         answers.extend(observe_token_sort(store.as_ref(), unique(&format!("tok-{name}"))).await);
+        answers
+            .extend(observe_log_correlation(store.as_ref(), unique(&format!("lc-{name}"))).await);
         answers.extend(observe_themes(store.as_ref(), unique(&format!("thm-{name}"))).await);
         answers.extend(
             observe_tenancy(

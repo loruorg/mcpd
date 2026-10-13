@@ -314,6 +314,10 @@ pub struct LogQuery {
     pub trace_id: Option<String>,
     /// Only logs from this step.
     pub span_id: Option<String>,
+    /// Correlation equality filters, as `(field, value)`. The field is one of
+    /// [`LOG_CORRELATION_FILTERS`]; a user id is compared as stored, so the
+    /// caller hashes it first.
+    pub correlation: Vec<(String, String)>,
     /// Window start.
     pub from: Option<OffsetDateTime>,
     /// Window end.
@@ -325,6 +329,20 @@ pub struct LogQuery {
     /// Opaque cursor.
     pub cursor: Option<String>,
 }
+
+/// The correlation fields a log list filters on, each a column of `logs`.
+pub const LOG_CORRELATION_FILTERS: [&str; 10] = [
+    "environment",
+    "service_name",
+    "service_version",
+    "session_id",
+    "thread_id",
+    "user_id",
+    "run_id",
+    "request_id",
+    "experiment_id",
+    "release",
+];
 
 /// Filters for a metric query.
 #[derive(Debug, Clone, Serialize, Deserialize)]

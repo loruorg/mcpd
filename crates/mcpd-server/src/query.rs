@@ -195,8 +195,28 @@ pub const SPAN_PARAMS: &[&str] = &[
 ];
 
 /// Every parameter `GET /v1/api/logs` accepts.
-pub const LOG_PARAMS: &[&str] =
-    &["project", "q", "level", "trace_id", "span_id", "from", "to", "order", "limit", "cursor"];
+pub const LOG_PARAMS: &[&str] = &[
+    "project",
+    "q",
+    "level",
+    "trace_id",
+    "span_id",
+    "from",
+    "to",
+    "order",
+    "limit",
+    "cursor",
+    "environment",
+    "service_name",
+    "service_version",
+    "session_id",
+    "thread_id",
+    "user_id",
+    "run_id",
+    "request_id",
+    "experiment_id",
+    "release",
+];
 
 /// Every parameter `GET /v1/api/scores` accepts.
 pub const SCORE_PARAMS: &[&str] = &[
@@ -685,6 +705,20 @@ pub async fn list_logs(
                 )?,
                 trace_id: get(&p, "trace_id").map(str::to_owned),
                 span_id: get(&p, "span_id").map(str::to_owned),
+                correlation: mcpd_store::LOG_CORRELATION_FILTERS
+                    .iter()
+                    .filter_map(|f| {
+                        let v = get(&p, f)?;
+                        // A user id is stored hashed, so the value asked for
+                        // is hashed the same way before it is compared.
+                        let v = if *f == "user_id" {
+                            state.redactor.hash_identifier(Some(v)).unwrap_or_default()
+                        } else {
+                            v.to_owned()
+                        };
+                        Some(((*f).to_owned(), v))
+                    })
+                    .collect(),
                 from: parse_time(&p, "from")?,
                 to: parse_time(&p, "to")?,
                 order: order(&p),

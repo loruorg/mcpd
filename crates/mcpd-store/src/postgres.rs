@@ -221,7 +221,7 @@ const MIGRATION_LOCK: i64 = 0x6d63_7064_0001;
 /// `CREATE TABLE IF NOT EXISTS` cannot apply, so `migrate` drops the old table
 /// inside the migrating transaction and rebuilds every row from the spans. That
 /// is safe only because every column of `traces` is derived.
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 
 /// The first version whose `traces` table is keyed by project as well.
 const TRACES_BY_PROJECT: i32 = 5;
@@ -625,7 +625,8 @@ fn row_to_trace(r: &Row) -> Trace {
 
 const LOG_COLUMNS: &str = "\
     log_id, trace_id, span_id, timestamp, level, message, fields, logger, \
-    project, environment, service_name, session_id, user_id, received_at";
+    project, environment, service_name, session_id, user_id, received_at, \
+    service_version, thread_id, resource_id, run_id, request_id, experiment_id, release";
 
 fn row_to_log(r: &Row) -> LogRecord {
     LogRecord {
@@ -641,15 +642,15 @@ fn row_to_log(r: &Row) -> LogRecord {
             project: r.get(8),
             environment: r.get(9),
             service_name: r.get(10),
-            service_version: None,
+            service_version: r.get(14),
             session_id: r.get(11),
-            thread_id: None,
+            thread_id: r.get(15),
             user_id: r.get(12),
-            resource_id: None,
-            run_id: None,
-            request_id: None,
-            experiment_id: None,
-            release: None,
+            resource_id: r.get(16),
+            run_id: r.get(17),
+            request_id: r.get(18),
+            experiment_id: r.get(19),
+            release: r.get(20),
         },
         received_at: from_nanos(r.get(13)),
     }
@@ -1556,8 +1557,10 @@ impl Store for PostgresStore {
                 .execute(
                     "INSERT INTO logs (log_id, trace_id, span_id, timestamp, level, severity,
                     message, fields, logger, project, environment, service_name, session_id,
-                    user_id, received_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                    user_id, received_at, service_version, thread_id, resource_id, run_id,
+                    request_id, experiment_id, release)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+                         $16,$17,$18,$19,$20,$21,$22)
                  ON CONFLICT (log_id) DO UPDATE SET project = EXCLUDED.project
                  WHERE logs.project = EXCLUDED.project",
                     &[
@@ -1576,6 +1579,13 @@ impl Store for PostgresStore {
                         &l.correlation.session_id,
                         &l.correlation.user_id,
                         &now,
+                        &l.correlation.service_version,
+                        &l.correlation.thread_id,
+                        &l.correlation.resource_id,
+                        &l.correlation.run_id,
+                        &l.correlation.request_id,
+                        &l.correlation.experiment_id,
+                        &l.correlation.release,
                     ],
                 )
                 .await
@@ -2518,6 +2528,13 @@ impl Store for PostgresStore {
         }
         if let Some(s) = &q.span_id {
             w.push("span_id = {}", s.clone());
+        }
+        for (field, value) in &q.correlation {
+            // Only a name from the fixed list reaches the SQL.
+            if let Some(col) = crate::LOG_CORRELATION_FILTERS.iter().find(|c| **c == field.as_str())
+            {
+                w.push(&format!("{col} = {{}}"), value.clone());
+            }
         }
         if let Some(t) = q.from {
             w.push("timestamp >= {}", to_nanos(t));

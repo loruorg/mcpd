@@ -240,6 +240,14 @@ rather than every commit.
 
 ### Added
 
+- **Log lines keep their whole correlation, and the log list filters on it**
+  (wire contract). Service version, thread, resource, run, request,
+  experiment and release are stored with every log line on all three
+  backends, and `GET /v1/api/logs` filters on environment, service, service
+  version, session, thread, user, run, request, experiment and release.
+  SQLite and Postgres databases gain the columns on the first start of this
+  version (schema version 6) with no row rewritten; lines stored before it
+  carry none of the new fields.
 - **Sort runs by tokens.** `sort=tokens` on `GET /v1/api/traces` orders runs
   by input and output tokens together, on all three backends, and the token
   columns in the run list sort by it.
@@ -269,6 +277,14 @@ rather than every commit.
   and the stored points behind it. Monitors shows every monitor and objective,
   its latched condition and last reading, with acknowledge beside a tripped
   one.
+- **Judge a run and keep it as a case from its header.** The run panel's
+  judge control records a reviewer's thumbs up or down with a comment, and
+  save to dataset captures the run into a dataset, optionally with its answer
+  as the expected one. A prompt or completion in the step inspector expands
+  to the height of the window.
+- **Span links in the step inspector.** A step's links are listed with their
+  kind; one inside the run opens the linked step, one into another run opens
+  that run.
 - **Histograms read back as distributions** (wire contract).
   `GET /v1/api/metrics/histogram` adds up the buckets of every point in a
   window, per label combination, and reads p50, p90, p95 and p99 from them.
@@ -291,6 +307,9 @@ rather than every commit.
   through new `ScorerConfig` fields. `GET /v1/api/scorers` now lists each
   scorer's kind, direction, settings and availability, configured criteria
   included.
+- **`mcpd eval` gates a deploy on an experiment comparison.** It asks a
+  running daemon to compare two experiments, prints every scorer with its
+  interval, and exits 1 on a regression and 2 when it cannot compare.
 - **Experiment comparison with confidence intervals** (wire contract). Each
   scorer's delta carries a 95% interval and a p-value from Welch's t-test, and
   `regressed` follows the scorer's direction, so a fall in `toxicity` reads as

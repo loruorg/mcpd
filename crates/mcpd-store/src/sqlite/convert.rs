@@ -192,7 +192,8 @@ pub(super) fn row_to_trace(r: &rusqlite::Row<'_>) -> rusqlite::Result<Trace> {
 
 pub(super) const LOG_COLUMNS: &str = "\
     log_id, trace_id, span_id, timestamp, level, message, fields, logger, \
-    project, environment, service_name, session_id, user_id, received_at";
+    project, environment, service_name, session_id, user_id, received_at, \
+    service_version, thread_id, resource_id, run_id, request_id, experiment_id, release";
 
 pub(super) fn row_to_log(r: &rusqlite::Row<'_>) -> rusqlite::Result<LogRecord> {
     Ok(LogRecord {
@@ -208,15 +209,15 @@ pub(super) fn row_to_log(r: &rusqlite::Row<'_>) -> rusqlite::Result<LogRecord> {
             project: r.get(8)?,
             environment: r.get(9)?,
             service_name: r.get(10)?,
-            service_version: None,
+            service_version: r.get(14)?,
             session_id: r.get(11)?,
-            thread_id: None,
+            thread_id: r.get(15)?,
             user_id: r.get(12)?,
-            resource_id: None,
-            run_id: None,
-            request_id: None,
-            experiment_id: None,
-            release: None,
+            resource_id: r.get(16)?,
+            run_id: r.get(17)?,
+            request_id: r.get(18)?,
+            experiment_id: r.get(19)?,
+            release: r.get(20)?,
         },
         received_at: from_nanos(r.get(13)?),
     })

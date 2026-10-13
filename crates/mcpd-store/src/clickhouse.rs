@@ -682,6 +682,13 @@ fn log_row(l: &LogRecord) -> Value {
         "session_id": c.session_id.clone().unwrap_or_default(),
         "user_id": c.user_id.clone().unwrap_or_default(),
         "received_at": ts_str(l.received_at),
+        "service_version": c.service_version.clone().unwrap_or_default(),
+        "thread_id": c.thread_id.clone().unwrap_or_default(),
+        "resource_id": c.resource_id.clone().unwrap_or_default(),
+        "run_id": c.run_id.clone().unwrap_or_default(),
+        "request_id": c.request_id.clone().unwrap_or_default(),
+        "experiment_id": c.experiment_id.clone().unwrap_or_default(),
+        "release": c.release.clone().unwrap_or_default(),
     })
 }
 
@@ -1652,6 +1659,12 @@ impl Store for ClickHouseStore {
         }
         if let Some(s) = &q.span_id {
             w.push(format!("span_id = {}", quote(s)));
+        }
+        for (field, value) in &q.correlation {
+            if let Some(col) = crate::LOG_CORRELATION_FILTERS.iter().find(|c| **c == field.as_str())
+            {
+                w.push(format!("{col} = {}", quote(value)));
+            }
         }
         if let Some(f) = q.from {
             w.push(format!("timestamp >= {}", ts(f)));
@@ -3904,6 +3917,20 @@ struct LogRow {
     session_id: String,
     user_id: String,
     received_at: String,
+    #[serde(default)]
+    service_version: String,
+    #[serde(default)]
+    thread_id: String,
+    #[serde(default)]
+    resource_id: String,
+    #[serde(default)]
+    run_id: String,
+    #[serde(default)]
+    request_id: String,
+    #[serde(default)]
+    experiment_id: String,
+    #[serde(default)]
+    release: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3957,15 +3984,15 @@ impl From<LogRow> for LogRecord {
                 project: r.project,
                 environment: opt(r.environment),
                 service_name: opt(r.service_name),
-                service_version: None,
+                service_version: opt(r.service_version),
                 session_id: opt(r.session_id),
-                thread_id: None,
+                thread_id: opt(r.thread_id),
                 user_id: opt(r.user_id),
-                resource_id: None,
-                run_id: None,
-                request_id: None,
-                experiment_id: None,
-                release: None,
+                resource_id: opt(r.resource_id),
+                run_id: opt(r.run_id),
+                request_id: opt(r.request_id),
+                experiment_id: opt(r.experiment_id),
+                release: opt(r.release),
             },
             received_at: parse_ts(&r.received_at),
         }

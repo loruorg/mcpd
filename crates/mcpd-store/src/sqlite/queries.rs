@@ -155,8 +155,11 @@ pub(super) fn write_batch(conn: &mut Connection, batch: Batch) -> Result<IngestR
             .prepare_cached(
                 "INSERT OR REPLACE INTO logs (
                     log_id, trace_id, span_id, timestamp, level, severity, message, fields,
-                    logger, project, environment, service_name, session_id, user_id, received_at
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                    logger, project, environment, service_name, session_id, user_id, received_at,
+                    service_version, thread_id, resource_id, run_id, request_id, experiment_id,
+                    release
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,
+                           ?16,?17,?18,?19,?20,?21,?22)",
             )
             .map_err(be)?;
         let mut ins_log_fts = tx
@@ -204,6 +207,13 @@ pub(super) fn write_batch(conn: &mut Connection, batch: Batch) -> Result<IngestR
                     c.session_id,
                     c.user_id,
                     to_nanos(log.received_at),
+                    c.service_version,
+                    c.thread_id,
+                    c.resource_id,
+                    c.run_id,
+                    c.request_id,
+                    c.experiment_id,
+                    c.release,
                 ])
                 .map_err(be)?;
             del_log_fts.execute(rusqlite::params![log.log_id, c.project]).map_err(be)?;
@@ -1114,6 +1124,13 @@ pub(super) fn list_logs_sync(conn: &Connection, q: &LogQuery) -> Result<Paged<Lo
     }
     if let Some(s) = &q.span_id {
         w.push("span_id = ?", s.clone());
+    }
+    for (field, value) in &q.correlation {
+        // Only a name from the fixed list reaches the SQL, so the column is
+        // never caller text.
+        if let Some(col) = crate::LOG_CORRELATION_FILTERS.iter().find(|c| **c == field.as_str()) {
+            w.push(&format!("{col} = ?"), value.clone());
+        }
     }
     if let Some(f) = q.from {
         w.push("timestamp >= ?", to_nanos(f));
