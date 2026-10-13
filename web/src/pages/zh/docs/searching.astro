@@ -2,6 +2,7 @@
 import Doc from '@/layouts/Doc.astro'
 import SearchDemo from '@/components/SearchDemo.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const code0 = localeOf(Astro.url.pathname)
@@ -309,8 +310,8 @@ while True:
         <td>时间窗口，按这次运行的开始时间来比。</td>
       </tr>
       <tr>
-        <td><code>min_duration_ms</code></td>
-        <td>至少这么慢的运行，单位是毫秒。</td>
+        <td><code>min_duration_ms</code>、<code>max_duration_ms</code></td>
+        <td>至少或至多这么慢的运行，单位是毫秒。</td>
       </tr>
       <tr>
         <td><code>min_cost</code></td>
@@ -320,12 +321,41 @@ while True:
         </td>
       </tr>
       <tr>
+        <td><code>max_cost</code></td>
+        <td>至多花了这么多钱的运行。</td>
+      </tr>
+      <tr>
+        <td><code>min_tokens</code></td>
+        <td>至少用了这么多 token 的运行，输入和输出合计。</td>
+      </tr>
+      <tr>
         <td><code>has_score</code></td>
         <td>带着这个评分器 id 给出的评分的那些运行。</td>
       </tr>
       <tr>
         <td><code>score_below</code></td>
         <td>和 <code>has_score</code> 一起用：那个评分器打到这个值以下的运行。</td>
+      </tr>
+      <tr>
+        <td><code>score_above</code></td>
+        <td>
+          和 <code>has_score</code> 一起用：那个评分器打到这个值以上的运行。再加上
+          <code>score_below</code> 时，同一个评分必须落在两者之间。
+        </td>
+      </tr>
+      <tr>
+        <td><code>preview</code></td>
+        <td>
+          设为 <code>true</code> 时，填上每次运行的 <code>input_preview</code>
+          和 <code>output_preview</code>。会记进审计日志。
+        </td>
+      </tr>
+      <tr>
+        <td><code>has_feedback</code></td>
+        <td>
+          <code>true</code> 表示有人给过反馈的运行，<code>false</code>
+          表示没有反馈的运行。
+        </td>
       </tr>
       <tr>
         <td><code>sort</code></td>
@@ -369,7 +399,11 @@ while True:
   <p>
     这里没有第二份更轻的运行列表，因为第一份已经足够轻了。存下来的 trace 投影
     完全不带输入、不带输出、不带任何属性：只有名称、计数、时间、成本、标签和
-    关联信息，没有一句模型说过的话。打开一次运行，才是去取载荷的时候。
+    关联信息。请求时带上 <code>preview=true</code>，每一行会多出
+    <code>input_preview</code> 和 <code>output_preview</code>，也就是根步骤的输入
+    和输出开头的纯文本，各自最多 240 个字符；对聊天输入来说，预览是最后一条用户
+    消息。带预览的列表读取携带了模型见过的文本，所以会记进审计日志。打开一次运行，
+    才会取回完整的载荷。
   </p>
   <p>
     在一次真实的运行上量过：一个八步的客服智能体，检索三份政策文档，调用两个
@@ -413,9 +447,17 @@ while True:
     这条规则不是运行列表独有的。<code>GET /v1/api/spans</code>、
     <code>/v1/api/logs</code>、<code>/v1/api/scores</code>、
     <code>/v1/api/metrics</code> 和 <code>/v1/api/feedback</code> 各自用同样的
-    方式守着自己的词汇。有两点值得在遇到之前就知道：评分列表不接受
-    <code>order</code>，因为它是最新的在前，而它的游标只朝一个方向比较；反馈
-    列表要求给出 <code>trace_id</code>，因为反馈是一次读一个运行的。
+    方式守着自己的词汇。评分列表不接受 <code>order</code>，因为它是最新的在前，
+    而它的游标只朝一个方向比较。反馈列表读取整个项目，最新的在前，可以按
+    <code>trace_id</code>、<code>span_id</code>、<code>kind</code>、
+    <code>author_kind</code> 以及 <code>from</code> 和 <code>to</code> 窗口缩小，
+    并带一个游标用于翻到下一页。日志列表按一行日志的关联信息过滤：
+    <code>environment</code>、<code>service_name</code>、
+    <code>service_version</code>、<code>session_id</code>、
+    <code>thread_id</code>、<code>user_id</code>、<code>run_id</code>、
+    <code>request_id</code>、<code>experiment_id</code> 和
+    <code>release</code>，每一个都是精确匹配。用户 id 按你知道的原样发送；它会按
+    存储时的方式做哈希。
   </p>
 
   <h2 id="filling-a-filter-box">把过滤框填起来</h2>
@@ -472,6 +514,21 @@ while True:
     时间，所以在它们上面做水位线，要么会跳过一行迟到的，要么会永远重复每一行。
     <code>signal=scores</code> 会被拒绝，而不是回一个空页。
   </p>
+
+  <h3>实时跟随</h3>
+  <p>
+    带上 <code>Accept: text/event-stream</code> 发送同样的请求，连接会一直保持。
+    守护进程每秒轮询一次，把每一批带来新行的结果作为一个 <code>delta</code> 事件
+    发出，事件里装着上面那种响应，事件 id 是这一批之后的游标。断开的客户端带着
+    这个游标重新连接，一行也不会漏。一次跟随在三十分钟后关闭，客户端用同样的方式
+    重新连接。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="在新运行到达时跟随它们"
+    command="curl -N -H 'accept: text/event-stream' 'localhost:4317/v1/api/deltas?signal=traces'"
+  />
 
   <h2>这套部署能做什么</h2>
   <p>
@@ -543,6 +600,7 @@ while True:
   <p>
     它接受 <code>q</code>、<code>kind</code>、<code>status</code>、
     <code>name</code>、<code>model</code>、<code>trace_id</code>、
+    <code>prompt</code>、<code>prompt_version</code>、
     <code>from</code>、<code>to</code>、<code>min_duration_ms</code>、
     <code>sort</code>、<code>order</code>、<code>limit</code> 和
     <code>cursor</code>，含义和默认值都一样。这里没有 <code>tags</code>、
