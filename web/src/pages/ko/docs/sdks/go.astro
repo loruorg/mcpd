@@ -42,6 +42,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 const payload = `span.SetModel("gpt-4o-mini", "openai")
 span.SetTokens(812, 96)
 
+// How the model was called. Settings, not payload: kept with capture off.
+span.SetModelParameters(mcpd.ModelParameters{
+    Temperature: ptr(0.0),
+    Seed:        ptr(int64(0)),
+    MaxTokens:   ptr(uint64(1024)),
+})
+
 // Or the full breakdown, so a cached prompt is priced as a cached prompt.
 span.SetUsage(mcpd.TokenUsage{
     InputTokens:  ptr(uint64(812)),
@@ -144,6 +151,22 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     나릅니다.
   </p>
 
+  <p>
+    직접 쓰는 단위 테스트에서는 <code>mcpdtest.New</code>가 <code>mcpd.New</code>와
+    같은 옵션을 받아 기록기를 돌려줍니다. 그 <code>Client</code> 필드는 메모리에
+    기록하는 <code>*mcpd.Client</code>입니다. 코드가 클라이언트를 받는 곳 어디에든 그
+    클라이언트를 넘긴 다음, 기록된 것을 다시 읽으십시오. 이름이나 종류로 찾는
+    <code>Spans</code>, 반드시 있어야 하는 스팬 하나를 찾는 <code>Span(name)</code>
+    (<code>MustSpan(t, name)</code>은 테스트를 대신 실패시킵니다), 실행마다 트리로
+    돌려주는 <code>Trees</code>, <code>Logs</code>, <code>Metrics</code>,
+    <code>Scores</code>, <code>RecordedFeedback</code>, <code>Reset</code>이 있습니다.
+    각 접근자는 먼저 플러시합니다. 담긴 것은 데몬으로 갈 때와 똑같이 샘플링,
+    페이로드 수집, <code>WithRedact</code>를 거쳤고, 테스트 실행에
+    <code>MCPD_ENABLED=false</code>를 설정해도 켜진 채로 남습니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="testing" title="단위 테스트" />
+
   <h2>실행 기록하기</h2>
   <p>
     <code>Start</code>는 새 컨텍스트와 스팬을 돌려주고, <code>defer span.End()</code>가
@@ -196,6 +219,17 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     받습니다. 기록된 실패에 메시지가 붙어 있음을 보장하는 것이 바로 이것입니다. 그러면
     <code>End</code>는 상태를 <code>ok</code>가 아니라 <code>error</code>로 기록합니다.
   </p>
+  <p>
+    <code>SetModelParameters</code>는 호출에 쓴 설정을 기록합니다.
+    <code>Temperature</code>, <code>TopP</code>, <code>TopK</code>,
+    <code>MaxTokens</code>, <code>Seed</code>, <code>StopSequences</code>,
+    <code>HasResponseFormat</code>입니다. 이것들은 페이로드가 아니라 설정이므로
+    <code>WithCapturePayloads(false)</code>에서도 남습니다. 중요한 것이 바로 이
+    경우입니다. 실행을 재현하려는 사람이 맞춰야 하는 값이 이것들이기 때문입니다. nil
+    필드는 없는 것이고 0을 가리키는 포인터는 값이므로, 0인 <code>Seed</code>도 시드입니다.
+    <code>HasResponseFormat</code> 뒤의 스키마는 기록하지 않고, 스키마가 적용되었는지만
+    기록합니다.
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -210,6 +244,23 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     <code>SetUser</code>, <code>Event</code>, <code>EndWithStatus</code>입니다. 같은
     필드는 <code>With...</code> 옵션으로 스팬이 시작할 때 정할 수도 있습니다.
   </p>
+
+  <h3>스트리밍 호출</h3>
+  <p>
+    스팬과 제공업체의 스트림을 <code>mcpd.RecordStream</code>에 넘기고, 대신 그것이
+    돌려주는 스트림을 읽으십시오. 공식 OpenAI와 Anthropic Go SDK가 돌려주는
+    <code>ssestream.Stream</code>과 같은 <code>Next</code>, <code>Current</code>,
+    <code>Err</code>, <code>Close</code> 메서드를 가지며, OpenAI chat-completion
+    청크와 Anthropic 메시지 이벤트를 받고, 모든 청크는 바뀌지 않은 채 지나갑니다.
+    텍스트나 도구 호출이 담긴 첫 청크가 첫 토큰까지의 시간을 표시합니다.
+    <code>Next</code>가 false를 돌려주거나 끝나기 전에 <code>Close</code>를 호출하면,
+    스팬은 같은 호출을 스트리밍 없이 했을 때 <code>RecordResponse</code>가 기록했을
+    내용과 출력으로서의 텍스트를 받고 끝납니다. 스트림에서 난 오류는 스팬에 표시되고
+    <code>Err</code>를 통해 바뀌지 않은 채 전달됩니다. 보관하는 텍스트는 32,768자에서
+    잘리며, 그 한도에 이르면 <code>mcpd.stream.truncated</code>가 설정됩니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="stream" title="스트리밍 호출" />
 
   <h2>지속성 실행</h2>
   <p>
