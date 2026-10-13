@@ -210,6 +210,39 @@ defmodule Mcpd do
     _kind, reason -> Worker.reject(client, "a recorded span was refused and dropped: #{inspect(reason)}")
   end
 
+  @doc false
+  # Open a span with no block, for a scope that outlives the call that opened
+  # it: a stream, which `Mcpd.ModelCall.record_stream/4` closes when the caller
+  # stops reading. Parent, sampling and correlation are resolved here exactly
+  # as `with_span/4` resolves them, and the open record goes out now (B8).
+  @spec __open__(pid(), String.t(), keyword()) :: map()
+  def __open__(client, name, opts) do
+    span = open(client, name, opts)
+    emit(client, span, :open, nil, nil)
+    span
+  end
+
+  @doc false
+  # Close a span opened by `__open__/3`. `opts` replaces the options it was
+  # opened with, because what a stream says about its call is only known at
+  # the end. `failure` is `{kind, reason, stacktrace}` when the scope raised,
+  # threw or exited. Goes through the same record path as `with_span/4`, so
+  # payload capture, redaction and step usage apply the same way.
+  @spec __close__(pid(), map(), keyword(), term(), {atom(), term(), list()} | nil) :: :ok
+  def __close__(client, span, opts, output, failure) do
+    span = %{span | opts: opts}
+
+    case failure do
+      nil -> emit(client, span, :ok, output, nil)
+      {kind, reason, trace} -> emit(client, span, :error, output, failure_of(kind, reason, trace))
+    end
+
+    accumulate(span)
+    :ok
+  rescue
+    e -> Worker.warn(client, "span could not be recorded and was dropped: #{Exception.message(e)}")
+  end
+
   @doc """
   What the client has done since it started: `queued`, `dropped`, `capacity`,
   `exported`, `failed`, `rejected` and `redaction_failures`. The same seven
@@ -828,6 +861,12 @@ defmodule Mcpd do
       "message" => if(String.trim(message) == "", do: kind, else: message),
       "stack" => stack(stacktrace)
     }
+  end
+
+  defp failure_of(:error, reason, trace), do: error_of(Exception.normalize(:error, reason, trace), trace)
+
+  defp failure_of(kind, reason, trace) do
+    %{"kind" => to_string(kind), "message" => Exception.format_exit(reason), "stack" => stack(trace)}
   end
 
   defp stack(stacktrace), do: stacktrace |> Exception.format_stacktrace() |> String.slice(0, 4_000)
