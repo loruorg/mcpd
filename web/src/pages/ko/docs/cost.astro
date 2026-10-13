@@ -4,9 +4,26 @@ import Waterfall from '@/components/Waterfall.astro'
 import Command from '@/components/Command.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
+import fs from 'node:fs'
+import path from 'node:path'
 
 const code = localeOf(Astro.url.pathname)
 const linkTo = (route: string) => urlFor(route, code)
+
+/* 내장 가격표는 데몬이 품는 파일에서 빌드 시점에 읽습니다. 그래서 아래의 개수와
+   날짜는 바이너리가 값을 매기는 데 쓰는 것과 어긋날 수 없습니다. */
+const book = JSON.parse(
+  fs.readFileSync(path.resolve(process.cwd(), '..', 'crates/mcpd-core/prices/builtin.json'), 'utf8'),
+)
+const bookTables = [
+  { name: 'models', note: '제공업체 표가 적용되지 않을 때 쓰는 자사 정가', count: Object.keys(book.models).length },
+  ...Object.entries(book.providers as Record<string, Record<string, unknown>>)
+    .map(([name, t]) => ({ name: `providers.${name}`, note: '', count: Object.keys(t).length }))
+    .sort((a, b) => b.count - a.count),
+]
+const tiered = Object.values(book.models as Record<string, { tiers?: unknown[] }>).filter((m) => m.tiers?.length).length
+const multipliers = Object.entries(book.service_tier_multipliers as Record<string, Record<string, number>>)
+  .flatMap(([p, t]) => Object.entries(t).map(([tier, m]) => ({ provider: p, tier, m })))
 
 /* 예제 프로그램에서 읽어 오지 않고 여기에 직접 적었습니다. 이것들은 CI가 실행할
    수 있는 코드가 아니라, 읽는 사람이 자기 데몬을 상대로 실행하는 질의입니다. */
@@ -203,6 +220,11 @@ const response = [
         <td><code>output</code> 요율로 청구합니다.</td>
       </tr>
       <tr>
+        <td><code>image_input</code>, <code>image_output</code></td>
+        <td>제공업체가 텍스트와 따로 값을 매기는 경우의 이미지 토큰.</td>
+        <td><code>input</code> 또는 <code>output</code> 요율로 청구합니다.</td>
+      </tr>
+      <tr>
         <td><code>reasoning</code></td>
         <td>제공업체가 따로 청구하는 경우의 숨은 추론 토큰.</td>
         <td>
@@ -213,6 +235,29 @@ const response = [
       </tr>
     </tbody>
   </table>
+
+  <h2>긴 프롬프트와 서비스 티어</h2>
+  <p>
+    여러 제공업체가 긴 프롬프트에는 모든 토큰에 더 많은 요금을 받습니다. 모델
+    항목은 <code>tiers</code>를 가질 수 있고, 각 티어는
+    <code>above_input_tokens</code> 문턱값과 자기 요율을 가집니다. 프롬프트는
+    캐시된 토큰까지 포함해 재며, 문턱값을 넘으면 호출 전체에 그 티어의 값을
+    매깁니다. <code>gemini-2.5-pro</code>에 보낸 300,000토큰 프롬프트는 300,000개
+    전부에 긴 컨텍스트 요율을 냅니다. 티어가 빼놓은 계량기는 기본 요율을
+    유지합니다.
+  </p>
+  <p>
+    배치 요청처럼 더 싼 서비스 티어의 호출은 제공업체의 할인 가격으로 값을
+    매깁니다. mcpd는 티어를 <code>gen_ai.response.service_tier</code>에서 읽고,
+    이어서 <code>gen_ai.openai.response.service_tier</code>,
+    <code>mcpd.service_tier</code>, <code>llm.service_tier</code>와 그에 맞는 요청
+    속성에서 읽습니다. <code>default</code>, <code>standard</code>,
+    <code>auto</code>는 표준 티어로 읽습니다. 모델은 <code>service_tiers</code>
+    아래에 티어별 요율을 직접 가질 수 있고, 없으면 가격표에서 그 제공업체의
+    <code>service_tier_multipliers</code>가 적용됩니다. 수치는 티어를 기록하므로,
+    배치 호출은 가격표로 <code>builtin+batch</code>를 저장하고 반값인 이유가
+    드러납니다.
+  </p>
 
   <h2>캐시된 토큰은 한 번만 청구됩니다</h2>
   <p>
@@ -238,12 +283,9 @@ const response = [
     값입니다.
   </p>
   <p>
-    요율이 없는 계량기에는 규칙 하나가 적용됩니다. 가격표에 요율이 없는 계량기는 나머지의
-    일부로만 청구되므로, 제공업체가 <code>text</code> 개수까지 보낸 경우에는 아예
-    청구되지 않습니다. 추론 토큰은 가격표가 그 토큰에 자기 요율을 주지 않는 한
-    거기에 놓이고, 요율을 선언하면 해결됩니다. 이미지 토큰은 언제나 거기에
-    놓입니다. 가격표에 줄 이미지 요율 자체가 없기 때문입니다. 그러니 멀티모달이
-    많은 작업에서는 그 수치를 정확한 값이 아니라 낮게 잡힌 값으로 읽으십시오.
+    가격표에 요율이 없는 계량기는 나머지의 일부로 청구됩니다. 제공업체가 추론
+    토큰이나 이미지 토큰을 따로 청구하고 별도의 <code>text</code> 개수도
+    보고한다면, 그 토큰에 자기 요율을 주십시오.
   </p>
 
   <h2>모르는 모델은 비용이 0이 아니라 비용이 없습니다</h2>
@@ -271,8 +313,9 @@ const response = [
   <p>
     스팬에 붙은 id는 클라이언트가 보낸 그대로이고, 클라이언트는 여기에 장식을
     붙입니다. 게이트웨이는 벤더를 앞에 붙이고, 클라우드는 리전을 앞에 붙이고,
-    제공업체는 릴리스 날짜를 고정해 붙입니다. 가격표는 맨 모델 이름을 키로 쓰므로,
-    조회는 네 가지를 순서대로 시도하고 처음 맞는 곳에서 멈춥니다.
+    제공업체는 릴리스 날짜를 고정해 붙입니다. 스팬이 제공업체를 밝히면 가격표에서
+    그 제공업체의 표를 먼저 찾고, 그다음 자사 <code>models</code> 표를 찾습니다.
+    표마다 조회는 다음 단계를 순서대로 시도하고 처음 맞는 곳에서 멈춥니다.
   </p>
 
   <table>
@@ -306,71 +349,107 @@ const response = [
 
   <p>
     <code>-YYYY-MM-DD</code>와 <code>-YYYYMMDD</code> 접미사를 모두 알아봅니다.
-    네 단계가 모두 실패하는 것은 오류가 아니라 정상적인 결과입니다. 위에서 말한
-    대로 비용이 없다는 뜻입니다.
+    네 단계 어디에서도 모델을 찾지 못하면, 클라우드 버전 태그를 뗀 id로 다시
+    시도합니다. 그래서 Vertex AI의 <code>claude-sonnet-4-5@20250929</code>와
+    Bedrock의 <code>anthropic.claude-sonnet-4-5-20250929-v1:0</code>이
+    해석됩니다. 그다음에는 숫자 사이의 점을 대시로 바꿔 시도하므로
+    <code>claude-sonnet-4.5</code>가 <code>claude-sonnet-4-5</code>를 찾습니다.
+    전혀 맞지 않으면 위에서 말한 대로 비용이 없습니다.
+  </p>
+  <p>
+    제공업체도 같은 너그러운 방식으로 맞춥니다. 주어진 그대로의 이름, 가격표에
+    적힌 별칭(<code>az.ai.openai</code>에 대한 <code>azure</code>), 그리고 앞의
+    벤더 부분 하나를 뗀 이름입니다. 그래서 <code>aws.bedrock</code>이
+    <code>bedrock</code> 표를 찾습니다.
   </p>
 
   <h2>함께 실려 오는 가격표</h2>
   <p>
-    mcpd는 작은 내장 가격표를 지니고 있어서, 설정을 전혀 하지 않아도
+    mcpd는 내장 가격표를 지니고 있어서, 설정을 전혀 하지 않아도
     <code>docker run</code>이 실제 수치를 내놓습니다. 이름은
     <code>builtin</code>이고 USD로 값을 매기며, 이 가격표가 만들어 낸 모든 비용은
-    그 이름을 기록합니다.
+    그 이름을 기록합니다. 주요 모델 벤더 전부와 그 모델을 재판매하는 클라우드와
+    게이트웨이의 정가를 {book.as_of} 기준으로 담고 있습니다. 자사 모델 가운데
+    {tiered}개가 긴 컨텍스트 티어를 가집니다.
   </p>
 
-  {/* crates/mcpd-core/src/cost.rs의 `builtin_book`에서 옮겨 적었습니다. 거기에서
-      요율이 바뀌면 여기에서도 바뀝니다. */}
   <table>
     <thead>
-      <tr>
-        <th>모델</th><th>입력</th><th>출력</th><th>캐시 읽기</th><th>캐시 쓰기, 5분</th><th>캐시 쓰기, 1시간</th>
-      </tr>
+      <tr><th>표</th><th>모델</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>claude-opus-4</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-1</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-5</code></td><td>5.00</td><td>25.00</td><td>0.50</td><td>6.25</td><td>10.00</td></tr>
-      <tr><td><code>claude-sonnet-4</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-sonnet-4-5</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-haiku-4-5</code></td><td>1.00</td><td>5.00</td><td>0.10</td><td>1.25</td><td>2.00</td></tr>
-      <tr><td><code>claude-3-5-haiku</code></td><td>0.80</td><td>4.00</td><td>0.08</td><td>1.00</td><td>1.60</td></tr>
-      <tr><td><code>gpt-4o</code></td><td>2.50</td><td>10.00</td><td>1.25</td><td>입력 요율</td><td>입력 요율</td></tr>
-      <tr><td><code>gpt-4o-mini</code></td><td>0.15</td><td>0.60</td><td>0.075</td><td>입력 요율</td><td>입력 요율</td></tr>
-      <tr><td><code>gpt-4.1</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>입력 요율</td><td>입력 요율</td></tr>
-      <tr><td><code>gpt-4.1-mini</code></td><td>0.40</td><td>1.60</td><td>0.10</td><td>입력 요율</td><td>입력 요율</td></tr>
-      <tr><td><code>o3</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>입력 요율</td><td>입력 요율</td></tr>
-      <tr><td><code>o4-mini</code></td><td>1.10</td><td>4.40</td><td>0.275</td><td>입력 요율</td><td>입력 요율</td></tr>
-      <tr><td><code>gemini-2.5-pro</code></td><td>1.25</td><td>10.00</td><td>0.31</td><td>입력 요율</td><td>입력 요율</td></tr>
-      <tr><td><code>gemini-2.5-flash</code></td><td>0.30</td><td>2.50</td><td>0.075</td><td>입력 요율</td><td>입력 요율</td></tr>
-      <tr><td><code>text-embedding-3-small</code></td><td>0.02</td><td>0.00</td><td>입력 요율</td><td>입력 요율</td><td>입력 요율</td></tr>
-      <tr><td><code>text-embedding-3-large</code></td><td>0.13</td><td>0.00</td><td>입력 요율</td><td>입력 요율</td><td>입력 요율</td></tr>
+      {bookTables.map((t) => (
+        <tr><td><code>{t.name}</code>{t.note && <>: {t.note}</>}</td><td>{t.count}</td></tr>
+      ))}
+    </tbody>
+  </table>
+
+  <table>
+    <thead>
+      <tr><th>제공업체</th><th>서비스 티어</th><th>배수</th></tr>
+    </thead>
+    <tbody>
+      {multipliers.map((m) => (
+        <tr><td><code>{m.provider}</code></td><td><code>{m.tier}</code></td><td>{m.m}</td></tr>
+      ))}
     </tbody>
   </table>
 
   <p>
-    100만 토큰당 USD이며, 서드파티 모델 카탈로그와 마지막으로 대조했을 때의
-    가격표 상태입니다. 그 시점을 가격표는 자기 <code>as_of</code> 날짜로
-    기록합니다. Anthropic 항목이 캐시 쓰기 요율을 둘 다 담고 있는 이유는 데몬이
-    1시간 요율에서 5분 요율로 폴백하기 때문이고, 더 긴 쪽을 빼놓은 가격표는 조용히
-    적게 청구할 것이기 때문입니다. OpenAI는 캐시에 쓰는 데 요금을 받지 않으므로
-    거기에서 캐시 쓰기는 입력 요율로 청구됩니다. <code>gemini-2.5-flash</code>는
-    1.00의 오디오 입력 요율도 함께 담고 있고, 나머지 항목은 오디오를 자기 텍스트
-    요율로 계산합니다. <code>claude-haiku-4</code>는 없습니다. Anthropic이
-    제공하는 id는 <code>claude-haiku-4-5</code>이고, 아무것에도 해석되지 않는
-    id는 추측하지 않고 값이 매겨지지 않은 채로 둡니다.
+    이것은 공개 정가입니다. 어떤 모델에 어떤 값이 매겨지는지 보려면 바이너리에
+    물어보십시오. 수집과 같은 조회를 씁니다.
   </p>
+
+  <Command class="not-prose my-6" command="mcpd prices show claude-sonnet-4-5 --provider aws.bedrock" />
+
+  <h2>나만의 가격표</h2>
   <p>
-    이것은 미국 달러로 된 공개 정가입니다. 모든 배포는 위의 내장 표로 가격을
-    매기고, 그 표에 없는 모델은 값이 매겨지지 않은 채로 남습니다. 가격표를 일부러
-    짧게 두었습니다. 긴 가격표는 더 많은 자리에서 낡을 것이기 때문입니다.
+    <code>--price-book</code>이나 설정 파일의 <code>price_book</code> 키로 직접
+    만든 가격표를 불러오십시오. 가격표는 JSON입니다. <code>id</code>, ISO 4217
+    <code>currency</code>, 그리고 <code>models</code>와 <code>providers</code>
+    표가 있고, 각 표는 모델 id를 위의 요율에 대응시킵니다.
+    <code>"extends": "builtin"</code>을 주면 내장 가격표 위에 겹쳐지므로, 다르게
+    내는 요율만 적으면 됩니다.
   </p>
+
+  <pre><code>{`{
+  "id": "acme-2026-10",
+  "currency": "USD",
+  "extends": "builtin",
+  "providers": {
+    "bedrock": {
+      "anthropic.claude-sonnet-4-5-20250929-v1:0": { "input": 2.7, "output": 13.5 }
+    }
+  },
+  "models": {
+    "our-finetune": { "input": 0.5, "output": 1.5 }
+  }
+}`}</code></pre>
+
   <p>
-    가격표는 서버 상태의 일부이고, mcpd를 라이브러리로 넣으면
-    <code>AppState::with_price_book</code>에 가격표를 넘길 수 있습니다. 가격표는
-    id 하나, ISO 4217 통화 하나, 모델 id에서 요율로 가는 맵으로 이루어지고, 여기서
-    나온 모든 수치에는 그 id가 찍히므로 나중에 두 가격표를 구분할 수 있습니다. 한
-    프로젝트 안의 가격은 하나의 통화를 함께 씁니다. mcpd는 실행의 스팬을
-    산술적으로 더할 뿐 통화 사이를 환산하지 않습니다.
+    mcpd는 시작할 때 가격표를 검사하고, 음수 요율, 순서가 어긋난 티어, 세 글자
+    코드가 아닌 통화가 있으면 그 항목을 짚어 거부합니다. 직접 만든 가격표에서
+    나온 수치는 그 id를 기록하므로, 나중에 정가 추정치와 구분할 수 있습니다.
+    프로젝트의 실행은 스팬을 산술적으로 더하므로, 한 가격표의 모든 요율은 한
+    통화로 맞추십시오.
+  </p>
+
+  <h2>요율 새로 고치기</h2>
+  <p>
+    요율은 몇 주마다 바뀝니다. <code>mcpd prices refresh</code>는 공개 모델
+    카탈로그에서 가격표를 써 내므로, 배포는 새 릴리스 없이 새 요율을 받을 수
+    있습니다.
+  </p>
+
+  <Command class="not-prose my-6" command="mcpd prices refresh --out /etc/mcpd/prices.json" />
+
+  <p>
+    <code>--price-book</code>이 그 파일을 가리키게 하고 재시작하십시오.
+    <code>--out</code>의 가격표가 이미 값을 매기고 있지만 카탈로그에 더는 없는
+    모델은 남겨 둡니다. 은퇴한 모델로 가는 트래픽도 계속 들어오기 때문입니다.
+    <code>--prune</code>은 그런 모델을 뺍니다. <code>--source</code>는 같은 모양의
+    다른 카탈로그를 URL이나 파일에서 읽습니다. 내장 가격표도 같은 명령으로
+    씁니다.
   </p>
 
   <h2>돈을 다시 읽어 오기</h2>
