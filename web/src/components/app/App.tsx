@@ -17,6 +17,7 @@ import { findDaemon, storedSession } from '@/lib/api'
 import type { StoredSession } from '@/lib/api'
 import Explorer, { initialEndpoint, initialProject } from './Explorer'
 import { AccountPanel, AuthScreen } from './Account'
+import { linkFromUrl } from './AccountAuth'
 import Logs from './Logs'
 import Cost from './Cost'
 import Workflows from './Workflows'
@@ -76,6 +77,7 @@ export default function App() {
   const [signup, setSignup] = useState<boolean | null>(null)
   const [offers, setOffers] = useState({ signup: false, sso: false })
   const [session, setSession] = useState<StoredSession | null>(() => storedSession(endpoint))
+  const [mailedLink, setMailedLink] = useState(linkFromUrl)
 
   useEffect(() => {
     let live = true
@@ -114,13 +116,16 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPop)
   }, [])
 
-  if (signup && !session) {
+  // A mailed link other than an invitation is about an account, possibly not
+  // the one logged in here, so it opens the account screens to be finished.
+  if (signup && (!session || (mailedLink && mailedLink.kind !== 'invite'))) {
     return (
       <AuthScreen
         endpoint={endpoint}
         signup={offers.signup}
         sso={offers.sso}
         onSession={(s) => {
+          setMailedLink(null)
           setSession(storedSession(endpoint))
           if (s.project) setProject(s.project)
         }}

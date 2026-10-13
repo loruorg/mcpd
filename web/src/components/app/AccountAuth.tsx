@@ -41,16 +41,26 @@ export interface LinkToken {
   token: string
 }
 
-/** The mailed link in the URL fragment, if any. */
-export function linkFromUrl(): LinkToken | null {
-  if (typeof window === 'undefined') return null
-  const m = /^#(verify|reset|email|invite|forgot)(?:=([A-Za-z0-9_-]+))?$/.exec(location.hash)
+function parseLink(hash: string): LinkToken | null {
+  const m = /^#(verify|reset|email|invite|forgot)(?:=([A-Za-z0-9_-]+))?$/.exec(hash)
   if (!m) return null
   return { kind: m[1] as LinkToken['kind'], token: m[2] ?? '' }
 }
 
+/* Read once, when the page loads. Screens rewrite the query string as they
+   settle, and a rewrite drops the fragment before the screen that reads it has
+   mounted. */
+let loadedLink: LinkToken | null = typeof window === 'undefined' ? null : parseLink(location.hash)
+
+/** The mailed link the page was opened with, if any. */
+export function linkFromUrl(): LinkToken | null {
+  if (typeof window === 'undefined') return null
+  return parseLink(location.hash) ?? loadedLink
+}
+
 /** Remove the fragment and the single sign-on query from the URL. */
 export function clearLink() {
+  loadedLink = null
   const p = new URLSearchParams(location.search)
   for (const k of ['code', 'state', 'error', 'error_description', 'session_state', 'iss']) p.delete(k)
   const q = p.toString()
