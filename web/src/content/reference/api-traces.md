@@ -35,7 +35,7 @@ The trace list. Filter on status, kind, name, tags, session, thread, user, envir
 | `min_cost` | `f64` | · | Only traces at least this expensive. |
 | `has_score` | `string` | · | Only traces carrying a score from this scorer. |
 | `score_below` | `f64` | · | Combined with `has_score`: only traces where that scorer came in under this value. This is the query that finds bad answers. |
-| `sort` | `string` | `start_time` | One of `start_time`, `duration`, `cost`, `span_count`, `score`. Defaults to `start_time`. |
+| `sort` | `string` | `start_time` | One of `start_time`, `duration`, `cost`, `span_count`, `tokens`, `score`. Defaults to `start_time`. |
 | `order` | `string` | `desc` | `asc` or `desc`. Defaults to `desc`. |
 | `limit` | `u32` | `50` | Page size, 1 to 500. |
 | `cursor` | `string` | · | Opaque cursor from a previous page. |

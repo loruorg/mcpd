@@ -1949,6 +1949,7 @@ impl Store for PostgresStore {
             TraceSort::Duration => "COALESCE(t.duration_ns, 0)",
             TraceSort::Cost => "t.total_cost",
             TraceSort::SpanCount => "t.span_count",
+            TraceSort::Tokens => "(t.input_tokens + t.output_tokens)",
             TraceSort::Score => "COALESCE(t.min_score, 0)",
         };
         let dir = match q.order {
@@ -2552,6 +2553,53 @@ impl Store for PostgresStore {
         let next_cursor = if items.len() > limit as usize {
             items.truncate(limit as usize);
             items.last().map(|l| encode_cursor(to_nanos(l.timestamp), &l.log_id))
+        } else {
+            None
+        };
+        Ok(Paged { items, next_cursor, total: None })
+    }
+
+    async fn list_feedback(&self, q: &crate::FeedbackQuery) -> Result<Paged<Feedback>> {
+        let conn = self.conn().await?;
+        let mut w = Where::default();
+        w.push("project = {}", q.project.clone());
+        if let Some(t) = &q.trace_id {
+            w.push("trace_id = {}", t.clone());
+        }
+        if let Some(s) = &q.span_id {
+            w.push("span_id = {}", s.clone());
+        }
+        if let Some(k) = &q.kind {
+            w.push("kind = {}", k.clone());
+        }
+        if let Some(a) = &q.author_kind {
+            w.push("author_kind = {}", a.clone());
+        }
+        if let Some(t) = q.from {
+            w.push("timestamp >= {}", to_nanos(t));
+        }
+        if let Some(t) = q.to {
+            w.push("timestamp < {}", to_nanos(t));
+        }
+        if let Some(c) = &q.cursor {
+            let (v, id) = decode_cursor(c)?;
+            let n = w.next();
+            w.push_raw(format!("(timestamp, feedback_id) < (${n}::bigint, ${})", n + 1));
+            w.bind(v);
+            w.bind(id);
+        }
+        let limit = q.limit.clamp(1, 500);
+        let sql = format!(
+            "SELECT {FEEDBACK_COLUMNS} FROM feedback{} ORDER BY timestamp DESC, feedback_id DESC \
+             LIMIT {}",
+            w.sql(),
+            limit + 1
+        );
+        let rows = conn.query(&sql, &w.params()).await.map_err(be)?;
+        let mut items: Vec<Feedback> = rows.iter().map(row_to_feedback).collect();
+        let next_cursor = if items.len() > limit as usize {
+            items.truncate(limit as usize);
+            items.last().map(|f| encode_cursor(to_nanos(f.timestamp), &f.feedback_id))
         } else {
             None
         };

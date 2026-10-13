@@ -828,6 +828,7 @@ fn order_by(sort: TraceSort, order: Order) -> String {
         TraceSort::Duration => "duration_ns",
         TraceSort::Cost => "total_cost",
         TraceSort::SpanCount => "span_count",
+        TraceSort::Tokens => "(input_tokens + output_tokens)",
         TraceSort::Score => "ifNull(min_score, 0)",
     };
     let dir = match order {
@@ -1677,6 +1678,51 @@ impl Store for ClickHouseStore {
             next_cursor: None,
             total: None,
         })
+    }
+
+    async fn list_feedback(&self, q: &crate::FeedbackQuery) -> Result<Paged<Feedback>> {
+        let mut w = vec![format!("project = {}", quote(&q.project))];
+        if let Some(t) = &q.trace_id {
+            w.push(format!("trace_id = {}", quote(t)));
+        }
+        if let Some(s) = &q.span_id {
+            w.push(format!("span_id = {}", quote(s)));
+        }
+        if let Some(k) = &q.kind {
+            w.push(format!("kind = {}", quote(k)));
+        }
+        if let Some(a) = &q.author_kind {
+            w.push(format!("author_kind = {}", quote(a)));
+        }
+        if let Some(f) = q.from {
+            w.push(format!("timestamp >= {}", ts(f)));
+        }
+        if let Some(t) = q.to {
+            w.push(format!("timestamp < {}", ts(t)));
+        }
+        if let Some(c) = &q.cursor {
+            let (v, id) = decode_cursor(c)?;
+            w.push(format!("(timestamp, feedback_id) < ({}, {})", nanos_literal(v), quote(&id)));
+        }
+        let limit = q.limit.clamp(1, 500);
+        // FINAL, because a resent piece of feedback is a second row until the
+        // table merges, and a list that showed both would count it twice.
+        let rows: Vec<FeedbackRow> = self
+            .select(&format!(
+                "SELECT * FROM {} FINAL WHERE {} ORDER BY timestamp DESC, feedback_id DESC LIMIT {}",
+                self.table("feedback"),
+                w.join(" AND "),
+                limit + 1
+            ))
+            .await?;
+        let mut items: Vec<Feedback> = rows.into_iter().map(Into::into).collect();
+        let next_cursor = if items.len() > limit as usize {
+            items.truncate(limit as usize);
+            items.last().map(|f| encode_cursor(f.timestamp, &f.feedback_id))
+        } else {
+            None
+        };
+        Ok(Paged { items, next_cursor, total: None })
     }
 
     async fn list_metric_points(
@@ -3233,10 +3279,15 @@ fn decode_cursor(cursor: &str) -> Result<(i64, String)> {
     Ok((v, id.to_owned()))
 }
 
-/// A nanosecond count as the literal a `DateTime64(9)` column compares against.
+/// A nanosecond count as the exact literal a `DateTime64(9)` column compares
+/// against. Exact, not through [`ts`]: a float rounds a present-day timestamp
+/// by a few hundred nanoseconds, so a keyset cursor built on it could land
+/// after the row it was taken from and serve that row again on the next page.
 fn nanos_literal(nanos: i64) -> String {
-    ts(OffsetDateTime::from_unix_timestamp_nanos(i128::from(nanos))
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH))
+    ts_exact(
+        OffsetDateTime::from_unix_timestamp_nanos(i128::from(nanos))
+            .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+    )
 }
 
 /// Map a caller-supplied dimension to a column and the table that answers it.

@@ -225,7 +225,8 @@ pub const METRIC_POINT_PARAMS: &[&str] =
     &["project", "name", "from", "to", "filter", "trace_id", "order", "limit", "cursor"];
 
 /// Every parameter `GET /v1/api/feedback` accepts.
-pub const FEEDBACK_PARAMS: &[&str] = &["project", "trace_id", "limit"];
+pub const FEEDBACK_PARAMS: &[&str] =
+    &["project", "trace_id", "limit", "span_id", "kind", "author_kind", "from", "to", "cursor"];
 
 /// Values mcpd records on every trace and cannot yet filter a list by.
 ///
@@ -515,6 +516,7 @@ pub async fn list_traces(
         sort: match get(&p, "sort") {
             Some("duration") => TraceSort::Duration,
             Some("cost") => TraceSort::Cost,
+            Some("tokens") => TraceSort::Tokens,
             Some("span_count") => TraceSort::SpanCount,
             // The lowest score the run was given. A run nothing has scored yet
             // ranks as a zero, so `order=asc` is "worst first" with the
@@ -526,7 +528,7 @@ pub async fn list_traces(
                     field: "sort".to_owned(),
                     message: format!(
                         "{other:?} is not sortable; use start_time, duration, cost, \
-                         span_count or score"
+                         span_count, tokens or score"
                     ),
                 })
             }
@@ -1082,39 +1084,37 @@ pub async fn list_feedback(
     // and not the project, so a key scoped to one team could read another team's
     // reviewer comments by naming their project.
     // Validated before the row, for the reason `audited_valid` gives.
-    let (trace_id, limit) = audited_valid(
+    let q = audited_valid(
         &state,
         &headers,
         peer.0,
         authorize_project(&state, &headers, Scope::Read, &project),
         || {
             only(&p, "GET /v1/api/feedback", FEEDBACK_PARAMS, &[])?;
-            let trace_id = get(&p, "trace_id").ok_or_else(|| ApiError::BadParam {
-                field: "trace_id".to_owned(),
-                message: "name the run whose judgements you want. This endpoint reads the \
-                          feedback attached to one run, and mcpd cannot yet list a whole \
-                          project's feedback, so an answer with no trace_id would be an empty \
-                          list that reads as though nobody had judged anything."
-                    .to_owned(),
-            })?;
-            let limit = parse::<u32>(&p, "limit")?.unwrap_or(50).clamp(1, 500) as usize;
-            Ok((trace_id, limit))
+            let kind = parse_enum::<mcpd_core::FeedbackKind>(
+                &p,
+                "kind",
+                "thumbs, rating, correction, tag, comment",
+            )?;
+            Ok(mcpd_store::FeedbackQuery {
+                project: project.clone(),
+                trace_id: get(&p, "trace_id").map(str::to_owned),
+                span_id: get(&p, "span_id").map(str::to_owned),
+                kind: kind.map(|k| k.as_str().to_owned()),
+                author_kind: get(&p, "author_kind").map(str::to_owned),
+                from: parse_time(&p, "from")?,
+                to: parse_time(&p, "to")?,
+                limit: parse::<u32>(&p, "limit")?.unwrap_or(50).clamp(1, 500),
+                cursor: page_cursor(&p, false)?,
+            })
         },
         "list_feedback",
         &project,
         get(&p, "trace_id"),
     )
     .await?;
-    let detail = state
-        .store
-        .get_trace(&project, trace_id, &Include { feedback: true, ..Include::default() })
-        .await?;
-    let mut items = detail.feedback.unwrap_or_default();
-    items.truncate(limit);
-    Ok(Json(FeedbackListResponse {
-        page: Page { next_cursor: None, has_more: false, total: Some(items.len() as u64) },
-        feedback: items,
-    }))
+    let paged = state.store.list_feedback(&q).await?;
+    Ok(Json(FeedbackListResponse { page: page_of(&paged), feedback: paged.items }))
 }
 
 /// `GET /v1/api/analytics/summary`

@@ -183,7 +183,7 @@ async fn a_request_answered_with_400_leaves_no_row_saying_it_was_served() {
             READ_KEY,
             None,
         ),
-        ("GET", "/v1/api/feedback", READ_KEY, None),
+        ("GET", "/v1/api/feedback?kind=loud", READ_KEY, None),
         ("GET", "/v1/api/datasets/audit-order-dataset/items?limit=many", READ_KEY, None),
         (
             "POST",

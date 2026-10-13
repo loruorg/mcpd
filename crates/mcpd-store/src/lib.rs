@@ -137,6 +137,8 @@ pub enum TraceSort {
     Cost,
     /// How many steps it had.
     SpanCount,
+    /// How many tokens it used, input and output together.
+    Tokens,
     /// The lowest score the run received.
     ///
     /// Read from the `min_score` column of the trace projection, which is
@@ -166,6 +168,11 @@ impl TraceSort {
             Self::Duration => trace.duration_ns.unwrap_or(0).to_string(),
             Self::Cost => trace.cost.as_ref().and_then(|c| c.total_cost).unwrap_or(0.0).to_string(),
             Self::SpanCount => trace.span_count.to_string(),
+            Self::Tokens => trace
+                .usage
+                .as_ref()
+                .map_or(0, |u| u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0))
+                .to_string(),
             Self::Score => min_score.to_string(),
         }
     }
@@ -340,6 +347,29 @@ pub struct MetricQuery {
     /// model is far cheaper than returning every series and discarding most of
     /// them in the client.
     pub filter: Vec<(String, String)>,
+}
+
+/// Filters for listing a project's feedback.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FeedbackQuery {
+    /// The project to read.
+    pub project: String,
+    /// Only feedback on this run.
+    pub trace_id: Option<String>,
+    /// Only feedback on this step.
+    pub span_id: Option<String>,
+    /// Only this kind: `thumbs`, `rating`, `correction`, `tag` or `comment`.
+    pub kind: Option<String>,
+    /// Only from this kind of author, such as `end_user` or `reviewer`.
+    pub author_kind: Option<String>,
+    /// Window start.
+    pub from: Option<OffsetDateTime>,
+    /// Window end.
+    pub to: Option<OffsetDateTime>,
+    /// Page size.
+    pub limit: u32,
+    /// Opaque cursor. Pages run newest first.
+    pub cursor: Option<String>,
 }
 
 /// Filters for listing stored metric points.
@@ -1650,6 +1680,10 @@ pub trait Store: Send + Sync + 'static {
 
     /// Query a metric as an aggregated time series.
     async fn query_metrics(&self, q: &MetricQuery) -> Result<MetricSeriesResponse>;
+
+    /// List a project's feedback, newest first, keyset paged on
+    /// `(timestamp, feedback_id)`.
+    async fn list_feedback(&self, q: &FeedbackQuery) -> Result<Paged<Feedback>>;
 
     /// List stored metric points as they were recorded, keyset paged on
     /// `(timestamp, metric_id)`.

@@ -39,8 +39,8 @@
 use std::collections::BTreeMap;
 
 use mcpd_core::{
-    Correlation, Cost, EntityKind, LogLevel, LogRecord, MetricKind, MetricPoint, Span, SpanKind,
-    SpanStatus, TokenUsage, Trace,
+    Correlation, Cost, EntityKind, Feedback, FeedbackKind, LogLevel, LogRecord, MetricKind,
+    MetricPoint, Span, SpanKind, SpanStatus, TokenUsage, Trace,
 };
 use mcpd_store::{
     Batch, ClickHouseConfig, ClickHouseStore, Delta, DeltaQuery, DeltaSignal, Discovered,
@@ -561,6 +561,15 @@ fn documented_answers() -> Answers {
     );
     e.insert("a policy with no window keeps everything", "0,1".into());
     e.insert("expiring runs removes them", "0".into());
+
+    // Runs sorted by the tokens they used, input and output together.
+    e.insert("runs sort by tokens", "big,mid,small".into());
+
+    // A project's feedback, newest first, filtered and keyset paged.
+    e.insert("feedback lists newest first", "f3,f2".into());
+    e.insert("feedback pages on", "f1".into());
+    e.insert("feedback filters on kind", "f2".into());
+    e.insert("feedback filters on run", "f1,f3".into());
 
     // Metric points read back as they were written, keyset paged.
     e.insert("metric points list newest first", "m3,m2".into());
@@ -2100,6 +2109,106 @@ async fn observe_themes(store: &dyn Store, project: String) -> Answers {
     a
 }
 
+async fn observe_token_sort(store: &dyn Store, project: String) -> Answers {
+    let mut a = Answers::new();
+    let now = OffsetDateTime::now_utc();
+    let spans: Vec<Span> = [("small", 10, 5), ("big", 900, 100), ("mid", 300, 0)]
+        .iter()
+        .enumerate()
+        .map(|(i, (label, input, output))| {
+            let mut s = root(
+                &project,
+                label,
+                now - Duration::seconds(i as i64 + 1),
+                only_project(&project),
+            );
+            s.usage = Some(tokens(*input, *output));
+            s
+        })
+        .collect();
+    store.ingest(Batch { spans, ..Batch::default() }).await.expect("the token fixture must ingest");
+    let page = store
+        .list_traces(&TraceQuery {
+            project: project.clone(),
+            sort: mcpd_store::TraceSort::Tokens,
+            order: mcpd_store::Order::Desc,
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("list runs by tokens");
+    let names: Vec<String> = page.items.iter().map(|t| t.name.clone()).collect();
+    a.insert("runs sort by tokens", names.join(","));
+    a
+}
+
+async fn observe_feedback_list(store: &dyn Store, project: String) -> Answers {
+    let mut a = Answers::new();
+    let now = OffsetDateTime::now_utc();
+    let run = trace_id(&project, "fb");
+    let item = |id: &str, secs: i64, kind: FeedbackKind, on_run: bool| Feedback {
+        feedback_id: format!("{project}-{id}"),
+        trace_id: on_run.then(|| run.clone()),
+        span_id: None,
+        kind,
+        value: json!(true),
+        comment: None,
+        author_id: None,
+        author_kind: Some("reviewer".into()),
+        timestamp: now - Duration::seconds(60 - secs),
+        metadata: None,
+        correlation: only_project(&project),
+    };
+    store
+        .ingest(Batch {
+            feedback: vec![
+                item("f1", 1, FeedbackKind::Thumbs, true),
+                item("f2", 2, FeedbackKind::Rating, false),
+                item("f3", 3, FeedbackKind::Thumbs, true),
+            ],
+            ..Batch::default()
+        })
+        .await
+        .expect("the feedback fixture must ingest");
+    let strip = |items: &[Feedback]| {
+        items
+            .iter()
+            .map(|f| f.feedback_id.trim_start_matches(&format!("{project}-")).to_owned())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut q =
+        mcpd_store::FeedbackQuery { project: project.clone(), limit: 2, ..Default::default() };
+    let first = store.list_feedback(&q).await.expect("list feedback");
+    a.insert("feedback lists newest first", strip(&first.items));
+    q.cursor = first.next_cursor.clone();
+    let second = store.list_feedback(&q).await.expect("list the next page");
+    a.insert("feedback pages on", strip(&second.items));
+    let rated = store
+        .list_feedback(&mcpd_store::FeedbackQuery {
+            project: project.clone(),
+            kind: Some("rating".into()),
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("filter feedback by kind");
+    a.insert("feedback filters on kind", strip(&rated.items));
+    let mut on_run = store
+        .list_feedback(&mcpd_store::FeedbackQuery {
+            project: project.clone(),
+            trace_id: Some(run.clone()),
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("filter feedback by run")
+        .items;
+    on_run.sort_by(|x, y| x.feedback_id.cmp(&y.feedback_id));
+    a.insert("feedback filters on run", strip(&on_run));
+    a
+}
+
 async fn observe_metric_points(store: &dyn Store, project: String) -> Answers {
     let mut a = Answers::new();
     let now = OffsetDateTime::now_utc();
@@ -2489,6 +2598,8 @@ async fn every_backend_gives_the_documented_answer_to_the_same_question() {
         answers.extend(observe_polling(store.as_ref(), unique(&format!("poll-{name}"))).await);
         answers.extend(observe_retention(store.as_ref(), unique(&format!("ret-{name}"))).await);
         answers.extend(observe_metric_points(store.as_ref(), unique(&format!("mp-{name}"))).await);
+        answers.extend(observe_feedback_list(store.as_ref(), unique(&format!("fb-{name}"))).await);
+        answers.extend(observe_token_sort(store.as_ref(), unique(&format!("tok-{name}"))).await);
         answers.extend(observe_themes(store.as_ref(), unique(&format!("thm-{name}"))).await);
         answers.extend(
             observe_tenancy(

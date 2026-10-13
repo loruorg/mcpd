@@ -113,6 +113,12 @@ impl Store for Bare {
     ) -> mcpd_store::Result<mcpd_core::MetricSeriesResponse> {
         self.0.query_metrics(q).await
     }
+    async fn list_feedback(
+        &self,
+        q: &mcpd_store::FeedbackQuery,
+    ) -> mcpd_store::Result<mcpd_store::Paged<mcpd_core::Feedback>> {
+        self.0.list_feedback(q).await
+    }
     async fn list_metric_points(
         &self,
         q: &mcpd_store::MetricPointQuery,

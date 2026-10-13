@@ -985,6 +985,11 @@ impl Store for SqliteStore {
         self.with_read(move |conn| query_metrics_sync(conn, &q)).await
     }
 
+    async fn list_feedback(&self, q: &crate::FeedbackQuery) -> Result<Paged<Feedback>> {
+        let q = q.clone();
+        self.with_read(move |conn| list_feedback_sync(conn, &q)).await
+    }
+
     async fn list_metric_points(
         &self,
         q: &crate::MetricPointQuery,

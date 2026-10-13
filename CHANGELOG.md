@@ -102,6 +102,9 @@ rather than every commit.
 
 ### Fixed
 
+- **A page of aspect notes or snapshots on ClickHouse could repeat the last
+  row of the page before.** The cursor's timestamp went through a float and
+  rounded by a few hundred nanoseconds. It is now exact.
 - **Postgres counts runs for a run dimension.** A breakdown by name,
   environment, status, session, user or service counted steps on Postgres and
   runs on the other two backends, so the same data reported three times as many
@@ -237,6 +240,27 @@ rather than every commit.
 
 ### Added
 
+- **Sort runs by tokens.** `sort=tokens` on `GET /v1/api/traces` orders runs
+  by input and output tokens together, on all three backends, and the token
+  columns in the run list sort by it.
+- **A project's feedback, listed and filtered** (wire contract).
+  `GET /v1/api/feedback` no longer needs a `trace_id`: it lists the whole
+  project newest first, narrows by run, step, kind, author kind and window,
+  and pages with a cursor, on all three backends. The SDKs' feedback filters
+  now reach it.
+- **Model calls recorded from the provider's response, in all six SDKs.**
+  `record_response` reads an OpenAI or Anthropic response and records the
+  model, provider, token usage with cache and reasoning meters, response id,
+  finish reasons and service tier, so a batch or flex call is priced at its
+  discount. `usage_from_openai` and `usage_from_anthropic` do the mapping
+  alone. `mark_first_token` records time to first token and `set_guardrail`
+  a guardrail's outcome. Elixir offers them as `Mcpd.ModelCall`.
+- **Redaction in the process, in all six SDKs.** A `redact` client option is
+  applied to span payloads, attributes, metadata and log fields before they
+  are queued. A redactor that fails drops the field and is counted in
+  `redaction_failures`.
+- **A `handoff` span kind** (wire contract), for one agent passing control to
+  another.
 - **Four more screens in the interface.** Evaluations lists every scorer the
   daemon offers, the recent scores with their reasons, and scores the newest
   runs on demand, as a dry run or stored. Datasets shows each dataset's cases

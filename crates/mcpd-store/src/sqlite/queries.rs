@@ -867,6 +867,7 @@ pub(super) fn list_traces_sync(conn: &Connection, q: &TraceQuery) -> Result<Page
         TraceSort::Duration => "COALESCE(t.duration_ns, 0)",
         TraceSort::Cost => "t.total_cost",
         TraceSort::SpanCount => "t.span_count",
+        TraceSort::Tokens => "(t.input_tokens + t.output_tokens)",
         TraceSort::Score => "COALESCE(t.min_score, 0)",
     };
     let dir = match q.order {
@@ -1154,6 +1155,58 @@ pub(super) fn list_logs_sync(conn: &Connection, q: &LogQuery) -> Result<Paged<Lo
     let next_cursor = if rows.len() > limit as usize {
         rows.truncate(limit as usize);
         rows.last().map(|l| encode_cursor(to_nanos(l.timestamp), &l.log_id))
+    } else {
+        None
+    };
+    Ok(Paged { items: rows, next_cursor, total: None })
+}
+
+pub(super) fn list_feedback_sync(
+    conn: &Connection,
+    q: &crate::FeedbackQuery,
+) -> Result<Paged<Feedback>> {
+    let mut w = Where::default();
+    w.push("project = ?", q.project.clone());
+    if let Some(t) = &q.trace_id {
+        w.push("trace_id = ?", t.clone());
+    }
+    if let Some(s) = &q.span_id {
+        w.push("span_id = ?", s.clone());
+    }
+    if let Some(k) = &q.kind {
+        w.push("kind = ?", k.clone());
+    }
+    if let Some(a) = &q.author_kind {
+        w.push("author_kind = ?", a.clone());
+    }
+    if let Some(f) = q.from {
+        w.push("timestamp >= ?", to_nanos(f));
+    }
+    if let Some(t) = q.to {
+        w.push("timestamp < ?", to_nanos(t));
+    }
+    if let Some(c) = &q.cursor {
+        let (v, id) = decode_cursor(c)?;
+        w.clauses.push("(timestamp, feedback_id) < (?, ?)".to_owned());
+        w.binds.push(Box::new(v));
+        w.binds.push(Box::new(id));
+    }
+    let limit = q.limit.clamp(1, 500);
+    let sql = format!(
+        "SELECT {FEEDBACK_COLUMNS} FROM feedback{} ORDER BY timestamp DESC, feedback_id DESC \
+         LIMIT {}",
+        w.sql(),
+        limit + 1
+    );
+    let mut stmt = conn.prepare(&sql).map_err(be)?;
+    let mut rows: Vec<Feedback> = stmt
+        .query_map(params_from_iter(w.refs()), row_to_feedback)
+        .map_err(be)?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(be)?;
+    let next_cursor = if rows.len() > limit as usize {
+        rows.truncate(limit as usize);
+        rows.last().map(|f| encode_cursor(to_nanos(f.timestamp), &f.feedback_id))
     } else {
         None
     };
