@@ -13,7 +13,7 @@ const link = (route: string) => urlFor(route, loc)
 
 <Doc
   title="Esecuzioni"
-  description="Un’esecuzione durevole in mcpd: avviarla in modo idempotente, il diario e come seguirlo, eventi e attese, annullamento, timer e limiti, e dove compare dentro la sua traccia."
+  description="Un’esecuzione durevole in mcpd: avviarla in modo idempotente, il diario, eventi e attese, annullamento, timer e limiti, perché un passo è fallito e quale passo verde l’ha causato, e l’esecuzione dentro la sua traccia."
   lede="Un’esecuzione è una riga, un cursore, un diario di tentativi, un insieme di scadenze e un insieme di sospensioni. Questa pagina dice che cosa puoi farle, e che cosa ti risponde."
   og="docs"
 >
@@ -127,6 +127,105 @@ const link = (route: string) => urlFor(route, loc)
     pesa sul budget dell’esecuzione nel momento in cui finisce.
   </p>
 
+  <h2>Perché un passo è fallito</h2>
+  <p>
+    I template di una definizione sono archi dichiarati. Quando l’input di un
+    passo legge <code>{'${steps.classify.output.kind}'}</code>, nomina l’output
+    di un altro passo, nella versione del documento che questa esecuzione ha
+    fissato all’avvio, e il daemon deve risolvere quel riferimento per poter
+    rendere l’input. Così il daemon può rispondere, per un passo di
+    un’esecuzione, di quali antenati quel passo ha consumato l’output,
+    direttamente e attraverso i passi intermedi.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="spiegare un passo"
+    command={`curl -G http://localhost:4317/v1/api/runs/run_1c4f9b02e7d3a856/cause \\
+  -H 'authorization: Bearer $MCPD_API_KEY' \\
+  --data-urlencode 'step=charge'`}
+  />
+
+  <p>
+    La risposta vale la lettura per quello che trova. Il passo che ha prodotto
+    il valore sbagliato di solito è <strong>riuscito</strong>: un classificatore
+    ha restituito una lista vuota invece di un errore, il passo successivo ha
+    passato avanti la lista vuota senza accorgersene, e il passo dopo ancora è
+    fallito perché non aveva niente su cui lavorare. Ogni stato su quel
+    percorso è <code>succeeded</code> tranne l’ultimo, quindi nessuna ricerca
+    sugli stati arriva al passo che ha causato il problema. Ogni salto della
+    catena porta il percorso del template attraverso cui è passato il valore e
+    <code>silent_producer</code>, che è vero quando quell’antenato è finito
+    <code>succeeded</code> e lo è anche ogni passo tra lui e il fallimento.
+    Questa è la lettura che un codice di stato non ti può dare: questo passo è
+    verde, ed è da qui che viene il tuo problema.
+  </p>
+  <p>
+    <code>value_kind</code> e <code>value_empty</code> riportano la forma di
+    quello che è passato per il percorso, mai il valore. Un antenato finito
+    <code>succeeded</code> che ha consegnato un array vuoto è proprio il caso
+    per cui esiste l’endpoint, e la forma basta a vederlo senza che il daemon
+    tenga niente che appartiene a un chiamante.
+  </p>
+  <p>
+    La chiave del passo è un parametro di query e non un segmento del percorso,
+    perché una chiave può contenere una barra: <code>refund/issue</code> è un
+    ramo di un <code>parallel</code>, e abbastanza proxy riscrivono o
+    rifiutano una barra codificata dentro un segmento del percorso da farne un
+    contratto sbagliato. Le chiavi con un indice funzionano allo stesso modo:
+    <code>classify[3]</code> è un elemento di un <code>foreach</code> e
+    <code>poll[7]/classify</code> è un’iterazione di un ciclo. Un passo
+    annidato porta anche quello che ha letto il suo contenitore, perché è il
+    contenitore ad averlo deciso: un elemento di <code>foreach</code> nomina il
+    passo da cui viene l’array su cui si è aperto, ed è per questo che
+    quell’elemento esiste. Un <code>subworkflow</code> è un salto solo, letto
+    dalla riga dell’esecuzione figlia; perché un passo della figlia è fallito
+    è la risposta della figlia stessa, da chiedere con l’id dell’esecuzione
+    figlia. Un template che legge <code>input</code> non nomina nessun
+    antenato, e la catena allora è vuota invece che inventata.
+  </p>
+  <p>
+    <code>max_depth</code> limita la risalita e vale 32 se non dici altro, che
+    è anche il suo tetto. Una risalita che si è fermata lasciando antenati non
+    visitati imposta <code>truncated</code>, così una catena corta non viene
+    mai scambiata per una completa. Qui niente legge un prompt, una completion
+    o un modello: la risposta viene dal diario e dalla definizione, quindi è la
+    stessa anche con la cattura dei payload degli span spenta.
+  </p>
+
+  <h2>Un’esecuzione che si ripete</h2>
+  <p>
+    Un’esecuzione in cui la stessa chiave di passo continua a fallire con un
+    input reso identico non fa progressi. La chiave del passo include il ramo,
+    l’elemento e l’iterazione, quindi una chiave identica è una posizione
+    identica nel grafo, e un input identico in più vuol dire che nemmeno il
+    contesto da cui viene reso si è mosso. Il daemon conta quei fallimenti e
+    chiude l’esecuzione quando arrivano a <code>max_step_repeats</code>,
+    nominando il passo e il conteggio, come la chiude un
+    <code>max_steps</code> esaurito.
+  </p>
+  <p>
+    <code>retry.max_attempts</code> non copre questo caso, ed è per questo che
+    il tetto esiste. Due percorsi riprovano senza spendere niente del budget dei
+    tentativi: un fallimento classificato <code>unservable</code> torna dopo la
+    durata di un lease, per sempre, perché il worker ha detto che il passo non
+    era suo da servire e non che è fallito, e un lease recuperato torna in coda
+    gratis, perché il daemon ha perso il contatto e addebitarlo al passo
+    farebbe sì che un solo deploy chiuda ogni esecuzione. Un’esecuzione
+    bloccata su uno dei due riprova lo stesso lavoro finché qualcos’altro non
+    la ferma.
+  </p>
+  <p>
+    Il tetto è del daemon, non di una definizione: si imposta insieme agli
+    altri tempi dello storage delle esecuzioni nel blocco <code>runs</code> del
+    file di configurazione e vale 16 se non dici altro. Zero lo spegne. Conta
+    gli input identici e non i fallimenti, quindi un passo il cui input cambia
+    tra un tentativo e l’altro, perché un ramo parallelo accanto a lui è
+    finito, viene lasciato stare. Sta davanti a un nuovo tentativo e da
+    nessun’altra parte, quindi un fallimento che avrebbe chiuso l’esecuzione o
+    l’avrebbe fatta proseguire oltre tiene il proprio errore.
+  </p>
+
   <h2>L’esecuzione dentro la sua traccia</h2>
   <p>
     Ogni esecuzione è anche una traccia. Il daemon apre uno span radice per
@@ -183,6 +282,15 @@ const link = (route: string) => urlFor(route, loc)
     endpoint delle esecuzioni risponde 503. Fanne il backup insieme
     allo storage delle tracce; <code>mcpd doctor</code> lo valuta come gruppo a
     sé.
+  </p>
+  <p>
+    <code>--runs-data postgres://...</code> le tiene invece in Postgres, e a
+    quel punto più repliche servono le esecuzioni da un solo storage. Lì ogni
+    transazione dello storage delle esecuzioni è <code>SERIALIZABLE</code>,
+    quindi due repliche che reclamano lo stesso passo, o fanno scattare la
+    stessa scadenza, finiscono come finirebbe un solo daemon che fa le due cose
+    una dopo l’altra. Le regole qui sopra valgono su tutti e due gli storage:
+    una sola suite di conformità gira su entrambi.
   </p>
   <p>
     Lo storage delle esecuzioni tiene i payload così come sono stati mandati.
