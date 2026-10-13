@@ -167,7 +167,7 @@ private fun PromptFallback.toPrompt(name: String, project: String): Prompt {
 }
 
 /** A path segment, percent-encoded: a prompt name may contain `/`. */
-private fun segment(value: String): String =
+internal fun segment(value: String): String =
     URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20")
 
 /**
