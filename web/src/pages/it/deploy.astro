@@ -409,8 +409,15 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
     <code>--ingest-key</code> permette di scrivere segnali.
     <code>--read-key</code> permette di leggerli. <code>--write-key</code>
     permette di cambiare dati archiviati: punteggi, feedback, dataset,
-    esperimenti e conferme. <code>--execute-key</code> permette di avviare, annullare e segnalare le esecuzioni. <code>--worker-key</code> permette di reclamare gli step e di riferire che cosa è successo, ed è la chiave che vive nel processo che esegue i tuoi step. <code>--admin-key</code> permette di cancellare una
-    traccia e di leggere il registro di audit.
+    esperimenti e conferme. <code>--execute-key</code> permette di avviare,
+    annullare e segnalare le esecuzioni. <code>--worker-key</code> permette di
+    prendere in carico i passi e di riferire che cosa è successo, ed è la
+    chiave che vive nel processo che esegue i corpi dei tuoi passi.
+    <code>--admin-key</code> permette di cancellare una traccia e di leggere il
+    registro di audit. Una lista non impostata accetta al suo posto una più
+    larga: la scrittura accetta le chiavi di ingest, admin accetta le chiavi di
+    lettura, ed execute e worker accettano le chiavi di scrittura. Un deploy
+    configurato prima che un ambito esistesse continua a funzionare.
   </p>
   <p>
     La prima divisione è quella che decide il tuo raggio d’impatto, perché le
@@ -528,6 +535,7 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
       { out: 'identity        off' },
       { out: 'client ip       peer address' },
       { out: 'sampling        keep everything' },
+      { out: 'tail sampling   off' },
       { out: 'quota           unlimited' },
       { out: 'redaction       on' },
       { out: 'redact key      set', tone: 'ok' },
@@ -552,8 +560,9 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
     sta ereditando: l’invocazione qui sopra non imposta nessuna
     <code>--admin-key</code>, quindi le sue chiavi di lettura cancellano oltre
     che leggere. Non imposta nemmeno <code>--execute-key</code> né
-    <code>--worker-key</code>, quindi le sue chiavi di ingestione avviano anche
-    esecuzioni e reclamano passi, e mcpd lo segnala all’avvio. Ogni opzione che questo comando stampa è documentata in
+    <code>--worker-key</code>, quindi le sue chiavi di ingest avviano anche
+    esecuzioni e prendono in carico passi, e mcpd lo segnala all’avvio. Ogni
+    opzione che questo comando stampa è documentata in
     <a href={href('/docs/configuration')} class="link">Configurazione</a>.
   </p>
 
@@ -660,16 +669,25 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
   </p>
   <p>
     Così si spostano i segnali e resta un file su disco: l’archivio delle
-    esecuzioni, che è SQLite incorporato qualunque sia l’archivio dei segnali.
-    Con <code>runs.enabled</code> a true, il valore predefinito, il chart lo
-    tiene sul volume ed esegue una replica sola. Per eseguire più pod, spegni la
-    superficie delle esecuzioni. Il chart allora esegue
-    <code>replicaCount</code> pod, passa da <code>Recreate</code> a un
-    aggiornamento progressivo e lascia perdere il PersistentVolumeClaim, perché
-    non resta niente di locale su cui litigare, e il daemon risponde agli
-    endpoint delle esecuzioni con un 503 che lo dice. Il chart rifiuta un
-    <code>replicaCount</code> sopra 1 finché le esecuzioni sono accese, invece
-    di avviare pod che tengono ciascuno un proprio archivio delle esecuzioni.
+    esecuzioni, che per impostazione predefinita è SQLite incorporato. Con
+    <code>runs.enabled</code> a true, il valore predefinito, il chart lo tiene
+    sul volume ed esegue una replica sola. Per eseguire più pod, sposta anche
+    le esecuzioni su Postgres: imposta <code>runs.store</code> a
+    <code>postgres</code> e la stringa di connessione in
+    <code>runs.postgresUrl</code>, che può nominare lo stesso database. Il
+    chart allora esegue <code>replicaCount</code> pod, passa da
+    <code>Recreate</code> a un aggiornamento progressivo e lascia perdere il
+    PersistentVolumeClaim, perché non resta niente di locale su cui litigare.
+    Ogni pod serve le esecuzioni dallo stesso archivio. Fuori dal chart la
+    stessa impostazione è <code>--runs-data postgres://...</code>.
+  </p>
+  <p>
+    Spegnere la superficie delle esecuzioni con <code>runs.enabled=false</code>
+    permette di scalare allo stesso modo, e il daemon risponde agli endpoint
+    delle esecuzioni con un 503 che lo dice. Il chart rifiuta un
+    <code>replicaCount</code> sopra 1 finché le esecuzioni stanno su un file
+    incorporato, invece di avviare pod che tengono ciascuno un proprio archivio
+    delle esecuzioni.
   </p>
 
   <pre><code class="language-bash">{`helm install mcpd ./deploy/helm/mcpd \\
@@ -677,7 +695,8 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
   --set keys.read=$READ_KEY \\
   --set externalStore.type=postgres \\
   --set externalStore.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
-  --set runs.enabled=false \\
+  --set runs.store=postgres \\
+  --set runs.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
   --set replicaCount=3`}</code></pre>
 
   <p>
