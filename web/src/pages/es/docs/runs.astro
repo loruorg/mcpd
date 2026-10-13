@@ -12,7 +12,7 @@ const locale = localeOf(Astro.url.pathname)
 
 <Doc
   title="Ejecuciones"
-  description="Una ejecución duradera en mcpd: arrancarla de forma idempotente, el diario y cómo seguirlo, eventos y esperas, cancelación, temporizadores y límites, y dónde aparece dentro de su traza."
+  description="Una ejecución duradera en mcpd: arrancarla de forma idempotente, el diario, eventos y esperas, cancelación, temporizadores y límites, por qué falló un paso y qué paso en verde lo causó, y la ejecución dentro de su traza."
   lede="Una ejecución es una fila, un cursor, un diario de intentos, un conjunto de plazos y un conjunto de suspensiones. Esta página es lo que puedes hacerle, y lo que ella te cuenta a cambio."
   og="docs"
 >
@@ -121,6 +121,104 @@ const locale = localeOf(Astro.url.pathname)
     se carga contra el presupuesto de la ejecución en cuanto termina.
   </p>
 
+  <h2>Por qué falló un paso</h2>
+  <p>
+    Las plantillas de una definición son aristas declaradas. Cuando la entrada
+    de un paso lee <code>{'${steps.classify.output.kind}'}</code>, nombra la
+    salida de otro paso, en la versión del documento que esta ejecución fijó al
+    arrancar, y el daemon tiene que resolver esa referencia para poder
+    renderizar la entrada. Así que el daemon puede responder, para un paso de
+    una ejecución, qué salidas de ancestros consumió ese paso, directamente y a
+    través de los pasos intermedios.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="explicar un paso"
+    command={`curl -G http://localhost:4317/v1/api/runs/run_1c4f9b02e7d3a856/cause \\
+  -H 'authorization: Bearer $MCPD_API_KEY' \\
+  --data-urlencode 'step=charge'`}
+  />
+
+  <p>
+    Vale la pena leer la respuesta por lo que encuentra. El paso que produjo el
+    valor malo normalmente <strong>terminó bien</strong>: un clasificador
+    devolvió una lista vacía en vez de un error, el paso siguiente pasó la
+    lista vacía sin darse cuenta, y el paso después de ese falló sin nada con
+    lo que trabajar. Todos los estados de ese camino son <code>succeeded</code>
+    salvo el último, así que ninguna búsqueda por estados llega al paso que lo
+    causó. Cada salto de la cadena lleva la ruta de plantilla por la que pasó
+    el valor y <code>silent_producer</code>, que es verdadero cuando ese
+    ancestro terminó en <code>succeeded</code> y todos los pasos entre él y el
+    fallo también. Esa es la lectura que un código de estado no te puede dar:
+    este paso está en verde, y de él viene tu problema.
+  </p>
+  <p>
+    <code>value_kind</code> y <code>value_empty</code> informan de la forma de
+    lo que pasó por la ruta, nunca del valor. Un ancestro que terminó en
+    <code>succeeded</code> y entregó un array vacío es el caso para el que
+    existe todo el endpoint, y la forma basta para verlo sin que el daemon
+    guarde nada que pertenezca a un llamador.
+  </p>
+  <p>
+    La clave del paso es un parámetro de consulta y no un segmento de la ruta,
+    porque una clave puede llevar una barra: <code>refund/issue</code> es una
+    rama de un <code>parallel</code>, y bastantes proxies reescriben o rechazan
+    una barra codificada dentro de un segmento de ruta como para que sea un mal
+    contrato. Las claves con índice funcionan igual: <code>classify[3]</code>
+    es un elemento de un <code>foreach</code> y <code>poll[7]/classify</code>
+    es una iteración de un bucle. Un paso anidado lleva también lo que leyó su
+    contenedor, porque el contenedor lo decidió: un elemento de
+    <code>foreach</code> nombra el paso del que vino el array sobre el que se
+    repartió, que es la razón de que ese elemento exista. Un
+    <code>subworkflow</code> es un solo salto, leído de la propia fila de la
+    ejecución hija; por qué falló un paso de la hija es una respuesta de la
+    propia hija, que se pide con el id de ejecución de la hija. Una plantilla
+    que lee <code>input</code> no nombra ningún ancestro, y entonces la cadena
+    queda vacía en vez de inventada.
+  </p>
+  <p>
+    <code>max_depth</code> acota el recorrido y vale 32 por defecto, que
+    también es su tope. Un recorrido que se detuvo con ancestros sin visitar
+    marca <code>truncated</code>, así que una cadena corta nunca se confunde con
+    una completa. Nada de esto lee un prompt, una respuesta ni un modelo: la
+    respuesta sale del diario y de la definición, así que es la misma con la
+    captura de payloads de los spans desactivada.
+  </p>
+
+  <h2>Una ejecución que se repite</h2>
+  <p>
+    Una ejecución cuya misma clave de paso sigue fallando con una entrada
+    renderizada idéntica no está avanzando. La clave del paso incluye la rama,
+    el elemento y la iteración, así que una clave idéntica es una posición
+    idéntica en el grafo, y una entrada idéntica además significa que el
+    contexto desde el que se renderiza tampoco se ha movido. El daemon cuenta
+    esos fallos y termina la ejecución cuando llegan a
+    <code>max_step_repeats</code>, nombrando el paso y el recuento, igual que
+    un <code>max_steps</code> agotado termina una.
+  </p>
+  <p>
+    <code>retry.max_attempts</code> no cubre esto, y por eso existe el tope.
+    Hay dos caminos que reintentan sin gastar nada del presupuesto de
+    reintentos: un fallo clasificado como <code>unservable</code> vuelve tras
+    la duración de un lease para siempre, porque el worker dijo que el paso no
+    le correspondía servirlo y no que fallara, y un lease recuperado se vuelve
+    a encolar gratis, porque el daemon perdió el contacto y cargárselo al paso
+    permitiría que un solo despliegue terminara todas las ejecuciones. Una
+    ejecución atascada en cualquiera de los dos reintenta el mismo trabajo
+    hasta que otra cosa la detenga.
+  </p>
+  <p>
+    El tope es del daemon, no de una definición: se fija junto con el resto de
+    tiempos del almacén de ejecuciones en el bloque <code>runs</code> del
+    archivo de configuración y vale 16 por defecto. Cero lo desactiva. Cuenta
+    entradas idénticas y no fallos, así que un paso cuya entrada cambia entre
+    intentos, porque terminó una rama <code>parallel</code> a su lado, no se
+    toca. Actúa delante de un reintento y en ningún otro sitio, así que un
+    fallo que iba a terminar la ejecución, o a continuar más allá, conserva su
+    propio error.
+  </p>
+
   <h2>La ejecución dentro de su traza</h2>
   <p>
     Cada ejecución es además una traza. El daemon abre un span raíz para la
@@ -174,6 +272,15 @@ const locale = localeOf(Astro.url.pathname)
     apaga por completo la superficie de ejecuciones, en cuyo caso todos sus
     endpoints responden 503. Haz su copia de seguridad junto con la del almacén
     de trazas; <code>mcpd doctor</code> lo califica como un grupo aparte.
+  </p>
+  <p>
+    <code>--runs-data postgres://...</code> las guarda en Postgres, y entonces
+    varias réplicas sirven ejecuciones desde un mismo almacén. Allí cada
+    transacción del almacén de ejecuciones es <code>SERIALIZABLE</code>, así
+    que dos réplicas que reclaman el mismo paso, o que disparan el mismo plazo,
+    terminan igual que un solo daemon que hiciera las dos cosas por turnos. Las
+    reglas de arriba se cumplen en cualquiera de los dos almacenes: una misma
+    suite de conformidad se ejecuta contra ambos.
   </p>
   <p>
     El almacén de ejecuciones guarda los payloads tal como se enviaron. La
