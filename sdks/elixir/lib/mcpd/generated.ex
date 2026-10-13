@@ -1824,6 +1824,120 @@ defmodule Mcpd.KeyScope do
   def from_wire(_), do: :error
 end
 
+defmodule Mcpd.OrgRole do
+  @moduledoc """
+  What a member may do in an organisation. Each role maps onto the six key scopes on every project the organisation owns, unless a project role says otherwise.
+  """
+
+  @type t :: :owner | :admin | :member | :viewer
+
+  @values [
+    :owner,
+    :admin,
+    :member,
+    :viewer,
+  ]
+
+  @doc "Every value, in declaration order."
+  @spec values() :: [t()]
+  def values, do: @values
+
+  @doc "The wire representation of a value."
+  @spec to_wire(t()) :: String.t()
+  def to_wire(:owner), do: "owner"
+  def to_wire(:admin), do: "admin"
+  def to_wire(:member), do: "member"
+  def to_wire(:viewer), do: "viewer"
+
+  @doc """
+  Parse a wire value.
+
+  Returns `:error` on an unknown value rather than raising: a newer daemon
+  may send a value this build has never heard of, and an SDK that crashes on
+  one it does not recognise breaks the agent it is meant to be observing.
+  """
+  @spec from_wire(String.t()) :: {:ok, t()} | :error
+  def from_wire("owner"), do: {:ok, :owner}
+  def from_wire("admin"), do: {:ok, :admin}
+  def from_wire("member"), do: {:ok, :member}
+  def from_wire("viewer"), do: {:ok, :viewer}
+  def from_wire(_), do: :error
+end
+
+defmodule Mcpd.ProjectRole do
+  @moduledoc """
+  A role on one project that replaces a member's organisation role there. Owners and admins keep their reach on every project whatever a project role says.
+  """
+
+  @type t :: :none | :viewer | :member | :admin
+
+  @values [
+    :none,
+    :viewer,
+    :member,
+    :admin,
+  ]
+
+  @doc "Every value, in declaration order."
+  @spec values() :: [t()]
+  def values, do: @values
+
+  @doc "The wire representation of a value."
+  @spec to_wire(t()) :: String.t()
+  def to_wire(:none), do: "none"
+  def to_wire(:viewer), do: "viewer"
+  def to_wire(:member), do: "member"
+  def to_wire(:admin), do: "admin"
+
+  @doc """
+  Parse a wire value.
+
+  Returns `:error` on an unknown value rather than raising: a newer daemon
+  may send a value this build has never heard of, and an SDK that crashes on
+  one it does not recognise breaks the agent it is meant to be observing.
+  """
+  @spec from_wire(String.t()) :: {:ok, t()} | :error
+  def from_wire("none"), do: {:ok, :none}
+  def from_wire("viewer"), do: {:ok, :viewer}
+  def from_wire("member"), do: {:ok, :member}
+  def from_wire("admin"), do: {:ok, :admin}
+  def from_wire(_), do: :error
+end
+
+defmodule Mcpd.SsoProvider do
+  @moduledoc """
+  How an organisation's members log in with single sign-on.
+  """
+
+  @type t :: :oidc | :github
+
+  @values [
+    :oidc,
+    :github,
+  ]
+
+  @doc "Every value, in declaration order."
+  @spec values() :: [t()]
+  def values, do: @values
+
+  @doc "The wire representation of a value."
+  @spec to_wire(t()) :: String.t()
+  def to_wire(:oidc), do: "oidc"
+  def to_wire(:github), do: "github"
+
+  @doc """
+  Parse a wire value.
+
+  Returns `:error` on an unknown value rather than raising: a newer daemon
+  may send a value this build has never heard of, and an SDK that crashes on
+  one it does not recognise breaks the agent it is meant to be observing.
+  """
+  @spec from_wire(String.t()) :: {:ok, t()} | :error
+  def from_wire("oidc"), do: {:ok, :oidc}
+  def from_wire("github"), do: {:ok, :github}
+  def from_wire(_), do: :error
+end
+
 defmodule Mcpd.InputTokenDetails do
   @moduledoc """
   Input tokens broken down by how the provider billed them. Every field is optional; absent means the provider did not report it, which is different from zero.
@@ -2440,7 +2554,9 @@ defmodule Mcpd.HealthStatus do
           uptime_seconds: non_neg_integer(),
           storage: String.t() | nil,
           detail: String.t() | nil,
-          signup: boolean() | nil
+          signup: boolean() | nil,
+          accounts: boolean() | nil,
+          sso: boolean() | nil
         }
 
   @enforce_keys [:status, :version, :spec_version, :uptime_seconds]
@@ -2452,6 +2568,8 @@ defmodule Mcpd.HealthStatus do
     storage: nil,
     detail: nil,
     signup: nil,
+    accounts: nil,
+    sso: nil,
   ]
 end
 
@@ -3952,13 +4070,15 @@ defmodule Mcpd.AccountCredentials do
 
   @type t :: %__MODULE__{
           email: String.t(),
-          password: String.t()
+          password: String.t(),
+          totp_code: String.t() | nil
         }
 
   @enforce_keys [:email, :password]
   defstruct [
     email: nil,
     password: nil,
+    totp_code: nil,
   ]
 end
 
@@ -3971,15 +4091,17 @@ defmodule Mcpd.AccountSession do
           token: String.t(),
           expires_at: DateTime.t(),
           email: String.t(),
-          project: String.t()
+          project: String.t() | nil,
+          org_id: String.t() | nil
         }
 
-  @enforce_keys [:token, :expires_at, :email, :project]
+  @enforce_keys [:token, :expires_at, :email]
   defstruct [
     token: nil,
     expires_at: nil,
     email: nil,
     project: nil,
+    org_id: nil,
   ]
 end
 
@@ -3990,15 +4112,23 @@ defmodule Mcpd.Account do
 
   @type t :: %__MODULE__{
           email: String.t(),
-          project: String.t(),
-          created_at: DateTime.t()
+          created_at: DateTime.t(),
+          email_verified: boolean(),
+          totp_enabled: boolean(),
+          has_password: boolean(),
+          project: String.t() | nil,
+          managed_by: String.t() | nil
         }
 
-  @enforce_keys [:email, :project, :created_at]
+  @enforce_keys [:email, :created_at, :email_verified, :totp_enabled, :has_password]
   defstruct [
     email: nil,
-    project: nil,
     created_at: nil,
+    email_verified: nil,
+    totp_enabled: nil,
+    has_password: nil,
+    project: nil,
+    managed_by: nil,
   ]
 end
 
@@ -4010,18 +4140,22 @@ defmodule Mcpd.AccountKey do
   @type t :: %__MODULE__{
           id: String.t(),
           scope: Mcpd.KeyScope.t(),
+          project: String.t(),
           prefix: String.t(),
           created_at: DateTime.t(),
-          name: String.t() | nil
+          name: String.t() | nil,
+          created_by: String.t() | nil
         }
 
-  @enforce_keys [:id, :scope, :prefix, :created_at]
+  @enforce_keys [:id, :scope, :project, :prefix, :created_at]
   defstruct [
     id: nil,
     scope: nil,
+    project: nil,
     prefix: nil,
     created_at: nil,
     name: nil,
+    created_by: nil,
   ]
 end
 
@@ -4032,13 +4166,15 @@ defmodule Mcpd.CreateAccountKeyRequest do
 
   @type t :: %__MODULE__{
           scope: Mcpd.KeyScope.t(),
-          name: String.t() | nil
+          name: String.t() | nil,
+          project: String.t() | nil
         }
 
   @enforce_keys [:scope]
   defstruct [
     scope: nil,
     name: nil,
+    project: nil,
   ]
 end
 
@@ -4056,6 +4192,735 @@ defmodule Mcpd.CreatedAccountKey do
   defstruct [
     key: nil,
     secret: nil,
+  ]
+end
+
+defmodule Mcpd.AccountNotice do
+  @moduledoc """
+  A plain answer that changes nothing you can read back, such as "check your email".
+  """
+
+  @type t :: %__MODULE__{
+          message: String.t()
+        }
+
+  @enforce_keys [:message]
+  defstruct [
+    message: nil,
+  ]
+end
+
+defmodule Mcpd.TokenRequest do
+  @moduledoc """
+  A one-time token from a link the daemon sent by email.
+  """
+
+  @type t :: %__MODULE__{
+          token: String.t()
+        }
+
+  @enforce_keys [:token]
+  defstruct [
+    token: nil,
+  ]
+end
+
+defmodule Mcpd.PasswordForgotRequest do
+  @moduledoc """
+  A request for a password reset link.
+  """
+
+  @type t :: %__MODULE__{
+          email: String.t()
+        }
+
+  @enforce_keys [:email]
+  defstruct [
+    email: nil,
+  ]
+end
+
+defmodule Mcpd.PasswordResetRequest do
+  @moduledoc """
+  A new password, with the token from a reset link.
+  """
+
+  @type t :: %__MODULE__{
+          token: String.t(),
+          password: String.t(),
+          totp_code: String.t() | nil
+        }
+
+  @enforce_keys [:token, :password]
+  defstruct [
+    token: nil,
+    password: nil,
+    totp_code: nil,
+  ]
+end
+
+defmodule Mcpd.PasswordChangeRequest do
+  @moduledoc """
+  A new password for the logged-in account.
+  """
+
+  @type t :: %__MODULE__{
+          new_password: String.t(),
+          current_password: String.t() | nil
+        }
+
+  @enforce_keys [:new_password]
+  defstruct [
+    new_password: nil,
+    current_password: nil,
+  ]
+end
+
+defmodule Mcpd.EmailChangeRequest do
+  @moduledoc """
+  A new email address for the logged-in account.
+  """
+
+  @type t :: %__MODULE__{
+          email: String.t(),
+          password: String.t() | nil
+        }
+
+  @enforce_keys [:email]
+  defstruct [
+    email: nil,
+    password: nil,
+  ]
+end
+
+defmodule Mcpd.AccountDeleteRequest do
+  @moduledoc """
+  Confirmation for deleting the logged-in account.
+  """
+
+  @type t :: %__MODULE__{
+          password: String.t() | nil,
+          totp_code: String.t() | nil
+        }
+
+  defstruct [
+    password: nil,
+    totp_code: nil,
+  ]
+end
+
+defmodule Mcpd.AccountDeletion do
+  @moduledoc """
+  What deleting an account removed.
+  """
+
+  @type t :: %__MODULE__{
+          orgs_deleted: non_neg_integer(),
+          projects_erased: [String.t()]
+        }
+
+  @enforce_keys [:orgs_deleted, :projects_erased]
+  defstruct [
+    orgs_deleted: nil,
+    projects_erased: [],
+  ]
+end
+
+defmodule Mcpd.SessionInfo do
+  @moduledoc """
+  One live session of the logged-in account. The token is not part of it.
+  """
+
+  @type t :: %__MODULE__{
+          id: String.t(),
+          created_at: DateTime.t(),
+          expires_at: DateTime.t(),
+          current: boolean(),
+          via: String.t(),
+          org_id: String.t() | nil,
+          user_agent: String.t() | nil,
+          address: String.t() | nil
+        }
+
+  @enforce_keys [:id, :created_at, :expires_at, :current, :via]
+  defstruct [
+    id: nil,
+    created_at: nil,
+    expires_at: nil,
+    current: nil,
+    via: nil,
+    org_id: nil,
+    user_agent: nil,
+    address: nil,
+  ]
+end
+
+defmodule Mcpd.TotpSetup do
+  @moduledoc """
+  A new authenticator secret, not yet in use. Confirm it with a code to turn two-step log-in on.
+  """
+
+  @type t :: %__MODULE__{
+          secret: String.t(),
+          otpauth_uri: String.t(),
+          qr_svg: String.t()
+        }
+
+  @enforce_keys [:secret, :otpauth_uri, :qr_svg]
+  defstruct [
+    secret: nil,
+    otpauth_uri: nil,
+    qr_svg: nil,
+  ]
+end
+
+defmodule Mcpd.TotpCodeRequest do
+  @moduledoc """
+  A code from an authenticator app.
+  """
+
+  @type t :: %__MODULE__{
+          code: String.t()
+        }
+
+  @enforce_keys [:code]
+  defstruct [
+    code: nil,
+  ]
+end
+
+defmodule Mcpd.TotpEnabled do
+  @moduledoc """
+  Two-step log-in is on.
+  """
+
+  @type t :: %__MODULE__{
+          recovery_codes: [String.t()]
+        }
+
+  @enforce_keys [:recovery_codes]
+  defstruct [
+    recovery_codes: [],
+  ]
+end
+
+defmodule Mcpd.TotpDisableRequest do
+  @moduledoc """
+  Confirmation for turning two-step log-in off.
+  """
+
+  @type t :: %__MODULE__{
+          code: String.t(),
+          password: String.t() | nil
+        }
+
+  @enforce_keys [:code]
+  defstruct [
+    code: nil,
+    password: nil,
+  ]
+end
+
+defmodule Mcpd.Org do
+  @moduledoc """
+  An organisation: the owner of projects, members and single sign-on settings.
+  """
+
+  @type t :: %__MODULE__{
+          id: String.t(),
+          name: String.t(),
+          role: Mcpd.OrgRole.t(),
+          created_at: DateTime.t(),
+          members: non_neg_integer(),
+          projects: non_neg_integer(),
+          managed_by_config: boolean(),
+          quota_per_minute: non_neg_integer() | nil,
+          retention_days: non_neg_integer() | nil
+        }
+
+  @enforce_keys [:id, :name, :role, :created_at, :members, :projects, :managed_by_config]
+  defstruct [
+    id: nil,
+    name: nil,
+    role: nil,
+    created_at: nil,
+    members: nil,
+    projects: nil,
+    managed_by_config: nil,
+    quota_per_minute: nil,
+    retention_days: nil,
+  ]
+end
+
+defmodule Mcpd.CreateOrgRequest do
+  @moduledoc """
+  A new organisation.
+  """
+
+  @type t :: %__MODULE__{
+          name: String.t()
+        }
+
+  @enforce_keys [:name]
+  defstruct [
+    name: nil,
+  ]
+end
+
+defmodule Mcpd.UpdateOrgRequest do
+  @moduledoc """
+  Changes to an organisation. A field left out keeps its value.
+  """
+
+  @type t :: %__MODULE__{
+          name: String.t() | nil,
+          quota_per_minute: non_neg_integer() | nil,
+          retention_days: non_neg_integer() | nil
+        }
+
+  defstruct [
+    name: nil,
+    quota_per_minute: nil,
+    retention_days: nil,
+  ]
+end
+
+defmodule Mcpd.OrgDeletion do
+  @moduledoc """
+  What deleting an organisation removed.
+  """
+
+  @type t :: %__MODULE__{
+          projects_erased: [String.t()]
+        }
+
+  @enforce_keys [:projects_erased]
+  defstruct [
+    projects_erased: [],
+  ]
+end
+
+defmodule Mcpd.ProjectRoleGrant do
+  @moduledoc """
+  A role on one project.
+  """
+
+  @type t :: %__MODULE__{
+          project: String.t(),
+          role: Mcpd.ProjectRole.t()
+        }
+
+  @enforce_keys [:project, :role]
+  defstruct [
+    project: nil,
+    role: nil,
+  ]
+end
+
+defmodule Mcpd.OrgMember do
+  @moduledoc """
+  One member of an organisation.
+  """
+
+  @type t :: %__MODULE__{
+          account_id: String.t(),
+          email: String.t(),
+          role: Mcpd.OrgRole.t(),
+          via: String.t(),
+          joined_at: DateTime.t(),
+          project_roles: [Mcpd.ProjectRoleGrant.t()],
+          managed: boolean(),
+          totp_enabled: boolean()
+        }
+
+  @enforce_keys [:account_id, :email, :role, :via, :joined_at, :project_roles, :managed, :totp_enabled]
+  defstruct [
+    account_id: nil,
+    email: nil,
+    role: nil,
+    via: nil,
+    joined_at: nil,
+    project_roles: [],
+    managed: nil,
+    totp_enabled: nil,
+  ]
+end
+
+defmodule Mcpd.UpdateMemberRequest do
+  @moduledoc """
+  A new role for a member.
+  """
+
+  @type t :: %__MODULE__{
+          role: Mcpd.OrgRole.t()
+        }
+
+  @enforce_keys [:role]
+  defstruct [
+    role: nil,
+  ]
+end
+
+defmodule Mcpd.SetProjectRoleRequest do
+  @moduledoc """
+  A role for a member on one project.
+  """
+
+  @type t :: %__MODULE__{
+          project: String.t(),
+          role: Mcpd.ProjectRole.t() | nil
+        }
+
+  @enforce_keys [:project]
+  defstruct [
+    project: nil,
+    role: nil,
+  ]
+end
+
+defmodule Mcpd.OrgInvite do
+  @moduledoc """
+  An invitation not yet accepted. The token is not part of it.
+  """
+
+  @type t :: %__MODULE__{
+          id: String.t(),
+          email: String.t(),
+          role: Mcpd.OrgRole.t(),
+          project_roles: [Mcpd.ProjectRoleGrant.t()],
+          created_at: DateTime.t(),
+          expires_at: DateTime.t(),
+          invited_by: String.t() | nil
+        }
+
+  @enforce_keys [:id, :email, :role, :project_roles, :created_at, :expires_at]
+  defstruct [
+    id: nil,
+    email: nil,
+    role: nil,
+    project_roles: [],
+    created_at: nil,
+    expires_at: nil,
+    invited_by: nil,
+  ]
+end
+
+defmodule Mcpd.CreateInviteRequest do
+  @moduledoc """
+  An invitation to an organisation.
+  """
+
+  @type t :: %__MODULE__{
+          email: String.t(),
+          role: Mcpd.OrgRole.t(),
+          project_roles: [Mcpd.ProjectRoleGrant.t()] | nil
+        }
+
+  @enforce_keys [:email, :role]
+  defstruct [
+    email: nil,
+    role: nil,
+    project_roles: [],
+  ]
+end
+
+defmodule Mcpd.InviteLookup do
+  @moduledoc """
+  What an invitation offers, read with its token before accepting it.
+  """
+
+  @type t :: %__MODULE__{
+          org_name: String.t(),
+          email: String.t(),
+          role: Mcpd.OrgRole.t(),
+          account_exists: boolean(),
+          expires_at: DateTime.t()
+        }
+
+  @enforce_keys [:org_name, :email, :role, :account_exists, :expires_at]
+  defstruct [
+    org_name: nil,
+    email: nil,
+    role: nil,
+    account_exists: nil,
+    expires_at: nil,
+  ]
+end
+
+defmodule Mcpd.InviteAcceptRequest do
+  @moduledoc """
+  Acceptance of an invitation.
+  """
+
+  @type t :: %__MODULE__{
+          token: String.t(),
+          password: String.t() | nil
+        }
+
+  @enforce_keys [:token]
+  defstruct [
+    token: nil,
+    password: nil,
+  ]
+end
+
+defmodule Mcpd.InviteAccepted do
+  @moduledoc """
+  An accepted invitation.
+  """
+
+  @type t :: %__MODULE__{
+          org: Mcpd.Org.t(),
+          session: Mcpd.AccountSession.t() | nil
+        }
+
+  @enforce_keys [:org]
+  defstruct [
+    org: nil,
+    session: nil,
+  ]
+end
+
+defmodule Mcpd.OrgProject do
+  @moduledoc """
+  A project an organisation owns.
+  """
+
+  @type t :: %__MODULE__{
+          project: String.t(),
+          created_at: DateTime.t(),
+          label: String.t() | nil
+        }
+
+  @enforce_keys [:project, :created_at]
+  defstruct [
+    project: nil,
+    created_at: nil,
+    label: nil,
+  ]
+end
+
+defmodule Mcpd.CreateProjectRequest do
+  @moduledoc """
+  A new project in an organisation.
+  """
+
+  @type t :: %__MODULE__{
+          label: String.t() | nil
+        }
+
+  defstruct [
+    label: nil,
+  ]
+end
+
+defmodule Mcpd.OrgUsage do
+  @moduledoc """
+  How much an organisation is using, against its ceilings. Counted since the daemon started.
+  """
+
+  @type t :: %__MODULE__{
+          org_id: String.t(),
+          admitted_this_minute: non_neg_integer(),
+          admitted_total: non_neg_integer(),
+          refused_total: non_neg_integer(),
+          members: non_neg_integer(),
+          projects: non_neg_integer(),
+          keys: non_neg_integer(),
+          since: DateTime.t(),
+          quota_per_minute: non_neg_integer() | nil,
+          retention_days: non_neg_integer() | nil
+        }
+
+  @enforce_keys [:org_id, :admitted_this_minute, :admitted_total, :refused_total, :members, :projects, :keys, :since]
+  defstruct [
+    org_id: nil,
+    admitted_this_minute: nil,
+    admitted_total: nil,
+    refused_total: nil,
+    members: nil,
+    projects: nil,
+    keys: nil,
+    since: nil,
+    quota_per_minute: nil,
+    retention_days: nil,
+  ]
+end
+
+defmodule Mcpd.SsoConfig do
+  @moduledoc """
+  An organisation's single sign-on settings. The client secret is not part of it.
+  """
+
+  @type t :: %__MODULE__{
+          provider: Mcpd.SsoProvider.t(),
+          client_id: String.t(),
+          has_client_secret: boolean(),
+          domains: [String.t()],
+          enforced: boolean(),
+          default_role: Mcpd.OrgRole.t(),
+          redirect_url: String.t(),
+          managed_by_config: boolean(),
+          updated_at: DateTime.t(),
+          issuer: String.t() | nil,
+          groups_claim: String.t() | nil
+        }
+
+  @enforce_keys [:provider, :client_id, :has_client_secret, :domains, :enforced, :default_role, :redirect_url, :managed_by_config, :updated_at]
+  defstruct [
+    provider: nil,
+    client_id: nil,
+    has_client_secret: nil,
+    domains: [],
+    enforced: nil,
+    default_role: nil,
+    redirect_url: nil,
+    managed_by_config: nil,
+    updated_at: nil,
+    issuer: nil,
+    groups_claim: nil,
+  ]
+end
+
+defmodule Mcpd.PutSsoConfigRequest do
+  @moduledoc """
+  New single sign-on settings for an organisation.
+  """
+
+  @type t :: %__MODULE__{
+          provider: Mcpd.SsoProvider.t(),
+          client_id: String.t(),
+          domains: [String.t()],
+          enforced: boolean(),
+          default_role: Mcpd.OrgRole.t(),
+          issuer: String.t() | nil,
+          client_secret: String.t() | nil,
+          groups_claim: String.t() | nil
+        }
+
+  @enforce_keys [:provider, :client_id, :domains, :enforced, :default_role]
+  defstruct [
+    provider: nil,
+    client_id: nil,
+    domains: [],
+    enforced: nil,
+    default_role: nil,
+    issuer: nil,
+    client_secret: nil,
+    groups_claim: nil,
+  ]
+end
+
+defmodule Mcpd.GroupRole do
+  @moduledoc """
+  A group from the identity provider, and the role its members get.
+  """
+
+  @type t :: %__MODULE__{
+          group: String.t(),
+          role: Mcpd.OrgRole.t()
+        }
+
+  @enforce_keys [:group, :role]
+  defstruct [
+    group: nil,
+    role: nil,
+  ]
+end
+
+defmodule Mcpd.ScimTokenInfo do
+  @moduledoc """
+  Whether an organisation has a SCIM token. The token is not part of it.
+  """
+
+  @type t :: %__MODULE__{
+          configured: boolean(),
+          base_url: String.t(),
+          prefix: String.t() | nil,
+          created_at: DateTime.t() | nil
+        }
+
+  @enforce_keys [:configured, :base_url]
+  defstruct [
+    configured: nil,
+    base_url: nil,
+    prefix: nil,
+    created_at: nil,
+  ]
+end
+
+defmodule Mcpd.CreatedScimToken do
+  @moduledoc """
+  A new SCIM token. This is the only time it is shown, and it replaces any earlier token.
+  """
+
+  @type t :: %__MODULE__{
+          token: String.t(),
+          prefix: String.t(),
+          created_at: DateTime.t(),
+          base_url: String.t()
+        }
+
+  @enforce_keys [:token, :prefix, :created_at, :base_url]
+  defstruct [
+    token: nil,
+    prefix: nil,
+    created_at: nil,
+    base_url: nil,
+  ]
+end
+
+defmodule Mcpd.SsoStartRequest do
+  @moduledoc """
+  Where to start single sign-on. Give one of the two.
+  """
+
+  @type t :: %__MODULE__{
+          email: String.t() | nil,
+          org_id: String.t() | nil
+        }
+
+  defstruct [
+    email: nil,
+    org_id: nil,
+  ]
+end
+
+defmodule Mcpd.SsoStart do
+  @moduledoc """
+  Where to send the browser for single sign-on.
+  """
+
+  @type t :: %__MODULE__{
+          authorize_url: String.t(),
+          binding: String.t(),
+          org_name: String.t()
+        }
+
+  @enforce_keys [:authorize_url, :binding, :org_name]
+  defstruct [
+    authorize_url: nil,
+    binding: nil,
+    org_name: nil,
+  ]
+end
+
+defmodule Mcpd.SsoCallbackRequest do
+  @moduledoc """
+  What the provider sent back to the redirect URL.
+  """
+
+  @type t :: %__MODULE__{
+          state: String.t(),
+          code: String.t(),
+          binding: String.t()
+        }
+
+  @enforce_keys [:state, :code, :binding]
+  defstruct [
+    state: nil,
+    code: nil,
+    binding: nil,
   ]
 end
 

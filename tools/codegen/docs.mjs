@@ -105,7 +105,9 @@ export function emitApiDocs(spec) {
           ? 'none; this endpoint is public.'
           : ep.auth === 'session'
             ? 'an account session token from `POST /v1/api/account/login`. An API key is not accepted.'
-            : `an API key with \`${ep.auth}\` scope.`
+            : ep.auth === 'scim'
+              ? 'the organisation\'s SCIM token from `POST /v1/api/orgs/{org_id}/scim-token`. No other credential is accepted.'
+              : `an API key with \`${ep.auth}\` scope.`
       o.push(`**Authentication:** ${authText}\n`)
       o.push('---\n')
     }

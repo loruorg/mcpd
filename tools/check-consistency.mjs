@@ -253,6 +253,9 @@ const CONFIG_FILE_STRUCTS = [
   ['crates/mcpd-server/src/state.rs', 'ProjectConfig', 'projects.<name>.'],
   ['crates/mcpd-server/src/derive.rs', 'DerivedMetrics', 'derived_metrics.'],
   ['crates/mcpd-server/src/aspects.rs', 'AspectSettings', 'aspects.'],
+  ['crates/mcpd/src/main.rs', 'FileAccounts', 'accounts.'],
+  ['crates/mcpd-server/src/accounts.rs', 'ConfigOrg', 'accounts.orgs[].'],
+  ['crates/mcpd-server/src/accounts.rs', 'ConfigSso', 'accounts.orgs[].sso.'],
 ]
 
 /* -------------------------------- 4b. every config file key is documented */
@@ -461,6 +464,16 @@ const CONFIG_LINE_OF = {
   '--client-ip-header': 'client ip',
   '--signup': 'signup',
   '--accounts-data': 'signup',
+  '--accounts': 'signup',
+  '--public-url': 'signup',
+  '--smtp-host': 'signup',
+  '--smtp-port': 'signup',
+  '--smtp-user': 'signup',
+  '--smtp-password': 'signup',
+  '--smtp-from': 'signup',
+  '--smtp-tls': 'signup',
+  '--org-quota-per-minute': 'signup',
+  '--org-retention-days': 'signup',
   '--sample': 'sampling',
   '--quota-per-minute': 'quota',
   '--no-redact': 'redaction',
@@ -484,6 +497,7 @@ const CONFIG_LINE_OF = {
   max_batch_signals: 'limits',
   derived_metrics: 'derived',
   aspects: 'aspects',
+  accounts: 'signup',
 }
 
 /** The translated page trees: every two-letter directory under the pages. */
@@ -1604,6 +1618,9 @@ function checkEndpointScopes() {
     'crates/mcpd-server/src/runs.rs',
     'crates/mcpd-server/src/accounts.rs',
     'crates/mcpd-server/src/grpc.rs',
+    'crates/mcpd-server/src/orgs.rs',
+    'crates/mcpd-server/src/sso.rs',
+    'crates/mcpd-server/src/scim.rs',
   ]
   if (!exists(router)) {
     fail(router, 'is missing; the scope check cannot run without the route table')
@@ -1666,6 +1683,26 @@ function checkEndpointScopes() {
         fail(
           `${found.file}: ${fn}`,
           `serves ${where}, documented \`session\`, and must call \`authorize_session\` and no key check`,
+        )
+      } else {
+        checked += 1
+      }
+      continue
+    }
+    // A SCIM token is its own credential: the handler must call
+    // `authorize_scim`, and nothing that takes a key or a session.
+    if (ep.auth === 'scim') {
+      const fn = routes.get(`${ep.method} ${shape(ep.path)}`)
+      const found = fn && bodies.get(fn)
+      if (!found) {
+        fail('crates/mcpd-server/src/lib.rs', `${where} is in the spec but no route reaches a handler for it`)
+      } else if (
+        !/authorize_scim\(/.test(found.body) ||
+        /authorize(?:_project|_session)?\(/.test(found.body)
+      ) {
+        fail(
+          `${found.file}: ${fn}`,
+          `serves ${where}, documented \`scim\`, and must call \`authorize_scim\` and nothing else`,
         )
       } else {
         checked += 1

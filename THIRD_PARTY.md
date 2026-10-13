@@ -40,7 +40,7 @@ obligations of both licences do not extend to mcpd's release artefacts.
 That is the project's reading, recorded here so the question has an answer
 on file; it is not legal advice.
 
-## Rust crates (339 crates, 27 licence expressions)
+## Rust crates (349 crates, 28 licence expressions)
 
 Reachable from a workspace member through a normal or build dependency,
 with every Cargo feature on, on every target. A crate that is only used on
@@ -49,6 +49,10 @@ one platform is still listed.
 ### (MIT OR Apache-2.0) AND Unicode-3.0 (1)
 
 - unicode-ident 1.0.24 (https://github.com/dtolnay/unicode-ident)
+
+### 0BSD (1)
+
+- quoted_printable 0.5.2 (https://github.com/staktrace/quoted-printable)
 
 ### 0BSD OR MIT OR Apache-2.0 (1)
 
@@ -79,7 +83,7 @@ one platform is still listed.
 - rustls 0.23.45 (https://github.com/rustls/rustls)
 - rustls-native-certs 0.8.4 (https://github.com/rustls/rustls-native-certs)
 
-### Apache-2.0 OR MIT (27)
+### Apache-2.0 OR MIT (29)
 
 - atomic-waker 1.1.2 (https://github.com/smol-rs/atomic-waker)
 - autocfg 1.5.1 (https://github.com/cuviper/autocfg)
@@ -94,11 +98,13 @@ one platform is still listed.
 - der 0.7.10 (https://github.com/RustCrypto/formats/tree/master/der)
 - der_derive 0.7.3 (https://github.com/RustCrypto/formats/tree/master/der/derive)
 - equivalent 1.0.2 (https://github.com/indexmap-rs/equivalent)
+- fastrand 2.5.0 (https://github.com/smol-rs/fastrand)
 - fnv 1.0.7 (https://github.com/servo/rust-fnv)
 - idna_adapter 1.2.2 (https://github.com/hsivonen/idna_adapter)
 - indexmap 2.14.2 (https://github.com/indexmap-rs/indexmap)
 - pin-project-lite 0.2.17 (https://github.com/taiki-e/pin-project-lite)
 - rustc-hash 2.1.3 (https://github.com/rust-lang/rustc-hash)
+- signature 2.2.0 (https://github.com/RustCrypto/traits/tree/master/signature)
 - simd_cesu8 1.2.0 (https://github.com/seancroach/simd_cesu8)
 - spki 0.7.3 (https://github.com/RustCrypto/formats/tree/master/spki)
 - tls_codec 0.4.2 (https://github.com/RustCrypto/formats)
@@ -134,9 +140,10 @@ one platform is still listed.
 - webpki-root-certs 1.0.9 (https://github.com/rustls/webpki-roots)
 - webpki-roots 1.0.9 (https://github.com/rustls/webpki-roots)
 
-### ISC (2)
+### ISC (3)
 
 - rustls-webpki 0.103.15 (https://github.com/rustls/webpki)
+- untrusted 0.7.1 (https://github.com/briansmith/untrusted)
 - untrusted 0.9.0 (https://github.com/briansmith/untrusted)
 
 ### ISC AND (Apache-2.0 OR ISC) (1)
@@ -147,7 +154,7 @@ one platform is still listed.
 
 - aws-lc-sys 0.45.0 (https://github.com/aws/aws-lc-rs)
 
-### MIT (65)
+### MIT (69)
 
 - axum 0.8.9 (https://github.com/tokio-rs/axum)
 - axum-core 0.5.6 (https://github.com/tokio-rs/axum)
@@ -162,6 +169,7 @@ one platform is still listed.
 - fs_extra 1.3.0 (https://github.com/webdesus/fs_extra)
 - generic-array 0.14.7 (https://github.com/fizyk20/generic-array.git)
 - h2 0.4.20 (https://github.com/hyperium/h2)
+- hostname 0.4.2 (https://github.com/djc/hostname)
 - http-body 1.1.0 (https://github.com/hyperium/http-body)
 - http-body-util 0.1.5 (https://github.com/hyperium/http-body)
 - hyper 1.11.1 (https://github.com/hyperium/hyper)
@@ -171,11 +179,14 @@ one platform is still listed.
 - jsonschema 0.56.0 (https://github.com/Stranger6667/jsonschema)
 - jsonschema-regex 0.56.0 (https://github.com/Stranger6667/jsonschema)
 - jsonschema-value 0.56.0 (https://github.com/Stranger6667/jsonschema)
+- jsonwebtoken 11.1.0 (https://github.com/Keats/jsonwebtoken)
+- lettre 0.11.23 (https://github.com/lettre/lettre)
 - libredox 0.1.24 (https://gitlab.redox-os.org/redox-os/libredox.git)
 - libsqlite3-sys 0.38.2 (https://github.com/rusqlite/rusqlite)
 - matchers 0.2.0 (https://github.com/hawkw/matchers)
 - micromap 0.3.0 (https://github.com/yegor256/micromap)
 - mio 1.2.3 (https://github.com/tokio-rs/mio)
+- nom 8.0.0 (https://github.com/rust-bakery/nom)
 - nu-ansi-term 0.50.3 (https://github.com/nushell/nu-ansi-term)
 - outref 0.5.2 (https://github.com/Nugine/outref)
 - phf 0.13.1 (https://github.com/rust-phf/rust-phf)
@@ -219,7 +230,7 @@ one platform is still listed.
 
 - matchit 0.8.4 (https://github.com/ibraheemdev/matchit)
 
-### MIT OR Apache-2.0 (185)
+### MIT OR Apache-2.0 (187)
 
 - ahash 0.8.12 (https://github.com/tkaitchuck/ahash)
 - allocator-api2 0.2.21 (https://github.com/zakarumych/allocator-api2)
@@ -264,6 +275,7 @@ one platform is still listed.
 - digest 0.10.7 (https://github.com/RustCrypto/traits)
 - digest 0.11.3 (https://github.com/RustCrypto/traits)
 - displaydoc 0.2.7 (https://github.com/yaahc/displaydoc)
+- email-encoding 0.4.2 (https://github.com/lettre/email-encoding)
 - errno 0.3.14 (https://github.com/lambda-fairy/rust-errno)
 - fallible-iterator 0.2.0 (https://github.com/sfackler/rust-fallible-iterator)
 - fallible-iterator 0.3.0 (https://github.com/sfackler/rust-fallible-iterator)
@@ -331,6 +343,7 @@ one platform is still listed.
 - postgres-types 0.2.14 (https://github.com/rust-postgres/rust-postgres)
 - powerfmt 0.2.0 (https://github.com/jhpratt/powerfmt)
 - proc-macro2 1.0.107 (https://github.com/dtolnay/proc-macro2)
+- qrcode 0.14.1 (https://github.com/kennytm/qrcode-rust)
 - quinn 0.11.11 (https://github.com/quinn-rs/quinn)
 - quinn-proto 0.11.17 (https://github.com/quinn-rs/quinn)
 - quinn-udp 0.5.15 (https://github.com/quinn-rs/quinn)

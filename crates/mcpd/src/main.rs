@@ -270,6 +270,155 @@ struct Cli {
     /// with `.accounts` before its extension, or `:memory:` when --data is.
     #[arg(long, env = "MCPD_ACCOUNTS_DATA", global = true)]
     accounts_data: Option<String>,
+
+    /// Accounts without public sign-up, and the mail they send.
+    #[command(flatten)]
+    account_flags: AccountFlags,
+}
+
+/// Accounts without public sign-up, the mail they send, and the defaults an
+/// organisation gets. Every one is read by `crate::accounts` in the server.
+#[derive(clap::Args, Debug, Clone)]
+struct AccountFlags {
+    /// Turn on accounts, organisations, roles, single sign-on and SCIM without
+    /// public sign-up. People arrive by invitation, single sign-on or SCIM.
+    /// Configured keys keep working beside them. `--signup` implies this.
+    #[arg(long, env = "MCPD_ACCOUNTS", global = true)]
+    accounts: bool,
+
+    /// Where people open the interface, such as https://mcpd.example.com. The
+    /// links in mail and the single sign-on redirect URL start here. Defaults
+    /// to http://localhost:4317.
+    #[arg(long, env = "MCPD_PUBLIC_URL", global = true)]
+    public_url: Option<String>,
+
+    /// The SMTP server mail goes through. With none, links are written to the
+    /// log, except with --signup on a public address, where the features that
+    /// need mail are refused.
+    #[arg(long, env = "MCPD_SMTP_HOST", global = true)]
+    smtp_host: Option<String>,
+
+    /// The SMTP port. Defaults to 587 for starttls, 465 for tls and 25 for none.
+    #[arg(long, env = "MCPD_SMTP_PORT", global = true)]
+    smtp_port: Option<u16>,
+
+    /// The SMTP user, when the server wants one.
+    #[arg(long, env = "MCPD_SMTP_USER", global = true)]
+    smtp_user: Option<String>,
+
+    /// The SMTP password. Prefer the environment variable to the flag, so it is
+    /// not in the process list.
+    #[arg(long, env = "MCPD_SMTP_PASSWORD", global = true, hide_env_values = true)]
+    smtp_password: Option<String>,
+
+    /// The From address, such as "mcpd <no-reply@example.com>". Required with
+    /// --smtp-host.
+    #[arg(long, env = "MCPD_SMTP_FROM", global = true)]
+    smtp_from: Option<String>,
+
+    /// How the SMTP connection is secured: starttls (the default), tls or none.
+    #[arg(long, env = "MCPD_SMTP_TLS", global = true)]
+    smtp_tls: Option<String>,
+
+    /// The signals-per-minute ceiling an organisation shares across its
+    /// projects when it sets none, and the most it may set. With --signup it
+    /// defaults to 60000, so one tenant cannot starve the others.
+    #[arg(long, env = "MCPD_ORG_QUOTA_PER_MINUTE", global = true)]
+    org_quota_per_minute: Option<u32>,
+
+    /// How long an organisation's projects keep data when it sets none, in
+    /// days, and the longest it may set. Falls back to --retention-days.
+    #[arg(long, env = "MCPD_ORG_RETENTION_DAYS", global = true)]
+    org_retention_days: Option<u32>,
+}
+
+/// The `accounts` block of the config file.
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileAccounts {
+    /// Whether an account may create organisations. Defaults to whether
+    /// --signup is on.
+    #[serde(default)]
+    allow_org_creation: Option<bool>,
+    /// Let an organisation admin point single sign-on at an http issuer or one
+    /// on a private network. For tests and closed networks.
+    #[serde(default)]
+    allow_private_issuers: bool,
+    /// Organisations this file declares, with their owners, projects, single
+    /// sign-on and SCIM token.
+    #[serde(default)]
+    orgs: Vec<mcpd_server::accounts::ConfigOrg>,
+}
+
+/// The account settings, from the flags and the config file.
+fn account_settings(
+    cli: &Cli,
+    file: &FileConfig,
+) -> anyhow::Result<mcpd_server::accounts::AccountSettings> {
+    use mcpd_server::mail::{MailConfig, SmtpConfig, SmtpTls};
+    let f = &cli.account_flags;
+    let enabled = f.accounts || cli.signup;
+    let tls = SmtpTls::parse(f.smtp_tls.as_deref().unwrap_or("")).map_err(anyhow::Error::msg)?;
+    let loopback = cli.listen.parse::<SocketAddr>().is_ok_and(|a| a.ip().is_loopback());
+    let mail = match f.smtp_host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+        Some(host) => {
+            let Some(from) = f.smtp_from.clone().filter(|f| !f.trim().is_empty()) else {
+                anyhow::bail!("--smtp-host is set with no --smtp-from; add the address mail is sent from, such as no-reply@example.com");
+            };
+            MailConfig::Smtp(SmtpConfig {
+                host: host.to_owned(),
+                port: f.smtp_port,
+                user: f.smtp_user.clone(),
+                password: f.smtp_password.clone(),
+                from,
+                tls,
+            })
+        }
+        None if cli.signup && !loopback => MailConfig::Refuse,
+        None => MailConfig::Log,
+    };
+    // Built once here so a bad From address stops the start, rather than the
+    // first sign-up.
+    mcpd_server::mail::Mailer::new(mail.clone()).map_err(anyhow::Error::msg)?;
+    if let Some(url) = &f.public_url {
+        let ok = url.starts_with("https://") || url.starts_with("http://");
+        if !ok {
+            anyhow::bail!("--public-url must start with https:// or http://, got {url:?}");
+        }
+    }
+    let org_quota = match f.org_quota_per_minute {
+        Some(0) => anyhow::bail!(
+            "--org-quota-per-minute must be at least 1, got 0; omit it for the default"
+        ),
+        Some(n) if n > mcpd_server::state::QUOTA_MAX => {
+            anyhow::bail!(
+                "--org-quota-per-minute must be at most {}, got {n}",
+                mcpd_server::state::QUOTA_MAX
+            )
+        }
+        Some(n) => Some(n),
+        None if cli.signup => Some(60_000),
+        None => None,
+    };
+    if f.org_retention_days == Some(0) {
+        anyhow::bail!(
+            "--org-retention-days must be at least 1, got 0; omit it to keep --retention-days"
+        );
+    }
+    let block = file.accounts.clone().unwrap_or_default();
+    if !block.orgs.is_empty() && !enabled {
+        anyhow::bail!("the config file declares organisations, and accounts are off; add --accounts or --signup");
+    }
+    Ok(mcpd_server::accounts::AccountSettings {
+        enabled,
+        public_url: f.public_url.clone(),
+        mail,
+        org_quota_per_minute: org_quota,
+        org_retention_days: f.org_retention_days,
+        allow_org_creation: block.allow_org_creation,
+        allow_private_issuers: block.allow_private_issuers,
+        orgs: block.orgs,
+    })
 }
 
 /// The parts of the configuration that do not fit on a command line.
@@ -321,6 +470,10 @@ struct FileConfig {
     /// already holds.
     #[serde(default)]
     aspects: Option<mcpd_server::aspects::AspectSettings>,
+    /// Accounts: who may create organisations, and the organisations this file
+    /// declares with their owners, projects, single sign-on and SCIM token.
+    #[serde(default)]
+    accounts: Option<FileAccounts>,
 }
 
 /// The knobs the run store's ticks read, as a config file spells them: whole
@@ -522,8 +675,8 @@ fn runs_path(data: &str, runs_data: Option<&str>) -> Option<String> {
 
 /// Where the account store lives, from the flag or from the data path. `None`
 /// when sign-up is off, because then no file is opened at all.
-fn accounts_path(data: &str, signup: bool, accounts_data: Option<&str>) -> Option<String> {
-    if !signup {
+fn accounts_path(data: &str, enabled: bool, accounts_data: Option<&str>) -> Option<String> {
+    if !enabled {
         return None;
     }
     match accounts_data.map(str::trim) {
@@ -722,6 +875,7 @@ async fn main() -> Result<()> {
     // somebody decides how an operator sets it, which is the whole subject of
     // this block.
     let defaults = ServerConfig::default();
+    let account_settings = account_settings(&cli, &file)?;
     let mut config = ServerConfig {
         default_project: cli.project.clone(),
         max_body_bytes: limit_from(
@@ -756,6 +910,7 @@ async fn main() -> Result<()> {
         run_config: file.runs.into_config()?,
         trusted_identity,
         signup: cli.signup,
+        account_settings,
         client_ip,
         sampling: match cli.sample {
             Some(p) if (0.0..=1.0).contains(&p) => Policy::deterministic(p),
@@ -844,16 +999,18 @@ async fn main() -> Result<()> {
     // A path with nothing to put in it is a sign the operator thinks sign-up is
     // on. Refused rather than ignored, so the daemon they start is the one
     // they meant.
-    if cli.accounts_data.as_deref().is_some_and(|p| !p.trim().is_empty()) && !cli.signup {
+    if cli.accounts_data.as_deref().is_some_and(|p| !p.trim().is_empty())
+        && !config.accounts_enabled()
+    {
         anyhow::bail!(
-            "--accounts-data is set with no --signup, so no account would ever be stored; add \
-             --signup, or drop --accounts-data"
+            "--accounts-data is set with no --signup or --accounts, so no account would ever be \
+             stored; add one of them, or drop --accounts-data"
         );
     }
     // The third embedded file, opened only with --signup. Without it no file is
     // created and nothing about the daemon changes.
     let account_store: Option<Arc<mcpd_server::accounts::AccountStore>> =
-        match accounts_path(&cli.data, cli.signup, cli.accounts_data.as_deref()) {
+        match accounts_path(&cli.data, config.accounts_enabled(), cli.accounts_data.as_deref()) {
             None => None,
             Some(path) => Some(Arc::new(
                 mcpd_server::accounts::AccountStore::open(&path)
@@ -939,6 +1096,11 @@ async fn main() -> Result<()> {
         state = state.with_account_store(accounts);
     }
     let state = Arc::new(state);
+    // Organisations the config file declares, applied before the first request
+    // so their owners, projects and single sign-on are in place from the start.
+    if state.accounts.is_some() {
+        mcpd_server::orgs::apply_config(&state).await.map_err(anyhow::Error::msg)?;
+    }
 
     // Monitors run in the background for the life of the process. `spawn` is a
     // no-op when none are configured, so this costs nothing by default.
@@ -982,6 +1144,24 @@ async fn main() -> Result<()> {
     // With sign-up on no scope is open, so these three would be false. The one
     // warning that applies instead is about the limits on sign-up and log-in.
     let open_warnings = !config.signup;
+    if config.signup
+        && matches!(config.account_settings.mail, mcpd_server::mail::MailConfig::Refuse)
+    {
+        tracing::warn!(
+            "sign-up is on with no SMTP server, so sign-up, password reset, address changes and \
+             invitations are refused: each needs a mailed link. Set --smtp-host and --smtp-from."
+        );
+    }
+    if config.accounts_enabled()
+        && config.account_settings.public_url.is_none()
+        && !addr.ip().is_loopback()
+    {
+        tracing::warn!(
+            "accounts are on with no --public-url, so mailed links and the single sign-on \
+             redirect point at http://localhost:4317. Set --public-url to where people open the \
+             interface."
+        );
+    }
     if config.signup && config.client_ip.header().is_none() && !addr.ip().is_loopback() {
         tracing::warn!(
             "sign-up is on and every client is counted by its peer address. Behind a proxy that \
@@ -1045,7 +1225,7 @@ async fn main() -> Result<()> {
         plan
     };
 
-    if !retention_plan.is_empty() {
+    if !retention_plan.is_empty() || account_store.is_some() {
         // Tracked and cancellable, so a stop between passes is immediate and a
         // stop during a pass waits for the delete in flight rather than
         // dropping it halfway. A panic in one pass is logged with the loop's
@@ -1055,7 +1235,7 @@ async fn main() -> Result<()> {
         let store = Arc::clone(&store);
         let runs = run_store.clone();
         let accounts = account_store.clone();
-        let global_days = cli.retention_days;
+        let global_days = config.account_settings.org_retention_days.or(cli.retention_days);
         mcpd_server::spawn_loop(
             &state,
             "retention",
@@ -1065,14 +1245,24 @@ async fn main() -> Result<()> {
                 let (plan, store, runs) = (Arc::clone(&plan), Arc::clone(&store), runs.clone());
                 let accounts = accounts.clone();
                 async move {
-                    // Accounts' projects are created while the daemon runs, so
-                    // they are read on every pass. Each takes the global
-                    // window; nothing else sets one for them.
+                    // Organisations' projects are created while the daemon
+                    // runs, so they are read on every pass. Each takes its
+                    // organisation's window, else the organisation default,
+                    // else the global one. A project the configuration names
+                    // keeps the window the configuration gave it.
                     let mut plan: Vec<(String, u32)> = plan.as_ref().clone();
-                    if let (Some(accounts), Some(days)) = (accounts, global_days) {
-                        match tokio::task::spawn_blocking(move || accounts.projects()).await {
+                    if let Some(accounts) = accounts {
+                        match tokio::task::spawn_blocking(move || {
+                            accounts.retention_plan(global_days)
+                        })
+                        .await
+                        {
                             Ok(Ok(projects)) => {
-                                plan.extend(projects.into_iter().map(|p| (p, days)));
+                                for (p, d) in projects {
+                                    if !plan.iter().any(|(n, _)| *n == p) {
+                                        plan.push((p, d));
+                                    }
+                                }
                             }
                             Ok(Err(e)) => tracing::error!("retention could not list accounts: {e}"),
                             Err(e) => tracing::error!("retention could not list accounts: {e}"),
@@ -1318,9 +1508,32 @@ fn config_lines(cli: &Cli, config: &ServerConfig, redact_keys: &[String]) -> Vec
     // back up, and on a container it has to be on the volume.
     row(
         "signup",
-        match accounts_path(&cli.data, config.signup, cli.accounts_data.as_deref()) {
+        match accounts_path(&cli.data, config.accounts_enabled(), cli.accounts_data.as_deref()) {
             None => "off".to_owned(),
-            Some(path) => format!("open, accounts in sqlite at {path}"),
+            Some(path) => {
+                let s = &config.account_settings;
+                let mode = if config.signup {
+                    "open"
+                } else {
+                    "closed, accounts by invitation, sso or scim"
+                };
+                let mut line = format!(
+                    "{mode}, accounts in sqlite at {path}; mail {}; links to {}",
+                    s.mail.describe(),
+                    s.base_url()
+                );
+                if let Some(q) = s.org_quota_per_minute {
+                    line.push_str(&format!("; org quota {q}/min"));
+                }
+                if let Some(d) = s.org_retention_days {
+                    line.push_str(&format!("; org retention {d} days"));
+                }
+                if !s.orgs.is_empty() {
+                    let names: Vec<&str> = s.orgs.iter().map(|o| o.slug.as_str()).collect();
+                    line.push_str(&format!("; config orgs {}", names.join(", ")));
+                }
+                line
+            }
         },
     );
     let runs = runs_path(&cli.data, cli.runs_data.as_deref());

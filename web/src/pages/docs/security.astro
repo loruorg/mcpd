@@ -139,7 +139,8 @@ import TerminalCast from '@/components/TerminalCast.astro'
   <h2>Keys and scopes</h2>
   <p>
     Authentication is API keys. By default there is no account, no session and
-    no login; <code>--signup</code> adds them, as described below. A
+    no login; <code>--signup</code> and <code>--accounts</code> add them, as
+    described below. A
     key is presented as <code>Authorization: Bearer …</code> or in the
     <code>X-Mcpd-Key</code> header, and both sides are hashed with SHA-256
     before they are compared, so neither the length of the configured key nor
@@ -190,22 +191,46 @@ import TerminalCast from '@/components/TerminalCast.astro'
     is one answer to "what does this endpoint need" rather than one per document.
   </p>
 
-  <h3>Accounts, with --signup</h3>
+  <h3>Accounts, with --signup or --accounts</h3>
   <p>
     With <code>--signup</code>, anyone may create an account with an email and a
-    password. Each account owns one project with a random name. Logging in gives
-    a session token that holds every scope on that project, and the account can
-    mint API keys for it, one scope each. Neither reaches any other project. A
-    signal an account key sends is stored in the account's project, whatever
+    password; with <code>--accounts</code>, people arrive by invitation, single
+    sign-on or SCIM. Every account project belongs to an organisation, and a
+    member's role there (owner, admin, member or viewer, optionally replaced on
+    one project) maps onto the six scopes. A session carries the scopes the
+    role allows on each project of the account's organisations; a key carries
+    one scope on one project, and only while its maker's role still allows it.
+    Nothing reaches a project of an organisation the account does not belong
+    to. A signal an account key sends is stored in the key's project, whatever
     project it names, and an idempotency key is kept per project, so one
     account cannot make another's batch look like a replay. Only a session can
     list, mint or revoke keys, so a key that leaks cannot make more.
   </p>
   <p>
-    Passwords are hashed with argon2id. Tokens and keys are random 32-byte
-    values, shown once, and stored only as SHA-256 digests. A wrong password
-    and an unknown email get the same answer. Sign-up and log-in are limited
-    per client address, and failed log-ins per email. Sessions last 30 days.
+    Passwords are hashed with argon2id. Tokens, keys, mailed links, invitation
+    tokens, recovery codes and SCIM tokens are random values, shown once, and
+    stored only as SHA-256 digests. Sign-up, log-in and password reset give the
+    same answer whether or not an address has an account, and say the rest in a
+    mail to the address. An address is confirmed by a link before the account
+    can log in. Two-step log-in uses time-based codes, refuses a code used
+    before, and gives ten single-use recovery codes. Every credential door is
+    limited per client address, and failed log-ins per email. Password
+    sessions last 30 days and single sign-on sessions 24 hours; an account can
+    list and end its sessions, and changing or resetting the password ends the
+    others.
+  </p>
+  <p>
+    Single sign-on is OpenID Connect with PKCE, a one-time state and a nonce,
+    plus a secret held by the browser that started the login, so a login link
+    cannot be handed to somebody else. The ID token's signature, issuer,
+    audience, expiry and nonce are checked, and symmetric algorithms are
+    refused. A person is found by their identity at the provider; a new
+    account is created only for an address in a domain the organisation
+    claims, an existing account is never taken over, and the session reaches
+    that organisation's projects only. SCIM provisions an organisation's users
+    and groups with a token that reaches nothing else; deprovisioning ends the
+    membership, its keys and its sessions. See
+    <a href="/docs/accounts" class="link">accounts and organisations</a>.
   </p>
   <p>
     The mode also turns off the rule that a scope with no keys is open: a
@@ -345,7 +370,8 @@ import TerminalCast from '@/components/TerminalCast.astro'
     <code>admin</code> scope.
   </p>
   <p>
-    Eighteen actions are recorded: <code>get_trace</code>, <code>list_spans</code>,
+    Forty-two actions are recorded. Eighteen are reads and deletions of data:
+    <code>get_trace</code>, <code>list_spans</code>,
     <code>list_logs</code>, <code>list_feedback</code>,
     <code>list_dataset_items</code>, <code>capture_into_dataset</code>,
     <code>read_trace_aspect_notes</code>, <code>get_theme</code>,
@@ -361,6 +387,25 @@ import TerminalCast from '@/components/TerminalCast.astro'
     is recorded, because every run in the list carries its input, output and
     state as they were sent. A refused read of a run is recorded under the
     project that owns the run.
+  </p>
+  <p>
+    The other twenty-four are changes to who can reach what, on a daemon with
+    accounts. They are written against the organisation's id rather than a
+    project, carry the acting account's email as the subject, and are read
+    with <code>GET /v1/api/orgs/{'{org_id}'}/audit</code> by an admin or owner:
+    <code>org_create</code>, <code>org_update</code>, <code>org_delete</code>,
+    <code>member_invite</code>, <code>invite_revoke</code>,
+    <code>invite_accept</code>, <code>member_role</code>,
+    <code>member_project_role</code>, <code>member_remove</code>,
+    <code>project_create</code>, <code>project_delete</code>,
+    <code>org_key_revoke</code>, <code>group_roles_update</code>,
+    <code>sso_update</code>, <code>sso_delete</code>, <code>sso_login</code>,
+    <code>scim_token_rotate</code>, <code>scim_token_revoke</code>,
+    <code>scim_user_create</code>, <code>scim_user_update</code>,
+    <code>scim_user_delete</code>, <code>scim_group_create</code>,
+    <code>scim_group_update</code> and <code>scim_group_delete</code>. A SCIM
+    change carries <code>scim</code> as its subject and the digest of the SCIM
+    token as its principal.
   </p>
   <p>
     The worker calls are not recorded: claiming a step, declaring it started,
@@ -381,8 +426,9 @@ import TerminalCast from '@/components/TerminalCast.astro'
       open daemon is recorded as <code>anonymous</code>.
     </li>
     <li>
-      <strong>The person comes from your ingress.</strong> On its own a row
-      attributes an action to a key. The <code>subject</code> field carries an identity
+      <strong>The person comes from a session or your ingress.</strong> A row
+      for an organisation change carries the acting account's email. For a key,
+      a row attributes an action to the key and not to a human. The <code>subject</code> field carries an identity
       when <code>--trusted-identity-header</code> and
       <code>--trusted-proxy-cidr</code> are both set, and is empty otherwise,
       which is the default. mcpd never establishes that identity itself; it
@@ -399,7 +445,7 @@ import TerminalCast from '@/components/TerminalCast.astro'
       <strong>It records which key, and optionally who.</strong> The key is
       stored as a truncated digest, never the key itself, so the log is not a
       place credentials accumulate. That answers "an admin key deleted this".
-      To answer "which person did", give it the header
+      A session also names the person for organisation changes. For keys, give it the header
       your ingress already sets and the addresses allowed to set it:
       <code>--trusted-identity-header x-forwarded-user</code> with
       <code>--trusted-proxy-cidr 10.42.0.0/16</code>. Both halves are required.
@@ -432,7 +478,8 @@ import TerminalCast from '@/components/TerminalCast.astro'
       <strong>The interface.</strong> The markup at <code>/</code> is served to
       anyone who can reach the port. The data behind it is not: every request it
       makes goes through the query API and meets the same keys. There is no
-      login screen in the daemon unless <code>--signup</code> is on.
+      login screen in the daemon unless <code>--signup</code> or
+      <code>--accounts</code> is on.
     </li>
     <li>
       <strong>The probes and <code>/metrics</code>.</strong> Unauthenticated on
@@ -552,19 +599,7 @@ import TerminalCast from '@/components/TerminalCast.astro'
         <td>Terminate TLS at your ingress or in your mesh, and keep the daemon's port off any untrusted network.</td>
       </tr>
       <tr>
-        <td><strong>Single sign-on.</strong> A person's identity comes from the proxy in front of mcpd.</td>
-        <td>Put the interface behind the identity proxy you already run. A person's identity is whatever that proxy establishes.</td>
-      </tr>
-      <tr>
-        <td><strong>Provisioning.</strong> Inside mcpd the unit is a key. The accounts <code>--signup</code> creates own one project each.</td>
-        <td>Provision at the proxy. Inside mcpd, add a key to a list or remove it.</td>
-      </tr>
-      <tr>
-        <td><strong>Roles.</strong> Authorisation is one of six scopes and a project list.</td>
-        <td>Separate by key and by project. If a distinction matters, make it a project.</td>
-      </tr>
-      <tr>
-        <td><strong>Who a person is.</strong> The audit log records the subject your ingress asserted, and only from an address you named.</td>
+        <td><strong>Who a person is, for keys.</strong> Sessions name the account. For a key, the audit log records the subject your ingress asserted, from an address you named.</td>
         <td>Set <code>--trusted-identity-header</code> and <code>--trusted-proxy-cidr</code> so the header your proxy already sets reaches the audit row. Without them a row attributes an action to a key, and issuing one key per team narrows the digest.</td>
       </tr>
       <tr>

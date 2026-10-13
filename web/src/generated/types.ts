@@ -950,6 +950,65 @@ export type KeyScope = typeof KeyScope[keyof typeof KeyScope]
 export const ALL_KEY_SCOPE: readonly KeyScope[] = ['ingest', 'read', 'write', 'admin', 'execute', 'worker']
 
 /**
+  * What a member may do in an organisation. Each role maps onto the six key scopes on
+  * every project the organisation owns, unless a project role says otherwise. */
+export const OrgRole = {
+  // Every scope on every project, and everything an admin may do. Only an owner may add
+  // or remove an owner, change quotas or delete the organisation.
+  Owner: 'owner',
+  // Every scope on every project. Invites and removes members below owner, sets roles,
+  // creates and deletes projects, and manages SSO, SCIM and every key in the
+  // organisation.
+  Admin: 'admin',
+  // The `ingest`, `read`, `write`, `execute` and `worker` scopes. Everything but
+  // `admin`: a member cannot delete data or read the audit log.
+  Member: 'member',
+  // The `read` scope only.
+  Viewer: 'viewer',
+} as const
+
+export type OrgRole = typeof OrgRole[keyof typeof OrgRole]
+
+/** Every `OrgRole` value, in declaration order. */
+export const ALL_ORG_ROLE: readonly OrgRole[] = ['owner', 'admin', 'member', 'viewer']
+
+/**
+  * A role on one project that replaces a member's organisation role there. Owners and
+  * admins keep their reach on every project whatever a project role says. */
+export const ProjectRole = {
+  // No access to this project.
+  None: 'none',
+  // The `read` scope on this project.
+  Viewer: 'viewer',
+  // Every scope but `admin` on this project.
+  Member: 'member',
+  // Every scope on this project. It does not let the member manage the organisation.
+  Admin: 'admin',
+} as const
+
+export type ProjectRole = typeof ProjectRole[keyof typeof ProjectRole]
+
+/** Every `ProjectRole` value, in declaration order. */
+export const ALL_PROJECT_ROLE: readonly ProjectRole[] = ['none', 'viewer', 'member', 'admin']
+
+/**
+  * How an organisation's members log in with single sign-on. */
+export const SsoProvider = {
+  // Any OpenID Connect provider, such as Google, Microsoft Entra ID, Okta or Auth0,
+  // found through its issuer's discovery document. Authorization code flow with PKCE,
+  // state and nonce.
+  Oidc: 'oidc',
+  // GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub
+  // user id and the email is the primary verified address GitHub reports.
+  Github: 'github',
+} as const
+
+export type SsoProvider = typeof SsoProvider[keyof typeof SsoProvider]
+
+/** Every `SsoProvider` value, in declaration order. */
+export const ALL_SSO_PROVIDER: readonly SsoProvider[] = ['oidc', 'github']
+
+/**
  * Input tokens broken down by how the provider billed them. Every field is optional;
  * absent means the provider did not report it, which is different from zero.
  */
@@ -1727,6 +1786,16 @@ export interface HealthStatus {
    * its sign-up and log-in screens.
    */
   signup?: boolean
+  /**
+   * True when this daemon has accounts, with or without open sign-up. Absent when it
+   * does not. The interface reads this to show its log-in screen.
+   */
+  accounts?: boolean
+  /**
+   * True when at least one organisation on this daemon logs in with single sign-on, so
+   * the log-in screen offers it. Absent otherwise.
+   */
+  sso?: boolean
 }
 
 /**
@@ -3699,6 +3768,11 @@ export interface AccountCredentials {
    * At least 10 characters and at most 1024 bytes. Stored only as an argon2id hash.
    */
   password: string
+  /**
+   * The six-digit code from an authenticator app, or one of the recovery codes, when the
+   * account has two-step log-in on. Ignored by sign-up.
+   */
+  totp_code?: string
 }
 
 /**
@@ -3706,8 +3780,7 @@ export interface AccountCredentials {
  */
 export interface AccountSession {
   /**
-   * The session token. It grants every scope on the account's own project and nothing
-   * else. It is shown once: the daemon keeps only its SHA-256 digest.
+   * The session token. It is shown once: the daemon keeps only its SHA-256 digest.
    */
   token: string
   /**
@@ -3719,10 +3792,16 @@ export interface AccountSession {
    */
   email: string
   /**
-   * The account's project. Every signal an account key writes lands here, and every read
-   * is limited to it.
+   * The project reads go to when they name none. The account's own project, or the first
+   * project of the organisation a single sign-on session is limited to. Absent when the
+   * session reaches no project yet.
    */
-  project: string
+  project?: string
+  /**
+   * Set when the session came from an organisation's single sign-on. The session then
+   * reaches that organisation's projects only.
+   */
+  org_id?: string
 }
 
 /**
@@ -3734,13 +3813,32 @@ export interface Account {
    */
   email: string
   /**
-   * The account's project, which is the only project its session and its keys reach.
+   * The project created with the account at sign-up. Absent for an account that was
+   * invited, or created by single sign-on or SCIM.
    */
-  project: string
+  project?: string
   /**
    * When the account was created.
    */
   created_at: string
+  /**
+   * Whether the address has been confirmed by a link sent to it.
+   */
+  email_verified: boolean
+  /**
+   * Whether two-step log-in is on.
+   */
+  totp_enabled: boolean
+  /**
+   * Whether the account can log in with a password. False for an account created by
+   * single sign-on or SCIM that has never set one.
+   */
+  has_password: boolean
+  /**
+   * The organisation that created this account through single sign-on or SCIM. That
+   * organisation can deactivate it.
+   */
+  managed_by?: string
 }
 
 /**
@@ -3757,6 +3855,10 @@ export interface AccountKey {
    */
   scope: KeyScope
   /**
+   * The one project the key reaches.
+   */
+  project: string
+  /**
    * The label given when the key was created.
    */
   name?: string
@@ -3769,6 +3871,11 @@ export interface AccountKey {
    * When the key was created.
    */
   created_at: string
+  /**
+   * The email of the account that created the key. Set in an organisation's key list, so
+   * an admin can see whose key it is.
+   */
+  created_by?: string
 }
 
 /**
@@ -3783,6 +3890,11 @@ export interface CreateAccountKeyRequest {
    * A label for the key, such as the service that will hold it. At most 100 characters.
    */
   name?: string
+  /**
+   * The project the key reaches. Defaults to the account's own project. Your role on the
+   * project must allow the scope.
+   */
+  project?: string
 }
 
 /**
@@ -3798,6 +3910,760 @@ export interface CreatedAccountKey {
    * keeps only its SHA-256 digest and cannot show it again.
    */
   secret: string
+}
+
+/**
+ * A plain answer that changes nothing you can read back, such as "check your email".
+ */
+export interface AccountNotice {
+  /**
+   * What happened, and what to do next.
+   */
+  message: string
+}
+
+/**
+ * A one-time token from a link the daemon sent by email.
+ */
+export interface TokenRequest {
+  /**
+   * The token, as it appears in the link.
+   */
+  token: string
+}
+
+/**
+ * A request for a password reset link.
+ */
+export interface PasswordForgotRequest {
+  /**
+   * The address to send the link to. The answer is the same whether or not an account
+   * uses it.
+   */
+  email: string
+}
+
+/**
+ * A new password, with the token from a reset link.
+ */
+export interface PasswordResetRequest {
+  /**
+   * The token from the reset link. It works once, for one hour.
+   */
+  token: string
+  /**
+   * The new password. At least 10 characters and at most 1024 bytes.
+   */
+  password: string
+  /**
+   * A code from the authenticator app, or a recovery code, when the account has two-step
+   * log-in on. A reset proves the address, not the second factor.
+   */
+  totp_code?: string
+}
+
+/**
+ * A new password for the logged-in account.
+ */
+export interface PasswordChangeRequest {
+  /**
+   * The password in use now. Required when the account has one.
+   */
+  current_password?: string
+  /**
+   * The new password. At least 10 characters and at most 1024 bytes.
+   */
+  new_password: string
+}
+
+/**
+ * A new email address for the logged-in account.
+ */
+export interface EmailChangeRequest {
+  /**
+   * The new address. A link is sent to it, and the change happens when the link is
+   * opened.
+   */
+  email: string
+  /**
+   * The account's password. Required when the account has one.
+   */
+  password?: string
+}
+
+/**
+ * Confirmation for deleting the logged-in account.
+ */
+export interface AccountDeleteRequest {
+  /**
+   * The account's password. Required when the account has one.
+   */
+  password?: string
+  /**
+   * A code from the authenticator app. Required when two-step log-in is on.
+   */
+  totp_code?: string
+}
+
+/**
+ * What deleting an account removed.
+ */
+export interface AccountDeletion {
+  /**
+   * Organisations that had this account as their only member, deleted with it.
+   */
+  orgs_deleted: number
+  /**
+   * Projects whose stored signals and runs were erased, because their organisation was
+   * deleted.
+   */
+  projects_erased: string[]
+}
+
+/**
+ * One live session of the logged-in account. The token is not part of it.
+ */
+export interface SessionInfo {
+  /**
+   * The session's identifier, for ending it. Not a secret.
+   */
+  id: string
+  /**
+   * When the session started.
+   */
+  created_at: string
+  /**
+   * When it stops working.
+   */
+  expires_at: string
+  /**
+   * True for the session this request carries.
+   */
+  current: boolean
+  /**
+   * How it started: `password`, `sso`, `invite`, `verify` or `reset`.
+   */
+  via: string
+  /**
+   * The organisation a single sign-on session is limited to.
+   */
+  org_id?: string
+  /**
+   * The browser or client that started it, as it described itself.
+   */
+  user_agent?: string
+  /**
+   * The client address that started it.
+   */
+  address?: string
+}
+
+/**
+ * A new authenticator secret, not yet in use. Confirm it with a code to turn two-step
+ * log-in on.
+ */
+export interface TotpSetup {
+  /**
+   * The secret in base32, for typing into an authenticator app.
+   */
+  secret: string
+  /**
+   * The same secret as an `otpauth://` URI.
+   */
+  otpauth_uri: string
+  /**
+   * The URI as a QR code, an SVG document.
+   */
+  qr_svg: string
+}
+
+/**
+ * A code from an authenticator app.
+ */
+export interface TotpCodeRequest {
+  /**
+   * The six-digit code.
+   */
+  code: string
+}
+
+/**
+ * Two-step log-in is on.
+ */
+export interface TotpEnabled {
+  /**
+   * Ten single-use codes that stand in for the authenticator app. They are shown once:
+   * the daemon keeps only their digests.
+   */
+  recovery_codes: string[]
+}
+
+/**
+ * Confirmation for turning two-step log-in off.
+ */
+export interface TotpDisableRequest {
+  /**
+   * The account's password. Required when the account has one.
+   */
+  password?: string
+  /**
+   * A code from the authenticator app, or a recovery code.
+   */
+  code: string
+}
+
+/**
+ * An organisation: the owner of projects, members and single sign-on settings.
+ */
+export interface Org {
+  /**
+   * The organisation's identifier.
+   */
+  id: string
+  /**
+   * Its display name.
+   */
+  name: string
+  /**
+   * Your role in it.
+   */
+  role: OrgRole
+  /**
+   * When it was created.
+   */
+  created_at: string
+  /**
+   * The most signals all its projects together may store per minute. Absent means no
+   * ceiling.
+   */
+  quota_per_minute?: number
+  /**
+   * How long its projects keep data, in days. Absent means forever.
+   */
+  retention_days?: number
+  /**
+   * How many members it has.
+   */
+  members: number
+  /**
+   * How many projects it owns.
+   */
+  projects: number
+  /**
+   * True when the daemon's configuration file declares this organisation. Its single
+   * sign-on settings are then read from that file and cannot be changed here.
+   */
+  managed_by_config: boolean
+}
+
+/**
+ * A new organisation.
+ */
+export interface CreateOrgRequest {
+  /**
+   * Its display name, at most 100 characters.
+   */
+  name: string
+}
+
+/**
+ * Changes to an organisation. A field left out keeps its value.
+ */
+export interface UpdateOrgRequest {
+  /**
+   * A new display name, at most 100 characters.
+   */
+  name?: string
+  /**
+   * A ceiling on signals per minute across all the organisation's projects, at most the
+   * daemon's own ceiling. 0 restores the daemon's default. Owner only.
+   */
+  quota_per_minute?: number
+  /**
+   * How long to keep data, in days, at most the daemon's own window. 0 restores the
+   * daemon's default. Owner only.
+   */
+  retention_days?: number
+}
+
+/**
+ * What deleting an organisation removed.
+ */
+export interface OrgDeletion {
+  /**
+   * Projects whose stored signals and runs were erased.
+   */
+  projects_erased: string[]
+}
+
+/**
+ * A role on one project.
+ */
+export interface ProjectRoleGrant {
+  /**
+   * The project.
+   */
+  project: string
+  /**
+   * The role there.
+   */
+  role: ProjectRole
+}
+
+/**
+ * One member of an organisation.
+ */
+export interface OrgMember {
+  /**
+   * The member's account.
+   */
+  account_id: string
+  /**
+   * The member's email address.
+   */
+  email: string
+  /**
+   * The member's role.
+   */
+  role: OrgRole
+  /**
+   * How they joined: `created`, `invite`, `sso`, `scim` or `config`.
+   */
+  via: string
+  /**
+   * When they joined.
+   */
+  joined_at: string
+  /**
+   * Roles on single projects that replace the organisation role there.
+   */
+  project_roles: ProjectRoleGrant[]
+  /**
+   * True when this organisation created the account through single sign-on or SCIM.
+   */
+  managed: boolean
+  /**
+   * Whether the member has two-step log-in on.
+   */
+  totp_enabled: boolean
+}
+
+/**
+ * A new role for a member.
+ */
+export interface UpdateMemberRequest {
+  /**
+   * The role. Only an owner may grant or remove `owner`, and the last owner cannot be
+   * demoted.
+   */
+  role: OrgRole
+}
+
+/**
+ * A role for a member on one project.
+ */
+export interface SetProjectRoleRequest {
+  /**
+   * A project the organisation owns.
+   */
+  project: string
+  /**
+   * The role there. Absent removes the project role, so the organisation role applies
+   * again.
+   */
+  role?: ProjectRole
+}
+
+/**
+ * An invitation not yet accepted. The token is not part of it.
+ */
+export interface OrgInvite {
+  /**
+   * The invitation's identifier, for revoking it.
+   */
+  id: string
+  /**
+   * The address it was sent to.
+   */
+  email: string
+  /**
+   * The role it grants.
+   */
+  role: OrgRole
+  /**
+   * Project roles it grants as well.
+   */
+  project_roles: ProjectRoleGrant[]
+  /**
+   * The email of the member who sent it. Absent when the configuration file or SCIM sent
+   * it.
+   */
+  invited_by?: string
+  /**
+   * When it was sent.
+   */
+  created_at: string
+  /**
+   * When it stops working.
+   */
+  expires_at: string
+}
+
+/**
+ * An invitation to an organisation.
+ */
+export interface CreateInviteRequest {
+  /**
+   * Who to invite. The link is sent to this address.
+   */
+  email: string
+  /**
+   * The role to grant. Only an owner may invite an owner.
+   */
+  role: OrgRole
+  /**
+   * Project roles to grant as well.
+   */
+  project_roles?: ProjectRoleGrant[]
+}
+
+/**
+ * What an invitation offers, read with its token before accepting it.
+ */
+export interface InviteLookup {
+  /**
+   * The organisation.
+   */
+  org_name: string
+  /**
+   * The address it was sent to. Accepting it joins the account with this address.
+   */
+  email: string
+  /**
+   * The role it grants.
+   */
+  role: OrgRole
+  /**
+   * Whether an account with this address exists. If it does, log in as it to accept; if
+   * not, accepting creates it.
+   */
+  account_exists: boolean
+  /**
+   * When it stops working.
+   */
+  expires_at: string
+}
+
+/**
+ * Acceptance of an invitation.
+ */
+export interface InviteAcceptRequest {
+  /**
+   * The token from the invitation link.
+   */
+  token: string
+  /**
+   * A password for the new account, when no account uses the invited address. Ignored
+   * otherwise.
+   */
+  password?: string
+}
+
+/**
+ * An accepted invitation.
+ */
+export interface InviteAccepted {
+  /**
+   * The organisation joined.
+   */
+  org: Org
+  /**
+   * A session for the account accepting created. Absent when an existing account
+   * accepted with its own session.
+   */
+  session?: AccountSession
+}
+
+/**
+ * A project an organisation owns.
+ */
+export interface OrgProject {
+  /**
+   * The project name. Random, so nobody can choose one that already holds somebody
+   * else's data.
+   */
+  project: string
+  /**
+   * A display label.
+   */
+  label?: string
+  /**
+   * When it was created or attached.
+   */
+  created_at: string
+}
+
+/**
+ * A new project in an organisation.
+ */
+export interface CreateProjectRequest {
+  /**
+   * A display label, at most 100 characters.
+   */
+  label?: string
+}
+
+/**
+ * How much an organisation is using, against its ceilings. Counted since the daemon
+ * started.
+ */
+export interface OrgUsage {
+  /**
+   * The organisation.
+   */
+  org_id: string
+  /**
+   * Its ceiling on signals per minute, when it has one.
+   */
+  quota_per_minute?: number
+  /**
+   * Signals stored in the current one-minute window.
+   */
+  admitted_this_minute: number
+  /**
+   * Signals stored since the daemon started.
+   */
+  admitted_total: number
+  /**
+   * Signals refused for the ceiling since the daemon started.
+   */
+  refused_total: number
+  /**
+   * How long its projects keep data, in days.
+   */
+  retention_days?: number
+  /**
+   * Members.
+   */
+  members: number
+  /**
+   * Projects.
+   */
+  projects: number
+  /**
+   * API keys on its projects.
+   */
+  keys: number
+  /**
+   * When counting started.
+   */
+  since: string
+}
+
+/**
+ * An organisation's single sign-on settings. The client secret is not part of it.
+ */
+export interface SsoConfig {
+  /**
+   * The kind of provider.
+   */
+  provider: SsoProvider
+  /**
+   * The OpenID Connect issuer URL. Absent for GitHub.
+   */
+  issuer?: string
+  /**
+   * The client id registered with the provider.
+   */
+  client_id: string
+  /**
+   * Whether a client secret is stored.
+   */
+  has_client_secret: boolean
+  /**
+   * Email domains this organisation claims. Single sign-on creates accounts only for
+   * these domains, and "Log in with SSO" finds the organisation by them.
+   */
+  domains: string[]
+  /**
+   * When true, members whose email is in a claimed domain cannot log in with a password.
+   */
+  enforced: boolean
+  /**
+   * The role given to a member single sign-on creates, when no group maps to a role.
+   * Never `owner`.
+   */
+  default_role: OrgRole
+  /**
+   * The ID token claim that lists the member's groups, mapped to roles by the group
+   * roles.
+   */
+  groups_claim?: string
+  /**
+   * The redirect URL to register with the provider.
+   */
+  redirect_url: string
+  /**
+   * True when these settings come from the configuration file.
+   */
+  managed_by_config: boolean
+  /**
+   * When they were last changed.
+   */
+  updated_at: string
+}
+
+/**
+ * New single sign-on settings for an organisation.
+ */
+export interface PutSsoConfigRequest {
+  /**
+   * The kind of provider.
+   */
+  provider: SsoProvider
+  /**
+   * The OpenID Connect issuer URL, such as `https://accounts.google.com`. Required for
+   * `oidc`. Must be `https`.
+   */
+  issuer?: string
+  /**
+   * The client id registered with the provider.
+   */
+  client_id: string
+  /**
+   * The client secret. Left out, the stored one is kept.
+   */
+  client_secret?: string
+  /**
+   * Email domains to claim. You can claim the domain of your own verified address. A
+   * domain belongs to one organisation.
+   */
+  domains: string[]
+  /**
+   * Refuse password log-in for members in the claimed domains. Turning it on ends their
+   * password sessions.
+   */
+  enforced: boolean
+  /**
+   * The role for a member single sign-on creates. `admin`, `member` or `viewer`.
+   */
+  default_role: OrgRole
+  /**
+   * The ID token claim that lists groups, such as `groups`.
+   */
+  groups_claim?: string
+}
+
+/**
+ * A group from the identity provider, and the role its members get.
+ */
+export interface GroupRole {
+  /**
+   * The group name, as single sign-on or SCIM sends it. Compared without regard to case.
+   */
+  group: string
+  /**
+   * The role. Never `owner`.
+   */
+  role: OrgRole
+}
+
+/**
+ * Whether an organisation has a SCIM token. The token is not part of it.
+ */
+export interface ScimTokenInfo {
+  /**
+   * Whether a token exists.
+   */
+  configured: boolean
+  /**
+   * The first characters of the token.
+   */
+  prefix?: string
+  /**
+   * When it was created.
+   */
+  created_at?: string
+  /**
+   * The SCIM base URL to give your identity provider.
+   */
+  base_url: string
+}
+
+/**
+ * A new SCIM token. This is the only time it is shown, and it replaces any earlier
+ * token.
+ */
+export interface CreatedScimToken {
+  /**
+   * The bearer token for your identity provider. The daemon keeps only its SHA-256
+   * digest.
+   */
+  token: string
+  /**
+   * Its first characters.
+   */
+  prefix: string
+  /**
+   * When it was created.
+   */
+  created_at: string
+  /**
+   * The SCIM base URL to give your identity provider.
+   */
+  base_url: string
+}
+
+/**
+ * Where to start single sign-on. Give one of the two.
+ */
+export interface SsoStartRequest {
+  /**
+   * Your email address. Its domain finds the organisation.
+   */
+  email?: string
+  /**
+   * The organisation, when you know it.
+   */
+  org_id?: string
+}
+
+/**
+ * Where to send the browser for single sign-on.
+ */
+export interface SsoStart {
+  /**
+   * The provider's authorization URL, with state, nonce and the PKCE challenge in it.
+   */
+  authorize_url: string
+  /**
+   * A secret to keep in this browser and send back with the callback. It ties the
+   * callback to the browser that started it, so a link from somebody else cannot log you
+   * in as them.
+   */
+  binding: string
+  /**
+   * The organisation.
+   */
+  org_name: string
+}
+
+/**
+ * What the provider sent back to the redirect URL.
+ */
+export interface SsoCallbackRequest {
+  /**
+   * The `state` parameter.
+   */
+  state: string
+  /**
+   * The `code` parameter.
+   */
+  code: string
+  /**
+   * The binding from the start of the flow.
+   */
+  binding: string
 }
 
 /**

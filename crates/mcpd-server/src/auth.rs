@@ -52,13 +52,15 @@
 //!
 //! ## Accounts
 //!
-//! With `--signup`, a presented secret that matches no configured key is looked
-//! up among the accounts' keys and sessions (see `crate::accounts`). Configured
-//! keys are tried first and behave exactly as above. An account key grants its
-//! one scope, a session every scope, and both only on the account's own
-//! project. And the open rule above is off: with `--signup` a request with no
-//! key is refused whatever the configuration holds, because a daemon that lets
-//! strangers in must not also let in strangers with no credential at all.
+//! With `--signup` or `--accounts`, a presented secret that matches no
+//! configured key is looked up among the accounts' keys and sessions (see
+//! `crate::accounts`). Configured keys are tried first and behave exactly as
+//! above. An account key grants its one scope on its one project, and a session
+//! the scopes the account's role carries on each project of its organisations;
+//! both only while that role still carries the scope. And the open rule above
+//! is off: with accounts on, a request with no key is refused whatever the
+//! configuration holds, because a daemon that lets people in by account must not
+//! also let in anybody with no credential at all.
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -240,7 +242,7 @@ pub fn authorize(state: &AppState, headers: &HeaderMap, scope: Scope) -> Result<
     // Are there any keys at all, anywhere? With none, the surface is open, which
     // is the laptop path. Never with sign-up on: see the module documentation.
     let any_project_key = state.config.projects.values().any(|p| !p.keys_for(scope).is_empty());
-    if global.is_empty() && !any_project_key && !state.config.signup {
+    if global.is_empty() && !any_project_key && !state.config.accounts_enabled() {
         return Ok(Grant::All);
     }
 
@@ -276,8 +278,10 @@ pub fn authorize(state: &AppState, headers: &HeaderMap, scope: Scope) -> Result<
     // so a configured key means exactly what it meant before accounts existed.
     if reachable.is_empty() {
         if let Some(credential) = account_credential(state, &presented) {
-            if credential.allows(scope) {
-                return Ok(Grant::Only(std::collections::BTreeSet::from([credential.project])));
+            let reach =
+                state.accounts.as_ref().map(|a| a.reach(&credential, scope)).unwrap_or_default();
+            if !reach.is_empty() {
+                return Ok(Grant::Only(reach));
             }
             return Err(ApiError::Forbidden(scope.refusal().to_owned()));
         }
@@ -317,9 +321,9 @@ pub fn authorize_project(
     }
 }
 
-/// The account credential a secret is, when sign-up is on and it is one.
+/// The account credential a secret is, when accounts are on and it is one.
 fn account_credential(state: &AppState, presented: &str) -> Option<crate::accounts::Credential> {
-    if !state.config.signup {
+    if !state.config.accounts_enabled() {
         return None;
     }
     state.accounts.as_ref()?.lookup(presented)
@@ -343,7 +347,8 @@ pub fn pinned_project(state: &AppState, headers: &HeaderMap) -> Option<String> {
     if is_configured_key(state, &presented) {
         return None;
     }
-    account_credential(state, &presented).map(|c| c.project)
+    let credential = account_credential(state, &presented)?;
+    state.accounts.as_ref()?.home_project(&credential)
 }
 
 /// Whether a secret is in any configured list.
@@ -358,6 +363,42 @@ fn is_configured_key(state: &AppState, presented: &str) -> bool {
     })
 }
 
+/// The secret a request presents, for the doors that read a credential of
+/// their own: the SCIM token, and an optional session on invitation accept.
+#[must_use]
+pub fn presented(headers: &HeaderMap) -> Option<String> {
+    presented_key(headers)
+}
+
+/// Require an organisation's SCIM token, and return the organisation it
+/// belongs to.
+///
+/// Only a SCIM token passes. A session or an API key does not, whatever it can
+/// reach, and a SCIM token passes nothing else: it is looked up in its own
+/// table, never among keys and sessions, so it cannot read a trace.
+///
+/// # Errors
+/// [`ApiError::NotFound`] when accounts are off, and [`ApiError::Unauthorized`]
+/// for a missing or unknown token.
+pub fn authorize_scim(state: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
+    let accounts = crate::accounts::store(state)?;
+    let Some(presented) = presented_key(headers) else {
+        return Err(ApiError::Unauthorized(
+            "SCIM needs the organisation's SCIM token; send it as `Authorization: Bearer <token>`"
+                .to_owned(),
+        ));
+    };
+    match accounts.org_for_scim_token(&presented) {
+        Ok(Some(org)) => Ok(org),
+        Ok(None) => Err(ApiError::Unauthorized(
+            "that is not a SCIM token this daemon knows; create one under the organisation's SSO \
+             settings"
+                .to_owned(),
+        )),
+        Err(e) => Err(ApiError::Internal(e.to_string())),
+    }
+}
+
 /// Require an account session token, and return it with what it is.
 ///
 /// Only a session from logging in passes. An API key does not, whatever its
@@ -365,15 +406,17 @@ fn is_configured_key(state: &AppState, presented: &str) -> bool {
 /// revoke the ones that are watching it.
 ///
 /// # Errors
-/// [`ApiError::NotFound`] when sign-up is off, [`ApiError::Unauthorized`] for a
-/// missing, unknown or expired token, and [`ApiError::Forbidden`] for an API key.
+/// [`ApiError::NotFound`] when accounts are off, [`ApiError::Unauthorized`] for
+/// a missing, unknown or expired token, and [`ApiError::Forbidden`] for an API
+/// key.
 pub fn authorize_session(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<(crate::accounts::Credential, String), ApiError> {
-    if !state.config.signup {
+    if !state.config.accounts_enabled() {
         return Err(ApiError::NotFound(
-            "this daemon does not offer accounts; start it with --signup to turn them on"
+            "this daemon does not offer accounts; start it with --signup or --accounts to turn \
+             them on"
                 .to_owned(),
         ));
     }

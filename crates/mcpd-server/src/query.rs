@@ -385,6 +385,49 @@ pub(crate) async fn audited(
     decision
 }
 
+/// [`audited`], for the account doors: organisations, members, roles, single
+/// sign-on and SCIM.
+///
+/// Their rows are written against the organisation's id rather than a project,
+/// because a membership belongs to no one project, and they carry the acting
+/// account's email as the subject. A session is a person, so the audit log can
+/// say who did it without a proxy asserting it. Like [`audited`], the row is
+/// written whichever way the decision went and the decision is handed back, so
+/// what the log records is what the caller was answered.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn audited_as<T>(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+    decision: ApiResult<T>,
+    action: &str,
+    org: &str,
+    resource: Option<&str>,
+    subject: &str,
+) -> ApiResult<T> {
+    let result = if decision.is_ok() { AuditResult::Allowed } else { AuditResult::Refused };
+    let event = AuditEvent {
+        audit_id: mcpd_core::ids::new_trace_id(),
+        timestamp: OffsetDateTime::now_utc(),
+        principal: crate::auth::principal(headers),
+        subject: subject
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(crate::identity::MAX_SUBJECT_BYTES)
+            .collect(),
+        action: action.to_owned(),
+        project: org.to_owned(),
+        resource: resource.map(str::to_owned),
+        result,
+    };
+    let _ = peer;
+    if let Err(e) = state.store.record_audit(&event).await {
+        state.metrics.audit_write_failures.fetch_add(1, AtomicOrdering::Relaxed);
+        tracing::error!(action, org, "the audit row could not be written: {e}");
+    }
+    decision
+}
+
 /// [`audited`], for a handler that has a request to validate before it reads.
 ///
 /// Three steps, in an order that matters. The key is checked first, so a
@@ -1058,7 +1101,18 @@ pub async fn healthz(State(state): State<Arc<AppState>>) -> Json<HealthStatus> {
         // Absent rather than `false` when off, so the probe a self-hosted
         // daemon answers is byte for byte what it was before accounts existed.
         signup: state.config.signup.then_some(true),
+        accounts: state.config.accounts_enabled().then_some(true),
+        sso: any_sso(&state),
     })
+}
+
+/// Whether the log-in screen should offer single sign-on. Absent, like
+/// `signup`, on a daemon without accounts.
+fn any_sso(state: &AppState) -> Option<bool> {
+    if !state.config.accounts_enabled() {
+        return None;
+    }
+    state.accounts.as_ref()?.any_sso().ok().filter(|on| *on)
 }
 
 /// `GET /readyz` — readiness. Touches storage, so traffic is only sent to an
@@ -1092,6 +1146,8 @@ pub async fn readyz(
             storage: Some(state.store.name().to_owned()),
             detail,
             signup: state.config.signup.then_some(true),
+            accounts: state.config.accounts_enabled().then_some(true),
+            sso: any_sso(&state),
         }),
     )
 }

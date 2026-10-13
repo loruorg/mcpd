@@ -113,6 +113,26 @@ pub enum ApiError {
     #[error("{0}")]
     AccountExists(String),
 
+    /// The password was right and the account has two-step log-in on, but no
+    /// code, or a wrong one, came with it. A 401 under its own code, so a client
+    /// knows to ask for the code rather than the password again.
+    #[error("{0}")]
+    TotpRequired(String),
+
+    /// The password was right, and an organisation the account belongs to
+    /// requires single sign-on for its address.
+    #[error("{0}")]
+    SsoRequired(String),
+
+    /// The password was right, and the address is not confirmed yet.
+    #[error("{0}")]
+    EmailUnverified(String),
+
+    /// The request is valid and conflicts with what is stored: the last owner
+    /// of an organisation, a domain another organisation claims.
+    #[error("{0}")]
+    Conflict(String),
+
     /// The request ran past the configured deadline.
     ///
     /// A 503 rather than a 408: the deadline covers the handler as well as the
@@ -221,6 +241,10 @@ impl IntoResponse for ApiError {
             Self::TooManyRequests(_) => (StatusCode::TOO_MANY_REQUESTS, "over_quota", None, None),
             Self::RateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited", None, None),
             Self::AccountExists(_) => (StatusCode::CONFLICT, "account_exists", None, None),
+            Self::TotpRequired(_) => (StatusCode::UNAUTHORIZED, "totp_required", None, None),
+            Self::SsoRequired(_) => (StatusCode::FORBIDDEN, "sso_required", None, None),
+            Self::EmailUnverified(_) => (StatusCode::FORBIDDEN, "email_unverified", None, None),
+            Self::Conflict(_) => (StatusCode::CONFLICT, "conflict", None, None),
             Self::Timeout(_) => (StatusCode::SERVICE_UNAVAILABLE, "timeout", None, None),
             Self::StepConflict(_) => (StatusCode::CONFLICT, "conflict", None, None),
             Self::VersionTaken(_) => (StatusCode::CONFLICT, "version_taken", None, None),

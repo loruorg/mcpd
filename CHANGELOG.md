@@ -18,6 +18,43 @@ rather than every commit.
 
 ## [Unreleased]
 
+### Added
+
+- **Organisations, roles, single sign-on and SCIM.** An account can create
+  organisations, which own projects, invite members by email and give each a
+  role (owner, admin, member or viewer, optionally replaced on one project)
+  that maps onto the six key scopes. API keys can belong to any project of an
+  organisation, and stop working when their maker's role stops allowing them.
+  Organisations log in with any OpenID Connect provider or GitHub, can claim
+  email domains and enforce single sign-on for them, and can provision users
+  and groups over SCIM 2.0, with groups mapped onto roles. Membership, role,
+  project, single sign-on and SCIM changes are written to the audit log. See
+  the new accounts page.
+- **`--accounts`** turns all of that on without public sign-up, so a
+  self-hosted deployment gets single sign-on and roles on its own cluster.
+  Organisations, their owners, projects, single sign-on and SCIM token can be
+  declared in the `accounts` block of the config file. Configured keys keep
+  working.
+- **The account lifecycle.** Address confirmation, password reset, password and
+  address changes, session list and revoke, two-step log-in with recovery
+  codes, and account deletion, which erases the projects of organisations the
+  account was the only member of. Mail goes through `--smtp-host`,
+  `--smtp-port`, `--smtp-user`, `--smtp-password`, `--smtp-from` and
+  `--smtp-tls`; links start at `--public-url`.
+- **Per-organisation quotas.** An organisation's projects share one ceiling on
+  signals per minute, `--org-quota-per-minute` (60000 with `--signup`), and a
+  retention default, `--org-retention-days`. Usage is shown in the interface.
+
+### Changed
+
+- **Wire contract: sign-up answers the same way whether or not the address is
+  in use.** `POST /v1/api/account/signup` returns `AccountNotice` and mails a
+  link; `POST /v1/api/account/verify` confirms the address and returns the
+  session. It no longer answers 409. `Account.project` and
+  `AccountSession.project` are optional, `AccountKey` carries `project`, and
+  `HealthStatus` carries `accounts` and `sso`. The new endpoints are tagged
+  Accounts, Organisations, SSO and SCIM.
+
 ### Security
 
 - **A trace id two projects share is a run in each.** A trace id crosses

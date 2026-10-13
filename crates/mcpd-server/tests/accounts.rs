@@ -44,8 +44,33 @@ fn temp_dir() -> std::path::PathBuf {
     dir
 }
 
+thread_local! {
+    /// The mail the daemon of the current test sent. Each tokio test runs on a
+    /// thread of its own, so two tests never read each other's mail.
+    static OUTBOX: std::cell::RefCell<mcpd_server::mail::Outbox> =
+        std::cell::RefCell::new(mcpd_server::mail::Outbox::default());
+}
+
+fn outbox() -> mcpd_server::mail::Outbox {
+    OUTBOX.with(|o| o.borrow().clone())
+}
+
 fn signup_config() -> ServerConfig {
-    ServerConfig { signup: true, ..ServerConfig::default() }
+    let outbox = mcpd_server::mail::Outbox::default();
+    OUTBOX.with(|o| *o.borrow_mut() = outbox.clone());
+    let mut c = ServerConfig { signup: true, ..ServerConfig::default() };
+    c.account_settings.mail = mcpd_server::mail::MailConfig::Memory(outbox);
+    c
+}
+
+/// The token in the newest link of a kind mailed to `email`.
+fn mailed_token(email: &str, kind: &str) -> String {
+    let mail = outbox().last_to(email.trim()).unwrap_or_else(|| panic!("no mail to {email}"));
+    let at = mail
+        .body
+        .find(&format!("#{kind}="))
+        .unwrap_or_else(|| panic!("no {kind} link in {}", mail.body));
+    mail.body[at + kind.len() + 2..].split_whitespace().next().expect("a token").to_owned()
 }
 
 /// The router over private files: signals, runs and accounts.
@@ -145,6 +170,9 @@ async fn signup(app: &Router, email: &str) -> Who {
     let peer = format!("192.0.2.{}:5000", email.len() + email.as_bytes()[0] as usize % 100);
     let r = signup_from(app, email, &peer).await;
     assert_eq!(r.status, StatusCode::OK, "sign-up failed: {}", r.body);
+    let token = mailed_token(&email.trim().to_lowercase(), "verify");
+    let r = post(app, "/v1/api/account/verify", None, json!({ "token": token })).await;
+    assert_eq!(r.status, StatusCode::OK, "confirming failed: {}", r.body);
     Who {
         token: r.body["token"].as_str().expect("a token").to_owned(),
         project: r.body["project"].as_str().expect("a project").to_owned(),
@@ -258,9 +286,18 @@ async fn signup_refuses_a_bad_email_a_short_password_and_a_taken_email() {
     assert_eq!(r.body["field"], json!("password"));
 
     signup(&app, "a@example.com").await;
-    let r = signup_from(&app, "A@EXAMPLE.COM", "198.51.100.9:1").await;
-    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
-    assert_eq!(r.body["error"], json!("account_exists"));
+    let fresh = signup_from(&app, "fresh@example.com", "198.51.100.9:1").await;
+    let taken = signup_from(&app, "A@EXAMPLE.COM", "198.51.100.9:1").await;
+    // The same answer either way, so sign-up does not say which addresses
+    // have accounts. The difference is in a mail only the owner reads.
+    assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
+    assert_eq!(
+        taken.body["message"].as_str().unwrap().replace("a@example.com", "X"),
+        fresh.body["message"].as_str().unwrap().replace("fresh@example.com", "X"),
+    );
+    let mail = outbox().last_to("a@example.com").unwrap();
+    assert!(mail.body.contains("already has an account"), "{}", mail.body);
+    assert!(!mail.body.contains("#verify="), "a taken address was sent a working link");
 }
 
 #[tokio::test]

@@ -741,6 +741,50 @@
           "worker": "Claim steps and report their outcome. The key that lives in the process running step bodies."
         }
       },
+      "OrgRole": {
+        "type": "string",
+        "description": "What a member may do in an organisation. Each role maps onto the six key scopes on every project the organisation owns, unless a project role says otherwise.",
+        "enum": [
+          "owner",
+          "admin",
+          "member",
+          "viewer"
+        ],
+        "x-enumDescriptions": {
+          "owner": "Every scope on every project, and everything an admin may do. Only an owner may add or remove an owner, change quotas or delete the organisation.",
+          "admin": "Every scope on every project. Invites and removes members below owner, sets roles, creates and deletes projects, and manages SSO, SCIM and every key in the organisation.",
+          "member": "The `ingest`, `read`, `write`, `execute` and `worker` scopes. Everything but `admin`: a member cannot delete data or read the audit log.",
+          "viewer": "The `read` scope only."
+        }
+      },
+      "ProjectRole": {
+        "type": "string",
+        "description": "A role on one project that replaces a member's organisation role there. Owners and admins keep their reach on every project whatever a project role says.",
+        "enum": [
+          "none",
+          "viewer",
+          "member",
+          "admin"
+        ],
+        "x-enumDescriptions": {
+          "none": "No access to this project.",
+          "viewer": "The `read` scope on this project.",
+          "member": "Every scope but `admin` on this project.",
+          "admin": "Every scope on this project. It does not let the member manage the organisation."
+        }
+      },
+      "SsoProvider": {
+        "type": "string",
+        "description": "How an organisation's members log in with single sign-on.",
+        "enum": [
+          "oidc",
+          "github"
+        ],
+        "x-enumDescriptions": {
+          "oidc": "Any OpenID Connect provider, such as Google, Microsoft Entra ID, Okta or Auth0, found through its issuer's discovery document. Authorization code flow with PKCE, state and nonce.",
+          "github": "GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub user id and the email is the primary verified address GitHub reports."
+        }
+      },
       "InputTokenDetails": {
         "type": "object",
         "description": "Input tokens broken down by how the provider billed them. Every field is optional; absent means the provider did not report it, which is different from zero.",
@@ -1714,6 +1758,14 @@
           "signup": {
             "type": "boolean",
             "description": "True when this daemon offers open sign-up: anyone may create an account at `POST /v1/api/account/signup` and log in at `POST /v1/api/account/login`. Absent when it does not, which is the default. The interface reads this to decide whether to show its sign-up and log-in screens."
+          },
+          "accounts": {
+            "type": "boolean",
+            "description": "True when this daemon has accounts, with or without open sign-up. Absent when it does not. The interface reads this to show its log-in screen."
+          },
+          "sso": {
+            "type": "boolean",
+            "description": "True when at least one organisation on this daemon logs in with single sign-on, so the log-in screen offers it. Absent otherwise."
           }
         },
         "required": [
@@ -4044,6 +4096,10 @@
           "password": {
             "type": "string",
             "description": "At least 10 characters and at most 1024 bytes. Stored only as an argon2id hash."
+          },
+          "totp_code": {
+            "type": "string",
+            "description": "The six-digit code from an authenticator app, or one of the recovery codes, when the account has two-step log-in on. Ignored by sign-up."
           }
         },
         "required": [
@@ -4057,7 +4113,7 @@
         "properties": {
           "token": {
             "type": "string",
-            "description": "The session token. It grants every scope on the account's own project and nothing else. It is shown once: the daemon keeps only its SHA-256 digest."
+            "description": "The session token. It is shown once: the daemon keeps only its SHA-256 digest."
           },
           "expires_at": {
             "type": "string",
@@ -4070,14 +4126,17 @@
           },
           "project": {
             "type": "string",
-            "description": "The account's project. Every signal an account key writes lands here, and every read is limited to it."
+            "description": "The project reads go to when they name none. The account's own project, or the first project of the organisation a single sign-on session is limited to. Absent when the session reaches no project yet."
+          },
+          "org_id": {
+            "type": "string",
+            "description": "Set when the session came from an organisation's single sign-on. The session then reaches that organisation's projects only."
           }
         },
         "required": [
           "token",
           "expires_at",
-          "email",
-          "project"
+          "email"
         ]
       },
       "Account": {
@@ -4090,18 +4149,36 @@
           },
           "project": {
             "type": "string",
-            "description": "The account's project, which is the only project its session and its keys reach."
+            "description": "The project created with the account at sign-up. Absent for an account that was invited, or created by single sign-on or SCIM."
           },
           "created_at": {
             "type": "string",
             "format": "date-time",
             "description": "When the account was created."
+          },
+          "email_verified": {
+            "type": "boolean",
+            "description": "Whether the address has been confirmed by a link sent to it."
+          },
+          "totp_enabled": {
+            "type": "boolean",
+            "description": "Whether two-step log-in is on."
+          },
+          "has_password": {
+            "type": "boolean",
+            "description": "Whether the account can log in with a password. False for an account created by single sign-on or SCIM that has never set one."
+          },
+          "managed_by": {
+            "type": "string",
+            "description": "The organisation that created this account through single sign-on or SCIM. That organisation can deactivate it."
           }
         },
         "required": [
           "email",
-          "project",
-          "created_at"
+          "created_at",
+          "email_verified",
+          "totp_enabled",
+          "has_password"
         ]
       },
       "AccountKey": {
@@ -4116,6 +4193,10 @@
             "$ref": "#/components/schemas/KeyScope",
             "description": "What the key may do."
           },
+          "project": {
+            "type": "string",
+            "description": "The one project the key reaches."
+          },
           "name": {
             "type": "string",
             "description": "The label given when the key was created."
@@ -4128,11 +4209,16 @@
             "type": "string",
             "format": "date-time",
             "description": "When the key was created."
+          },
+          "created_by": {
+            "type": "string",
+            "description": "The email of the account that created the key. Set in an organisation's key list, so an admin can see whose key it is."
           }
         },
         "required": [
           "id",
           "scope",
+          "project",
           "prefix",
           "created_at"
         ]
@@ -4148,6 +4234,10 @@
           "name": {
             "type": "string",
             "description": "A label for the key, such as the service that will hold it. At most 100 characters."
+          },
+          "project": {
+            "type": "string",
+            "description": "The project the key reaches. Defaults to the account's own project. Your role on the project must allow the scope."
           }
         },
         "required": [
@@ -4170,6 +4260,958 @@
         "required": [
           "key",
           "secret"
+        ]
+      },
+      "AccountNotice": {
+        "type": "object",
+        "description": "A plain answer that changes nothing you can read back, such as \"check your email\".",
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "What happened, and what to do next."
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "TokenRequest": {
+        "type": "object",
+        "description": "A one-time token from a link the daemon sent by email.",
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "The token, as it appears in the link."
+          }
+        },
+        "required": [
+          "token"
+        ]
+      },
+      "PasswordForgotRequest": {
+        "type": "object",
+        "description": "A request for a password reset link.",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The address to send the link to. The answer is the same whether or not an account uses it."
+          }
+        },
+        "required": [
+          "email"
+        ]
+      },
+      "PasswordResetRequest": {
+        "type": "object",
+        "description": "A new password, with the token from a reset link.",
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "The token from the reset link. It works once, for one hour."
+          },
+          "password": {
+            "type": "string",
+            "description": "The new password. At least 10 characters and at most 1024 bytes."
+          },
+          "totp_code": {
+            "type": "string",
+            "description": "A code from the authenticator app, or a recovery code, when the account has two-step log-in on. A reset proves the address, not the second factor."
+          }
+        },
+        "required": [
+          "token",
+          "password"
+        ]
+      },
+      "PasswordChangeRequest": {
+        "type": "object",
+        "description": "A new password for the logged-in account.",
+        "properties": {
+          "current_password": {
+            "type": "string",
+            "description": "The password in use now. Required when the account has one."
+          },
+          "new_password": {
+            "type": "string",
+            "description": "The new password. At least 10 characters and at most 1024 bytes."
+          }
+        },
+        "required": [
+          "new_password"
+        ]
+      },
+      "EmailChangeRequest": {
+        "type": "object",
+        "description": "A new email address for the logged-in account.",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The new address. A link is sent to it, and the change happens when the link is opened."
+          },
+          "password": {
+            "type": "string",
+            "description": "The account's password. Required when the account has one."
+          }
+        },
+        "required": [
+          "email"
+        ]
+      },
+      "AccountDeleteRequest": {
+        "type": "object",
+        "description": "Confirmation for deleting the logged-in account.",
+        "properties": {
+          "password": {
+            "type": "string",
+            "description": "The account's password. Required when the account has one."
+          },
+          "totp_code": {
+            "type": "string",
+            "description": "A code from the authenticator app. Required when two-step log-in is on."
+          }
+        }
+      },
+      "AccountDeletion": {
+        "type": "object",
+        "description": "What deleting an account removed.",
+        "properties": {
+          "orgs_deleted": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "Organisations that had this account as their only member, deleted with it."
+          },
+          "projects_erased": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Projects whose stored signals and runs were erased, because their organisation was deleted."
+          }
+        },
+        "required": [
+          "orgs_deleted",
+          "projects_erased"
+        ]
+      },
+      "SessionInfo": {
+        "type": "object",
+        "description": "One live session of the logged-in account. The token is not part of it.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The session's identifier, for ending it. Not a secret."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the session started."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it stops working."
+          },
+          "current": {
+            "type": "boolean",
+            "description": "True for the session this request carries."
+          },
+          "via": {
+            "type": "string",
+            "description": "How it started: `password`, `sso`, `invite`, `verify` or `reset`."
+          },
+          "org_id": {
+            "type": "string",
+            "description": "The organisation a single sign-on session is limited to."
+          },
+          "user_agent": {
+            "type": "string",
+            "description": "The browser or client that started it, as it described itself."
+          },
+          "address": {
+            "type": "string",
+            "description": "The client address that started it."
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "expires_at",
+          "current",
+          "via"
+        ]
+      },
+      "TotpSetup": {
+        "type": "object",
+        "description": "A new authenticator secret, not yet in use. Confirm it with a code to turn two-step log-in on.",
+        "properties": {
+          "secret": {
+            "type": "string",
+            "description": "The secret in base32, for typing into an authenticator app."
+          },
+          "otpauth_uri": {
+            "type": "string",
+            "description": "The same secret as an `otpauth://` URI."
+          },
+          "qr_svg": {
+            "type": "string",
+            "description": "The URI as a QR code, an SVG document."
+          }
+        },
+        "required": [
+          "secret",
+          "otpauth_uri",
+          "qr_svg"
+        ]
+      },
+      "TotpCodeRequest": {
+        "type": "object",
+        "description": "A code from an authenticator app.",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The six-digit code."
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "TotpEnabled": {
+        "type": "object",
+        "description": "Two-step log-in is on.",
+        "properties": {
+          "recovery_codes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ten single-use codes that stand in for the authenticator app. They are shown once: the daemon keeps only their digests."
+          }
+        },
+        "required": [
+          "recovery_codes"
+        ]
+      },
+      "TotpDisableRequest": {
+        "type": "object",
+        "description": "Confirmation for turning two-step log-in off.",
+        "properties": {
+          "password": {
+            "type": "string",
+            "description": "The account's password. Required when the account has one."
+          },
+          "code": {
+            "type": "string",
+            "description": "A code from the authenticator app, or a recovery code."
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "Org": {
+        "type": "object",
+        "description": "An organisation: the owner of projects, members and single sign-on settings.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The organisation's identifier."
+          },
+          "name": {
+            "type": "string",
+            "description": "Its display name."
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "Your role in it."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was created."
+          },
+          "quota_per_minute": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "The most signals all its projects together may store per minute. Absent means no ceiling."
+          },
+          "retention_days": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How long its projects keep data, in days. Absent means forever."
+          },
+          "members": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many members it has."
+          },
+          "projects": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How many projects it owns."
+          },
+          "managed_by_config": {
+            "type": "boolean",
+            "description": "True when the daemon's configuration file declares this organisation. Its single sign-on settings are then read from that file and cannot be changed here."
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "role",
+          "created_at",
+          "members",
+          "projects",
+          "managed_by_config"
+        ]
+      },
+      "CreateOrgRequest": {
+        "type": "object",
+        "description": "A new organisation.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Its display name, at most 100 characters."
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "UpdateOrgRequest": {
+        "type": "object",
+        "description": "Changes to an organisation. A field left out keeps its value.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "A new display name, at most 100 characters."
+          },
+          "quota_per_minute": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "A ceiling on signals per minute across all the organisation's projects, at most the daemon's own ceiling. 0 restores the daemon's default. Owner only."
+          },
+          "retention_days": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How long to keep data, in days, at most the daemon's own window. 0 restores the daemon's default. Owner only."
+          }
+        }
+      },
+      "OrgDeletion": {
+        "type": "object",
+        "description": "What deleting an organisation removed.",
+        "properties": {
+          "projects_erased": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Projects whose stored signals and runs were erased."
+          }
+        },
+        "required": [
+          "projects_erased"
+        ]
+      },
+      "ProjectRoleGrant": {
+        "type": "object",
+        "description": "A role on one project.",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "The project."
+          },
+          "role": {
+            "$ref": "#/components/schemas/ProjectRole",
+            "description": "The role there."
+          }
+        },
+        "required": [
+          "project",
+          "role"
+        ]
+      },
+      "OrgMember": {
+        "type": "object",
+        "description": "One member of an organisation.",
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "description": "The member's account."
+          },
+          "email": {
+            "type": "string",
+            "description": "The member's email address."
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The member's role."
+          },
+          "via": {
+            "type": "string",
+            "description": "How they joined: `created`, `invite`, `sso`, `scim` or `config`."
+          },
+          "joined_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When they joined."
+          },
+          "project_roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectRoleGrant"
+            },
+            "description": "Roles on single projects that replace the organisation role there."
+          },
+          "managed": {
+            "type": "boolean",
+            "description": "True when this organisation created the account through single sign-on or SCIM."
+          },
+          "totp_enabled": {
+            "type": "boolean",
+            "description": "Whether the member has two-step log-in on."
+          }
+        },
+        "required": [
+          "account_id",
+          "email",
+          "role",
+          "via",
+          "joined_at",
+          "project_roles",
+          "managed",
+          "totp_enabled"
+        ]
+      },
+      "UpdateMemberRequest": {
+        "type": "object",
+        "description": "A new role for a member.",
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The role. Only an owner may grant or remove `owner`, and the last owner cannot be demoted."
+          }
+        },
+        "required": [
+          "role"
+        ]
+      },
+      "SetProjectRoleRequest": {
+        "type": "object",
+        "description": "A role for a member on one project.",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "A project the organisation owns."
+          },
+          "role": {
+            "$ref": "#/components/schemas/ProjectRole",
+            "description": "The role there. Absent removes the project role, so the organisation role applies again."
+          }
+        },
+        "required": [
+          "project"
+        ]
+      },
+      "OrgInvite": {
+        "type": "object",
+        "description": "An invitation not yet accepted. The token is not part of it.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The invitation's identifier, for revoking it."
+          },
+          "email": {
+            "type": "string",
+            "description": "The address it was sent to."
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The role it grants."
+          },
+          "project_roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectRoleGrant"
+            },
+            "description": "Project roles it grants as well."
+          },
+          "invited_by": {
+            "type": "string",
+            "description": "The email of the member who sent it. Absent when the configuration file or SCIM sent it."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was sent."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it stops working."
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role",
+          "project_roles",
+          "created_at",
+          "expires_at"
+        ]
+      },
+      "CreateInviteRequest": {
+        "type": "object",
+        "description": "An invitation to an organisation.",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "Who to invite. The link is sent to this address."
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The role to grant. Only an owner may invite an owner."
+          },
+          "project_roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectRoleGrant"
+            },
+            "description": "Project roles to grant as well."
+          }
+        },
+        "required": [
+          "email",
+          "role"
+        ]
+      },
+      "InviteLookup": {
+        "type": "object",
+        "description": "What an invitation offers, read with its token before accepting it.",
+        "properties": {
+          "org_name": {
+            "type": "string",
+            "description": "The organisation."
+          },
+          "email": {
+            "type": "string",
+            "description": "The address it was sent to. Accepting it joins the account with this address."
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The role it grants."
+          },
+          "account_exists": {
+            "type": "boolean",
+            "description": "Whether an account with this address exists. If it does, log in as it to accept; if not, accepting creates it."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it stops working."
+          }
+        },
+        "required": [
+          "org_name",
+          "email",
+          "role",
+          "account_exists",
+          "expires_at"
+        ]
+      },
+      "InviteAcceptRequest": {
+        "type": "object",
+        "description": "Acceptance of an invitation.",
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "The token from the invitation link."
+          },
+          "password": {
+            "type": "string",
+            "description": "A password for the new account, when no account uses the invited address. Ignored otherwise."
+          }
+        },
+        "required": [
+          "token"
+        ]
+      },
+      "InviteAccepted": {
+        "type": "object",
+        "description": "An accepted invitation.",
+        "properties": {
+          "org": {
+            "$ref": "#/components/schemas/Org",
+            "description": "The organisation joined."
+          },
+          "session": {
+            "$ref": "#/components/schemas/AccountSession",
+            "description": "A session for the account accepting created. Absent when an existing account accepted with its own session."
+          }
+        },
+        "required": [
+          "org"
+        ]
+      },
+      "OrgProject": {
+        "type": "object",
+        "description": "A project an organisation owns.",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "The project name. Random, so nobody can choose one that already holds somebody else's data."
+          },
+          "label": {
+            "type": "string",
+            "description": "A display label."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was created or attached."
+          }
+        },
+        "required": [
+          "project",
+          "created_at"
+        ]
+      },
+      "CreateProjectRequest": {
+        "type": "object",
+        "description": "A new project in an organisation.",
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "A display label, at most 100 characters."
+          }
+        }
+      },
+      "OrgUsage": {
+        "type": "object",
+        "description": "How much an organisation is using, against its ceilings. Counted since the daemon started.",
+        "properties": {
+          "org_id": {
+            "type": "string",
+            "description": "The organisation."
+          },
+          "quota_per_minute": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "Its ceiling on signals per minute, when it has one."
+          },
+          "admitted_this_minute": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Signals stored in the current one-minute window."
+          },
+          "admitted_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Signals stored since the daemon started."
+          },
+          "refused_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Signals refused for the ceiling since the daemon started."
+          },
+          "retention_days": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "How long its projects keep data, in days."
+          },
+          "members": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "Members."
+          },
+          "projects": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "Projects."
+          },
+          "keys": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "API keys on its projects."
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When counting started."
+          }
+        },
+        "required": [
+          "org_id",
+          "admitted_this_minute",
+          "admitted_total",
+          "refused_total",
+          "members",
+          "projects",
+          "keys",
+          "since"
+        ]
+      },
+      "SsoConfig": {
+        "type": "object",
+        "description": "An organisation's single sign-on settings. The client secret is not part of it.",
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/SsoProvider",
+            "description": "The kind of provider."
+          },
+          "issuer": {
+            "type": "string",
+            "description": "The OpenID Connect issuer URL. Absent for GitHub."
+          },
+          "client_id": {
+            "type": "string",
+            "description": "The client id registered with the provider."
+          },
+          "has_client_secret": {
+            "type": "boolean",
+            "description": "Whether a client secret is stored."
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Email domains this organisation claims. Single sign-on creates accounts only for these domains, and \"Log in with SSO\" finds the organisation by them."
+          },
+          "enforced": {
+            "type": "boolean",
+            "description": "When true, members whose email is in a claimed domain cannot log in with a password."
+          },
+          "default_role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The role given to a member single sign-on creates, when no group maps to a role. Never `owner`."
+          },
+          "groups_claim": {
+            "type": "string",
+            "description": "The ID token claim that lists the member's groups, mapped to roles by the group roles."
+          },
+          "redirect_url": {
+            "type": "string",
+            "description": "The redirect URL to register with the provider."
+          },
+          "managed_by_config": {
+            "type": "boolean",
+            "description": "True when these settings come from the configuration file."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When they were last changed."
+          }
+        },
+        "required": [
+          "provider",
+          "client_id",
+          "has_client_secret",
+          "domains",
+          "enforced",
+          "default_role",
+          "redirect_url",
+          "managed_by_config",
+          "updated_at"
+        ]
+      },
+      "PutSsoConfigRequest": {
+        "type": "object",
+        "description": "New single sign-on settings for an organisation.",
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/SsoProvider",
+            "description": "The kind of provider."
+          },
+          "issuer": {
+            "type": "string",
+            "description": "The OpenID Connect issuer URL, such as `https://accounts.google.com`. Required for `oidc`. Must be `https`."
+          },
+          "client_id": {
+            "type": "string",
+            "description": "The client id registered with the provider."
+          },
+          "client_secret": {
+            "type": "string",
+            "description": "The client secret. Left out, the stored one is kept."
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Email domains to claim. You can claim the domain of your own verified address. A domain belongs to one organisation."
+          },
+          "enforced": {
+            "type": "boolean",
+            "description": "Refuse password log-in for members in the claimed domains. Turning it on ends their password sessions."
+          },
+          "default_role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The role for a member single sign-on creates. `admin`, `member` or `viewer`."
+          },
+          "groups_claim": {
+            "type": "string",
+            "description": "The ID token claim that lists groups, such as `groups`."
+          }
+        },
+        "required": [
+          "provider",
+          "client_id",
+          "domains",
+          "enforced",
+          "default_role"
+        ]
+      },
+      "GroupRole": {
+        "type": "object",
+        "description": "A group from the identity provider, and the role its members get.",
+        "properties": {
+          "group": {
+            "type": "string",
+            "description": "The group name, as single sign-on or SCIM sends it. Compared without regard to case."
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The role. Never `owner`."
+          }
+        },
+        "required": [
+          "group",
+          "role"
+        ]
+      },
+      "ScimTokenInfo": {
+        "type": "object",
+        "description": "Whether an organisation has a SCIM token. The token is not part of it.",
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "Whether a token exists."
+          },
+          "prefix": {
+            "type": "string",
+            "description": "The first characters of the token."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was created."
+          },
+          "base_url": {
+            "type": "string",
+            "description": "The SCIM base URL to give your identity provider."
+          }
+        },
+        "required": [
+          "configured",
+          "base_url"
+        ]
+      },
+      "CreatedScimToken": {
+        "type": "object",
+        "description": "A new SCIM token. This is the only time it is shown, and it replaces any earlier token.",
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "The bearer token for your identity provider. The daemon keeps only its SHA-256 digest."
+          },
+          "prefix": {
+            "type": "string",
+            "description": "Its first characters."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was created."
+          },
+          "base_url": {
+            "type": "string",
+            "description": "The SCIM base URL to give your identity provider."
+          }
+        },
+        "required": [
+          "token",
+          "prefix",
+          "created_at",
+          "base_url"
+        ]
+      },
+      "SsoStartRequest": {
+        "type": "object",
+        "description": "Where to start single sign-on. Give one of the two.",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "Your email address. Its domain finds the organisation."
+          },
+          "org_id": {
+            "type": "string",
+            "description": "The organisation, when you know it."
+          }
+        }
+      },
+      "SsoStart": {
+        "type": "object",
+        "description": "Where to send the browser for single sign-on.",
+        "properties": {
+          "authorize_url": {
+            "type": "string",
+            "description": "The provider's authorization URL, with state, nonce and the PKCE challenge in it."
+          },
+          "binding": {
+            "type": "string",
+            "description": "A secret to keep in this browser and send back with the callback. It ties the callback to the browser that started it, so a link from somebody else cannot log you in as them."
+          },
+          "org_name": {
+            "type": "string",
+            "description": "The organisation."
+          }
+        },
+        "required": [
+          "authorize_url",
+          "binding",
+          "org_name"
+        ]
+      },
+      "SsoCallbackRequest": {
+        "type": "object",
+        "description": "What the provider sent back to the redirect URL.",
+        "properties": {
+          "state": {
+            "type": "string",
+            "description": "The `state` parameter."
+          },
+          "code": {
+            "type": "string",
+            "description": "The `code` parameter."
+          },
+          "binding": {
+            "type": "string",
+            "description": "The binding from the start of the flow."
+          }
+        },
+        "required": [
+          "state",
+          "code",
+          "binding"
         ]
       },
       "Span": {
@@ -10333,7 +11375,7 @@
           "Accounts"
         ],
         "summary": "Create an account",
-        "description": "Creates an account and a new project that belongs to it, and logs it in. The project has a random name, and no other account or key can reach it. The email is checked for shape only; there is no verification mail. Limited per client address: a client that signs up too often is answered with 429 and a `Retry-After` header. Answers 404 when the daemon was not started with `--signup`.",
+        "description": "Starts an account. The answer is the same whether or not the email already has an account, so it does not say which addresses are in use. A link is sent to the address: for a new account it confirms the address and logs in; for an address already in use it says so and offers a password reset. The account and its project are created now, and the session comes from opening the link. Limited per client address: a client that signs up too often is answered with 429 and a `Retry-After` header. Answers 404 when the daemon was not started with `--signup`, and 503 when it has no way to send mail.",
         "requestBody": {
           "required": true,
           "content": {
@@ -10350,7 +11392,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AccountSession"
+                  "$ref": "#/components/schemas/AccountNotice"
                 }
               }
             }
@@ -10364,11 +11406,11 @@
           "404": {
             "description": "This daemon does not offer sign-up."
           },
-          "409": {
-            "description": "An account with this email already exists. Log in instead."
-          },
           "429": {
             "description": "Too many sign-ups from this address. Wait for the number of seconds in `Retry-After`."
+          },
+          "503": {
+            "description": "This daemon has no mail server, so it cannot send the link. The operator sets `--smtp-host`."
           }
         },
         "security": []
@@ -10381,7 +11423,7 @@
           "Accounts"
         ],
         "summary": "Log in",
-        "description": "Starts a session for an account. A wrong password and an unknown email get the same 401 with the same message, so the answer does not say which emails have accounts. Limited per client address and per email. Answers 404 when the daemon was not started with `--signup`.",
+        "description": "Starts a session for an account. A wrong password and an unknown email get the same 401 with the same message, so the answer does not say which emails have accounts. With the right password, an account with two-step log-in on and no `totp_code` gets 401 with the code `totp_required`; an address not yet confirmed gets 403 and a new link; and a member of an organisation that enforces single sign-on gets 403 with the code `sso_required`. Limited per client address and per email. Answers 404 when the daemon has no accounts.",
         "requestBody": {
           "required": true,
           "content": {
@@ -10409,6 +11451,9 @@
           "401": {
             "description": "The email and password do not match an account."
           },
+          "403": {
+            "description": "The password is right, and the address is not confirmed yet or the organisation requires single sign-on."
+          },
           "404": {
             "description": "This daemon does not offer accounts."
           },
@@ -10426,7 +11471,7 @@
           "Accounts"
         ],
         "summary": "Log out",
-        "description": "Ends the session whose token the request carries. The account's API keys keep working. The body is empty. Answers 404 when the daemon was not started with `--signup`.",
+        "description": "Ends the session whose token the request carries. The account's API keys keep working. The body is empty. Answers 404 when the daemon has no accounts.",
         "responses": {
           "200": {
             "description": "Success",
@@ -10462,7 +11507,7 @@
           "Accounts"
         ],
         "summary": "Read the logged-in account",
-        "description": "The email and the project of the account whose session the request carries. Answers 404 when the daemon was not started with `--signup`.",
+        "description": "The account whose session the request carries. Answers 404 when the daemon has no accounts.",
         "responses": {
           "200": {
             "description": "Success",
@@ -10498,7 +11543,7 @@
           "Accounts"
         ],
         "summary": "List the account's API keys",
-        "description": "Every API key the account holds, newest first. No secret is returned: the daemon keeps only digests. Answers 404 when the daemon was not started with `--signup`.",
+        "description": "Every API key the account holds, on every project, newest first. No secret is returned: the daemon keeps only digests. Answers 404 when the daemon has no accounts.",
         "responses": {
           "200": {
             "description": "Success",
@@ -10535,7 +11580,7 @@
           "Accounts"
         ],
         "summary": "Create an API key",
-        "description": "Creates an API key with one scope on the account's project. The secret is in this response and nowhere else. A key reaches the account's project only: a signal it writes that names another project is stored in the account's project instead. An account holds at most 50 keys. Answers 404 when the daemon was not started with `--signup`.",
+        "description": "Creates an API key with one scope on one project: the account's own project, or a project of an organisation it belongs to. Your role there must allow the scope, and the key stops working if your role stops allowing it. The secret is in this response and nowhere else. A signal the key writes that names another project is stored in the key's project instead. An account holds at most 50 keys. Answers 404 when the daemon has no accounts.",
         "requestBody": {
           "required": true,
           "content": {
@@ -10563,6 +11608,9 @@
           "401": {
             "description": "No credential, or one this endpoint does not accept."
           },
+          "403": {
+            "description": "Your role on that project does not allow the scope."
+          },
           "429": {
             "description": "Rate limited. `Retry-After` says how long to wait."
           }
@@ -10581,7 +11629,7 @@
           "Accounts"
         ],
         "summary": "Revoke an API key",
-        "description": "Revokes one of the account's API keys. It stops working at once. Answers 404 when the daemon was not started with `--signup`.",
+        "description": "Revokes one of the account's API keys. It stops working at once. Answers 404 when the daemon has no accounts.",
         "parameters": [
           {
             "name": "key_id",
@@ -10612,6 +11660,2853 @@
           },
           "404": {
             "description": "The account holds no key with that id."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/account/verify": {
+      "post": {
+        "operationId": "verify_email",
+        "tags": [
+          "Accounts"
+        ],
+        "summary": "Confirm an email address",
+        "description": "Confirms the address with the token from the sign-up link, and logs in. The token works once, for 24 hours. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountSession"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The token is unknown, used or expired."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/api/account/password/forgot": {
+      "post": {
+        "operationId": "forgot_password",
+        "tags": [
+          "Accounts"
+        ],
+        "summary": "Ask for a password reset",
+        "description": "Sends a reset link to the address when an account uses it. The answer is the same either way. Limited per client address and per email. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordForgotRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountNotice"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          },
+          "503": {
+            "description": "This daemon has no mail server."
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/api/account/password/reset": {
+      "post": {
+        "operationId": "reset_password",
+        "tags": [
+          "Accounts"
+        ],
+        "summary": "Reset a password",
+        "description": "Sets a new password with the token from a reset link, ends every other session, confirms the address and logs in. The token works once, for one hour. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordResetRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountSession"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The token is unknown, used or expired, or the password is too short."
+          },
+          "401": {
+            "description": "The account has two-step log-in on and the code is missing or wrong. The code is `totp_required`, and the link still works."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/api/account/password": {
+      "post": {
+        "operationId": "change_password",
+        "tags": [
+          "Accounts"
+        ],
+        "summary": "Change the password",
+        "description": "Sets a new password and ends every other session of the account. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChangeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountNotice"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "The current password is wrong."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/account/email": {
+      "post": {
+        "operationId": "change_email",
+        "tags": [
+          "Accounts"
+        ],
+        "summary": "Change the email address",
+        "description": "Sends a confirmation link to the new address, and a notice to the old one. The address changes when the link is opened. The answer is the same whether or not the new address is in use. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailChangeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountNotice"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "The password is wrong."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          },
+          "503": {
+            "description": "This daemon has no mail server."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/account/email/confirm": {
+      "post": {
+        "operationId": "confirm_email",
+        "tags": [
+          "Accounts"
+        ],
+        "summary": "Confirm a new email address",
+        "description": "Changes the address with the token from the confirmation link. The token works once, for 24 hours. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Account"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The token is unknown, used or expired."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "409": {
+            "description": "Another account took the address in the meantime."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/api/account/delete": {
+      "post": {
+        "operationId": "delete_account",
+        "tags": [
+          "Accounts"
+        ],
+        "summary": "Delete the account",
+        "description": "Deletes the account, its keys and its sessions. Each organisation it is the only member of is deleted too, and the stored signals and runs of that organisation's projects are erased. Refused while the account is the only owner of an organisation that has other members: make another member an owner first. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountDeleteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountDeletion"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "The password or the code is wrong."
+          },
+          "409": {
+            "description": "The account is the only owner of an organisation with other members."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/account/sessions": {
+      "get": {
+        "operationId": "list_sessions",
+        "tags": [
+          "Accounts"
+        ],
+        "summary": "List sessions",
+        "description": "Every live session of the account, newest first. Answers 404 when the daemon has no accounts.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SessionInfo"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/account/sessions/{session_id}": {
+      "delete": {
+        "operationId": "revoke_session",
+        "tags": [
+          "Accounts"
+        ],
+        "summary": "End a session",
+        "description": "Ends one session of the account. It stops working at once. Answers 404 when the daemon has no accounts.",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "description": "The session's `id`, as listed.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "The account has no session with that id."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/account/totp/setup": {
+      "post": {
+        "operationId": "totp_setup",
+        "tags": [
+          "Accounts"
+        ],
+        "summary": "Start two-step log-in",
+        "description": "Makes a new authenticator secret. Two-step log-in is not on until a code from it is confirmed with `POST /v1/api/account/totp/enable`. Answers 404 when the daemon has no accounts.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpSetup"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "409": {
+            "description": "Two-step log-in is already on."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/account/totp/enable": {
+      "post": {
+        "operationId": "totp_enable",
+        "tags": [
+          "Accounts"
+        ],
+        "summary": "Turn two-step log-in on",
+        "description": "Confirms the secret from setup with a code from the app, turns two-step log-in on and returns ten recovery codes. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpCodeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpEnabled"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "The code is wrong."
+          },
+          "409": {
+            "description": "There is no secret waiting to be confirmed, or two-step log-in is already on."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/account/totp/disable": {
+      "post": {
+        "operationId": "totp_disable",
+        "tags": [
+          "Accounts"
+        ],
+        "summary": "Turn two-step log-in off",
+        "description": "Turns two-step log-in off and drops the recovery codes. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpDisableRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountNotice"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "The password or the code is wrong."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs": {
+      "get": {
+        "operationId": "list_orgs",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "List your organisations",
+        "description": "Every organisation the account belongs to, with its role in each. A single sign-on session lists only the organisation it is limited to. Answers 404 when the daemon has no accounts.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Org"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create_org",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Create an organisation",
+        "description": "Creates an organisation with one project, and makes you its owner. With `--signup` any account may create one; without it, only when the configuration file allows it. An account belongs to at most 20 organisations. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOrgRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Org"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "This daemon does not let accounts create organisations, or the account belongs to 20 already."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs/{org_id}": {
+      "get": {
+        "operationId": "get_org",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Read an organisation",
+        "description": "Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Org"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "update_org",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Change an organisation",
+        "description": "Renames an organisation, or sets its ceiling and retention within the daemon's limits. Admin to rename, owner for the rest. Audited as `org_update`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateOrgRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Org"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "Your role does not allow the change."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "delete_org",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Delete an organisation",
+        "description": "Deletes an organisation, its members' access, its keys, its invitations and its single sign-on and SCIM settings, and erases the stored signals and runs of every project it owns. Owner only. Audited as `org_delete`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgDeletion"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "Only an owner may delete the organisation."
+          },
+          "409": {
+            "description": "The organisation is declared in the configuration file, or one of its projects is an account's own project."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs/{org_id}/members": {
+      "get": {
+        "operationId": "list_members",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "List members",
+        "description": "Every member, with their roles. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrgMember"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs/{org_id}/members/{account_id}": {
+      "patch": {
+        "operationId": "update_member",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Change a member's role",
+        "description": "Sets a member's organisation role. Admin, and owner to grant or remove `owner`. The last owner cannot be demoted. Keys the member made that the new role no longer allows stop working. Audited as `member_role`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "account_id",
+            "in": "path",
+            "required": true,
+            "description": "The member's `account_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemberRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgMember"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "Your role does not allow the change."
+          },
+          "409": {
+            "description": "This would leave the organisation with no owner."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "remove_member",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Remove a member",
+        "description": "Removes a member, or yourself. Their keys on the organisation's projects are revoked and their single sign-on sessions for it end. Admin to remove others; owner to remove an owner. The last owner cannot leave. Audited as `member_remove`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "account_id",
+            "in": "path",
+            "required": true,
+            "description": "The member's `account_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "Your role does not allow it."
+          },
+          "409": {
+            "description": "This would leave the organisation with no owner."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs/{org_id}/members/{account_id}/project-roles": {
+      "post": {
+        "operationId": "set_project_role",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Set a project role",
+        "description": "Sets or clears a member's role on one project. Admin. Audited as `member_project_role`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "account_id",
+            "in": "path",
+            "required": true,
+            "description": "The member's `account_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetProjectRoleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgMember"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "Your role does not allow it."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs/{org_id}/invites": {
+      "get": {
+        "operationId": "list_invites",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "List invitations",
+        "description": "Every invitation not yet accepted or expired. Admin. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrgInvite"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create_invite",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Invite a member",
+        "description": "Sends an invitation link to an address. It works once, for seven days. Admin, and owner to invite an owner. Audited as `member_invite`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInviteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgInvite"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "Your role does not allow it."
+          },
+          "409": {
+            "description": "That address is already a member."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          },
+          "503": {
+            "description": "This daemon has no mail server."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs/{org_id}/invites/{invite_id}": {
+      "delete": {
+        "operationId": "revoke_invite",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Revoke an invitation",
+        "description": "Revokes an invitation. Admin. Audited as `invite_revoke`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "invite_id",
+            "in": "path",
+            "required": true,
+            "description": "The invitation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/invites/lookup": {
+      "post": {
+        "operationId": "lookup_invite",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Read an invitation",
+        "description": "What an invitation offers, from the token in its link. Limited per client address. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteLookup"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The token is unknown, used or expired."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/api/invites/accept": {
+      "post": {
+        "operationId": "accept_invite",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Accept an invitation",
+        "description": "Joins the organisation. When an account uses the invited address, send that account's session token with the request. When none does, send a password: the account is created with the address confirmed, and logged in. Audited as `invite_accept`. Limited per client address. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteAcceptRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The token is unknown, used or expired, or a password is needed and missing."
+          },
+          "401": {
+            "description": "An account uses the invited address, and the request carries no session for it."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/api/orgs/{org_id}/projects": {
+      "get": {
+        "operationId": "list_org_projects",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "List projects",
+        "description": "The projects the organisation owns that you can reach. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrgProject"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create_org_project",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Create a project",
+        "description": "Creates a project with a random name in the organisation. Admin. An organisation owns at most 100 projects. Audited as `project_create`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgProject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "Your role does not allow it, or the organisation owns 100 projects already."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs/{org_id}/projects/{project}": {
+      "delete": {
+        "operationId": "delete_org_project",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Delete a project",
+        "description": "Deletes a project, revokes its keys, and erases its stored signals and runs. Admin. Audited as `project_delete`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "description": "The project name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgDeletion"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "Your role does not allow it."
+          },
+          "409": {
+            "description": "The project is an account's own project, or the organisation's last."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs/{org_id}/keys": {
+      "get": {
+        "operationId": "list_org_keys",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "List the organisation's keys",
+        "description": "Every API key on the organisation's projects, whoever made it. Admin. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AccountKey"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs/{org_id}/keys/{key_id}": {
+      "delete": {
+        "operationId": "revoke_org_key",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Revoke a key in the organisation",
+        "description": "Revokes any key on the organisation's projects. Admin. Audited as `org_key_revoke`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "description": "The key's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs/{org_id}/usage": {
+      "get": {
+        "operationId": "get_org_usage",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Read usage",
+        "description": "Signals stored and refused against the organisation's ceiling. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgUsage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs/{org_id}/audit": {
+      "get": {
+        "operationId": "list_org_audit",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Read the organisation's audit log",
+        "description": "Membership, role, project, single sign-on and SCIM changes, newest first, at most 500. Admin. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AuditEvent"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs/{org_id}/group-roles": {
+      "get": {
+        "operationId": "get_group_roles",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Read group roles",
+        "description": "How identity provider groups map onto roles. Admin. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GroupRole"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "put_group_roles",
+        "tags": [
+          "Organisations"
+        ],
+        "summary": "Set group roles",
+        "description": "Replaces the group mapping. A member single sign-on or SCIM manages gets the highest role among their groups, or the default role when none maps. Owners keep their role. Admin. Audited as `group_roles_update`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/GroupRole"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GroupRole"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A group maps to `owner`, or a group appears twice."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs/{org_id}/sso": {
+      "get": {
+        "operationId": "get_sso",
+        "tags": [
+          "SSO"
+        ],
+        "summary": "Read SSO settings",
+        "description": "The organisation's single sign-on settings, without the client secret. Admin. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoConfig"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "404": {
+            "description": "No settings are stored, or the organisation is not one you belong to."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "put_sso",
+        "tags": [
+          "SSO"
+        ],
+        "summary": "Set SSO settings",
+        "description": "Stores single sign-on settings. For `oidc` the issuer's discovery document is fetched and checked before anything is stored. Admin. Audited as `sso_update`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutSsoConfigRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoConfig"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A setting is invalid, or the discovery document could not be read."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "Your role does not allow it, or a domain is not yours to claim."
+          },
+          "409": {
+            "description": "Another organisation claims a domain, or the settings come from the configuration file."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "delete_sso",
+        "tags": [
+          "SSO"
+        ],
+        "summary": "Remove SSO settings",
+        "description": "Removes single sign-on and releases the claimed domains. Admin. Audited as `sso_delete`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/orgs/{org_id}/scim-token": {
+      "get": {
+        "operationId": "get_scim_token",
+        "tags": [
+          "SSO"
+        ],
+        "summary": "Read the SCIM token status",
+        "description": "Whether a SCIM token exists, and the base URL. Admin. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimTokenInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create_scim_token",
+        "tags": [
+          "SSO"
+        ],
+        "summary": "Create a SCIM token",
+        "description": "Creates a SCIM bearer token and revokes any earlier one. Admin. Audited as `scim_token_rotate`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedScimToken"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "revoke_scim_token",
+        "tags": [
+          "SSO"
+        ],
+        "summary": "Revoke the SCIM token",
+        "description": "Revokes the SCIM token. Admin. Audited as `scim_token_revoke`. Answers 404 when the daemon has no accounts or the organisation is not one you belong to.",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "description": "The organisation's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/api/sso/start": {
+      "post": {
+        "operationId": "sso_start",
+        "tags": [
+          "SSO"
+        ],
+        "summary": "Start single sign-on",
+        "description": "Finds the organisation by email domain or id and returns the provider URL to send the browser to. State, nonce and PKCE verifier are kept by the daemon for ten minutes. Limited per client address. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsoStartRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoStart"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No organisation logs in with single sign-on for that domain or id."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/api/sso/callback": {
+      "post": {
+        "operationId": "sso_callback",
+        "tags": [
+          "SSO"
+        ],
+        "summary": "Finish single sign-on",
+        "description": "Exchanges the code, checks the ID token's signature, issuer, audience, expiry and nonce, and logs in. A member is found by their identity at the provider; a new one is created only for an address in a claimed domain, and an existing account that is not a member is never taken over. The session reaches this organisation's projects only and lasts 24 hours. Audited as `sso_login`. Limited per client address. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsoCallbackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountSession"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The state is unknown or expired, the binding does not match, or the provider refused the code."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "403": {
+            "description": "The provider's answer does not identify a member this organisation may log in."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": []
+      }
+    },
+    "/scim/v2/ServiceProviderConfig": {
+      "get": {
+        "operationId": "scim_service_provider_config",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "Read the SCIM service provider configuration",
+        "description": "What this SCIM service supports: PATCH and filtering on, bulk, sort, ETags and password change off. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/scim/v2/Schemas": {
+      "get": {
+        "operationId": "scim_schemas",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "List SCIM schemas",
+        "description": "The User and Group schemas. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/scim/v2/ResourceTypes": {
+      "get": {
+        "operationId": "scim_resource_types",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "List SCIM resource types",
+        "description": "User and Group. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/scim/v2/Users": {
+      "get": {
+        "operationId": "scim_list_users",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "List users",
+        "description": "The organisation's provisioned users. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "parameters": [
+          {
+            "name": "filter",
+            "in": "query",
+            "required": false,
+            "description": "A SCIM filter. `eq` on `userName`, `externalId`, `emails.value` or `displayName`, and `and` between them.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "required": false,
+            "description": "Most resources per page, at most 200. `startIndex` gives the first, from 1.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "scim_create_user",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "Provision a user",
+        "description": "Provisions a user. An address in a claimed domain with no account gets one, managed by the organisation. An address with an account becomes a member when that account accepts the invitation sent to it. Roles come from groups. Audited as `scim_user_create`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "409": {
+            "description": "A user with that `userName` is already provisioned."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/scim/v2/Users/{id}": {
+      "get": {
+        "operationId": "scim_get_user",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "Read a user",
+        "description": "The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The resource's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "scim_replace_user",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "Replace a user",
+        "description": "Replaces a user. `active: false` deprovisions: the membership ends, the account's sessions and keys for the organisation end, and an account the organisation manages is deactivated. Audited as `scim_user_update`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The resource's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "scim_patch_user",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "Change a user",
+        "description": "Applies PATCH operations to a user, with the same deprovisioning rule as replace. Audited as `scim_user_update`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The resource's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "scim_delete_user",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "Delete a user",
+        "description": "Deprovisions a user and forgets them. An account the organisation manages is deleted. Answers 204. Audited as `scim_user_delete`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The resource's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/scim/v2/Groups": {
+      "get": {
+        "operationId": "scim_list_groups",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "List groups",
+        "description": "The organisation's provisioned groups. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "parameters": [
+          {
+            "name": "filter",
+            "in": "query",
+            "required": false,
+            "description": "A SCIM filter. `eq` on `userName`, `externalId`, `emails.value` or `displayName`, and `and` between them.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "required": false,
+            "description": "Most resources per page, at most 200. `startIndex` gives the first, from 1.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "scim_create_group",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "Provision a group",
+        "description": "Provisions a group. Its members get the role the group maps to. Audited as `scim_group_create`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "409": {
+            "description": "A group with that `displayName` is already provisioned."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/scim/v2/Groups/{id}": {
+      "get": {
+        "operationId": "scim_get_group",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "Read a group",
+        "description": "The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The resource's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "scim_replace_group",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "Replace a group",
+        "description": "Replaces a group and its members, and recomputes their roles. Audited as `scim_group_update`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The resource's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "scim_patch_group",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "Change a group",
+        "description": "Adds or removes members, or renames the group, and recomputes roles. Audited as `scim_group_update`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The resource's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
+          },
+          "429": {
+            "description": "Rate limited. `Retry-After` says how long to wait."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "scim_delete_group",
+        "tags": [
+          "SCIM"
+        ],
+        "summary": "Delete a group",
+        "description": "Deletes a group and recomputes its members' roles. Answers 204. Audited as `scim_group_delete`. The body is SCIM 2.0 JSON (RFC 7643 and RFC 7644), sent as `application/scim+json`. Answers 404 when the daemon has no accounts.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The resource's `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed. The body names the field and the problem."
+          },
+          "401": {
+            "description": "No credential, or one this endpoint does not accept."
           },
           "429": {
             "description": "Rate limited. `Retry-After` says how long to wait."

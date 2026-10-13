@@ -596,6 +596,38 @@ class KeyScope(str, Enum):
     WORKER = "worker"
     """Claim steps and report their outcome. The key that lives in the process running step bodies."""
 
+class OrgRole(str, Enum):
+    """What a member may do in an organisation. Each role maps onto the six key scopes on every project the organisation owns, unless a project role says otherwise."""
+
+    OWNER = "owner"
+    """Every scope on every project, and everything an admin may do. Only an owner may add or remove an owner, change quotas or delete the organisation."""
+    ADMIN = "admin"
+    """Every scope on every project. Invites and removes members below owner, sets roles, creates and deletes projects, and manages SSO, SCIM and every key in the organisation."""
+    MEMBER = "member"
+    """The `ingest`, `read`, `write`, `execute` and `worker` scopes. Everything but `admin`: a member cannot delete data or read the audit log."""
+    VIEWER = "viewer"
+    """The `read` scope only."""
+
+class ProjectRole(str, Enum):
+    """A role on one project that replaces a member's organisation role there. Owners and admins keep their reach on every project whatever a project role says."""
+
+    NONE = "none"
+    """No access to this project."""
+    VIEWER = "viewer"
+    """The `read` scope on this project."""
+    MEMBER = "member"
+    """Every scope but `admin` on this project."""
+    ADMIN = "admin"
+    """Every scope on this project. It does not let the member manage the organisation."""
+
+class SsoProvider(str, Enum):
+    """How an organisation's members log in with single sign-on."""
+
+    OIDC = "oidc"
+    """Any OpenID Connect provider, such as Google, Microsoft Entra ID, Okta or Auth0, found through its issuer's discovery document. Authorization code flow with PKCE, state and nonce."""
+    GITHUB = "github"
+    """GitHub, through an OAuth app. GitHub issues no ID token, so the member is the GitHub user id and the email is the primary verified address GitHub reports."""
+
 @dataclass(**_SLOTS)
 class InputTokenDetails:
     """Input tokens broken down by how the provider billed them. Every field is optional; absent means the provider did not report it, which is different from zero.
@@ -1037,6 +1069,10 @@ class HealthStatus:
     """What is degraded, when something is."""
     signup: bool | None = None
     """True when this daemon offers open sign-up: anyone may create an account at `POST /v1/api/account/signup` and log in at `POST /v1/api/account/login`. Absent when it does not, which is the default. The interface reads this to decide whether to show its sign-up and log-in screens."""
+    accounts: bool | None = None
+    """True when this daemon has accounts, with or without open sign-up. Absent when it does not. The interface reads this to show its log-in screen."""
+    sso: bool | None = None
+    """True when at least one organisation on this daemon logs in with single sign-on, so the log-in screen offers it. Absent otherwise."""
 
 @dataclass(**_SLOTS)
 class ScorerInfo:
@@ -2085,6 +2121,8 @@ class AccountCredentials:
     """The account's email address. Compared without regard to case, and with surrounding spaces removed."""
     password: str
     """At least 10 characters and at most 1024 bytes. Stored only as an argon2id hash."""
+    totp_code: str | None = None
+    """The six-digit code from an authenticator app, or one of the recovery codes, when the account has two-step log-in on. Ignored by sign-up."""
 
 @dataclass(**_SLOTS)
 class AccountSession:
@@ -2092,13 +2130,15 @@ class AccountSession:
     """
 
     token: str
-    """The session token. It grants every scope on the account's own project and nothing else. It is shown once: the daemon keeps only its SHA-256 digest."""
+    """The session token. It is shown once: the daemon keeps only its SHA-256 digest."""
     expires_at: datetime
     """When the session stops working. Log in again after this."""
     email: str
     """The account's email address, as stored."""
-    project: str
-    """The account's project. Every signal an account key writes lands here, and every read is limited to it."""
+    project: str | None = None
+    """The project reads go to when they name none. The account's own project, or the first project of the organisation a single sign-on session is limited to. Absent when the session reaches no project yet."""
+    org_id: str | None = None
+    """Set when the session came from an organisation's single sign-on. The session then reaches that organisation's projects only."""
 
 @dataclass(**_SLOTS)
 class Account:
@@ -2107,10 +2147,18 @@ class Account:
 
     email: str
     """The account's email address, as stored."""
-    project: str
-    """The account's project, which is the only project its session and its keys reach."""
     created_at: datetime
     """When the account was created."""
+    email_verified: bool
+    """Whether the address has been confirmed by a link sent to it."""
+    totp_enabled: bool
+    """Whether two-step log-in is on."""
+    has_password: bool
+    """Whether the account can log in with a password. False for an account created by single sign-on or SCIM that has never set one."""
+    project: str | None = None
+    """The project created with the account at sign-up. Absent for an account that was invited, or created by single sign-on or SCIM."""
+    managed_by: str | None = None
+    """The organisation that created this account through single sign-on or SCIM. That organisation can deactivate it."""
 
 @dataclass(**_SLOTS)
 class AccountKey:
@@ -2121,12 +2169,16 @@ class AccountKey:
     """The key's identifier, for revoking it. Not a secret."""
     scope: KeyScope
     """What the key may do."""
+    project: str
+    """The one project the key reaches."""
     prefix: str
     """The first characters of the secret, so you can tell which key a process holds without the daemon storing the secret."""
     created_at: datetime
     """When the key was created."""
     name: str | None = None
     """The label given when the key was created."""
+    created_by: str | None = None
+    """The email of the account that created the key. Set in an organisation's key list, so an admin can see whose key it is."""
 
 @dataclass(**_SLOTS)
 class CreateAccountKeyRequest:
@@ -2137,6 +2189,8 @@ class CreateAccountKeyRequest:
     """What the key may do. One scope per key."""
     name: str | None = None
     """A label for the key, such as the service that will hold it. At most 100 characters."""
+    project: str | None = None
+    """The project the key reaches. Defaults to the account's own project. Your role on the project must allow the scope."""
 
 @dataclass(**_SLOTS)
 class CreatedAccountKey:
@@ -2147,6 +2201,480 @@ class CreatedAccountKey:
     """The key as it is listed from now on."""
     secret: str
     """The key itself. Send it as `Authorization: Bearer <secret>`. Copy it now: the daemon keeps only its SHA-256 digest and cannot show it again."""
+
+@dataclass(**_SLOTS)
+class AccountNotice:
+    """A plain answer that changes nothing you can read back, such as "check your email".
+    """
+
+    message: str
+    """What happened, and what to do next."""
+
+@dataclass(**_SLOTS)
+class TokenRequest:
+    """A one-time token from a link the daemon sent by email.
+    """
+
+    token: str
+    """The token, as it appears in the link."""
+
+@dataclass(**_SLOTS)
+class PasswordForgotRequest:
+    """A request for a password reset link.
+    """
+
+    email: str
+    """The address to send the link to. The answer is the same whether or not an account uses it."""
+
+@dataclass(**_SLOTS)
+class PasswordResetRequest:
+    """A new password, with the token from a reset link.
+    """
+
+    token: str
+    """The token from the reset link. It works once, for one hour."""
+    password: str
+    """The new password. At least 10 characters and at most 1024 bytes."""
+    totp_code: str | None = None
+    """A code from the authenticator app, or a recovery code, when the account has two-step log-in on. A reset proves the address, not the second factor."""
+
+@dataclass(**_SLOTS)
+class PasswordChangeRequest:
+    """A new password for the logged-in account.
+    """
+
+    new_password: str
+    """The new password. At least 10 characters and at most 1024 bytes."""
+    current_password: str | None = None
+    """The password in use now. Required when the account has one."""
+
+@dataclass(**_SLOTS)
+class EmailChangeRequest:
+    """A new email address for the logged-in account.
+    """
+
+    email: str
+    """The new address. A link is sent to it, and the change happens when the link is opened."""
+    password: str | None = None
+    """The account's password. Required when the account has one."""
+
+@dataclass(**_SLOTS)
+class AccountDeleteRequest:
+    """Confirmation for deleting the logged-in account.
+    """
+
+    password: str | None = None
+    """The account's password. Required when the account has one."""
+    totp_code: str | None = None
+    """A code from the authenticator app. Required when two-step log-in is on."""
+
+@dataclass(**_SLOTS)
+class AccountDeletion:
+    """What deleting an account removed.
+    """
+
+    orgs_deleted: int
+    """Organisations that had this account as their only member, deleted with it."""
+    projects_erased: list[str] = field(default_factory=list)
+    """Projects whose stored signals and runs were erased, because their organisation was deleted."""
+
+@dataclass(**_SLOTS)
+class SessionInfo:
+    """One live session of the logged-in account. The token is not part of it.
+    """
+
+    id: str
+    """The session's identifier, for ending it. Not a secret."""
+    created_at: datetime
+    """When the session started."""
+    expires_at: datetime
+    """When it stops working."""
+    current: bool
+    """True for the session this request carries."""
+    via: str
+    """How it started: `password`, `sso`, `invite`, `verify` or `reset`."""
+    org_id: str | None = None
+    """The organisation a single sign-on session is limited to."""
+    user_agent: str | None = None
+    """The browser or client that started it, as it described itself."""
+    address: str | None = None
+    """The client address that started it."""
+
+@dataclass(**_SLOTS)
+class TotpSetup:
+    """A new authenticator secret, not yet in use. Confirm it with a code to turn two-step log-in on.
+    """
+
+    secret: str
+    """The secret in base32, for typing into an authenticator app."""
+    otpauth_uri: str
+    """The same secret as an `otpauth://` URI."""
+    qr_svg: str
+    """The URI as a QR code, an SVG document."""
+
+@dataclass(**_SLOTS)
+class TotpCodeRequest:
+    """A code from an authenticator app.
+    """
+
+    code: str
+    """The six-digit code."""
+
+@dataclass(**_SLOTS)
+class TotpEnabled:
+    """Two-step log-in is on.
+    """
+
+    recovery_codes: list[str] = field(default_factory=list)
+    """Ten single-use codes that stand in for the authenticator app. They are shown once: the daemon keeps only their digests."""
+
+@dataclass(**_SLOTS)
+class TotpDisableRequest:
+    """Confirmation for turning two-step log-in off.
+    """
+
+    code: str
+    """A code from the authenticator app, or a recovery code."""
+    password: str | None = None
+    """The account's password. Required when the account has one."""
+
+@dataclass(**_SLOTS)
+class Org:
+    """An organisation: the owner of projects, members and single sign-on settings.
+    """
+
+    id: str
+    """The organisation's identifier."""
+    name: str
+    """Its display name."""
+    role: OrgRole
+    """Your role in it."""
+    created_at: datetime
+    """When it was created."""
+    members: int
+    """How many members it has."""
+    projects: int
+    """How many projects it owns."""
+    managed_by_config: bool
+    """True when the daemon's configuration file declares this organisation. Its single sign-on settings are then read from that file and cannot be changed here."""
+    quota_per_minute: int | None = None
+    """The most signals all its projects together may store per minute. Absent means no ceiling."""
+    retention_days: int | None = None
+    """How long its projects keep data, in days. Absent means forever."""
+
+@dataclass(**_SLOTS)
+class CreateOrgRequest:
+    """A new organisation.
+    """
+
+    name: str
+    """Its display name, at most 100 characters."""
+
+@dataclass(**_SLOTS)
+class UpdateOrgRequest:
+    """Changes to an organisation. A field left out keeps its value.
+    """
+
+    name: str | None = None
+    """A new display name, at most 100 characters."""
+    quota_per_minute: int | None = None
+    """A ceiling on signals per minute across all the organisation's projects, at most the daemon's own ceiling. 0 restores the daemon's default. Owner only."""
+    retention_days: int | None = None
+    """How long to keep data, in days, at most the daemon's own window. 0 restores the daemon's default. Owner only."""
+
+@dataclass(**_SLOTS)
+class OrgDeletion:
+    """What deleting an organisation removed.
+    """
+
+    projects_erased: list[str] = field(default_factory=list)
+    """Projects whose stored signals and runs were erased."""
+
+@dataclass(**_SLOTS)
+class ProjectRoleGrant:
+    """A role on one project.
+    """
+
+    project: str
+    """The project."""
+    role: ProjectRole
+    """The role there."""
+
+@dataclass(**_SLOTS)
+class OrgMember:
+    """One member of an organisation.
+    """
+
+    account_id: str
+    """The member's account."""
+    email: str
+    """The member's email address."""
+    role: OrgRole
+    """The member's role."""
+    via: str
+    """How they joined: `created`, `invite`, `sso`, `scim` or `config`."""
+    joined_at: datetime
+    """When they joined."""
+    managed: bool
+    """True when this organisation created the account through single sign-on or SCIM."""
+    totp_enabled: bool
+    """Whether the member has two-step log-in on."""
+    project_roles: list[ProjectRoleGrant] = field(default_factory=list)
+    """Roles on single projects that replace the organisation role there."""
+
+@dataclass(**_SLOTS)
+class UpdateMemberRequest:
+    """A new role for a member.
+    """
+
+    role: OrgRole
+    """The role. Only an owner may grant or remove `owner`, and the last owner cannot be demoted."""
+
+@dataclass(**_SLOTS)
+class SetProjectRoleRequest:
+    """A role for a member on one project.
+    """
+
+    project: str
+    """A project the organisation owns."""
+    role: ProjectRole | None = None
+    """The role there. Absent removes the project role, so the organisation role applies again."""
+
+@dataclass(**_SLOTS)
+class OrgInvite:
+    """An invitation not yet accepted. The token is not part of it.
+    """
+
+    id: str
+    """The invitation's identifier, for revoking it."""
+    email: str
+    """The address it was sent to."""
+    role: OrgRole
+    """The role it grants."""
+    created_at: datetime
+    """When it was sent."""
+    expires_at: datetime
+    """When it stops working."""
+    project_roles: list[ProjectRoleGrant] = field(default_factory=list)
+    """Project roles it grants as well."""
+    invited_by: str | None = None
+    """The email of the member who sent it. Absent when the configuration file or SCIM sent it."""
+
+@dataclass(**_SLOTS)
+class CreateInviteRequest:
+    """An invitation to an organisation.
+    """
+
+    email: str
+    """Who to invite. The link is sent to this address."""
+    role: OrgRole
+    """The role to grant. Only an owner may invite an owner."""
+    project_roles: list[ProjectRoleGrant] | None = None
+    """Project roles to grant as well."""
+
+@dataclass(**_SLOTS)
+class InviteLookup:
+    """What an invitation offers, read with its token before accepting it.
+    """
+
+    org_name: str
+    """The organisation."""
+    email: str
+    """The address it was sent to. Accepting it joins the account with this address."""
+    role: OrgRole
+    """The role it grants."""
+    account_exists: bool
+    """Whether an account with this address exists. If it does, log in as it to accept; if not, accepting creates it."""
+    expires_at: datetime
+    """When it stops working."""
+
+@dataclass(**_SLOTS)
+class InviteAcceptRequest:
+    """Acceptance of an invitation.
+    """
+
+    token: str
+    """The token from the invitation link."""
+    password: str | None = None
+    """A password for the new account, when no account uses the invited address. Ignored otherwise."""
+
+@dataclass(**_SLOTS)
+class InviteAccepted:
+    """An accepted invitation.
+    """
+
+    org: Org
+    """The organisation joined."""
+    session: AccountSession | None = None
+    """A session for the account accepting created. Absent when an existing account accepted with its own session."""
+
+@dataclass(**_SLOTS)
+class OrgProject:
+    """A project an organisation owns.
+    """
+
+    project: str
+    """The project name. Random, so nobody can choose one that already holds somebody else's data."""
+    created_at: datetime
+    """When it was created or attached."""
+    label: str | None = None
+    """A display label."""
+
+@dataclass(**_SLOTS)
+class CreateProjectRequest:
+    """A new project in an organisation.
+    """
+
+    label: str | None = None
+    """A display label, at most 100 characters."""
+
+@dataclass(**_SLOTS)
+class OrgUsage:
+    """How much an organisation is using, against its ceilings. Counted since the daemon started.
+    """
+
+    org_id: str
+    """The organisation."""
+    admitted_this_minute: int
+    """Signals stored in the current one-minute window."""
+    admitted_total: int
+    """Signals stored since the daemon started."""
+    refused_total: int
+    """Signals refused for the ceiling since the daemon started."""
+    members: int
+    """Members."""
+    projects: int
+    """Projects."""
+    keys: int
+    """API keys on its projects."""
+    since: datetime
+    """When counting started."""
+    quota_per_minute: int | None = None
+    """Its ceiling on signals per minute, when it has one."""
+    retention_days: int | None = None
+    """How long its projects keep data, in days."""
+
+@dataclass(**_SLOTS)
+class SsoConfig:
+    """An organisation's single sign-on settings. The client secret is not part of it.
+    """
+
+    provider: SsoProvider
+    """The kind of provider."""
+    client_id: str
+    """The client id registered with the provider."""
+    has_client_secret: bool
+    """Whether a client secret is stored."""
+    enforced: bool
+    """When true, members whose email is in a claimed domain cannot log in with a password."""
+    default_role: OrgRole
+    """The role given to a member single sign-on creates, when no group maps to a role. Never `owner`."""
+    redirect_url: str
+    """The redirect URL to register with the provider."""
+    managed_by_config: bool
+    """True when these settings come from the configuration file."""
+    updated_at: datetime
+    """When they were last changed."""
+    domains: list[str] = field(default_factory=list)
+    """Email domains this organisation claims. Single sign-on creates accounts only for these domains, and "Log in with SSO" finds the organisation by them."""
+    issuer: str | None = None
+    """The OpenID Connect issuer URL. Absent for GitHub."""
+    groups_claim: str | None = None
+    """The ID token claim that lists the member's groups, mapped to roles by the group roles."""
+
+@dataclass(**_SLOTS)
+class PutSsoConfigRequest:
+    """New single sign-on settings for an organisation.
+    """
+
+    provider: SsoProvider
+    """The kind of provider."""
+    client_id: str
+    """The client id registered with the provider."""
+    enforced: bool
+    """Refuse password log-in for members in the claimed domains. Turning it on ends their password sessions."""
+    default_role: OrgRole
+    """The role for a member single sign-on creates. `admin`, `member` or `viewer`."""
+    domains: list[str] = field(default_factory=list)
+    """Email domains to claim. You can claim the domain of your own verified address. A domain belongs to one organisation."""
+    issuer: str | None = None
+    """The OpenID Connect issuer URL, such as `https://accounts.google.com`. Required for `oidc`. Must be `https`."""
+    client_secret: str | None = None
+    """The client secret. Left out, the stored one is kept."""
+    groups_claim: str | None = None
+    """The ID token claim that lists groups, such as `groups`."""
+
+@dataclass(**_SLOTS)
+class GroupRole:
+    """A group from the identity provider, and the role its members get.
+    """
+
+    group: str
+    """The group name, as single sign-on or SCIM sends it. Compared without regard to case."""
+    role: OrgRole
+    """The role. Never `owner`."""
+
+@dataclass(**_SLOTS)
+class ScimTokenInfo:
+    """Whether an organisation has a SCIM token. The token is not part of it.
+    """
+
+    configured: bool
+    """Whether a token exists."""
+    base_url: str
+    """The SCIM base URL to give your identity provider."""
+    prefix: str | None = None
+    """The first characters of the token."""
+    created_at: datetime | None = None
+    """When it was created."""
+
+@dataclass(**_SLOTS)
+class CreatedScimToken:
+    """A new SCIM token. This is the only time it is shown, and it replaces any earlier token.
+    """
+
+    token: str
+    """The bearer token for your identity provider. The daemon keeps only its SHA-256 digest."""
+    prefix: str
+    """Its first characters."""
+    created_at: datetime
+    """When it was created."""
+    base_url: str
+    """The SCIM base URL to give your identity provider."""
+
+@dataclass(**_SLOTS)
+class SsoStartRequest:
+    """Where to start single sign-on. Give one of the two.
+    """
+
+    email: str | None = None
+    """Your email address. Its domain finds the organisation."""
+    org_id: str | None = None
+    """The organisation, when you know it."""
+
+@dataclass(**_SLOTS)
+class SsoStart:
+    """Where to send the browser for single sign-on.
+    """
+
+    authorize_url: str
+    """The provider's authorization URL, with state, nonce and the PKCE challenge in it."""
+    binding: str
+    """A secret to keep in this browser and send back with the callback. It ties the callback to the browser that started it, so a link from somebody else cannot log you in as them."""
+    org_name: str
+    """The organisation."""
+
+@dataclass(**_SLOTS)
+class SsoCallbackRequest:
+    """What the provider sent back to the redirect URL.
+    """
+
+    state: str
+    """The `state` parameter."""
+    code: str
+    """The `code` parameter."""
+    binding: str
+    """The binding from the start of the flow."""
 
 @dataclass(**_SLOTS)
 class Span:

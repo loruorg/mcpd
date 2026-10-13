@@ -71,14 +71,21 @@ export default function App() {
   // Whether this daemon offers accounts, from its health probe, and the
   // session this browser holds for it. `null` until the probe answers, so a
   // daemon without accounts never flashes a log-in screen.
+  // `signup` here means "accounts are on", with or without public sign-up;
+  // `offers` says which doors the log-in screen shows.
   const [signup, setSignup] = useState<boolean | null>(null)
+  const [offers, setOffers] = useState({ signup: false, sso: false })
   const [session, setSession] = useState<StoredSession | null>(() => storedSession(endpoint))
 
   useEffect(() => {
     let live = true
     setSession(storedSession(endpoint))
     findDaemon(endpoint)
-      .then(({ health }) => live && setSignup(health.signup === true))
+      .then(({ health }) => {
+        if (!live) return
+        setSignup(health.signup === true || health.accounts === true)
+        setOffers({ signup: health.signup === true, sso: health.sso === true })
+      })
       .catch(() => live && setSignup(false))
     return () => {
       live = false
@@ -111,9 +118,11 @@ export default function App() {
     return (
       <AuthScreen
         endpoint={endpoint}
+        signup={offers.signup}
+        sso={offers.sso}
         onSession={(s) => {
           setSession(storedSession(endpoint))
-          setProject(s.project)
+          if (s.project) setProject(s.project)
         }}
       />
     )

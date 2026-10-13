@@ -63,9 +63,10 @@ const RUST_KEYWORDS = new Set(['as', 'async', 'await', 'break', 'const', 'contin
 /**
  * What an endpoint may require. The six scopes are the server's `Scope` enum.
  * `session` is an account's session token from `POST /v1/api/account/login`,
- * which no API key satisfies, so a leaked key cannot mint more keys.
+ * which no API key satisfies, so a leaked key cannot mint more keys. `scim` is
+ * an organisation's SCIM bearer token, which is good for `/scim/v2` and nothing else.
  */
-export const AUTH_VALUES = new Set(['none', 'ingest', 'read', 'write', 'admin', 'execute', 'worker', 'session'])
+export const AUTH_VALUES = new Set(['none', 'ingest', 'read', 'write', 'admin', 'execute', 'worker', 'session', 'scim'])
 
 /** Fail loudly on a spec that references something that does not exist. */
 function validate(spec) {
