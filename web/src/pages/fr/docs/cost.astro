@@ -4,8 +4,25 @@ import Waterfall from '@/components/Waterfall.astro'
 import Command from '@/components/Command.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
+import fs from 'node:fs'
+import path from 'node:path'
 
 const code = localeOf(Astro.url.pathname)
+
+/* The built-in book, read at build time from the file the daemon embeds, so
+   the counts and dates below cannot drift from what the binary prices with. */
+const book = JSON.parse(
+  fs.readFileSync(path.resolve(process.cwd(), '..', 'crates/mcpd-core/prices/builtin.json'), 'utf8'),
+)
+const bookTables = [
+  { name: 'models', note: 'tarifs publics des éditeurs, utilisés quand aucune table de fournisseur ne s’applique', count: Object.keys(book.models).length },
+  ...Object.entries(book.providers as Record<string, Record<string, unknown>>)
+    .map(([name, t]) => ({ name: `providers.${name}`, note: '', count: Object.keys(t).length }))
+    .sort((a, b) => b.count - a.count),
+]
+const tiered = Object.values(book.models as Record<string, { tiers?: unknown[] }>).filter((m) => m.tiers?.length).length
+const multipliers = Object.entries(book.service_tier_multipliers as Record<string, Record<string, number>>)
+  .flatMap(([p, t]) => Object.entries(t).map(([tier, m]) => ({ provider: p, tier, m })))
 
 /* Written here rather than read from an example program: these are queries a
    reader runs against their own daemon, not code CI can execute. */
@@ -210,6 +227,11 @@ const response = [
         <td>Facturés au tarif <code>output</code>.</td>
       </tr>
       <tr>
+        <td><code>image_input</code>, <code>image_output</code></td>
+        <td>Les tokens d’image, quand un fournisseur les tarife à part du texte.</td>
+        <td>Facturés au tarif <code>input</code> ou <code>output</code>.</td>
+      </tr>
+      <tr>
         <td><code>reasoning</code></td>
         <td>Les tokens de raisonnement cachés, quand un fournisseur les facture à part.</td>
         <td>
@@ -221,6 +243,32 @@ const response = [
       </tr>
     </tbody>
   </table>
+
+  <h2>Prompts longs et niveaux de service</h2>
+  <p>
+    Plusieurs fournisseurs facturent plus cher chaque token d’un prompt long.
+    Une entrée de modèle peut porter des <code>tiers</code>, chacun avec un
+    seuil <code>above_input_tokens</code> et ses propres tarifs. Le prompt est
+    mesuré avec ses tokens en cache, et quand il dépasse un seuil, tout l’appel
+    est tarifé à ce palier : un prompt de 300 000 tokens envoyé à
+    <code>gemini-2.5-pro</code> paie le tarif long contexte sur les 300 000. Un
+    compteur que le palier omet garde le tarif de base.
+  </p>
+  <p>
+    Un appel sur un niveau de service moins cher, comme une requête batch, est
+    tarifé avec la remise du fournisseur. mcpd lit le niveau dans
+    <code>gen_ai.response.service_tier</code>, puis
+    <code>gen_ai.openai.response.service_tier</code>,
+    <code>mcpd.service_tier</code>, <code>llm.service_tier</code> et les
+    attributs de requête correspondants. <code>default</code>,
+    <code>standard</code> et <code>auto</code> se lisent comme le niveau
+    standard. Un modèle peut porter ses propres tarifs pour un niveau sous
+    <code>service_tiers</code> ; sinon, les
+    <code>service_tier_multipliers</code> de la grille pour ce fournisseur
+    s’appliquent. Le chiffre enregistre le niveau : un appel batch stocke donc
+    <code>builtin+batch</code> comme grille, et son demi-tarif a une raison
+    lisible.
+  </p>
 
   <h2>Un token en cache est facturé une fois</h2>
   <p>
@@ -250,14 +298,10 @@ const response = [
     rapporté moins chaque champ mesuré.
   </p>
   <p>
-    Une règle couvre les compteurs sans tarif. Un compteur pour lequel la grille n’a
-    aucun tarif n’est facturé que dans le reste : quand le fournisseur a aussi
-    envoyé un compte <code>text</code>, il n’est donc pas facturé du tout. Les
-    tokens de raisonnement sont dans ce cas dès que votre grille ne leur donne
-    pas leur propre tarif, et en déclarer un le corrige. Les tokens d’image y
-    sont toujours, parce qu’une grille n’a pas de tarif d’image à donner : sur
-    une charge fortement multimodale, lisez le chiffre comme bas plutôt que
-    comme exact.
+    Un compteur pour lequel la grille n’a aucun tarif est facturé dans le
+    reste. Donnez aux tokens de raisonnement ou d’image leur propre tarif quand
+    votre fournisseur les facture à part et rapporte aussi un compte
+    <code>text</code> séparé.
   </p>
 
   <h2>Un modèle inconnu n’a pas de coût, pas un coût de zéro</h2>
@@ -266,8 +310,8 @@ const response = [
     aucun champ de coût. Il ne stocke pas un zéro.
   </p>
   <p>
-    Zéro est une affirmation : cet appel était gratuit. Absent dit que la
-    grille ne détient aucun prix pour cet appel. Les deux mènent à des décisions
+    Zéro est une affirmation : cet appel était gratuit. Absent est un aveu :
+    nous ne savons pas ce que cet appel a coûté. Les deux mènent à des décisions
     différentes, et un outil qui rapporte le second comme le premier ment sur
     une facture. La même règle court dans le chemin de lecture, où une exécution
     dont les spans ne totalisent rien est renvoyée sans chiffre de coût plutôt
@@ -287,9 +331,11 @@ const response = [
   <p>
     L’identifiant sur un span est celui que votre client a envoyé, et les
     clients le décorent. Une passerelle préfixe son éditeur, un cloud préfixe sa
-    région, un fournisseur y épingle une date de sortie. Une grille est indexée
-    sur des noms de modèles nus, donc la recherche essaie quatre choses dans
-    l’ordre et s’arrête à la première qui aboutit.
+    région, un fournisseur y épingle une date de sortie. Quand le span nomme un
+    fournisseur, la table de ce fournisseur dans la grille est cherchée en
+    premier, et la table <code>models</code> des éditeurs ensuite. Dans chaque
+    table, la recherche essaie ces étapes dans l’ordre et s’arrête à la
+    première qui aboutit.
   </p>
 
   <table>
@@ -323,76 +369,113 @@ const response = [
 
   <p>
     Les suffixes <code>-YYYY-MM-DD</code> et <code>-YYYYMMDD</code> sont tous
-    deux reconnus. Échouer sur les quatre étapes est une issue normale et non
-    une erreur : cela veut dire aucun coût, comme ci-dessus.
+    deux reconnus. Quand aucune des quatre ne trouve le modèle, elles sont
+    rejouées sur l’identifiant privé de son étiquette de version cloud, si bien
+    que <code>claude-sonnet-4-5@20250929</code> sur Vertex AI et
+    <code>anthropic.claude-sonnet-4-5-20250929-v1:0</code> sur Bedrock se
+    résolvent, puis avec les points entre chiffres écrits en tirets, si bien
+    que <code>claude-sonnet-4.5</code> trouve <code>claude-sonnet-4-5</code>.
+    Aucune correspondance veut dire aucun coût, comme ci-dessus.
+  </p>
+  <p>
+    Un fournisseur est reconnu de la même façon tolérante : le nom tel quel, un
+    alias que la grille liste (<code>azure</code> pour
+    <code>az.ai.openai</code>), et le nom privé d’un segment d’éditeur en tête,
+    si bien que <code>aws.bedrock</code> trouve la table <code>bedrock</code>.
   </p>
 
   <h2>La grille livrée</h2>
   <p>
-    mcpd embarque une petite grille intégrée pour qu’un <code>docker run</code>
+    mcpd embarque une grille intégrée pour qu’un <code>docker run</code>
     produise de vrais chiffres sans aucune configuration. Elle s’appelle
     <code>builtin</code>, elle tarife en USD, et chaque coût qu’elle produit
-    enregistre ce nom.
+    enregistre ce nom. Elle contient les prix publics de chaque grand éditeur
+    de modèles et des clouds et passerelles qui revendent leurs modèles, tels
+    qu’ils étaient à la date du {book.as_of}. {tiered} de ses modèles d’éditeurs portent
+    des paliers long contexte.
   </p>
 
-  {/* Transcribed from `builtin_book` in crates/mcpd-core/src/cost.rs. When a
-      rate moves there, it moves here. */}
   <table>
     <thead>
-      <tr>
-        <th>Modèle</th><th>Entrée</th><th>Sortie</th><th>Lecture de cache</th><th>Écriture de cache, 5 min</th><th>Écriture de cache, 1 heure</th>
-      </tr>
+      <tr><th>Table</th><th>Modèles</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>claude-opus-4</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-1</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-5</code></td><td>5.00</td><td>25.00</td><td>0.50</td><td>6.25</td><td>10.00</td></tr>
-      <tr><td><code>claude-sonnet-4</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-sonnet-4-5</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-haiku-4-5</code></td><td>1.00</td><td>5.00</td><td>0.10</td><td>1.25</td><td>2.00</td></tr>
-      <tr><td><code>claude-3-5-haiku</code></td><td>0.80</td><td>4.00</td><td>0.08</td><td>1.00</td><td>1.60</td></tr>
-      <tr><td><code>gpt-4o</code></td><td>2.50</td><td>10.00</td><td>1.25</td><td>au tarif d’entrée</td><td>au tarif d’entrée</td></tr>
-      <tr><td><code>gpt-4o-mini</code></td><td>0.15</td><td>0.60</td><td>0.075</td><td>au tarif d’entrée</td><td>au tarif d’entrée</td></tr>
-      <tr><td><code>gpt-4.1</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>au tarif d’entrée</td><td>au tarif d’entrée</td></tr>
-      <tr><td><code>gpt-4.1-mini</code></td><td>0.40</td><td>1.60</td><td>0.10</td><td>au tarif d’entrée</td><td>au tarif d’entrée</td></tr>
-      <tr><td><code>o3</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>au tarif d’entrée</td><td>au tarif d’entrée</td></tr>
-      <tr><td><code>o4-mini</code></td><td>1.10</td><td>4.40</td><td>0.275</td><td>au tarif d’entrée</td><td>au tarif d’entrée</td></tr>
-      <tr><td><code>gemini-2.5-pro</code></td><td>1.25</td><td>10.00</td><td>0.31</td><td>au tarif d’entrée</td><td>au tarif d’entrée</td></tr>
-      <tr><td><code>gemini-2.5-flash</code></td><td>0.30</td><td>2.50</td><td>0.075</td><td>au tarif d’entrée</td><td>au tarif d’entrée</td></tr>
-      <tr><td><code>text-embedding-3-small</code></td><td>0.02</td><td>0.00</td><td>au tarif d’entrée</td><td>au tarif d’entrée</td><td>au tarif d’entrée</td></tr>
-      <tr><td><code>text-embedding-3-large</code></td><td>0.13</td><td>0.00</td><td>au tarif d’entrée</td><td>au tarif d’entrée</td><td>au tarif d’entrée</td></tr>
+      {bookTables.map((t) => (
+        <tr><td><code>{t.name}</code>{t.note && <>: {t.note}</>}</td><td>{t.count}</td></tr>
+      ))}
+    </tbody>
+  </table>
+
+  <table>
+    <thead>
+      <tr><th>Fournisseur</th><th>Niveau de service</th><th>Multiplicateur</th></tr>
+    </thead>
+    <tbody>
+      {multipliers.map((m) => (
+        <tr><td><code>{m.provider}</code></td><td><code>{m.tier}</code></td><td>{m.m}</td></tr>
+      ))}
     </tbody>
   </table>
 
   <p>
-    En USD par million de tokens, tels que la grille se présentait à sa dernière
-    vérification contre un catalogue de modèles tiers, date que la grille
-    enregistre sous <code>as_of</code>. Les entrées d’Anthropic portent les deux
-    tarifs d’écriture de cache parce que le daemon se replie du tarif d’une
-    heure sur celui de cinq minutes, et une grille qui aurait omis le plus long
-    sous-facturerait en silence. OpenAI ne facture rien pour écrire dans son
-    cache, donc une écriture de cache y est facturée au tarif d’entrée.
-    <code>gemini-2.5-flash</code> porte aussi un tarif d’entrée audio de 1.00 ;
-    toutes les autres entrées tarifent l’audio à leur tarif texte. Il n’y a pas
-    de <code>claude-haiku-4</code> : l’identifiant qu’Anthropic sert est
-    <code>claude-haiku-4-5</code>, et un identifiant qui ne correspond à rien
-    est laissé sans prix plutôt que deviné.
+    Ce sont des prix publics. Pour voir à quel prix un modèle est tarifé,
+    demandez au binaire, qui utilise la même recherche que l’ingestion :
   </p>
+
+  <Command class="not-prose my-6" command="mcpd prices show claude-sonnet-4-5 --provider aws.bedrock" />
+
+  <h2>Votre propre grille</h2>
   <p>
-    Ce sont des prix publics en dollars US. Le daemon tarifie avec le tableau
-    intégré ci-dessus, et un modèle que ce tableau ne nomme pas reste sans prix.
-    La grille est délibérément courte, parce qu’une longue vieillirait à plus
-    d’endroits.
+    Chargez votre propre grille avec <code>--price-book</code>, ou la clé
+    <code>price_book</code> du fichier de configuration. Une grille est du
+    JSON : un <code>id</code>, une <code>currency</code> ISO 4217, et les
+    tables <code>models</code> et <code>providers</code>, qui associent chacune
+    un identifiant de modèle aux tarifs ci-dessus. Avec
+    <code>"extends": "builtin"</code>, elle se superpose à la grille intégrée,
+    donc elle n’a besoin que des tarifs que vous payez différemment :
   </p>
+
+  <pre><code>{`{
+  "id": "acme-2026-10",
+  "currency": "USD",
+  "extends": "builtin",
+  "providers": {
+    "bedrock": {
+      "anthropic.claude-sonnet-4-5-20250929-v1:0": { "input": 2.7, "output": 13.5 }
+    }
+  },
+  "models": {
+    "our-finetune": { "input": 0.5, "output": 1.5 }
+  }
+}`}</code></pre>
+
   <p>
-    La grille fait partie de l’état du serveur : pour la remplacer, embarquez
-    mcpd comme bibliothèque et passez-en une à
-    <code>AppState::with_price_book</code>. Une grille est un identifiant, une
-    monnaie ISO 4217 et une table qui associe un identifiant de modèle à des
-    tarifs, et chaque chiffre qu’elle produit est estampillé de son identifiant,
-    pour que deux grilles puissent être distinguées après coup. Les prix d’un
-    même projet partagent une seule monnaie : mcpd additionne les spans
-    d’une exécution arithmétiquement et ne convertit pas entre monnaies.
+    mcpd vérifie la grille au démarrage et refuse celle qui a un tarif négatif,
+    des paliers dans le désordre ou une devise qui n’est pas un code de trois
+    lettres, en nommant l’entrée. Les chiffres issus de votre grille
+    enregistrent son identifiant, pour être distingués après coup des
+    estimations au prix public. Les exécutions d’un projet additionnent leurs
+    spans arithmétiquement : gardez donc chaque tarif d’une grille dans une
+    seule devise.
+  </p>
+
+  <h2>Rafraîchir les tarifs</h2>
+  <p>
+    Les tarifs bougent toutes les quelques semaines.
+    <code>mcpd prices refresh</code> écrit une grille à partir d’un catalogue
+    public de modèles, pour qu’un déploiement prenne les nouveaux tarifs sans
+    nouvelle version :
+  </p>
+
+  <Command class="not-prose my-6" command="mcpd prices refresh --out /etc/mcpd/prices.json" />
+
+  <p>
+    Pointez <code>--price-book</code> sur le fichier et redémarrez. Un modèle
+    que la grille de <code>--out</code> tarife déjà et que le catalogue ne liste
+    plus est conservé, parce que le trafic vers un modèle retiré continue
+    d’arriver ; <code>--prune</code> le retire. <code>--source</code> lit un
+    autre catalogue, une URL ou un fichier, de même forme. La grille intégrée
+    est écrite par la même commande.
   </p>
 
   <h2>Relire la dépense</h2>
