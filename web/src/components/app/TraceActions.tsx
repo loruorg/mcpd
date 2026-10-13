@@ -48,7 +48,18 @@ export function TraceActions({
       >
         save to dataset
       </Action>
-      {note && <span className="text-[0.75rem] text-ink-2">{note}</span>}
+      <Action
+        onClick={() => {
+          request(`/v1/api/review-queue?project=${encodeURIComponent(project)}`, o, { trace_id: traceId })
+            .then(() => setNote('Queued for review.'))
+            .catch((e) => setNote(message(e)))
+        }}
+        pressed={false}
+        title="Put this run in the review queue for a person to look at"
+      >
+        queue for review
+      </Action>
+      {note &&<span className="text-[0.75rem] text-ink-2">{note}</span>}
       {open === 'judge' && (
         <Judge
           onDone={(n) => {

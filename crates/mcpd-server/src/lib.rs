@@ -21,6 +21,7 @@
 pub mod accounts;
 pub mod aspects;
 pub mod auth;
+pub mod curation;
 pub mod definitions;
 pub mod derive;
 pub mod error;
@@ -45,13 +46,14 @@ pub mod scim;
 pub mod spool;
 pub mod sso;
 pub mod state;
+pub mod tail;
 pub mod totp;
 pub mod ui;
 
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use std::future::Future;
 use std::sync::Arc;
@@ -202,6 +204,11 @@ fn api_router(config: &ServerConfig) -> Router<Arc<AppState>> {
         .route("/v1/api/datasets/{id}/items", get(query::list_dataset_items))
         .route("/v1/api/datasets/{id}/items", post(query::add_dataset_items))
         .route("/v1/api/datasets/{id}/capture", post(query::capture_into_dataset))
+        .route("/v1/api/datasets/{id}/versions", post(curation::create_dataset_version))
+        .route("/v1/api/datasets/{id}/versions", get(curation::list_dataset_versions))
+        .route("/v1/api/review-queue", get(curation::list_review_items))
+        .route("/v1/api/review-queue", post(curation::create_review_item))
+        .route("/v1/api/review-queue/{id}", patch(curation::update_review_item))
         .route("/v1/api/experiments", get(query::list_experiments))
         .route("/v1/api/experiments", post(query::create_experiment))
         .route("/v1/api/experiments/{id}/score", post(experiments::score_experiment))

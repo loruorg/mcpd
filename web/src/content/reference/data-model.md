@@ -561,6 +561,16 @@ How a stored scorer definition reaches its answer.
 | `judge` | The configured judge model grades the run against the definition's `prompt`, in one call. |
 | `code` | One of the daemon's code scorers, named in `builtin`, with the settings in `config` fixed. Free, and gives the same answer twice. |
 
+### ReviewStatus
+
+Where an item in the review queue has got to.
+
+| Value | Meaning |
+| --- | --- |
+| `pending` | Waiting for a person. |
+| `reviewed` | A person looked at it and recorded what they found. |
+| `dismissed` | A person looked at it and it needed nothing. |
+
 ## Entities
 
 ### InputTokenDetails
@@ -2354,6 +2364,58 @@ An experiment case by case, with a summary per scorer. Two of these joined on `i
 | `runs` | `u32` <span class="req">required</span> | How many runs are recorded under it. |
 | `failed` | `u32` <span class="req">required</span> | How many of them ended in an error. |
 
+### CreateReviewItemRequest
+
+A run to queue for review.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `trace_id` | `string` <span class="req">required</span> | The run. |
+| `span_id` | `string` | The step, when it is one step. |
+| `feedback_id` | `string` | The feedback that prompted it. |
+| `assignee` | `string` | Who should review it. |
+| `note` | `string` | Why it is queued. |
+
+### UpdateReviewItemRequest
+
+A change to a review item. Absent fields keep their value.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `status` | [`ReviewStatus`](#reviewstatus) | The new status. |
+| `assignee` | `string` | The new assignee. An empty string unassigns it. |
+| `note` | `string` | What the reviewer found. |
+
+### ReviewQueueResponse
+
+The review queue, newest first.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `items` | [`ReviewItem`](#reviewitem)[] <span class="req">required</span> | The items that matched, newest change first. |
+| `pending` | `u32` <span class="req">required</span> | How many items in the project are still pending, whatever the filter. |
+
+### DatasetVersion
+
+A frozen copy of a dataset's cases. An experiment that names a version runs against exactly those cases, whatever has been added to the dataset since.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `dataset_id` | `string` <span class="req">required</span> | The dataset. |
+| `version` | `u32` <span class="req">required</span> | Its number, from 1. |
+| `item_count` | `u32` <span class="req">required</span> | How many cases it froze. |
+| `note` | `string` | What changed since the version before. |
+| `created_by` | `string` | Which key or account froze it. |
+| `created_at` | `timestamp` <span class="req">required</span> | When it was frozen. |
+
+### CreateDatasetVersionRequest
+
+Freeze the dataset's current cases as a new version.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `note` | `string` | What changed since the version before. |
+
 ### Span
 
 One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.
@@ -2930,3 +2992,26 @@ Stored in the `documents` table.
 | `created_at` | `timestamp` <span class="req">required</span> | When this version was stored. |
 
 **Primary key:** `project`, `id`, `version`
+
+### ReviewItem
+
+A run, or one step of it, queued for a person to review. Queue the runs a low score or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every change is kept, so the item's history says who decided what and when. Corrections and labels go on the run as feedback.
+
+Stored in the `documents` table.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `project` | `string` <span class="req">required</span> | Which project. |
+| `review_id` | `string` <span class="req">required</span> | Its id. |
+| `version` | `u32` <span class="req">required</span> | How many times it has changed, from 1. |
+| `trace_id` | `string` <span class="req">required</span> | The run to review. |
+| `span_id` | `string` | The step to look at, when it is one step. |
+| `feedback_id` | `string` | The feedback that put it in the queue, when it was feedback. |
+| `status` | [`ReviewStatus`](#reviewstatus) <span class="req">required</span> | Where it has got to. |
+| `assignee` | `string` | Who should review it. |
+| `note` | `string` | Why it is queued, or what the reviewer found. |
+| `updated_by` | `string` | Which key or account made the latest change. |
+| `created_at` | `timestamp` <span class="req">required</span> | When it was queued. |
+| `updated_at` | `timestamp` <span class="req">required</span> | When it last changed. |
+
+**Primary key:** `project`, `review_id`, `version`

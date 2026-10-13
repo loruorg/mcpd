@@ -1148,6 +1148,23 @@
           "doc": "One of the daemon's code scorers, named in `builtin`, with the settings in `config` fixed. Free, and gives the same answer twice."
         }
       ]
+    },
+    "ReviewStatus": {
+      "doc": "Where an item in the review queue has got to.",
+      "values": [
+        {
+          "name": "pending",
+          "doc": "Waiting for a person."
+        },
+        {
+          "name": "reviewed",
+          "doc": "A person looked at it and recorded what they found."
+        },
+        {
+          "name": "dismissed",
+          "doc": "A person looked at it and it needed nothing."
+        }
+      ]
     }
   },
   "types": {
@@ -5562,6 +5579,116 @@
           "doc": "How many of them ended in an error."
         }
       ]
+    },
+    "CreateReviewItemRequest": {
+      "doc": "A run to queue for review.",
+      "fields": [
+        {
+          "name": "trace_id",
+          "type": "string",
+          "doc": "The run."
+        },
+        {
+          "name": "span_id",
+          "type": "string?",
+          "doc": "The step, when it is one step."
+        },
+        {
+          "name": "feedback_id",
+          "type": "string?",
+          "doc": "The feedback that prompted it."
+        },
+        {
+          "name": "assignee",
+          "type": "string?",
+          "doc": "Who should review it."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "Why it is queued."
+        }
+      ]
+    },
+    "UpdateReviewItemRequest": {
+      "doc": "A change to a review item. Absent fields keep their value.",
+      "fields": [
+        {
+          "name": "status",
+          "type": "ReviewStatus?",
+          "doc": "The new status."
+        },
+        {
+          "name": "assignee",
+          "type": "string?",
+          "doc": "The new assignee. An empty string unassigns it."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What the reviewer found."
+        }
+      ]
+    },
+    "ReviewQueueResponse": {
+      "doc": "The review queue, newest first.",
+      "fields": [
+        {
+          "name": "items",
+          "type": "ReviewItem[]",
+          "doc": "The items that matched, newest change first."
+        },
+        {
+          "name": "pending",
+          "type": "u32",
+          "doc": "How many items in the project are still pending, whatever the filter."
+        }
+      ]
+    },
+    "DatasetVersion": {
+      "doc": "A frozen copy of a dataset's cases. An experiment that names a version runs against exactly those cases, whatever has been added to the dataset since.",
+      "fields": [
+        {
+          "name": "dataset_id",
+          "type": "string",
+          "doc": "The dataset."
+        },
+        {
+          "name": "version",
+          "type": "u32",
+          "doc": "Its number, from 1."
+        },
+        {
+          "name": "item_count",
+          "type": "u32",
+          "doc": "How many cases it froze."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed since the version before."
+        },
+        {
+          "name": "created_by",
+          "type": "string?",
+          "doc": "Which key or account froze it."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When it was frozen."
+        }
+      ]
+    },
+    "CreateDatasetVersionRequest": {
+      "doc": "Freeze the dataset's current cases as a new version.",
+      "fields": [
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "What changed since the version before."
+        }
+      ]
     }
   },
   "entities": {
@@ -7361,6 +7488,77 @@
         "id",
         "version"
       ]
+    },
+    "ReviewItem": {
+      "doc": "A run, or one step of it, queued for a person to review. Queue the runs a low score or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every change is kept, so the item's history says who decided what and when. Corrections and labels go on the run as feedback.",
+      "table": "documents",
+      "fields": [
+        {
+          "name": "project",
+          "type": "string",
+          "doc": "Which project."
+        },
+        {
+          "name": "review_id",
+          "type": "string",
+          "doc": "Its id."
+        },
+        {
+          "name": "version",
+          "type": "u32",
+          "doc": "How many times it has changed, from 1."
+        },
+        {
+          "name": "trace_id",
+          "type": "string",
+          "doc": "The run to review."
+        },
+        {
+          "name": "span_id",
+          "type": "string?",
+          "doc": "The step to look at, when it is one step."
+        },
+        {
+          "name": "feedback_id",
+          "type": "string?",
+          "doc": "The feedback that put it in the queue, when it was feedback."
+        },
+        {
+          "name": "status",
+          "type": "ReviewStatus",
+          "doc": "Where it has got to."
+        },
+        {
+          "name": "assignee",
+          "type": "string?",
+          "doc": "Who should review it."
+        },
+        {
+          "name": "note",
+          "type": "string?",
+          "doc": "Why it is queued, or what the reviewer found."
+        },
+        {
+          "name": "updated_by",
+          "type": "string?",
+          "doc": "Which key or account made the latest change."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "doc": "When it was queued."
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "doc": "When it last changed."
+        }
+      ],
+      "primaryKey": [
+        "project",
+        "review_id",
+        "version"
+      ]
     }
   },
   "endpoints": [
@@ -8386,6 +8584,102 @@
       "auth": "read"
     },
     {
+      "id": "list_review_items",
+      "tag": "Evaluation",
+      "method": "GET",
+      "path": "/v1/api/review-queue",
+      "summary": "Read the review queue",
+      "doc": "The runs queued for review in the project, newest change first, filtered by status and assignee.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        },
+        {
+          "name": "status",
+          "type": "ReviewStatus?",
+          "doc": "Only items with this status."
+        },
+        {
+          "name": "assignee",
+          "type": "string?",
+          "doc": "Only items assigned to this person."
+        },
+        {
+          "name": "limit",
+          "type": "u32?",
+          "doc": "Page size, 1 to 500.",
+          "default": 100
+        }
+      ],
+      "response": {
+        "type": "ReviewQueueResponse"
+      },
+      "auth": "read"
+    },
+    {
+      "id": "create_review_item",
+      "tag": "Evaluation",
+      "method": "POST",
+      "path": "/v1/api/review-queue",
+      "summary": "Queue a run for review",
+      "doc": "Puts a run, or one step of it, in the review queue as `pending`. The run must exist in the project.",
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "request": {
+        "type": "CreateReviewItemRequest"
+      },
+      "response": {
+        "type": "ReviewItem"
+      },
+      "responses": {
+        "404": {
+          "doc": "No run with that id in the project."
+        }
+      },
+      "auth": "write"
+    },
+    {
+      "id": "update_review_item",
+      "tag": "Evaluation",
+      "method": "PATCH",
+      "path": "/v1/api/review-queue/{review_id}",
+      "summary": "Review, assign or dismiss an item",
+      "doc": "Changes an item's status, assignee or note. Each change is a new version of the item, so its history is kept.",
+      "params": [
+        {
+          "name": "review_id",
+          "type": "string",
+          "doc": "The item."
+        }
+      ],
+      "query": [
+        {
+          "name": "project",
+          "type": "string?",
+          "doc": "Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none."
+        }
+      ],
+      "request": {
+        "type": "UpdateReviewItemRequest"
+      },
+      "response": {
+        "type": "ReviewItem"
+      },
+      "responses": {
+        "404": {
+          "doc": "No review item with that id in the project."
+        }
+      },
+      "auth": "write"
+    },
+    {
       "id": "analytics_summary",
       "tag": "Analytics",
       "method": "GET",
@@ -8725,6 +9019,11 @@
           "type": "u32?",
           "doc": "Page size.",
           "default": 500
+        },
+        {
+          "name": "version",
+          "type": "u32?",
+          "doc": "Read a frozen version's cases instead of the current ones."
         }
       ],
       "response": {
@@ -8782,6 +9081,57 @@
         "type": "CaptureResult"
       },
       "auth": "write"
+    },
+    {
+      "id": "create_dataset_version",
+      "tag": "Datasets",
+      "method": "POST",
+      "path": "/v1/api/datasets/{dataset_id}/versions",
+      "summary": "Freeze a dataset version",
+      "doc": "Copies the dataset's current cases into a new numbered version. A version never changes, so an experiment run against it today and one run next month read the same cases.",
+      "params": [
+        {
+          "name": "dataset_id",
+          "type": "string",
+          "doc": "Which dataset."
+        }
+      ],
+      "request": {
+        "type": "CreateDatasetVersionRequest"
+      },
+      "response": {
+        "type": "DatasetVersion"
+      },
+      "responses": {
+        "404": {
+          "doc": "No dataset with that id."
+        }
+      },
+      "auth": "write"
+    },
+    {
+      "id": "list_dataset_versions",
+      "tag": "Datasets",
+      "method": "GET",
+      "path": "/v1/api/datasets/{dataset_id}/versions",
+      "summary": "List a dataset's versions",
+      "doc": "Every frozen version of the dataset, newest first.",
+      "params": [
+        {
+          "name": "dataset_id",
+          "type": "string",
+          "doc": "Which dataset."
+        }
+      ],
+      "response": {
+        "type": "DatasetVersion[]"
+      },
+      "responses": {
+        "404": {
+          "doc": "No dataset with that id."
+        }
+      },
+      "auth": "read"
     },
     {
       "id": "list_experiments",

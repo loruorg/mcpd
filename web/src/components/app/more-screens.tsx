@@ -9,14 +9,16 @@ import Evaluations from './Evaluations'
 import Metrics from './Metrics'
 import Monitors from './Monitors'
 import Prompts from './Prompts'
+import Review from './Review'
 import Themes from './Themes'
 import type { ScreenProps } from './screen-kit'
 
-export type MoreScreenId = 'prompts' | 'evaluations' | 'datasets' | 'themes' | 'metrics' | 'monitors'
+export type MoreScreenId = 'prompts' | 'evaluations' | 'review' | 'datasets' | 'themes' | 'metrics' | 'monitors'
 
 export const MORE_SCREENS: { id: MoreScreenId; label: string; Screen: ComponentType<ScreenProps> }[] = [
   { id: 'prompts', label: 'Prompts', Screen: Prompts },
   { id: 'evaluations', label: 'Evaluations', Screen: Evaluations },
+  { id: 'review', label: 'Review', Screen: Review },
   { id: 'datasets', label: 'Datasets', Screen: Datasets },
   { id: 'themes', label: 'Themes', Screen: Themes },
   { id: 'metrics', label: 'Metrics', Screen: Metrics },

@@ -57,6 +57,7 @@ The cases themselves, each with its input, its expected answer when it has one, 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
 | `limit` | `u32` | `500` | Page size. |
+| `version` | `u32` | · | Read a frozen version's cases instead of the current ones. |
 
 **Response:** `DatasetItem`
 
@@ -107,6 +108,56 @@ Turns runs that already happened into permanent cases. This is what datasets are
 **Response:** `CaptureResult`
 
 **Authentication:** an API key with `write` scope.
+
+---
+
+## Freeze a dataset version
+
+<div class="endpoint"><span class="method method--post">POST</span><code>/v1/api/datasets/{dataset_id}/versions</code></div>
+
+Copies the dataset's current cases into a new numbered version. A version never changes, so an experiment run against it today and one run next month read the same cases.
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `dataset_id` | `string` | Which dataset. |
+
+**Request body:** `CreateDatasetVersionRequest`
+
+**Response:** `DatasetVersion`
+
+**Other responses**
+
+| Status | Body | When |
+| --- | --- | --- |
+| `404` | · | No dataset with that id. |
+
+**Authentication:** an API key with `write` scope.
+
+---
+
+## List a dataset's versions
+
+<div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/datasets/{dataset_id}/versions</code></div>
+
+Every frozen version of the dataset, newest first.
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `dataset_id` | `string` | Which dataset. |
+
+**Response:** `DatasetVersion`
+
+**Other responses**
+
+| Status | Body | When |
+| --- | --- | --- |
+| `404` | · | No dataset with that id. |
+
+**Authentication:** an API key with `read` scope.
 
 ---
 

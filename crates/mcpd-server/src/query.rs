@@ -1570,6 +1570,11 @@ pub async fn list_dataset_items(
         Some(&dataset_id),
     )
     .await?;
+    if let Some(version) = parse::<u32>(&p, "version")? {
+        return Ok(Json(
+            crate::curation::version_items(&state, &project, &dataset_id, version, limit).await?,
+        ));
+    }
     Ok(Json(state.store.list_dataset_items(&dataset_id, limit).await?))
 }
 

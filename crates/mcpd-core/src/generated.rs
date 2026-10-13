@@ -2670,6 +2670,50 @@ impl std::fmt::Display for ScorerDefinitionKind {
     }
 }
 
+/// Where an item in the review queue has got to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewStatus {
+    /// Waiting for a person.
+    Pending,
+    /// A person looked at it and recorded what they found.
+    Reviewed,
+    /// A person looked at it and it needed nothing.
+    Dismissed,
+}
+
+impl ReviewStatus {
+    /// The wire representation, exactly as it appears in JSON.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Reviewed => "reviewed",
+            Self::Dismissed => "dismissed",
+        }
+    }
+
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[Self::Pending, Self::Reviewed, Self::Dismissed];
+}
+
+impl std::str::FromStr for ReviewStatus {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "reviewed" => Ok(Self::Reviewed),
+            "dismissed" => Ok(Self::Dismissed),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for ReviewStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Input tokens broken down by how the provider billed them. Every field is optional;
 /// absent means the provider did not report it, which is different from zero.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5920,6 +5964,90 @@ pub struct ExperimentResults {
     pub failed: u32,
 }
 
+/// A run to queue for review.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateReviewItemRequest {
+    /// The run.
+    pub trace_id: String,
+    /// The step, when it is one step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
+    /// The feedback that prompted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_id: Option<String>,
+    /// Who should review it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// Why it is queued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A change to a review item. Absent fields keep their value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateReviewItemRequest {
+    /// The new status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ReviewStatus>,
+    /// The new assignee. An empty string unassigns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// What the reviewer found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Default for UpdateReviewItemRequest {
+    fn default() -> Self {
+        Self { status: None, assignee: None, note: None }
+    }
+}
+
+/// The review queue, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewQueueResponse {
+    /// The items that matched, newest change first.
+    #[serde(default)]
+    pub items: Vec<ReviewItem>,
+    /// How many items in the project are still pending, whatever the filter.
+    pub pending: u32,
+}
+
+/// A frozen copy of a dataset's cases. An experiment that names a version runs against
+/// exactly those cases, whatever has been added to the dataset since.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatasetVersion {
+    /// The dataset.
+    pub dataset_id: String,
+    /// Its number, from 1.
+    pub version: u32,
+    /// How many cases it froze.
+    pub item_count: u32,
+    /// What changed since the version before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Which key or account froze it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    /// When it was frozen.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+}
+
+/// Freeze the dataset's current cases as a new version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateDatasetVersionRequest {
+    /// What changed since the version before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Default for CreateDatasetVersionRequest {
+    fn default() -> Self {
+        Self { note: None }
+    }
+}
+
 /// One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback
 /// all hang off a span or a trace.
 /// Stored in the `spans` table.
@@ -7086,6 +7214,53 @@ pub struct EvaluationRule {
 impl EvaluationRule {
     /// The primary key, as declared in the spec.
     pub const PRIMARY_KEY: &'static [&'static str] = &["project", "id", "version"];
+    /// The storage table this entity lives in.
+    pub const TABLE: &'static str = "documents";
+}
+
+/// A run, or one step of it, queued for a person to review. Queue the runs a low score
+/// or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every
+/// change is kept, so the item's history says who decided what and when. Corrections
+/// and labels go on the run as feedback.
+/// Stored in the `documents` table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewItem {
+    /// Which project.
+    pub project: String,
+    /// Its id.
+    pub review_id: String,
+    /// How many times it has changed, from 1.
+    pub version: u32,
+    /// The run to review.
+    pub trace_id: String,
+    /// The step to look at, when it is one step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
+    /// The feedback that put it in the queue, when it was feedback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_id: Option<String>,
+    /// Where it has got to.
+    pub status: ReviewStatus,
+    /// Who should review it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// Why it is queued, or what the reviewer found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Which key or account made the latest change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_by: Option<String>,
+    /// When it was queued.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+    /// When it last changed.
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: time::OffsetDateTime,
+}
+
+impl ReviewItem {
+    /// The primary key, as declared in the spec.
+    pub const PRIMARY_KEY: &'static [&'static str] = &["project", "review_id", "version"];
     /// The storage table this entity lives in.
     pub const TABLE: &'static str = "documents";
 }

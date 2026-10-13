@@ -351,6 +351,10 @@ pub enum DocKind {
     Scorer,
     /// An online evaluation rule.
     EvalRule,
+    /// An item in the review queue. Each change is a new version.
+    Review,
+    /// A frozen copy of a dataset's cases.
+    DatasetVersion,
 }
 
 impl DocKind {
@@ -361,6 +365,8 @@ impl DocKind {
             Self::Prompt => "prompt",
             Self::Scorer => "scorer",
             Self::EvalRule => "eval_rule",
+            Self::Review => "review",
+            Self::DatasetVersion => "dataset_version",
         }
     }
 }

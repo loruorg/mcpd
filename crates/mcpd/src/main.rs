@@ -1247,6 +1247,13 @@ async fn main() -> Result<()> {
     // Live scoring. Its rules are data written through the API, so it always
     // runs, and a pass with no enabled rule reads one list per project.
     mcpd_server::live::spawn(Arc::clone(&state));
+    // Tail sampling, for the projects whose block sets `tail_sampling`.
+    for (name, p) in &state.config.projects {
+        if let Some(t) = &p.tail_sampling {
+            t.check(name).map_err(anyhow::Error::msg)?;
+        }
+    }
+    mcpd_server::tail::spawn(Arc::clone(&state));
     // The run store's deadline tick and its span outbox drain. A no-op when
     // the daemon serves no runs.
     mcpd_server::runs::spawn(Arc::clone(&state));
@@ -1765,6 +1772,7 @@ fn config_lines(
             config.projects.iter().filter_map(|(name, p)| p.sample.map(|f| format!("{name} {f}"))),
         ),
     );
+    row("tail sampling", tail_summary(&config.projects));
     // Every limited project by name, not a count. A ceiling is set from two
     // places, and the mistake it hides is a project you thought was covered and
     // is not: one that appears in no `projects` block has no ceiling, whatever
@@ -1918,6 +1926,46 @@ fn config_lines(
 }
 
 /// A setting's global value, then every project that sets its own.
+/// Each project's tail sampling rule, in one line, or that there is none.
+fn tail_summary(
+    projects: &std::collections::BTreeMap<String, mcpd_server::state::ProjectConfig>,
+) -> String {
+    let rules: Vec<String> = projects
+        .iter()
+        .filter_map(|(name, p)| {
+            p.tail_sampling.as_ref().map(|t| {
+                let mut keep = Vec::new();
+                if t.keep_errors {
+                    keep.push("errors".to_owned());
+                }
+                if let Some(ms) = t.keep_slower_than_ms {
+                    keep.push(format!("slower than {ms}ms"));
+                }
+                if let Some(c) = t.keep_cost_above {
+                    keep.push(format!("cost over {c}"));
+                }
+                if let Some(s) = t.keep_score_below {
+                    keep.push(format!("scored under {s}"));
+                }
+                if t.keep_feedback {
+                    keep.push("feedback".to_owned());
+                }
+                format!(
+                    "{name} keeps {} and {} of the rest after {}s",
+                    if keep.is_empty() { "nothing by rule".to_owned() } else { keep.join(", ") },
+                    t.rate,
+                    t.decide_after_seconds
+                )
+            })
+        })
+        .collect();
+    if rules.is_empty() {
+        "off".to_owned()
+    } else {
+        rules.join("; ")
+    }
+}
+
 fn with_exceptions(global: String, projects: impl Iterator<Item = String>) -> String {
     let projects: Vec<String> = projects.collect();
     if projects.is_empty() {

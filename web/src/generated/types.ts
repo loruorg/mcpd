@@ -1079,6 +1079,22 @@ export type ScorerDefinitionKind = typeof ScorerDefinitionKind[keyof typeof Scor
 export const ALL_SCORER_DEFINITION_KIND: readonly ScorerDefinitionKind[] = ['judge', 'code']
 
 /**
+  * Where an item in the review queue has got to. */
+export const ReviewStatus = {
+  // Waiting for a person.
+  Pending: 'pending',
+  // A person looked at it and recorded what they found.
+  Reviewed: 'reviewed',
+  // A person looked at it and it needed nothing.
+  Dismissed: 'dismissed',
+} as const
+
+export type ReviewStatus = typeof ReviewStatus[keyof typeof ReviewStatus]
+
+/** Every `ReviewStatus` value, in declaration order. */
+export const ALL_REVIEW_STATUS: readonly ReviewStatus[] = ['pending', 'reviewed', 'dismissed']
+
+/**
  * Input tokens broken down by how the provider billed them. Every field is optional;
  * absent means the provider did not report it, which is different from zero.
  */
@@ -5332,6 +5348,105 @@ export interface ExperimentResults {
 }
 
 /**
+ * A run to queue for review.
+ */
+export interface CreateReviewItemRequest {
+  /**
+   * The run.
+   */
+  trace_id: string
+  /**
+   * The step, when it is one step.
+   */
+  span_id?: string
+  /**
+   * The feedback that prompted it.
+   */
+  feedback_id?: string
+  /**
+   * Who should review it.
+   */
+  assignee?: string
+  /**
+   * Why it is queued.
+   */
+  note?: string
+}
+
+/**
+ * A change to a review item. Absent fields keep their value.
+ */
+export interface UpdateReviewItemRequest {
+  /**
+   * The new status.
+   */
+  status?: ReviewStatus
+  /**
+   * The new assignee. An empty string unassigns it.
+   */
+  assignee?: string
+  /**
+   * What the reviewer found.
+   */
+  note?: string
+}
+
+/**
+ * The review queue, newest first.
+ */
+export interface ReviewQueueResponse {
+  /**
+   * The items that matched, newest change first.
+   */
+  items: ReviewItem[]
+  /**
+   * How many items in the project are still pending, whatever the filter.
+   */
+  pending: number
+}
+
+/**
+ * A frozen copy of a dataset's cases. An experiment that names a version runs against
+ * exactly those cases, whatever has been added to the dataset since.
+ */
+export interface DatasetVersion {
+  /**
+   * The dataset.
+   */
+  dataset_id: string
+  /**
+   * Its number, from 1.
+   */
+  version: number
+  /**
+   * How many cases it froze.
+   */
+  item_count: number
+  /**
+   * What changed since the version before.
+   */
+  note?: string
+  /**
+   * Which key or account froze it.
+   */
+  created_by?: string
+  /**
+   * When it was frozen.
+   */
+  created_at: string
+}
+
+/**
+ * Freeze the dataset's current cases as a new version.
+ */
+export interface CreateDatasetVersionRequest {
+  /**
+   * What changed since the version before.
+   */
+  note?: string
+}
+
+/**
  * One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback
  * all hang off a span or a trace.
  * Stored in the `spans` table.
@@ -6768,4 +6883,62 @@ export interface EvaluationRule {
    * When this version was stored.
    */
   created_at: string
+}
+
+/**
+ * A run, or one step of it, queued for a person to review. Queue the runs a low score
+ * or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every
+ * change is kept, so the item's history says who decided what and when. Corrections
+ * and labels go on the run as feedback.
+ * Stored in the `documents` table.
+ */
+export interface ReviewItem {
+  /**
+   * Which project.
+   */
+  project: string
+  /**
+   * Its id.
+   */
+  review_id: string
+  /**
+   * How many times it has changed, from 1.
+   */
+  version: number
+  /**
+   * The run to review.
+   */
+  trace_id: string
+  /**
+   * The step to look at, when it is one step.
+   */
+  span_id?: string
+  /**
+   * The feedback that put it in the queue, when it was feedback.
+   */
+  feedback_id?: string
+  /**
+   * Where it has got to.
+   */
+  status: ReviewStatus
+  /**
+   * Who should review it.
+   */
+  assignee?: string
+  /**
+   * Why it is queued, or what the reviewer found.
+   */
+  note?: string
+  /**
+   * Which key or account made the latest change.
+   */
+  updated_by?: string
+  /**
+   * When it was queued.
+   */
+  created_at: string
+  /**
+   * When it last changed.
+   */
+  updated_at: string
 }

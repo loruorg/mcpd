@@ -90,6 +90,85 @@ A project's human judgements, newest first, filtered by run, step, kind, author 
 
 ---
 
+## Read the review queue
+
+<div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/review-queue</code></div>
+
+The runs queued for review in the project, newest change first, filtered by status and assignee.
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none. |
+| `status` | `ReviewStatus` | · | Only items with this status. |
+| `assignee` | `string` | · | Only items assigned to this person. |
+| `limit` | `u32` | `100` | Page size, 1 to 500. |
+
+**Response:** `ReviewQueueResponse`
+
+**Authentication:** an API key with `read` scope.
+
+---
+
+## Queue a run for review
+
+<div class="endpoint"><span class="method method--post">POST</span><code>/v1/api/review-queue</code></div>
+
+Puts a run, or one step of it, in the review queue as `pending`. The run must exist in the project.
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none. |
+
+**Request body:** `CreateReviewItemRequest`
+
+**Response:** `ReviewItem`
+
+**Other responses**
+
+| Status | Body | When |
+| --- | --- | --- |
+| `404` | · | No run with that id in the project. |
+
+**Authentication:** an API key with `write` scope.
+
+---
+
+## Review, assign or dismiss an item
+
+<div class="endpoint"><span class="method method--patch">PATCH</span><code>/v1/api/review-queue/{review_id}</code></div>
+
+Changes an item's status, assignee or note. Each change is a new version of the item, so its history is kept.
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `review_id` | `string` | The item. |
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none. |
+
+**Request body:** `UpdateReviewItemRequest`
+
+**Response:** `ReviewItem`
+
+**Other responses**
+
+| Status | Body | When |
+| --- | --- | --- |
+| `404` | · | No review item with that id in the project. |
+
+**Authentication:** an API key with `write` scope.
+
+---
+
 ## List the scorers
 
 <div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/scorers</code></div>

@@ -58,6 +58,7 @@ const READ_ROUTES: &[&str] = &[
     "/v1/api/prompts",
     "/v1/api/scorer-definitions",
     "/v1/api/evaluation-rules",
+    "/v1/api/review-queue",
     "/v1/api/monitors",
     "/v1/api/slos",
 ];

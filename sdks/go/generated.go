@@ -1658,6 +1658,34 @@ func (v ScorerDefinitionKind) Valid() bool {
 	return false
 }
 
+// Where an item in the review queue has got to.
+type ReviewStatus string
+
+const (
+	// Waiting for a person.
+	ReviewStatusPending ReviewStatus = "pending"
+	// A person looked at it and recorded what they found.
+	ReviewStatusReviewed ReviewStatus = "reviewed"
+	// A person looked at it and it needed nothing.
+	ReviewStatusDismissed ReviewStatus = "dismissed"
+)
+
+// AllReviewStatuss lists every ReviewStatus value, in declaration order.
+var AllReviewStatuss = []ReviewStatus{ReviewStatusPending, ReviewStatusReviewed, ReviewStatusDismissed}
+
+// String returns the wire representation.
+func (v ReviewStatus) String() string { return string(v) }
+
+// Valid reports whether v is a value this version of the spec defines.
+func (v ReviewStatus) Valid() bool {
+	for _, c := range AllReviewStatuss {
+		if c == v {
+			return true
+		}
+	}
+	return false
+}
+
 // Input tokens broken down by how the provider billed them. Every field is optional;
 // absent means the provider did not report it, which is different from zero.
 type InputTokenDetails struct {
@@ -4177,6 +4205,61 @@ type ExperimentResults struct {
 	Failed uint32 `json:"failed"`
 }
 
+// A run to queue for review.
+type CreateReviewItemRequest struct {
+	// The run.
+	TraceID string `json:"trace_id"`
+	// The step, when it is one step.
+	SpanID *string `json:"span_id,omitempty"`
+	// The feedback that prompted it.
+	FeedbackID *string `json:"feedback_id,omitempty"`
+	// Who should review it.
+	Assignee *string `json:"assignee,omitempty"`
+	// Why it is queued.
+	Note *string `json:"note,omitempty"`
+}
+
+// A change to a review item. Absent fields keep their value.
+type UpdateReviewItemRequest struct {
+	// The new status.
+	Status *ReviewStatus `json:"status,omitempty"`
+	// The new assignee. An empty string unassigns it.
+	Assignee *string `json:"assignee,omitempty"`
+	// What the reviewer found.
+	Note *string `json:"note,omitempty"`
+}
+
+// The review queue, newest first.
+type ReviewQueueResponse struct {
+	// The items that matched, newest change first.
+	Items []ReviewItem `json:"items"`
+	// How many items in the project are still pending, whatever the filter.
+	Pending uint32 `json:"pending"`
+}
+
+// A frozen copy of a dataset's cases. An experiment that names a version runs against
+// exactly those cases, whatever has been added to the dataset since.
+type DatasetVersion struct {
+	// The dataset.
+	DatasetID string `json:"dataset_id"`
+	// Its number, from 1.
+	Version uint32 `json:"version"`
+	// How many cases it froze.
+	ItemCount uint32 `json:"item_count"`
+	// What changed since the version before.
+	Note *string `json:"note,omitempty"`
+	// Which key or account froze it.
+	CreatedBy *string `json:"created_by,omitempty"`
+	// When it was frozen.
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Freeze the dataset's current cases as a new version.
+type CreateDatasetVersionRequest struct {
+	// What changed since the version before.
+	Note *string `json:"note,omitempty"`
+}
+
 // One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback
 // all hang off a span or a trace.
 // Stored in the spans table.
@@ -5077,3 +5160,38 @@ type EvaluationRule struct {
 
 // Table is the storage table EvaluationRule lives in.
 func (EvaluationRule) Table() string { return "documents" }
+
+// A run, or one step of it, queued for a person to review. Queue the runs a low score
+// or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every
+// change is kept, so the item's history says who decided what and when. Corrections
+// and labels go on the run as feedback.
+// Stored in the documents table.
+type ReviewItem struct {
+	// Which project.
+	Project string `json:"project"`
+	// Its id.
+	ReviewID string `json:"review_id"`
+	// How many times it has changed, from 1.
+	Version uint32 `json:"version"`
+	// The run to review.
+	TraceID string `json:"trace_id"`
+	// The step to look at, when it is one step.
+	SpanID *string `json:"span_id,omitempty"`
+	// The feedback that put it in the queue, when it was feedback.
+	FeedbackID *string `json:"feedback_id,omitempty"`
+	// Where it has got to.
+	Status ReviewStatus `json:"status"`
+	// Who should review it.
+	Assignee *string `json:"assignee,omitempty"`
+	// Why it is queued, or what the reviewer found.
+	Note *string `json:"note,omitempty"`
+	// Which key or account made the latest change.
+	UpdatedBy *string `json:"updated_by,omitempty"`
+	// When it was queued.
+	CreatedAt time.Time `json:"created_at"`
+	// When it last changed.
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Table is the storage table ReviewItem lives in.
+func (ReviewItem) Table() string { return "documents" }

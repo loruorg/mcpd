@@ -1470,6 +1470,25 @@ enum class ScorerDefinitionKind(val wire: String) {
     }
 }
 
+/** Where an item in the review queue has got to. */
+@Serializable
+enum class ReviewStatus(val wire: String) {
+    /** Waiting for a person. */
+    @SerialName("pending") PENDING("pending"),
+    /** A person looked at it and recorded what they found. */
+    @SerialName("reviewed") REVIEWED("reviewed"),
+    /** A person looked at it and it needed nothing. */
+    @SerialName("dismissed") DISMISSED("dismissed"),
+    ;
+
+    override fun toString(): String = wire
+
+    companion object {
+        /** Parse a wire value, or null when this version of the spec does not define it. */
+        fun fromWire(s: String): ReviewStatus? = entries.firstOrNull { it.wire == s }
+    }
+}
+
 /**
  * Input tokens broken down by how the provider billed them. Every field is
  * optional; absent means the provider did not report it, which is different from
@@ -4729,6 +4748,73 @@ data class ExperimentResults(
 ) {
 }
 
+/** A run to queue for review. */
+@Serializable
+data class CreateReviewItemRequest(
+    /** The run. */
+    @SerialName("trace_id") val traceId: String,
+    /** The step, when it is one step. */
+    @SerialName("span_id") val spanId: String? = null,
+    /** The feedback that prompted it. */
+    @SerialName("feedback_id") val feedbackId: String? = null,
+    /** Who should review it. */
+    @SerialName("assignee") val assignee: String? = null,
+    /** Why it is queued. */
+    @SerialName("note") val note: String? = null
+) {
+}
+
+/** A change to a review item. Absent fields keep their value. */
+@Serializable
+data class UpdateReviewItemRequest(
+    /** The new status. */
+    @SerialName("status") val status: ReviewStatus? = null,
+    /** The new assignee. An empty string unassigns it. */
+    @SerialName("assignee") val assignee: String? = null,
+    /** What the reviewer found. */
+    @SerialName("note") val note: String? = null
+) {
+}
+
+/** The review queue, newest first. */
+@Serializable
+data class ReviewQueueResponse(
+    /** The items that matched, newest change first. */
+    @SerialName("items") val items: List<ReviewItem>,
+    /** How many items in the project are still pending, whatever the filter. */
+    @SerialName("pending") val pending: Int
+) {
+}
+
+/**
+ * A frozen copy of a dataset's cases. An experiment that names a version runs
+ * against exactly those cases, whatever has been added to the dataset since.
+ */
+@Serializable
+data class DatasetVersion(
+    /** The dataset. */
+    @SerialName("dataset_id") val datasetId: String,
+    /** Its number, from 1. */
+    @SerialName("version") val version: Int,
+    /** How many cases it froze. */
+    @SerialName("item_count") val itemCount: Int,
+    /** When it was frozen. */
+    @SerialName("created_at") val createdAt: Instant,
+    /** What changed since the version before. */
+    @SerialName("note") val note: String? = null,
+    /** Which key or account froze it. */
+    @SerialName("created_by") val createdBy: String? = null
+) {
+}
+
+/** Freeze the dataset's current cases as a new version. */
+@Serializable
+data class CreateDatasetVersionRequest(
+    /** What changed since the version before. */
+    @SerialName("note") val note: String? = null
+) {
+}
+
 /**
  * One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and
  * feedback all hang off a span or a trace. Stored in the `spans` table.
@@ -5873,6 +5959,46 @@ data class EvaluationRule(
     @SerialName("note") val note: String? = null,
     /** Which key or account stored it. */
     @SerialName("created_by") val createdBy: String? = null
+) {
+    companion object {
+        /** The storage table this entity lives in. */
+        const val TABLE = "documents"
+    }
+}
+
+/**
+ * A run, or one step of it, queued for a person to review. Queue the runs a low
+ * score or a thumbs-down flagged, assign them, and mark each reviewed or
+ * dismissed; every change is kept, so the item's history says who decided what and
+ * when. Corrections and labels go on the run as feedback. Stored in the
+ * `documents` table.
+ */
+@Serializable
+data class ReviewItem(
+    /** Which project. */
+    @SerialName("project") val project: String,
+    /** Its id. */
+    @SerialName("review_id") val reviewId: String,
+    /** How many times it has changed, from 1. */
+    @SerialName("version") val version: Int,
+    /** The run to review. */
+    @SerialName("trace_id") val traceId: String,
+    /** Where it has got to. */
+    @SerialName("status") val status: ReviewStatus,
+    /** When it was queued. */
+    @SerialName("created_at") val createdAt: Instant,
+    /** When it last changed. */
+    @SerialName("updated_at") val updatedAt: Instant,
+    /** The step to look at, when it is one step. */
+    @SerialName("span_id") val spanId: String? = null,
+    /** The feedback that put it in the queue, when it was feedback. */
+    @SerialName("feedback_id") val feedbackId: String? = null,
+    /** Who should review it. */
+    @SerialName("assignee") val assignee: String? = null,
+    /** Why it is queued, or what the reviewer found. */
+    @SerialName("note") val note: String? = null,
+    /** Which key or account made the latest change. */
+    @SerialName("updated_by") val updatedBy: String? = null
 ) {
     companion object {
         /** The storage table this entity lives in. */

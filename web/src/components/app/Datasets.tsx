@@ -9,7 +9,8 @@
  */
 
 import { useEffect, useState } from 'react'
-import type { Dataset, DatasetItem, Experiment, ExperimentComparison } from '@/generated/types'
+import type { Dataset, DatasetItem, DatasetVersion, Experiment, ExperimentComparison } from '@/generated/types'
+import { request } from '@/lib/api'
 import { Disconnected } from './Explorer'
 import { useConnection } from './shell'
 import { Empty, Failure, fixed, message, more, Section, Toolbar, when } from './screen-kit'
@@ -125,7 +126,7 @@ export default function Datasets({ endpoint, onEndpoint, project, onProject, onO
         </Section>
 
         {open && (
-          <Section title="Cases">
+          <Section title="Cases" aside={<Versions endpoint={endpoint} datasetId={open} />}>
             {items === null ? (
               <Empty>Reading…</Empty>
             ) : items.length === 0 ? (
@@ -288,4 +289,36 @@ function Comparison({ c }: { c: ExperimentComparison }) {
 function preview(v: unknown): string {
   const s = typeof v === 'string' ? v : JSON.stringify(v)
   return s.length > 300 ? `${s.slice(0, 300)}…` : s
+}
+
+/** A dataset's frozen versions, and the control that freezes the current cases. */
+function Versions({ endpoint, datasetId }: { endpoint: string; datasetId: string }) {
+  const [versions, setVersions] = useState<DatasetVersion[] | null>(null)
+  const [note, setNote] = useState<string | null>(null)
+  const path = `/v1/api/datasets/${encodeURIComponent(datasetId)}/versions`
+  useEffect(() => {
+    request<DatasetVersion[]>(path, { endpoint })
+      .then(setVersions)
+      .catch(() => setVersions([]))
+  }, [path, endpoint])
+  const freeze = () =>
+    request<DatasetVersion>(path, { endpoint }, {})
+      .then((v) => {
+        setNote(`Frozen as version ${v.version}, ${v.item_count} cases.`)
+        return request<DatasetVersion[]>(path, { endpoint }).then(setVersions)
+      })
+      .catch((e) => setNote(message(e)))
+  return (
+    <span className="flex flex-wrap items-baseline gap-3 text-[0.75rem] text-ink-3">
+      {versions && versions.length > 0 && (
+        <span className="data">
+          versions: {versions.map((v) => `v${v.version} (${v.item_count})`).join(', ')}
+        </span>
+      )}
+      {note && <span>{note}</span>}
+      <button type="button" className="link" onClick={freeze}>
+        freeze a version
+      </button>
+    </span>
+  )
 }

@@ -59,6 +59,16 @@ rather than every commit.
   it back case by case with a summary per scorer. The trace list filters on
   `experiment_id`. Wire-contract change: four types, three endpoints, two
   `ScorerConfig` fields.
+- **A review queue, frozen dataset versions and tail sampling.** Queue a run
+  for a person with `POST /v1/api/review-queue`, assign it and mark it
+  reviewed or dismissed; every change is kept. The Review screen works
+  through the queue, and the run panel queues a run. `POST
+  /v1/api/datasets/{id}/versions` freezes a dataset's cases into a numbered
+  version that `GET /v1/api/datasets/{id}/items?version=` reads back. A
+  project's `tail_sampling` block in the config file keeps finished runs
+  that failed, were slow, cost too much, scored low or got feedback, keeps
+  the rest at a rate, and deletes what it drops. Wire-contract change: two
+  entities, four types and five endpoints.
 - **Streamed model calls and a test client in every SDK.** Wrap a provider's
   OpenAI- or Anthropic-shaped stream with `record_stream` and read the
   wrapper: every chunk passes through unchanged, and the span gets the time to

@@ -666,6 +666,16 @@ class ScorerDefinitionKind(str, Enum):
     CODE = "code"
     """One of the daemon's code scorers, named in `builtin`, with the settings in `config` fixed. Free, and gives the same answer twice."""
 
+class ReviewStatus(str, Enum):
+    """Where an item in the review queue has got to."""
+
+    PENDING = "pending"
+    """Waiting for a person."""
+    REVIEWED = "reviewed"
+    """A person looked at it and recorded what they found."""
+    DISMISSED = "dismissed"
+    """A person looked at it and it needed nothing."""
+
 @dataclass(**_SLOTS)
 class InputTokenDetails:
     """Input tokens broken down by how the provider billed them. Every field is optional; absent means the provider did not report it, which is different from zero.
@@ -3035,6 +3045,70 @@ class ExperimentResults:
     """Per scorer, across every run."""
 
 @dataclass(**_SLOTS)
+class CreateReviewItemRequest:
+    """A run to queue for review.
+    """
+
+    trace_id: str
+    """The run."""
+    span_id: str | None = None
+    """The step, when it is one step."""
+    feedback_id: str | None = None
+    """The feedback that prompted it."""
+    assignee: str | None = None
+    """Who should review it."""
+    note: str | None = None
+    """Why it is queued."""
+
+@dataclass(**_SLOTS)
+class UpdateReviewItemRequest:
+    """A change to a review item. Absent fields keep their value.
+    """
+
+    status: ReviewStatus | None = None
+    """The new status."""
+    assignee: str | None = None
+    """The new assignee. An empty string unassigns it."""
+    note: str | None = None
+    """What the reviewer found."""
+
+@dataclass(**_SLOTS)
+class ReviewQueueResponse:
+    """The review queue, newest first.
+    """
+
+    pending: int
+    """How many items in the project are still pending, whatever the filter."""
+    items: list[ReviewItem] = field(default_factory=list)
+    """The items that matched, newest change first."""
+
+@dataclass(**_SLOTS)
+class DatasetVersion:
+    """A frozen copy of a dataset's cases. An experiment that names a version runs against exactly those cases, whatever has been added to the dataset since.
+    """
+
+    dataset_id: str
+    """The dataset."""
+    version: int
+    """Its number, from 1."""
+    item_count: int
+    """How many cases it froze."""
+    created_at: datetime
+    """When it was frozen."""
+    note: str | None = None
+    """What changed since the version before."""
+    created_by: str | None = None
+    """Which key or account froze it."""
+
+@dataclass(**_SLOTS)
+class CreateDatasetVersionRequest:
+    """Freeze the dataset's current cases as a new version.
+    """
+
+    note: str | None = None
+    """What changed since the version before."""
+
+@dataclass(**_SLOTS)
 class Span:
     """One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.
 
@@ -3813,6 +3887,40 @@ class EvaluationRule:
     """What changed in this version."""
     created_by: str | None = None
     """Which key or account stored it."""
+
+    TABLE = "documents"
+
+@dataclass(**_SLOTS)
+class ReviewItem:
+    """A run, or one step of it, queued for a person to review. Queue the runs a low score or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every change is kept, so the item's history says who decided what and when. Corrections and labels go on the run as feedback.
+
+    Stored in the `documents` table.
+    """
+
+    project: str
+    """Which project."""
+    review_id: str
+    """Its id."""
+    version: int
+    """How many times it has changed, from 1."""
+    trace_id: str
+    """The run to review."""
+    status: ReviewStatus
+    """Where it has got to."""
+    created_at: datetime
+    """When it was queued."""
+    updated_at: datetime
+    """When it last changed."""
+    span_id: str | None = None
+    """The step to look at, when it is one step."""
+    feedback_id: str | None = None
+    """The feedback that put it in the queue, when it was feedback."""
+    assignee: str | None = None
+    """Who should review it."""
+    note: str | None = None
+    """Why it is queued, or what the reviewer found."""
+    updated_by: str | None = None
+    """Which key or account made the latest change."""
 
     TABLE = "documents"
 

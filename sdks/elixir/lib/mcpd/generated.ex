@@ -2084,6 +2084,43 @@ defmodule Mcpd.ScorerDefinitionKind do
   def from_wire(_), do: :error
 end
 
+defmodule Mcpd.ReviewStatus do
+  @moduledoc """
+  Where an item in the review queue has got to.
+  """
+
+  @type t :: :pending | :reviewed | :dismissed
+
+  @values [
+    :pending,
+    :reviewed,
+    :dismissed,
+  ]
+
+  @doc "Every value, in declaration order."
+  @spec values() :: [t()]
+  def values, do: @values
+
+  @doc "The wire representation of a value."
+  @spec to_wire(t()) :: String.t()
+  def to_wire(:pending), do: "pending"
+  def to_wire(:reviewed), do: "reviewed"
+  def to_wire(:dismissed), do: "dismissed"
+
+  @doc """
+  Parse a wire value.
+
+  Returns `:error` on an unknown value rather than raising: a newer daemon
+  may send a value this build has never heard of, and an SDK that crashes on
+  one it does not recognise breaks the agent it is meant to be observing.
+  """
+  @spec from_wire(String.t()) :: {:ok, t()} | :error
+  def from_wire("pending"), do: {:ok, :pending}
+  def from_wire("reviewed"), do: {:ok, :reviewed}
+  def from_wire("dismissed"), do: {:ok, :dismissed}
+  def from_wire(_), do: :error
+end
+
 defmodule Mcpd.InputTokenDetails do
   @moduledoc """
   Input tokens broken down by how the provider billed them. Every field is optional; absent means the provider did not report it, which is different from zero.
@@ -5496,6 +5533,103 @@ defmodule Mcpd.ExperimentResults do
   ]
 end
 
+defmodule Mcpd.CreateReviewItemRequest do
+  @moduledoc """
+  A run to queue for review.
+  """
+
+  @type t :: %__MODULE__{
+          trace_id: String.t(),
+          span_id: String.t() | nil,
+          feedback_id: String.t() | nil,
+          assignee: String.t() | nil,
+          note: String.t() | nil
+        }
+
+  @enforce_keys [:trace_id]
+  defstruct [
+    trace_id: nil,
+    span_id: nil,
+    feedback_id: nil,
+    assignee: nil,
+    note: nil,
+  ]
+end
+
+defmodule Mcpd.UpdateReviewItemRequest do
+  @moduledoc """
+  A change to a review item. Absent fields keep their value.
+  """
+
+  @type t :: %__MODULE__{
+          status: Mcpd.ReviewStatus.t() | nil,
+          assignee: String.t() | nil,
+          note: String.t() | nil
+        }
+
+  defstruct [
+    status: nil,
+    assignee: nil,
+    note: nil,
+  ]
+end
+
+defmodule Mcpd.ReviewQueueResponse do
+  @moduledoc """
+  The review queue, newest first.
+  """
+
+  @type t :: %__MODULE__{
+          items: [Mcpd.ReviewItem.t()],
+          pending: non_neg_integer()
+        }
+
+  @enforce_keys [:items, :pending]
+  defstruct [
+    items: [],
+    pending: nil,
+  ]
+end
+
+defmodule Mcpd.DatasetVersion do
+  @moduledoc """
+  A frozen copy of a dataset's cases. An experiment that names a version runs against exactly those cases, whatever has been added to the dataset since.
+  """
+
+  @type t :: %__MODULE__{
+          dataset_id: String.t(),
+          version: non_neg_integer(),
+          item_count: non_neg_integer(),
+          created_at: DateTime.t(),
+          note: String.t() | nil,
+          created_by: String.t() | nil
+        }
+
+  @enforce_keys [:dataset_id, :version, :item_count, :created_at]
+  defstruct [
+    dataset_id: nil,
+    version: nil,
+    item_count: nil,
+    created_at: nil,
+    note: nil,
+    created_by: nil,
+  ]
+end
+
+defmodule Mcpd.CreateDatasetVersionRequest do
+  @moduledoc """
+  Freeze the dataset's current cases as a new version.
+  """
+
+  @type t :: %__MODULE__{
+          note: String.t() | nil
+        }
+
+  defstruct [
+    note: nil,
+  ]
+end
+
 defmodule Mcpd.Span do
   @moduledoc """
   One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and feedback all hang off a span or a trace.
@@ -6562,5 +6696,52 @@ defmodule Mcpd.EvaluationRule do
   @doc "The primary key, as declared in the spec."
   @spec primary_key() :: [String.t()]
   def primary_key, do: ["project", "id", "version"]
+end
+
+defmodule Mcpd.ReviewItem do
+  @moduledoc """
+  A run, or one step of it, queued for a person to review. Queue the runs a low score or a thumbs-down flagged, assign them, and mark each reviewed or dismissed; every change is kept, so the item's history says who decided what and when. Corrections and labels go on the run as feedback.
+
+  Stored in the `documents` table.
+  """
+
+  @type t :: %__MODULE__{
+          project: String.t(),
+          review_id: String.t(),
+          version: non_neg_integer(),
+          trace_id: String.t(),
+          status: Mcpd.ReviewStatus.t(),
+          created_at: DateTime.t(),
+          updated_at: DateTime.t(),
+          span_id: String.t() | nil,
+          feedback_id: String.t() | nil,
+          assignee: String.t() | nil,
+          note: String.t() | nil,
+          updated_by: String.t() | nil
+        }
+
+  @enforce_keys [:project, :review_id, :version, :trace_id, :status, :created_at, :updated_at]
+  defstruct [
+    project: nil,
+    review_id: nil,
+    version: nil,
+    trace_id: nil,
+    status: nil,
+    created_at: nil,
+    updated_at: nil,
+    span_id: nil,
+    feedback_id: nil,
+    assignee: nil,
+    note: nil,
+    updated_by: nil,
+  ]
+
+  @doc "The storage table this entity lives in."
+  @spec table() :: String.t()
+  def table, do: "documents"
+
+  @doc "The primary key, as declared in the spec."
+  @spec primary_key() :: [String.t()]
+  def primary_key, do: ["project", "review_id", "version"]
 end
 
