@@ -54,6 +54,8 @@ mod queue;
 pub mod runs;
 pub mod sink;
 pub mod span;
+pub mod stream;
+pub mod testing;
 mod transport;
 pub mod worker;
 pub mod workflow;
@@ -76,6 +78,7 @@ pub use prompts::{
 pub use runs::{ClaimSteps, PublishEvent, RunFilter, RunResult, StartRun};
 pub use sink::{ConsoleSink, RecordingSink, Sink};
 pub use span::Span;
+pub use stream::{RecordedStream, STREAM_MAX_TOOL_CALLS, STREAM_TEXT_BUDGET};
 pub use worker::{StepContext, StepFailure, StepOutcome, Worker, WorkerBuilder, WorkerStats};
 pub use workflow::{
     all, any, exists, not, when, Branch, Limits, Predicate, RetryPolicy, StepOptions, Workflow,

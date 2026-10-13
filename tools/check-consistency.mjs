@@ -129,8 +129,13 @@ const WORKFLOW_EXAMPLES = {
   elixir: 'examples/elixir/workflow.exs',
 }
 
+/** Regions only an SDK can show, read by the SDK pages and the integrating page. */
+const SDK_REGIONS = ['stream', 'testing']
+const SDK_EXAMPLES = Object.fromEntries(Object.entries(EXAMPLES).filter(([lang]) => lang !== 'curl'))
+
 function checkExamples() {
   checkExampleSet(EXAMPLES, REQUIRED_REGIONS, 'LANGUAGES')
+  checkExampleSet(SDK_EXAMPLES, SDK_REGIONS, 'the SDK pages')
   checkExampleSet(WORKFLOW_EXAMPLES, WORKFLOW_REGIONS, 'the workflow pages')
   notes.push(`examples: ${Object.keys(EXAMPLES).length} quickstart and ${Object.keys(WORKFLOW_EXAMPLES).length} workflow programs present with all regions`)
 }

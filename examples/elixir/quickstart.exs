@@ -82,6 +82,59 @@ estimate_delivery = fn mcpd, id ->
   end
 end
 
+# Stand-in for a provider's stream, in the shape OpenAI streams chat completions.
+fake_chat_stream = fn text ->
+  base = %{"id" => "chatcmpl-01", "model" => "gpt-4o-mini"}
+  delta = fn d -> Map.put(base, "choices", [%{"index" => 0, "delta" => d}]) end
+  usage = %{"prompt_tokens" => 24, "completion_tokens" => 6, "total_tokens" => 30}
+
+  chunks =
+    Enum.map(String.split(text, ~r/(?= )/), &delta.(%{"content" => &1})) ++
+      [
+        Map.put(base, "choices", [%{"index" => 0, "delta" => %{}, "finish_reason" => "stop"}]),
+        base |> Map.put("choices", []) |> Map.put("usage", usage)
+      ]
+
+  Stream.each(chunks, fn _ -> Process.sleep(5) end)
+end
+
+# #region stream
+# A streamed model call. Read the wrapper instead of the provider's stream:
+# every chunk comes through unchanged, and when the stream ends the span gets
+# the time to first token, the text, the usage and the finish reason.
+stream_answer = fn mcpd, question ->
+  # Where your provider's streaming call goes.
+  stream = fake_chat_stream.("Your order is in transit.")
+
+  mcpd
+  |> Mcpd.ModelCall.record_stream(stream, "stream_answer",
+    input: [%{"role" => "user", "content" => question}]
+  )
+  |> Enum.map_join(fn chunk ->
+    get_in(chunk, ["choices", Access.at(0), "delta", "content"]) || ""
+  end)
+end
+
+# #endregion stream
+
+# #region testing
+# A unit test. Start `Mcpd.Testing` and pass its client where your code takes
+# one, then read back what it recorded: no daemon, no port, no flush.
+test_stream_answer = fn ->
+  {:ok, testing} = Mcpd.Testing.start()
+  answer = stream_answer.(testing.client, "Where is my order A-1042?")
+
+  call = Mcpd.Testing.span(testing, "stream_answer")
+  ^answer = call["output"]
+  "gpt-4o-mini" = call["model"]
+  6 = call["usage"]["output_tokens"]
+
+  [%{span: %{"name" => "stream_answer"}}] = Mcpd.Testing.trees(testing)
+  Mcpd.Testing.stop(testing)
+end
+
+# #endregion testing
+
 # #region trace
 question = "where is my order 41?"
 
@@ -111,6 +164,10 @@ trace_id =
   end
 
 # #endregion trace
+
+# A streamed call, and the unit test that checks what it records.
+IO.puts("streamed: " <> stream_answer.(mcpd, "Is A-1042 on its way?"))
+test_stream_answer.()
 
 # #region score
 # A machine evaluation. `min` and `max` are required: 7 is excellent out of 10

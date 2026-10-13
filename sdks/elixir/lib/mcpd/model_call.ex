@@ -178,6 +178,121 @@ defmodule Mcpd.ModelCall do
     if is_binary(reason), do: Map.put(base, "mcpd.guardrail.reason", reason), else: base
   end
 
+  @doc """
+  Record a streamed model call (contract section 3.2).
+
+      stream = call_the_model_streaming(question)
+
+      mcpd
+      |> Mcpd.ModelCall.record_stream(stream, "answer", input: question)
+      |> Enum.map_join(&chunk_text/1)
+
+  Returns a lazy stream that yields every element of `enumerable` unchanged,
+  in order. Read it in place of the original. The span opens when the stream
+  is first read, under the span active in the reading process, and is
+  recorded once when reading stops: at the end, when you stop early
+  (`Enum.take/2`, `Enum.find/2`, a halted `Stream`), or when the enumerable
+  raises. A raise is recorded as the span's error and reaches you unchanged.
+
+  What the chunks said becomes the span: the model, provider, usage and
+  `gen_ai.response.*` attributes that `options/2` gives for the same call made
+  without streaming, `mcpd.time_to_first_token_ms` at the first chunk that
+  carries text or a tool-call delta, and the output: the text, or
+  `%{"content" => text, "tool_calls" => [...]}` when a tool call arrived.
+  OpenAI chat-completion chunks and Anthropic message events are read, as maps
+  with string or atom keys; any other element passes through and is skipped.
+
+  Text and tool-call arguments share a budget of 32,768 code points, and at
+  most 64 tool calls are kept. Past either, the rest is not kept and
+  `mcpd.stream.truncated` is set to `true`.
+
+  `opts` takes the options `Mcpd.span/4` does, plus `provider:`. `kind:`
+  defaults to `:model_generation`.
+  """
+  @spec record_stream(pid(), Enumerable.t(), String.t(), keyword()) :: Enumerable.t()
+  def record_stream(client, enumerable, name, opts \\ []) do
+    opts = Keyword.put_new(opts, :kind, :model_generation)
+
+    # A fresh reference per enumeration, because a stream can be read more
+    # than once and each reading is its own call.
+    fn acc, fun ->
+      ref = make_ref()
+
+      enumerable
+      |> guard(ref)
+      |> Stream.transform(
+        fn -> start_stream(client, name, opts) end,
+        fn chunk, state -> {[chunk], observe(client, state, chunk)} end,
+        fn state -> {[], state} end,
+        fn state -> finish_stream(client, state, opts, Process.delete(ref)) end
+      )
+      |> Enumerable.reduce(acc, fun)
+    end
+  end
+
+  defp start_stream(client, name, opts) do
+    %{span: Mcpd.__open__(client, name, opts), acc: Mcpd.StreamAccumulator.new(), first: nil}
+  end
+
+  # Instrumentation never raises (B1): a chunk that breaks the accumulator is
+  # reported and skipped, and the chunk still reaches the caller.
+  defp observe(client, state, chunk) do
+    {acc, content} = Mcpd.StreamAccumulator.add(state.acc, chunk)
+
+    first =
+      if content and state.first == nil,
+        do: first_token(state.span.started_at, :nanosecond),
+        else: state.first
+
+    %{state | acc: acc, first: first}
+  rescue
+    e ->
+      Mcpd.Worker.warn(client, "a stream chunk could not be read: #{Exception.message(e)}")
+      state
+  end
+
+  defp finish_stream(client, state, opts, failure) do
+    acc = state.acc
+    {provider, opts} = Keyword.pop(opts, :provider)
+    found = acc |> Mcpd.StreamAccumulator.response() |> then(&(&1 && options(&1, provider)))
+    found = found || if(provider, do: [provider: provider], else: [])
+    {found_attributes, found} = Keyword.pop(found, :attributes)
+    truncated = if acc.truncated, do: %{"mcpd.stream.truncated" => true}
+
+    # What the stream reported comes first, because a span reads the first
+    # `model:` it is given; attributes merge with the later ones winning.
+    close =
+      found ++
+        opts ++
+        Enum.reject([attributes: found_attributes, attributes: state.first, attributes: truncated], fn {_k, v} ->
+          v == nil
+        end)
+
+    output = Mcpd.StreamAccumulator.output(acc) || opts[:output]
+    Mcpd.__close__(client, state.span, close, output, failure)
+  rescue
+    e -> Mcpd.Worker.warn(client, "a stream could not be recorded: #{Exception.message(e)}")
+  end
+
+  # Remembers what the provider's enumerable raised, so the span can carry it.
+  # Only the source is wrapped: `Stream.transform/5` pulls it one element at a
+  # time, so a raise in the caller's own code never passes through here and
+  # never marks the call as failed.
+  defp guard(enumerable, ref) do
+    fn acc, fun -> guarded(&Enumerable.reduce(enumerable, &1, fun), acc, ref) end
+  end
+
+  defp guarded(reduce, acc, ref) do
+    case reduce.(acc) do
+      {:suspended, acc, next} -> {:suspended, acc, &guarded(next, &1, ref)}
+      other -> other
+    end
+  catch
+    kind, reason ->
+      Process.put(ref, {kind, reason, __STACKTRACE__})
+      :erlang.raise(kind, reason, __STACKTRACE__)
+  end
+
   # ------------------------------------------------------------- internals ---
 
   # Which provider shaped this response, or nil when neither did. The order is

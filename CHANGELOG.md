@@ -59,6 +59,15 @@ rather than every commit.
   it back case by case with a summary per scorer. The trace list filters on
   `experiment_id`. Wire-contract change: four types, three endpoints, two
   `ScorerConfig` fields.
+- **Streamed model calls and a test client in every SDK.** Wrap a provider's
+  OpenAI- or Anthropic-shaped stream with `record_stream` and read the
+  wrapper: every chunk passes through unchanged, and the span gets the time to
+  first token, the text, tool calls, usage, response id and finish reason when
+  the stream ends, fails or is left early. A test client (`TestClient`,
+  `mcpdtest`, `Mcpd.Testing`) records into memory through the same pipeline as
+  a real client, so your unit tests read back spans, trees, logs, scores and
+  feedback with no daemon.
+
 - **Organisations, roles, single sign-on and SCIM.** An account can create
   organisations, which own projects, invite members by email and give each a
   role (owner, admin, member or viewer, optionally replaced on one project)

@@ -171,6 +171,47 @@ When the deadline passes:
 The deadline covers the whole call: `shutdown()` does not spend one deadline
 flushing and another stopping the worker.
 
+### 2.5 The test client
+
+A user testing their own code needs to see what it recorded without a daemon.
+Every SDK ships a test client in a module of its own:
+
+| Language | Name |
+| --- | --- |
+| TypeScript | `TestClient` from `@mcpd/sdk/testing`, a subclass of `Mcpd` |
+| Python | `mcpd.testing.TestClient`, a subclass of `Mcpd` |
+| Go | `mcpdtest.New(options...)`, whose `Client` field is a `*mcpd.Client` |
+| Kotlin | `dev.mcpd.testing.TestClient`, whose `client` is an `Mcpd` |
+| Rust | `mcpd_sdk::testing::TestClient`, whose `client()` is a `Mcpd` |
+| Elixir | `Mcpd.Testing.start(opts)`, whose `client` is an `Mcpd` client |
+
+It is a real client whose sink is a `RecordingSink`, so what the code under
+test records goes through the same pipeline as in production: sampling,
+`capture_payloads`, `redact`, validation and the queue bound. A test sees what
+the daemon would have received, and nothing leaves the process.
+
+- It takes every client option except `sink`. `enabled` defaults to `true` and
+  `sample` to `1.0` whatever the environment says, so a CI job that sets
+  `MCPD_ENABLED=false` does not turn the test client off. Every other option
+  takes the client's own default.
+- Every accessor flushes first, so the test never calls `flush()` itself.
+- `spans(name?, kind?)` answers the finished spans, one per span id. A span is
+  queued on start and again on end (B8); the accessor keeps the last record
+  seen for each id, in the order each id first arrived, and leaves out a span
+  that has not ended.
+- `span(name)` answers the one finished span with that name, and fails with a
+  message giving the count when there is none or more than one. It is the one
+  call here that raises, because it is called from a test and a failed
+  assertion is its purpose. Python spells it `recorded_span(name)`, because
+  its client already has a `span` that starts one.
+- `logs()`, `metrics()`, `scores()` and `recorded_feedback()` answer the
+  other signals in arrival order. The last is not `feedback()` because the
+  client already has a `feedback` that records one.
+- `trees()` answers each trace as a tree of finished spans: the roots, each
+  with its children ordered by start time. A span whose parent was not
+  recorded is a root.
+- `reset()` flushes and forgets everything recorded so far.
+
 ## 3. Tracing surface
 
 ```
@@ -307,6 +348,64 @@ that return span options: `Mcpd.ModelCall.usage_from_openai/1`,
 `usage_from_anthropic/1`, `options/2` (the `model:`, `provider:`, `usage:` and
 `attributes:` that `record_response` would set), `first_token/1` (the attribute
 from a start time) and `guardrail/2`.
+
+### 3.2 Streamed model calls
+
+A streamed response arrives as chunks, and the facts `record_response` reads
+are spread across them. Every SDK ships a wrapper that collects them:
+
+```
+span.record_stream(stream, provider?) -> stream     # the same chunks, recorded
+```
+
+`stream` is the provider's stream in the language's own form: an async
+iterable in TypeScript, an iterator or async iterator in Python, a
+`Next`/`Current`/`Err`/`Close` stream in Go, a `Flow` in Kotlin, a `Stream` in
+Rust, an `Enumerable` in Elixir. The wrapper is the same form, and the caller
+reads it in place of the original. Elixir has no span handle, so there it is
+`Mcpd.ModelCall.record_stream(client, stream, name, opts)`, which opens the
+model span when the stream is first read.
+
+Four rules hold in every language.
+
+- **Every chunk passes through unchanged**, in order, none added and none
+  dropped. Reading a chunk never raises: a chunk of an unknown shape, a missing
+  field or a wrong type is skipped by the accumulator and still handed to the
+  caller (B1).
+- **The first chunk that carries text or a tool-call delta calls
+  `mark_first_token`.**
+- **The span is finished exactly once**, when the stream ends, when it raises,
+  or when the caller stops reading early (a `break`, a cancelled coroutine, a
+  dropped stream, a `Close`). Finishing applies `record_response` to a response
+  built from what was collected, sets the output, and ends the span. A stream
+  that raised also gets `set_error` with the error's message, and the error
+  reaches the caller unchanged: it is the provider's error, not
+  instrumentation's. An error the caller's own code raises while reading is
+  an early stop, not a failed call, and ends the span with no error.
+- **Memory is bounded.** The collected text and the tool calls' arguments
+  share one budget of 32,768 Unicode code points. What arrives past it is not
+  kept, and `mcpd.stream.truncated = true` is set on the span. At most 64 tool
+  calls are kept; later ones are ignored and set the same attribute.
+
+What is collected, by chunk shape:
+
+| Shape | Recognised by | Collected |
+| --- | --- | --- |
+| OpenAI chat completions | a `choices` key holding a list, or null (a typed chunk with no choices can serialise them that way) | `id`, `model`, `service_tier` (first non-empty wins); text from `choices[0].delta.content`; tool calls from `choices[0].delta.tool_calls`, keyed by `index`, with `id` and `function.name` set once and `function.arguments` appended; each choice's `finish_reason`, by choice index; `usage` from the chunk that carries one (the final chunk under `stream_options.include_usage`) |
+| Anthropic messages | a `type` of `message_start`, `content_block_start`, `content_block_delta` or `message_delta` | `id`, `model` and `usage` from `message_start.message`; a `tool_use` block from `content_block_start`, keyed by `index`; text from a `text_delta` and arguments from an `input_json_delta`; `stop_reason` from `message_delta.delta`; and each usage field in `message_delta.usage` replaces the one from `message_start` |
+
+The response handed to `record_response` is shaped like the provider's own:
+`{"object": "chat.completion", id, model, service_tier, choices: [{finish_reason}], usage}`
+for OpenAI and `{"type": "message", id, model, stop_reason, usage}` for
+Anthropic, each field only when it was seen. So the model, the provider, the
+usage and the `gen_ai.response.*` attributes come out exactly as they would for
+the same call made without streaming.
+
+The output is the text when no tool call arrived, and
+`{"content": text, "tool_calls": [{id, name, arguments}]}` when one did, with
+`arguments` the collected string. It goes through `set_output`, so
+`capture_payloads = false` keeps it in the process like any other output. A
+stream that carried neither text nor a tool call sets no output.
 
 ## 4. The other four signals
 
@@ -782,4 +881,15 @@ error. `start_and_wait` is the two in one call.
   both attributes without raising on a bad prompt.
 - Tests that `list_traces` and `list_spans` send the filters of section 5 and
   nothing else.
+- Tests for `record_stream` (section 3.2): an OpenAI stream and an Anthropic
+  stream each recording the model, usage, id, finish reason and output that
+  `record_response` and `set_output` would; tool-call deltas joined; every
+  chunk passed through unchanged, an unknown one included; the first token
+  marked once; a stream that raises ending the span with an error and the
+  error reaching the caller; a caller that stops early still ending the span;
+  and text past the budget cut with `mcpd.stream.truncated` set.
+- Tests for the test client (section 2.5): spans, logs, scores and feedback
+  read back with no flush; one record per span id; `span(name)` failing on
+  none and on two; the tree; `reset()`; `redact` applied; and `enabled` and
+  `sample` holding against the environment.
 - An example under `examples/<language>/` that the docs include **by reference**.

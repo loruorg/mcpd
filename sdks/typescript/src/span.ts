@@ -7,6 +7,7 @@
  */
 
 import { responseFacts } from './model-call.js'
+import { StreamAccumulator } from './stream.js'
 import type {
   Correlation,
   EntityKind,
@@ -379,6 +380,57 @@ export class McpdSpan {
       const ms = Number(nowNs() - this.#startNs) / 1e6
       this.#data.attributes = { ...attrs, 'mcpd.time_to_first_token_ms': ms }
     })
+  }
+
+  /**
+   * Record a streamed model call: wrap the provider's stream and read the
+   * wrapper instead. Every chunk comes through unchanged. The first chunk with
+   * text or a tool call marks the first token, and when the stream ends, raises
+   * or is abandoned with a `break`, the span gets what `recordResponse` would
+   * have recorded for the same call unstreamed, the text as its output, and
+   * ends. An error from the stream marks the span and is rethrown unchanged.
+   *
+   * Text and tool-call arguments past 32,768 code points are not kept, and
+   * `mcpd.stream.truncated` says so.
+   */
+  recordStream<T>(stream: AsyncIterable<T> | Iterable<T>, provider?: string): AsyncGenerator<T, void, undefined> {
+    const acc = new StreamAccumulator()
+    let done = false
+    const finish = (failure?: { error: unknown }): void => {
+      if (done) return
+      done = true
+      this.#set('recordStream', () => {
+        const response = acc.response()
+        if (response !== undefined) this.recordResponse(response, provider)
+        const output = acc.output()
+        if (output !== undefined) this.setOutput(output)
+        if (acc.truncated) this.setAttributes({ 'mcpd.stream.truncated': true })
+        if (failure !== undefined) {
+          const e = failure.error
+          const message = e instanceof Error ? e.message : String(e)
+          this.setError(message, e instanceof Error ? { kind: e.name } : {})
+        }
+      })
+      this.end()
+    }
+    const observe = (chunk: T): void => {
+      this.#set('recordStream', () => {
+        if (acc.add(chunk)) this.markFirstToken()
+      })
+    }
+    return (async function* () {
+      try {
+        for await (const chunk of stream) {
+          observe(chunk)
+          yield chunk
+        }
+      } catch (error) {
+        finish({ error })
+        throw error
+      } finally {
+        finish()
+      }
+    })()
   }
 
   /**

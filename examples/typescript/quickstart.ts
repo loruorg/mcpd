@@ -29,6 +29,8 @@ const mcpd = new Mcpd({
 // #endregion init
 
 import { renderPrompt, type McpdSpan } from '@mcpd/sdk'
+import assert from 'node:assert/strict'
+import { TestClient } from '@mcpd/sdk/testing'
 
 // ---------------------------------------------------------------------------
 // The agent
@@ -164,6 +166,69 @@ async function draftAnswer(
 }
 // #endregion prompt
 
+interface ChatChunk {
+  id: string
+  model: string
+  choices: Array<{ index: number; delta: { content?: string }; finish_reason?: string }>
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+}
+
+/** Stand-in for a provider's stream, in the shape OpenAI streams chat completions. */
+async function* fakeChatStream(text: string): AsyncGenerator<ChatChunk> {
+  const base = { id: 'chatcmpl-01', model: 'gpt-4o-mini' }
+  for (const word of text.split(/(?= )/)) {
+    await pause(5)
+    yield { ...base, choices: [{ index: 0, delta: { content: word } }] }
+  }
+  yield { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }
+  const usage = { prompt_tokens: 24, completion_tokens: 6, total_tokens: 30 }
+  yield { ...base, choices: [], usage }
+}
+
+// #region stream
+/**
+ * A streamed model call. Read the wrapper instead of the provider's stream:
+ * every chunk comes through unchanged, and when the stream ends the span gets
+ * the time to first token, the text, the usage and the finish reason.
+ */
+async function streamAnswer(client: Mcpd, question: string): Promise<string> {
+  return await client.withSpan(
+    'stream_answer',
+    async (generation) => {
+      generation.setInput([{ role: 'user', content: question }])
+      // Where `await openai.chat.completions.create({ ..., stream: true })` goes.
+      const stream = fakeChatStream('Your order is in transit.')
+      let answer = ''
+      for await (const chunk of generation.recordStream(stream)) {
+        answer += chunk.choices[0]?.delta.content ?? ''
+      }
+      return answer
+    },
+    { kind: 'model_generation' },
+  )
+}
+// #endregion stream
+
+// #region testing
+/**
+ * A unit test. Pass a `TestClient` where your code takes an `Mcpd`, then read
+ * back what it recorded: no daemon, no port, no flush.
+ */
+async function testStreamAnswer(): Promise<void> {
+  const test = new TestClient()
+  const answer = await streamAnswer(test, 'Where is my order A-1042?')
+
+  const call = await test.span('stream_answer')
+  assert.equal(call.output, answer)
+  assert.equal(call.model, 'gpt-4o-mini')
+  assert.equal(call.usage?.outputTokens, 6)
+
+  const [run] = await test.trees()
+  assert.equal(run?.span.name, 'stream_answer')
+  await test.shutdown()
+}
+// #endregion testing
+
 // ---------------------------------------------------------------------------
 // Running it
 // ---------------------------------------------------------------------------
@@ -185,6 +250,10 @@ async function main(): Promise<void> {
     question: 'Where is my order A-1042?',
   })
   console.log('answer:', answer)
+
+  // A streamed call, and the unit test that checks what it records.
+  console.log('streamed:', await streamAnswer(mcpd, 'Is A-1042 on its way?'))
+  await testStreamAnswer()
 
   // #region score
   // A machine evaluation of the run. `min` and `max` are required: 0.86 on an
