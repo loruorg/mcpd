@@ -13,12 +13,14 @@
 pub mod cost;
 pub mod generated;
 pub mod ids;
+pub mod jaeger;
 pub mod metrics;
 pub mod otlp;
 pub mod redact;
 pub mod sampling;
 pub mod scoring;
 pub mod sketch;
+pub mod zipkin;
 
 pub use generated::*;
 

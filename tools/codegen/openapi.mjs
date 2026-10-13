@@ -1,4 +1,4 @@
-import { parseType, pascal, allObjects } from './lib.mjs'
+import { parseType, pascal, allObjects, externalOf } from './lib.mjs'
 
 const PRIM = {
   string: { type: 'string' }, bool: { type: 'boolean' },
@@ -14,15 +14,16 @@ function schemaFor(t) {
   let s
   if (PRIM[base]) {
     s = { ...PRIM[base] }
-  } else if (base.startsWith('otlp.')) {
-    // An OTLP message is defined by opentelemetry-proto, not by the spec, and
-    // a `$ref` to a schema this document does not carry is a broken document:
-    // a client generator stops on it. Name the message and leave it open.
-    const message = base.slice('otlp.'.length)
+  } else if (externalOf(base)) {
+    // A message another wire format defines, not the spec, and a `$ref` to a
+    // schema this document does not carry is a broken document: a client
+    // generator stops on it. Name the message and leave it open.
+    const [prefix, ...rest] = base.split('.')
+    const message = rest.join('.')
     s = {
       type: 'object',
-      description: `The OpenTelemetry ${message} message, as defined by opentelemetry-proto rather than by this document.`,
-      'x-otlp-message': message,
+      description: `The ${externalOf(base).name} ${message} message, as defined by ${externalOf(base).source} rather than by this document.`,
+      [`x-${prefix}-message`]: message,
     }
   } else {
     s = { $ref: `#/components/schemas/${pascal(base)}` }
@@ -85,7 +86,7 @@ export function emitOpenApi(spec) {
         },
       } : {}),
       responses: {
-        '200': {
+        [String(ep.status ?? 200)]: {
           description: 'Success',
           content: { 'application/json': { schema: schemaFor(ep.response.type) } },
         },

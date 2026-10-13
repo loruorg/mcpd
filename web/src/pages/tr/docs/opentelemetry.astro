@@ -9,7 +9,8 @@ const locale = localeOf(Astro.url.pathname)
 
 const exporterEnv = `# Taban adres. /v1/traces yolunu exporter'ın kendisi ekler.
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+# http/protobuf, http/json ve grpc bu tek portta çalışır.
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 
 # İsteğe bağlı. Payload'larınız büyükse gzip gönderin.
 export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
@@ -45,19 +46,77 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
 }'
 
 # {"partialSuccess":{"rejectedSpans":0,"errorMessage":""}}`
+
+const grpcEnv = `# Aynı portta gRPC. Yol yok: servisi exporter'ın kendisi adlandırır.
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
+
+# Yalnızca mcpd --ingest-key ile çalışıyorsa. gRPC metadata anahtarları küçük harflidir.
+export OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer YOUR_INGEST_KEY"`
+
+const collectorYaml = `# Her şeyi gRPC üzerinden mcpd'ye ileten bir OpenTelemetry Collector.
+receivers:
+  otlp:
+    protocols: { grpc: {}, http: {} }
+
+exporters:
+  otlp:
+    endpoint: mcpd.internal:4317
+    compression: gzip
+    tls:
+      insecure: true # mcpd düz metin sunar; TLS'i onun önünde sonlandırın
+    headers:
+      authorization: Bearer \${env:MCPD_INGEST_KEY}
+
+service:
+  pipelines:
+    traces: { receivers: [otlp], exporters: [otlp] }
+    logs: { receivers: [otlp], exporters: [otlp] }
+    metrics: { receivers: [otlp], exporters: [otlp] }`
+
+const zipkinEnv = `# Zipkin biçiminde dışa aktaran bir OpenTelemetry SDK'sı.
+export OTEL_TRACES_EXPORTER=zipkin
+export OTEL_EXPORTER_ZIPKIN_ENDPOINT=http://localhost:4317/api/v2/spans
+
+# Bir Zipkin reporter'ı endpoint olarak aynı adresi alır, örneğin
+#   URLConnectionSender.create("http://localhost:4317/api/v2/spans")`
+
+const zipkinPost = `curl -X POST http://localhost:4317/api/v2/spans \\
+  -H 'content-type: application/json' \\
+  -d '[{
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "id": "00f067aa0ba902b7",
+  "kind": "CLIENT",
+  "name": "chat gpt-4o",
+  "timestamp": 1700000000000000,
+  "duration": 1500000,
+  "localEndpoint": { "serviceName": "checkout-agent" },
+  "tags": { "gen_ai.system": "openai", "gen_ai.request.model": "gpt-4o" }
+}]'
+
+# HTTP 202 {"accepted":1,"rejected":0,"duplicate":0}`
+
+const jaegerEnv = `# HTTP üzerinden Thrift gönderen bir Jaeger istemci kütüphanesi.
+export JAEGER_ENDPOINT=http://localhost:4317/api/traces
+
+# Jaeger'ın gRPC collector API'sini konuşan her şey, örneğin jaeger-agent.
+jaeger-agent --reporter.grpc.host-port=localhost:4317`
 ---
 
 <Doc
   title="OpenTelemetry"
-  description="mcpd, /v1/traces, /v1/logs ve /v1/metrics üzerinde OTLP/JSON kabul eder; hem OpenTelemetry gen_ai.* hem de OpenInference llm.* semantik kurallarını okur. mcpd'ye özel kod gerekmez."
-  lede="Ajanınız zaten OpenTelemetry yayıyorsa, mcpd bir endpoint değişikliğinden ibarettir. Bu sayfa OTLP yolunun tamamıdır: üç endpoint, kodlama ve mcpd'nin okuduğu her öznitelik."
+  description="mcpd, tek bir portta HTTP ve gRPC üzerinden OTLP, Zipkin v2 ve Jaeger kabul eder; hem OpenTelemetry gen_ai.* hem de OpenInference llm.* semantik kurallarını okur. mcpd'ye özel kod gerekmez."
+  lede="Ajanınız zaten OpenTelemetry, Zipkin ya da Jaeger yayıyorsa, mcpd bir endpoint değişikliğinden ibarettir. Bu sayfa yolun tamamıdır: endpoint'ler, kodlamalar ve mcpd'nin okuduğu her öznitelik."
   og="docs"
 >
-  <h2>Üç endpoint</h2>
+  <h2>Endpoint'ler</h2>
   <p>
-    mcpd, OTLP HTTP endpoint'lerini sorgu API'si ve arayüzüyle aynı porttan
-    sunar. Önüne konacak bir collector, ikinci bir konteyner ve ayrı bir alıcı
-    portu yoktur.
+    mcpd; HTTP ve gRPC üzerinden OTLP'yi, Zipkin'i ve Jaeger'ı sorgu API'si ve
+    arayüzüyle aynı porttan sunar. Önüne konacak bir collector, ikinci bir
+    konteyner ve ayrı bir alıcı portu yoktur. Port, HTTP/1.1'i ve düz metin
+    HTTP/2'yi yan yana kabul eder; bir gRPC çağrısı da bir HTTP/2 isteğidir,
+    yani tek bir adres aşağıdaki her protokolü sunar.
   </p>
 
   <div class="scroll-x">
@@ -85,16 +144,46 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
           <td><code>ExportMetricsServiceRequest</code></td>
           <td><code>partialSuccess.rejectedDataPoints</code></td>
         </tr>
+        <tr>
+          <td>gRPC <code>TraceService/Export</code></td>
+          <td><code>ExportTraceServiceRequest</code></td>
+          <td><code>partial_success.rejected_spans</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>LogsService/Export</code></td>
+          <td><code>ExportLogsServiceRequest</code></td>
+          <td><code>partial_success.rejected_log_records</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>MetricsService/Export</code></td>
+          <td><code>ExportMetricsServiceRequest</code></td>
+          <td><code>partial_success.rejected_data_points</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /api/v2/spans</code></td>
+          <td>Zipkin v2 span'leri, JSON ya da proto3</td>
+          <td><code>accepted</code> ve <code>rejected</code> ile <code>202</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /api/traces</code></td>
+          <td>Thrift binary biçiminde bir Jaeger yığını</td>
+          <td><code>accepted</code> ve <code>rejected</code> ile <code>202</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>jaeger.api_v2.CollectorService/PostSpans</code></td>
+          <td><code>PostSpansRequest</code></td>
+          <td><code>PostSpansResponse</code></td>
+        </tr>
       </tbody>
     </table>
   </div>
 
   <p>
-    Başarılı her dışa aktarım, OTLP'nin bir sayı taşıyan kendi
-    <code>partialSuccess</code> biçimiyle yanıtlanır. Bir collector'ın
-    gönderene bir şey düşürdüğünü söyleme yolu budur ve exporter'lar bunu okur.
-    Boş bir gövde döndürmek, gönderenin almadığı bir başarıyı bildirmesine yol
-    açardı.
+    Başarılı her OTLP dışa aktarımı, OTLP'nin kendi <code>partialSuccess</code>
+    biçimiyle yanıtlanır. Bir şey geri çevrildiyse bu biçim sayıyı ve nedeni
+    taşır. Bir collector'ın gönderene bir şey düşürdüğünü söyleme yolu budur ve
+    exporter'lar bunu okur. Yanıt, dışa aktarımın geldiği kodlamayla gelir:
+    protobuf için protobuf, JSON için JSON.
   </p>
 
   <h2>Bir exporter'ı buraya yöneltmek</h2>
@@ -116,31 +205,69 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
     vermek isterseniz bunun yerine
     <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code> ayarlayın. İkincisi,
     OpenTelemetry'de 4317 portu alışılageldiği üzere gRPC portudur, 4318 ise
-    HTTP portudur. mcpd her şeyi tek porttan sunduğu için HTTP'yi 4317'den
-    sunar; yani varsayılan portunda bırakılmış bir exporter 4318'e gönderir ve
-    siz hiçbir şeyin geldiğini görmezsiniz. Portu açıkça yazın.
+    HTTP portudur. mcpd her şeyi tek porttan sunduğu için ikisini de 4317'den
+    sunar. <code>grpc</code> olarak ayarlanmış bir exporter onu varsayılan
+    portunda bulur; varsayılan portunda bırakılmış bir HTTP exporter'ı ise
+    4318'e gönderir, bu yüzden portu açıkça yazın.
   </p>
 
-  <h2>Trace'ler için her iki kodlama</h2>
+  <h2>gRPC üzerinden OTLP</h2>
   <p>
-    <code>/v1/traces</code>, <code>content-type</code> başlığını okur ve iki
-    kodlamayı da kabul eder: içinde <code>protobuf</code> geçiyorsa
-    OTLP/protobuf, geçmiyorsa OTLP/JSON. OpenTelemetry'nin varsayılanı
-    protobuf'tur, yani mcpd'ye yöneltilmiş, değiştirilmemiş bir SDK'nın
-    gönderdiği trace'ler hiçbir yapılandırma olmadan yerine ulaşır.
-  </p>
-  <p>
-    <code>/v1/logs</code> ve <code>/v1/metrics</code> yalnızca JSON kabul eder.
-    Oraya gelen bir protobuf gövdesi <code>body is not valid JSON</code>
-    diyerek geri çevrilir. Üç sinyali de gönderiyorsanız protokolü bir kez,
-    genel olarak ayarlayın:
+    Üç OTLP collector servisi aynı porttan sunulur:
+    <code>opentelemetry.proto.collector.trace.v1.TraceService</code>,
+    <code>logs.v1.LogsService</code> ve <code>metrics.v1.MetricsService</code>.
+    Exporter'ın protokolünü <code>grpc</code> yapın ve endpoint'i olduğu gibi
+    bırakın:
   </p>
 
-  <Command
+  <CodeSwitcher
     class="not-prose my-6"
-    title="her sinyal için json"
-    command="export OTEL_EXPORTER_OTLP_PROTOCOL=http/json"
+    title="grpc exporter"
+    samples={[{ lang: 'curl', label: 'Ortam', shiki: 'bash', code: grpcEnv }]}
   />
+
+  <p>
+    Bir gRPC çağrısı, karşılığı olan HTTP kapısıyla tam olarak aynı yoldan
+    geçer: aynı anahtar denetimi, bir hesap anahtarı için aynı proje, aynı
+    tavanlar, örnekleme, maskeleme ve maliyetlendirme, yeniden gönderilmiş bir
+    dışa aktarımın da aynı biçimde tanınması. Anahtar, çağrının metadata'sına
+    <code>authorization: Bearer</code> ya da <code>x-mcpd-key</code> olarak
+    konur. Geri çevrilen bir çağrı, exporter'ın göre davrandığı gRPC durumuyla
+    biter: eksik ya da bilinmeyen bir anahtar için
+    <code>UNAUTHENTICATED</code>, alım kapsamı olmayan bir anahtar için
+    <code>PERMISSION_DENIED</code>, çözülemeyen bir mesaj için
+    <code>INVALID_ARGUMENT</code>, bir sınır aşıldığında
+    <code>RESOURCE_EXHAUSTED</code> ve depo yazmayı alamadığında
+    <code>UNAVAILABLE</code>; exporter'lar bunu yeniden dener. mcpd'nin
+    sunmadığı bir metot <code>UNIMPLEMENTED</code> ile yanıtlanır.
+  </p>
+  <p>
+    Mesajlar gzip ile sıkıştırılmış olabilir (<code>grpc-encoding: gzip</code>).
+    Dinleyici düz metin HTTP/2 konuşur. gRPC'yi TLS üzerinden sunmak için TLS'i
+    bir proxy'de sonlandırın ve HTTP/2'yi mcpd'ye iletin; gRPC HTTP/1.1
+    üzerinde çalışmadığı için proxy, daemon'a giden ayakta da HTTP/2'yi
+    korumalıdır.
+  </p>
+  <p>
+    Bir OpenTelemetry Collector, OTLP exporter'ıyla mcpd'ye iletir:
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="collector"
+    samples={[{ lang: 'curl', label: 'YAML', shiki: 'yaml', code: collectorYaml }]}
+  />
+
+  <h2>Her sinyal için her iki kodlama</h2>
+  <p>
+    <code>/v1/traces</code>, <code>/v1/logs</code> ve <code>/v1/metrics</code>,
+    <code>content-type</code> başlığını okur ve iki kodlamayı da kabul eder:
+    içinde <code>protobuf</code> geçiyorsa OTLP/protobuf, geçmiyorsa OTLP/JSON.
+    OpenTelemetry'nin varsayılanı protobuf'tur, yani mcpd'ye yöneltilmiş,
+    değiştirilmemiş bir SDK üç sinyali de gönderir ve bunlar hiçbir
+    yapılandırma olmadan yerine ulaşır. Aynı dışa aktarım, iki kodlamada da
+    aynı kayıtları saklar; bir yeniden gönderimin tanındığı id'lere kadar.
+  </p>
 
   <p>
     Hiç <code>content-type</code> gönderilmediğinde mcpd
@@ -160,9 +287,12 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
     Tek bir isteğe iki sınır uygulanır. Gövde sınırı 32 MiB; gelen şeyin
     üzerinden ölçülür, yani gzip size yer kazandırır. Yığın sınırı 10.000
     sinyaldir ve her alım kapısında kod çözüldükten sonra sayılır:
-    <code>/v1/traces</code> üzerinde span'ler, <code>/v1/logs</code> üzerinde
-    kayıtlar, <code>/v1/metrics</code> üzerinde veri noktaları ve
-    <code>/v1/ingest</code> üzerinde istekteki her şey. Daha büyük bir yığın,
+    <code>/v1/traces</code>, <code>/api/v2/spans</code>,
+    <code>/api/traces</code> ve bunların gRPC servisleri üzerinde span'ler,
+    <code>/v1/logs</code> üzerinde kayıtlar, <code>/v1/metrics</code> üzerinde
+    veri noktaları ve <code>/v1/ingest</code> üzerinde istekteki her şey. Gzip
+    ile gelen bir gövde ya da mesaj, açıldıktan sonra da gövde sınırına tabidir.
+    Daha büyük bir yığın,
     iki sayıyı da adlandıran <code>413 payload_too_large</code> ile geri
     çevrilir. İki sınır da birer ayardır:
     <a href={urlFor('/docs/configuration', locale)} class="link">Yapılandırma</a>
@@ -170,10 +300,114 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
     <code>--max-batch-signals</code>.
   </p>
 
+  <h2>Zipkin</h2>
+  <p>
+    <code>POST /api/v2/spans</code>, Zipkin'in v2 span endpoint'idir. Span'lerden
+    oluşan bir JSON dizisi ya da <code>content-type</code> içinde
+    <code>protobuf</code> geçtiğinde bir proto3 <code>ListOfSpans</code> alır,
+    gzip ile kodlanmış olsun ya da olmasın, ve <code>202</code> ile yanıtlar.
+    Bir Zipkin reporter'ını ya da bir OpenTelemetry SDK'sının Zipkin
+    exporter'ını buraya yöneltin:
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="zipkin exporter"
+    samples={[{ lang: 'curl', label: 'Ortam', shiki: 'bash', code: zipkinEnv }]}
+  />
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="ham Zipkin JSON"
+    samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: zipkinPost }]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Zipkin alanı</th>
+          <th>Neye dönüşür</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>localEndpoint.serviceName</code></td><td>servis, kaynak <code>service.name</code></td></tr>
+        <tr><td><code>tags</code></td><td>span öznitelikleri; yani <code>gen_ai.*</code> ve <code>llm.*</code> etiketleri OTLP'deki gibi okunur</td></tr>
+        <tr><td><code>kind</code></td><td>küçük harfle <code>span.kind</code> özniteliği</td></tr>
+        <tr><td><code>annotations</code></td><td>her biri değeriyle adlandırılan span olayları</td></tr>
+        <tr><td><code>remoteEndpoint</code></td><td><code>peer.service</code>, <code>network.peer.address</code>, <code>network.peer.port</code></td></tr>
+        <tr><td><code>error</code> etiketi ya da <code>otel.status_code</code></td><td>durum; mesaj olarak etiketin değeri</td></tr>
+        <tr><td><code>timestamp</code>, <code>duration</code></td><td>başlangıç ve bitiş; süresi olmayan bir span bitmemiştir</td></tr>
+        <tr><td><code>debug</code></td><td>örneklenmiş biti; böylece örnekleyici trace'i tutar</td></tr>
+        <tr><td><code>parentId</code></td><td>ebeveyn</td></tr>
+        <tr><td><code>shared</code></td><td>istemci yarısının yanında tutulan bir sunucu yarısı</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    64 bitlik bir trace id, başına sıfırlar eklenerek 128 bite tamamlanır; bu,
+    OpenTelemetry'nin aynı trace'e verdiği id'dir. Paylaşılan bir sunucu span'i,
+    istemcisinin span id'sini yeniden kullanır; mcpd bir span'i id'siyle
+    anahtarladığı için sunucu yarısı paylaşılan id'den türetilmiş bir id altında
+    ve onun çocuğu olarak saklanır, iki yarı da tutulur. Yeniden gönderilen bir
+    span aynı satıra düşer.
+  </p>
+
+  <h2>Jaeger</h2>
+  <p>
+    İki Jaeger collector kapısı sunulur: Thrift'in binary protokolünde
+    (<code>application/x-thrift</code>) tek bir <code>jaeger.Batch</code> alan
+    ve <code>202</code> ile yanıtlayan <code>POST /api/traces</code>, bir de
+    gRPC servisi <code>jaeger.api_v2.CollectorService/PostSpans</code>. İkisi
+    de bir span'i aynı biçimde eşler.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="jaeger"
+    samples={[{ lang: 'curl', label: 'Ortam', shiki: 'bash', code: jaegerEnv }]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Jaeger alanı</th>
+          <th>Neye dönüşür</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>süreç <code>serviceName</code></td><td>servis, kaynak <code>service.name</code></td></tr>
+        <tr><td>süreç etiketleri</td><td>kaynak öznitelikleri</td></tr>
+        <tr><td>span etiketleri</td><td>Jaeger'ın verdiği türlerle span öznitelikleri</td></tr>
+        <tr><td>loglar</td><td><code>event</code> alanıyla adlandırılan span olayları</td></tr>
+        <tr><td><code>parentSpanId</code> ya da aynı trace içindeki ilk <code>CHILD_OF</code></td><td>ebeveyn</td></tr>
+        <tr><td>diğer her referans</td><td><code>child_of</code> ya da <code>follows_from</code> türünde bir span bağlantısı</td></tr>
+        <tr><td><code>error</code> etiketi ya da <code>otel.status_code</code></td><td>durum</td></tr>
+        <tr><td>örneklenmiş ya da debug bayrağı</td><td>örneklenmiş biti</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Span bağlantıları</h2>
+  <p>
+    Bir bağlantı, bir span'in bu trace'teki ya da başka bir trace'teki başka
+    bir span'le, onun çocuğu olmadan ilişkili olduğunu söyler. mcpd her
+    kapıdan gelen bağlantıları tutar: iki kodlamada ve iki taşımada da bir OTLP
+    span'inin <code>links</code> alanı, yerel bir span'in <code>links</code>
+    alanı ve bir Jaeger span'inin ebeveyni olmayan referansları. Bir
+    bağlantının türü <code>mcpd.link.kind</code> özniteliğinden ya da bir
+    Jaeger referansının dönüştüğü <code>opentracing.ref_type</code>
+    özniteliğinden gelir. Her bağlantı span'le birlikte saklanır ve trace'le
+    birlikte döndürülür.
+  </p>
+
   <h2>Gelmekle saklanmak arasında ne olur</h2>
   <p>
-    Bir OTLP span'i ile yerel bir span aynı yoldan geçer. Hattın ortak olmasının
-    amacı budur: aşağıdaki sıra iki kapı arasında ayrışamaz.
+    Bir OTLP span'i, bir Zipkin ya da Jaeger span'i ve yerel bir span aynı
+    yoldan geçer. Hattın ortak olmasının amacı budur: aşağıdaki sıra kapılar
+    arasında ayrışamaz.
   </p>
 
   <PipelineDiagram class="not-prose my-8" />
@@ -522,7 +756,8 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
     <a href={urlFor('/docs/configuration', locale)} class="link">yapılandırmayla</a>
     ayarlayın, sonra anahtarı <code>Authorization: Bearer</code> olarak
     gönderin; yukarıdaki <code>OTEL_EXPORTER_OTLP_HEADERS</code> tam da bunu
-    yapar.
+    yapar. Bu sayfadaki her kapı, gRPC metadata'sı da dahil, anahtarı aynı
+    biçimde okur.
   </p>
 
   <Command

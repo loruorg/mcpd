@@ -87,7 +87,7 @@ export function emitApiDocs(spec) {
         o.push('')
       }
       if (ep.request) o.push(`**Request body:** \`${pascal(parseType(ep.request.type).base)}\`\n`)
-      o.push(`**Response:** \`${pascal(parseType(ep.response.type).base)}\`\n`)
+      o.push(`**Response:** \`${pascal(parseType(ep.response.type).base)}\`${ep.status ? `, status \`${ep.status}\`` : ''}\n`)
       // The statuses this endpoint answers beyond 200 and the three every
       // endpoint shares. A 409 that carries a typed body names the type, so a
       // worker reading this knows what to parse before it knows what to do.

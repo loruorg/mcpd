@@ -1603,6 +1603,7 @@ function checkEndpointScopes() {
     'crates/mcpd-server/src/ingest.rs',
     'crates/mcpd-server/src/runs.rs',
     'crates/mcpd-server/src/accounts.rs',
+    'crates/mcpd-server/src/grpc.rs',
   ]
   if (!exists(router)) {
     fail(router, 'is missing; the scope check cannot run without the route table')

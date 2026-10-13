@@ -24,6 +24,23 @@ export function parseType(t) {
 export const PRIMITIVES = new Set(['string', 'bool', 'f64', 'u64', 'u32', 'i64', 'json', 'timestamp'])
 
 /**
+ * Messages another project's wire format defines, by type prefix. An endpoint
+ * that takes one names it, `zipkin.ListOfSpans` say, and no generator emits a
+ * type for it: the definition belongs to the format, not to this spec.
+ */
+export const EXTERNAL = {
+  otlp: { name: 'OpenTelemetry', source: 'opentelemetry-proto' },
+  zipkin: { name: 'Zipkin v2', source: 'zipkin-api' },
+  jaeger: { name: 'Jaeger', source: 'jaeger-idl' },
+}
+
+/** The format an external type belongs to, or undefined for a spec type. */
+export function externalOf(base) {
+  const prefix = String(base).split('.')[0]
+  return String(base).includes('.') ? EXTERNAL[prefix] : undefined
+}
+
+/**
  * A name the generators can turn into an identifier in every language. Enum
  * values are rendered verbatim on the wire and pascal-cased or upper-cased into
  * identifiers, so a dotted or capitalised value breaks Rust and Kotlin; field
@@ -80,13 +97,18 @@ function validate(spec) {
       if (!q.doc) errs.push(`endpoint ${ep.id} param ${q.name}: missing doc string`)
       if (!IDENT.test(q.name)) errs.push(`endpoint ${ep.id} param ${q.name}: name must match ${IDENT}`)
     }
-    // Request/response types must resolve, unless they are an externally-owned
-    // OTLP message (prefixed `otlp.`) or a bare primitive.
+    // Request/response types must resolve, unless they are a message another
+    // wire format owns (see EXTERNAL) or a bare primitive.
     for (const [slot, ref] of [['request', ep.request], ['response', ep.response]]) {
       if (!ref) continue
       const { base } = parseType(ref.type)
-      if (base.startsWith('otlp.')) continue
+      if (externalOf(base)) continue
       if (!known.has(base)) errs.push(`endpoint ${ep.id} ${slot}: unknown type "${ref.type}"`)
+    }
+    // The success status, when it is not 200. Zipkin and Jaeger collectors
+    // answer 202, and a door that speaks their protocol answers what they do.
+    if (ep.status !== undefined && !(Number.isInteger(ep.status) && ep.status >= 200 && ep.status < 300)) {
+      errs.push(`endpoint ${ep.id} status: ${ep.status} is not a 2xx status`)
     }
     // The extra statuses an endpoint answers. 200 is `response`; 400, 401 and
     // 429 are every endpoint's. Anything else is declared here so the OpenAPI

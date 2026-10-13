@@ -21,6 +21,7 @@ use crate::state::{AppState, ProjectQuotas};
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use bytes::Bytes;
 use mcpd_core::{ids, otlp, IngestBatch, IngestError, IngestResult, SignalType, Span};
@@ -37,7 +38,7 @@ use time::OffsetDateTime;
 /// decompressed size was bounded by nothing, and gzip compresses a run of
 /// zeros a thousand to one: a 2 MiB request expanded to 2 GiB in memory before
 /// a single byte of it was parsed.
-fn decompress(headers: &HeaderMap, body: Bytes, max_bytes: usize) -> ApiResult<Bytes> {
+pub(crate) fn decompress(headers: &HeaderMap, body: Bytes, max_bytes: usize) -> ApiResult<Bytes> {
     let encoding = headers
         .get("content-encoding")
         .and_then(|v| v.to_str().ok())
@@ -204,64 +205,222 @@ pub(crate) async fn finish_pinned(
     Ok(result)
 }
 
+/// Which OpenTelemetry signal a request carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Signal {
+    /// `ExportTraceServiceRequest`.
+    Traces,
+    /// `ExportLogsServiceRequest`.
+    Logs,
+    /// `ExportMetricsServiceRequest`.
+    Metrics,
+}
+
+impl Signal {
+    /// What one signal is called in a refusal.
+    const fn noun(self) -> &'static str {
+        match self {
+            Self::Traces => "spans",
+            Self::Logs => "log records",
+            Self::Metrics => "metric points",
+        }
+    }
+
+    /// The count field of OTLP's `partialSuccess` in its JSON form.
+    const fn rejected_field(self) -> &'static str {
+        match self {
+            Self::Traces => "rejectedSpans",
+            Self::Logs => "rejectedLogRecords",
+            Self::Metrics => "rejectedDataPoints",
+        }
+    }
+}
+
+/// Whether a request declared a protobuf body.
+///
+/// Protobuf is the OpenTelemetry default, so accepting only JSON would mean
+/// most SDKs need reconfiguring before they work. Anything not declared as
+/// protobuf is read as JSON, which is what the doors always did.
+pub(crate) fn is_protobuf(headers: &HeaderMap) -> bool {
+    headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.to_ascii_lowercase().contains("protobuf"))
+}
+
+/// Refuse a request that carries more signals than one batch may.
+fn hold_to_cap(state: &AppState, count: usize, noun: &str) -> ApiResult<()> {
+    if count > state.config.max_batch_signals {
+        return Err(ApiError::TooLarge(format!(
+            "batch carries {count} {noun}; this server accepts {} at a time",
+            state.config.max_batch_signals
+        )));
+    }
+    Ok(())
+}
+
+/// Store spans decoded by any trace door: OTLP in either encoding and over
+/// either transport, Zipkin and Jaeger.
+///
+/// `to_spans`, not one `to_span` per decoded span: a span event becomes a span
+/// of its own, and whether a parent is foreign can only be answered with the
+/// whole request in hand. The batch ceiling counts what the sender sent, which
+/// is what the sender can act on; the spans events add are bounded by the
+/// decoder's own per-span cap and then by the project ceiling that `finish`
+/// applies.
+pub(crate) async fn ingest_spans(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    grant: &Grant,
+    decoded: &[otlp::OtlpSpan],
+) -> ApiResult<IngestResult> {
+    hold_to_cap(state, decoded.len(), "spans")?;
+    let now = OffsetDateTime::now_utc();
+    let spans: Vec<Span> = otlp::to_spans(decoded, &state.config.default_project, now);
+    let pin = crate::auth::pinned_project(state, headers);
+    finish_pinned(state, spans, Batch::default(), grant, pin.as_deref()).await
+}
+
+/// Decode and store one OTLP export, whichever door it came in by.
+///
+/// The HTTP doors and the gRPC services both end here, so a signal means the
+/// same thing over either transport. `body` is already decompressed.
+pub(crate) async fn ingest_otlp(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    grant: &Grant,
+    signal: Signal,
+    body: &[u8],
+    protobuf: bool,
+) -> ApiResult<IngestResult> {
+    let bad = |e: mcpd_core::Error| {
+        let encoding = if protobuf { "protobuf" } else { "JSON" };
+        ApiError::BadRequest(format!("not a valid OTLP {encoding} {} payload: {e}", signal.noun()))
+    };
+    if signal == Signal::Traces {
+        let decoded = if protobuf {
+            otlp::protobuf::decode_traces(body).map_err(bad)?
+        } else {
+            otlp::decode_json(&json_body(body)?).map_err(bad)?
+        };
+        return ingest_spans(state, headers, grant, &decoded).await;
+    }
+
+    // Logs and metrics in protobuf are read into the OTLP/JSON document the
+    // same export would have been, so the mapping below is the only one.
+    let value = match (protobuf, signal) {
+        (false, _) => json_body(body)?,
+        (true, Signal::Logs) => otlp::protobuf::decode_logs(body).map_err(bad)?,
+        (true, _) => otlp::protobuf::decode_metrics(body).map_err(bad)?,
+    };
+    let project = &state.config.default_project;
+    let batch = if signal == Signal::Logs {
+        let logs = otlp_logs_decode(&value, project)?;
+        // The same ceiling the trace door applies, and for the same reason.
+        // Without it this door was bounded by bytes alone, so one body inside
+        // the byte cap could carry as many records as fit in it, and every one
+        // of them was a stored row. Counted after decoding, because OTLP nests
+        // its records three deep and the count is not knowable before.
+        hold_to_cap(state, logs.len(), signal.noun())?;
+        let ingest_key = export_key("otlp-logs", logs.iter().map(|l| l.log_id.as_str()));
+        Batch { logs, ingest_key, ..Batch::default() }
+    } else {
+        let metrics = otlp_metrics_decode(&value, project)?;
+        hold_to_cap(state, metrics.len(), signal.noun())?;
+        let ingest_key = export_key("otlp-metrics", metrics.iter().map(|m| m.metric_id.as_str()));
+        Batch { metrics, ingest_key, ..Batch::default() }
+    };
+    let pin = crate::auth::pinned_project(state, headers);
+    finish_pinned(state, Vec::new(), batch, grant, pin.as_deref()).await
+}
+
+fn json_body(body: &[u8]) -> ApiResult<serde_json::Value> {
+    serde_json::from_slice(body)
+        .map_err(|e| ApiError::BadRequest(format!("body is not valid JSON: {e}")))
+}
+
+/// The reasons a result gives for what it refused, as one line.
+pub(crate) fn rejection_message(result: &IngestResult) -> String {
+    result
+        .errors
+        .as_ref()
+        .map(|errors| errors.iter().map(|e| e.message.as_str()).collect::<Vec<_>>().join("; "))
+        .unwrap_or_default()
+}
+
+/// An OTLP `Export*ServiceResponse` in protobuf.
+///
+/// All three responses have one field, `partial_success`, whose message holds
+/// the count at field 1 and the reason at field 2. A fully accepted export
+/// leaves it unset, which OTLP asks of a server, so the response is empty.
+pub(crate) fn otlp_response_protobuf(result: &IngestResult) -> Vec<u8> {
+    if result.rejected == 0 {
+        return Vec::new();
+    }
+    fn varint(out: &mut Vec<u8>, mut v: u64) {
+        while v >= 0x80 {
+            out.push((v as u8) | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    }
+    let message = rejection_message(result);
+    let mut inner = vec![0x08];
+    varint(&mut inner, u64::from(result.rejected));
+    inner.push(0x12);
+    varint(&mut inner, message.len() as u64);
+    inner.extend_from_slice(message.as_bytes());
+    let mut out = vec![0x0a];
+    varint(&mut out, inner.len() as u64);
+    out.extend_from_slice(&inner);
+    out
+}
+
+/// The three OTLP/HTTP doors, after the key has been checked.
+///
+/// The key is checked from the headers before a byte of the body is read.
+/// These doors once took `Bytes`, which axum fills before the handler runs, so
+/// a client with no key could make the daemon hold up to the body cap per
+/// request before being told 401. `Body` defers the read to here, and
+/// `collect_body` holds it to the same cap.
+///
+/// The answer is in the encoding the export arrived in, which is what an
+/// OpenTelemetry exporter parses it as.
+async fn otlp_http(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    grant: Grant,
+    body: Body,
+    signal: Signal,
+) -> ApiResult<Response> {
+    state.metrics.ingest_requests.fetch_add(1, Ordering::Relaxed);
+    let body = collect_body(body, state.config.max_body_bytes).await?;
+    let body = decompress(&headers, body, state.config.max_body_bytes)?;
+    let protobuf = is_protobuf(&headers);
+    let result = ingest_otlp(&state, &headers, &grant, signal, &body, protobuf).await?;
+    if protobuf {
+        return Ok((
+            [(axum::http::header::CONTENT_TYPE, "application/x-protobuf")],
+            otlp_response_protobuf(&result),
+        )
+            .into_response());
+    }
+    // OTLP's own success shape. Returning `partialSuccess` with a count is how
+    // a collector tells a sender it dropped something, and senders read it.
+    let mut partial = serde_json::Map::new();
+    partial.insert(signal.rejected_field().to_owned(), result.rejected.into());
+    partial.insert("errorMessage".to_owned(), rejection_message(&result).into());
+    Ok(Json(serde_json::json!({ "partialSuccess": partial })).into_response())
+}
+
 /// `POST /v1/traces` — the standard OTLP trace endpoint.
 pub async fn otlp_traces(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Body,
-) -> ApiResult<Json<serde_json::Value>> {
-    // The key is checked from the headers before a byte of the body is read.
-    // These three doors took `Bytes`, which axum fills before the handler
-    // runs, so a client with no key could make the daemon hold up to the body
-    // cap per request before being told 401. `Body` defers the read to here,
-    // and `collect_body` holds it to the same cap.
+) -> ApiResult<Response> {
     let grant = authorize(&state, &headers, Scope::Ingest)?;
-    state.metrics.ingest_requests.fetch_add(1, Ordering::Relaxed);
-    let body = collect_body(body, state.config.max_body_bytes).await?;
-    let body = decompress(&headers, body, state.config.max_body_bytes)?;
-    let content_type =
-        headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/json");
-
-    // Protobuf is the OpenTelemetry default, so accepting only JSON would mean
-    // most SDKs need reconfiguring before they work. Both encodings lower into
-    // the same shape and are mapped by the same code.
-    let decoded = if content_type.contains("protobuf") {
-        otlp::protobuf::decode_traces(&body)
-            .map_err(|e| ApiError::BadRequest(format!("not a valid OTLP protobuf payload: {e}")))?
-    } else {
-        let value: serde_json::Value = serde_json::from_slice(&body)
-            .map_err(|e| ApiError::BadRequest(format!("body is not valid JSON: {e}")))?;
-        otlp::decode_json(&value)
-            .map_err(|e| ApiError::BadRequest(format!("not a valid OTLP trace payload: {e}")))?
-    };
-
-    if decoded.len() > state.config.max_batch_signals {
-        return Err(ApiError::TooLarge(format!(
-            "batch carries {} spans; this server accepts {} at a time",
-            decoded.len(),
-            state.config.max_batch_signals
-        )));
-    }
-
-    let now = OffsetDateTime::now_utc();
-    // `to_spans`, not one `to_span` per decoded span: an OTLP span event becomes
-    // a span of its own, and whether a parent is foreign can only be answered
-    // with the whole request in hand. The batch ceiling above counts what the
-    // sender sent, which is what the sender can act on; the spans events add are
-    // bounded by the decoder's own per-span cap and then by the project ceiling
-    // that `finish` applies.
-    let spans: Vec<Span> = otlp::to_spans(&decoded, &state.config.default_project, now);
-
-    let pin = crate::auth::pinned_project(&state, &headers);
-    let result = finish_pinned(&state, spans, Batch::default(), &grant, pin.as_deref()).await?;
-    // OTLP's own success shape. Returning `partialSuccess` with a count is how
-    // a collector tells a sender it dropped something, and senders read it.
-    Ok(Json(serde_json::json!({
-        "partialSuccess": {
-            "rejectedSpans": result.rejected,
-            "errorMessage": ""
-        }
-    })))
+    otlp_http(state, headers, grant, body, Signal::Traces).await
 }
 
 /// `POST /v1/logs` — the standard OTLP log endpoint.
@@ -269,39 +428,72 @@ pub async fn otlp_logs(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Body,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Response> {
+    let grant = authorize(&state, &headers, Scope::Ingest)?;
+    otlp_http(state, headers, grant, body, Signal::Logs).await
+}
+
+/// `POST /v1/metrics` — the standard OTLP metric endpoint.
+pub async fn otlp_metrics(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Body,
+) -> ApiResult<Response> {
+    let grant = authorize(&state, &headers, Scope::Ingest)?;
+    otlp_http(state, headers, grant, body, Signal::Metrics).await
+}
+
+/// The answer the Zipkin and Jaeger doors give: `202 Accepted`, which is what
+/// both collectors answer, with the native result as the body.
+fn accepted(result: IngestResult) -> Response {
+    (axum::http::StatusCode::ACCEPTED, Json(result)).into_response()
+}
+
+/// `POST /api/v2/spans` — Zipkin's v2 span endpoint.
+///
+/// JSON by default, or proto3 `ListOfSpans` when the content type says
+/// protobuf, gzip-encoded or not. A Zipkin reporter needs only its base URL
+/// pointed at this daemon.
+pub async fn zipkin_spans(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Body,
+) -> ApiResult<Response> {
     let grant = authorize(&state, &headers, Scope::Ingest)?;
     state.metrics.ingest_requests.fetch_add(1, Ordering::Relaxed);
     let body = collect_body(body, state.config.max_body_bytes).await?;
     let body = decompress(&headers, body, state.config.max_body_bytes)?;
-    let value: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|e| ApiError::BadRequest(format!("body is not valid JSON: {e}")))?;
+    let spans = if is_protobuf(&headers) {
+        mcpd_core::zipkin::decode_proto(&body).map_err(|e| {
+            ApiError::BadRequest(format!("not a valid Zipkin proto3 ListOfSpans: {e}"))
+        })?
+    } else {
+        mcpd_core::zipkin::decode_json(&json_body(&body)?)
+            .map_err(|e| ApiError::BadRequest(format!("not a valid Zipkin v2 payload: {e}")))?
+    };
+    let decoded: Vec<otlp::OtlpSpan> = spans.iter().map(mcpd_core::zipkin::lower).collect();
+    Ok(accepted(ingest_spans(&state, &headers, &grant, &decoded).await?))
+}
 
-    let logs = crate::ingest::otlp_logs_decode(&value, &state.config.default_project)?;
-    // The same ceiling the trace door applies, and for the same reason. Without
-    // it this door was bounded by bytes alone, so one body inside the byte cap
-    // could carry as many records as fit in it, and every one of them was a
-    // stored row. Counted after decoding, because OTLP nests its records three
-    // deep and the count is not knowable before.
-    if logs.len() > state.config.max_batch_signals {
-        return Err(ApiError::TooLarge(format!(
-            "batch carries {} log records; this server accepts {} at a time",
-            logs.len(),
-            state.config.max_batch_signals
-        )));
-    }
-    let ingest_key = export_key("otlp-logs", logs.iter().map(|l| l.log_id.as_str()));
-    let result = finish_pinned(
-        &state,
-        Vec::new(),
-        Batch { logs, ingest_key, ..Batch::default() },
-        &grant,
-        crate::auth::pinned_project(&state, &headers).as_deref(),
-    )
-    .await?;
-    Ok(Json(serde_json::json!({
-        "partialSuccess": { "rejectedLogRecords": result.rejected, "errorMessage": "" }
-    })))
+/// `POST /api/traces` — the Jaeger collector's HTTP endpoint.
+///
+/// The body is one `jaeger.Batch` in Thrift's binary protocol, which is what
+/// Jaeger clients send as `application/x-thrift`.
+pub async fn jaeger_traces(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Body,
+) -> ApiResult<Response> {
+    let grant = authorize(&state, &headers, Scope::Ingest)?;
+    state.metrics.ingest_requests.fetch_add(1, Ordering::Relaxed);
+    let body = collect_body(body, state.config.max_body_bytes).await?;
+    let body = decompress(&headers, body, state.config.max_body_bytes)?;
+    let batch = mcpd_core::jaeger::decode_thrift(&body).map_err(|e| {
+        ApiError::BadRequest(format!(
+            "not a valid Jaeger batch: {e}; send one jaeger.Batch in Thrift's binary protocol"
+        ))
+    })?;
+    Ok(accepted(ingest_spans(&state, &headers, &grant, &batch.lower()).await?))
 }
 
 /// Decode an OTLP/JSON `ExportLogsServiceRequest`.
@@ -439,42 +631,6 @@ fn otlp_logs_decode(
         }
     }
     Ok(out)
-}
-
-/// `POST /v1/metrics` — the standard OTLP metric endpoint.
-pub async fn otlp_metrics(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: Body,
-) -> ApiResult<Json<serde_json::Value>> {
-    let grant = authorize(&state, &headers, Scope::Ingest)?;
-    state.metrics.ingest_requests.fetch_add(1, Ordering::Relaxed);
-    let body = collect_body(body, state.config.max_body_bytes).await?;
-    let body = decompress(&headers, body, state.config.max_body_bytes)?;
-    let value: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|e| ApiError::BadRequest(format!("body is not valid JSON: {e}")))?;
-    let metrics = otlp_metrics_decode(&value, &state.config.default_project)?;
-    // As on the logs door: one data point is one stored row, so the number of
-    // them is what has to be bounded, not only the bytes they arrived in.
-    if metrics.len() > state.config.max_batch_signals {
-        return Err(ApiError::TooLarge(format!(
-            "batch carries {} metric points; this server accepts {} at a time",
-            metrics.len(),
-            state.config.max_batch_signals
-        )));
-    }
-    let ingest_key = export_key("otlp-metrics", metrics.iter().map(|m| m.metric_id.as_str()));
-    let result = finish_pinned(
-        &state,
-        Vec::new(),
-        Batch { metrics, ingest_key, ..Batch::default() },
-        &grant,
-        crate::auth::pinned_project(&state, &headers).as_deref(),
-    )
-    .await?;
-    Ok(Json(serde_json::json!({
-        "partialSuccess": { "rejectedDataPoints": result.rejected, "errorMessage": "" }
-    })))
 }
 
 /// Decode an OTLP/JSON `ExportMetricsServiceRequest`.

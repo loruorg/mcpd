@@ -46,7 +46,7 @@ const SPAN_FLAG_IS_REMOTE: u32 = 0x0000_0200;
 /// million rows out of one request. 128 is what the OpenTelemetry SDKs cap
 /// their own per-span link and event counts at by default, so a conforming
 /// producer is never truncated by this.
-const MAX_PER_SPAN: usize = 128;
+pub(crate) const MAX_PER_SPAN: usize = 128;
 
 /// The attribute `to_span` records OTLP's `flags` under.
 ///

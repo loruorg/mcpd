@@ -14,7 +14,8 @@ const url = (route: string) =>
 
 const exporterEnv = `# L'URL di base. Il percorso /v1/traces lo attacca l'exporter.
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+# http/protobuf, http/json e grpc funzionano tutti su questa stessa porta.
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 
 # Facoltativo. Manda gzip se i tuoi payload sono grossi.
 export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
@@ -50,19 +51,78 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
 }'
 
 # {"partialSuccess":{"rejectedSpans":0,"errorMessage":""}}`
+
+const grpcEnv = `# gRPC sulla stessa porta. Nessun percorso: il servizio lo nomina l'exporter.
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
+
+# Solo quando mcpd gira con --ingest-key. Le chiavi dei metadata gRPC sono minuscole.
+export OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer YOUR_INGEST_KEY"`
+
+const collectorYaml = `# Un OpenTelemetry Collector che inoltra tutto a mcpd su gRPC.
+receivers:
+  otlp:
+    protocols: { grpc: {}, http: {} }
+
+exporters:
+  otlp:
+    endpoint: mcpd.internal:4317
+    compression: gzip
+    tls:
+      insecure: true # mcpd serve in chiaro; termina TLS davanti a lui
+    headers:
+      authorization: Bearer \${env:MCPD_INGEST_KEY}
+
+service:
+  pipelines:
+    traces: { receivers: [otlp], exporters: [otlp] }
+    logs: { receivers: [otlp], exporters: [otlp] }
+    metrics: { receivers: [otlp], exporters: [otlp] }`
+
+const zipkinEnv = `# Un SDK OpenTelemetry che esporta nel formato di Zipkin.
+export OTEL_TRACES_EXPORTER=zipkin
+export OTEL_EXPORTER_ZIPKIN_ENDPOINT=http://localhost:4317/api/v2/spans
+
+# Un reporter Zipkin prende lo stesso URL come endpoint, per esempio
+#   URLConnectionSender.create("http://localhost:4317/api/v2/spans")`
+
+const zipkinPost = `curl -X POST http://localhost:4317/api/v2/spans \\
+  -H 'content-type: application/json' \\
+  -d '[{
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "id": "00f067aa0ba902b7",
+  "kind": "CLIENT",
+  "name": "chat gpt-4o",
+  "timestamp": 1700000000000000,
+  "duration": 1500000,
+  "localEndpoint": { "serviceName": "checkout-agent" },
+  "tags": { "gen_ai.system": "openai", "gen_ai.request.model": "gpt-4o" }
+}]'
+
+# HTTP 202 {"accepted":1,"rejected":0,"duplicate":0}`
+
+const jaegerEnv = `# Una libreria client di Jaeger, che manda Thrift su HTTP.
+export JAEGER_ENDPOINT=http://localhost:4317/api/traces
+
+# Qualunque cosa parli l'API gRPC del collector di Jaeger, come jaeger-agent.
+jaeger-agent --reporter.grpc.host-port=localhost:4317`
 ---
 
 <Doc
   title="OpenTelemetry"
-  description="mcpd accetta OTLP/JSON su /v1/traces, /v1/logs e /v1/metrics, e legge sia le convenzioni semantiche gen_ai.* di OpenTelemetry sia le llm.* di OpenInference. Non serve codice per mcpd."
-  lede="Se il tuo agente emette già OpenTelemetry, mcpd è un cambio di endpoint. Questa pagina è tutto il percorso OTLP: i tre endpoint, la codifica, e ogni attributo che mcpd legge."
+  description="mcpd accetta OTLP su HTTP e su gRPC, Zipkin v2 e Jaeger su una porta sola, e legge sia le convenzioni semantiche gen_ai.* di OpenTelemetry sia le llm.* di OpenInference. Non serve codice per mcpd."
+  lede="Se il tuo agente emette già OpenTelemetry, Zipkin o Jaeger, mcpd è un cambio di endpoint. Questa pagina è tutto il percorso: gli endpoint, le codifiche, e ogni attributo che mcpd legge."
   og="docs"
 >
-  <h2>I tre endpoint</h2>
+  <h2>Gli endpoint</h2>
   <p>
-    mcpd serve gli endpoint OTLP su HTTP sulla stessa porta della sua API di
-    lettura e della sua interfaccia. Non c’è nessun collector da far girare
-    davanti, nessun secondo container e nessuna porta di ricezione a parte.
+    mcpd serve OTLP su HTTP e su gRPC, Zipkin e Jaeger sulla stessa porta della
+    sua API di lettura e della sua interfaccia. Non c’è nessun collector da far
+    girare davanti, nessun secondo container e nessuna porta di ricezione a
+    parte. La porta accetta HTTP/1.1 e HTTP/2 in chiaro fianco a fianco, e una
+    chiamata gRPC è una richiesta HTTP/2, quindi un solo indirizzo serve tutti i
+    protocolli qui sotto.
   </p>
 
   <div class="scroll-x">
@@ -90,16 +150,47 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
           <td><code>ExportMetricsServiceRequest</code></td>
           <td><code>partialSuccess.rejectedDataPoints</code></td>
         </tr>
+        <tr>
+          <td>gRPC <code>TraceService/Export</code></td>
+          <td><code>ExportTraceServiceRequest</code></td>
+          <td><code>partial_success.rejected_spans</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>LogsService/Export</code></td>
+          <td><code>ExportLogsServiceRequest</code></td>
+          <td><code>partial_success.rejected_log_records</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>MetricsService/Export</code></td>
+          <td><code>ExportMetricsServiceRequest</code></td>
+          <td><code>partial_success.rejected_data_points</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /api/v2/spans</code></td>
+          <td>span Zipkin v2, JSON o proto3</td>
+          <td><code>202</code> con <code>accepted</code> e <code>rejected</code></td>
+        </tr>
+        <tr>
+          <td><code>POST /api/traces</code></td>
+          <td>un batch Jaeger in Thrift binario</td>
+          <td><code>202</code> con <code>accepted</code> e <code>rejected</code></td>
+        </tr>
+        <tr>
+          <td>gRPC <code>jaeger.api_v2.CollectorService/PostSpans</code></td>
+          <td><code>PostSpansRequest</code></td>
+          <td><code>PostSpansResponse</code></td>
+        </tr>
       </tbody>
     </table>
   </div>
 
   <p>
-    Ogni export riuscito risponde con la forma <code>partialSuccess</code>
-    propria di OTLP, che porta un conteggio. È così che un collector dice a chi
-    manda di avere scartato qualcosa, e gli exporter la leggono. Restituire un
-    corpo vuoto lascerebbe che chi manda riferisca un successo che non ha
-    ottenuto.
+    Ogni export OTLP riuscito risponde con la forma
+    <code>partialSuccess</code> propria di OTLP. Quando qualcosa è stato
+    rifiutato, porta il conteggio e il motivo. È così che un collector dice a
+    chi manda di avere scartato qualcosa, e gli exporter la leggono. La risposta
+    arriva nella codifica in cui è arrivato l’export: protobuf per protobuf,
+    JSON per JSON.
   </p>
 
   <h2>Puntaci un exporter</h2>
@@ -121,32 +212,70 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
     attacca in fondo il percorso del segnale. Imposta invece
     <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code> se vuoi dare l’URL intero,
     percorso compreso. Secondo, in OpenTelemetry la porta 4317 è per convenzione
-    quella gRPC e la 4318 quella HTTP. mcpd serve HTTP sulla 4317 perché serve
-    tutto su una porta sola, quindi un exporter lasciato sulla porta predefinita
-    manda alla 4318 e tu non vedi arrivare niente. Nomina la porta in modo
-    esplicito.
+    quella gRPC e la 4318 quella HTTP. mcpd le serve tutte e due sulla 4317,
+    perché serve tutto su una porta sola. Un exporter impostato su
+    <code>grpc</code> lo trova sulla sua porta predefinita; un exporter HTTP
+    lasciato sulla predefinita manda alla 4318, quindi nomina la porta.
   </p>
 
-  <h2>Tutte e due le codifiche, per le tracce</h2>
+  <h2>OTLP su gRPC</h2>
   <p>
-    <code>/v1/traces</code> legge l’header <code>content-type</code> e accetta
-    l’una o l’altra codifica: OTLP/protobuf quando contiene
-    <code>protobuf</code>, OTLP/JSON altrimenti. Protobuf è il formato
-    predefinito di OpenTelemetry, quindi un SDK non modificato e puntato su
-    mcpd manda tracce che atterrano senza nessuna configurazione.
-  </p>
-  <p>
-    <code>/v1/logs</code> e <code>/v1/metrics</code> accettano solo JSON. Lì un
-    corpo protobuf viene rifiutato come <code>body is not valid JSON</code>. Se
-    stai mandando tutti e tre i segnali, imposta il protocollo una volta sola,
-    globalmente:
+    I tre servizi di collector OTLP sono serviti sulla stessa porta:
+    <code>opentelemetry.proto.collector.trace.v1.TraceService</code>,
+    <code>logs.v1.LogsService</code> e <code>metrics.v1.MetricsService</code>.
+    Imposta il protocollo dell’exporter su <code>grpc</code> e tieni
+    l’endpoint:
   </p>
 
-  <Command
+  <CodeSwitcher
     class="not-prose my-6"
-    title="json per ogni segnale"
-    command="export OTEL_EXPORTER_OTLP_PROTOCOL=http/json"
+    title="grpc exporter"
+    samples={[{ lang: 'curl', label: 'Ambiente', shiki: 'bash', code: grpcEnv }]}
   />
+
+  <p>
+    Una chiamata gRPC fa esattamente la strada dell’ingresso HTTP
+    corrispondente: lo stesso controllo della chiave, lo stesso progetto per la
+    chiave di un account, gli stessi tetti, campionamento, oscuramento e
+    valorizzazione, e lo stesso riconoscimento di un export rimandato. La chiave
+    va nei metadata della chiamata come <code>authorization: Bearer</code>, o
+    come <code>x-mcpd-key</code>. Una chiamata rifiutata finisce con lo stato
+    gRPC su cui un exporter agisce: <code>UNAUTHENTICATED</code> per una chiave
+    mancante o sconosciuta, <code>PERMISSION_DENIED</code> per una chiave senza
+    lo scope di ingest, <code>INVALID_ARGUMENT</code> per un messaggio che non si
+    decodifica, <code>RESOURCE_EXHAUSTED</code> oltre un limite, e
+    <code>UNAVAILABLE</code> quando l’archivio non riesce a prendere la
+    scrittura, che gli exporter ritentano. Un metodo che mcpd non serve risponde
+    <code>UNIMPLEMENTED</code>.
+  </p>
+  <p>
+    I messaggi possono essere compressi con gzip
+    (<code>grpc-encoding: gzip</code>). Il listener parla HTTP/2 in chiaro. Per
+    servire gRPC su TLS, termina TLS in un proxy e inoltra HTTP/2 a mcpd; il
+    proxy deve tenere HTTP/2 sul tratto verso il daemon, perché gRPC non gira
+    su HTTP/1.1.
+  </p>
+  <p>
+    Un OpenTelemetry Collector inoltra a mcpd con il suo exporter OTLP:
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="collector"
+    samples={[{ lang: 'curl', label: 'YAML', shiki: 'yaml', code: collectorYaml }]}
+  />
+
+  <h2>Tutte e due le codifiche, per ogni segnale</h2>
+  <p>
+    <code>/v1/traces</code>, <code>/v1/logs</code> e <code>/v1/metrics</code>
+    leggono l’header <code>content-type</code> e accettano l’una o l’altra
+    codifica: OTLP/protobuf quando contiene <code>protobuf</code>, OTLP/JSON
+    altrimenti. Protobuf è il formato predefinito di OpenTelemetry, quindi un
+    SDK non modificato e puntato su mcpd manda tutti e tre i segnali, e questi
+    atterrano senza nessuna configurazione. Lo stesso export archivia gli stessi
+    record nell’una o nell’altra codifica, fino agli id con cui si riconosce un
+    invio ripetuto.
+  </p>
 
   <p>
     Quando non arriva nessun <code>content-type</code>, mcpd assume
@@ -167,20 +296,123 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
     A una richiesta si applicano due limiti. Il limite sul corpo è 32 MiB ed è
     misurato su quello che arriva, quindi gzip ti compra spazio. Il limite sul
     batch è 10.000 segnali, contati dopo la decodifica su ogni ingresso di
-    ingest: gli span su <code>/v1/traces</code>, i record su
+    ingest: gli span su <code>/v1/traces</code>, <code>/api/v2/spans</code>,
+    <code>/api/traces</code> e i loro servizi gRPC, i record su
     <code>/v1/logs</code>, i punti dati su <code>/v1/metrics</code> e tutto
-    quello che c’è nella richiesta su <code>/v1/ingest</code>. Un batch più
-    grande viene rifiutato con <code>413 payload_too_large</code>, che nomina
+    quello che c’è nella richiesta su <code>/v1/ingest</code>. Anche un corpo o
+    un messaggio gzip è tenuto al limite sul corpo dopo essere stato
+    decompresso. Un batch più grande viene rifiutato con <code>413 payload_too_large</code>, che nomina
     tutti e due i numeri. I due limiti sono impostazioni:
     <code>--max-body-bytes</code> e <code>--max-batch-signals</code>, descritte
     in <a href={url('/docs/configuration')} class="link">Configurazione</a>.
   </p>
 
+  <h2>Zipkin</h2>
+  <p>
+    <code>POST /api/v2/spans</code> è l’endpoint degli span v2 di Zipkin. Prende
+    un array JSON di span, o un <code>ListOfSpans</code> proto3 quando il
+    <code>content-type</code> contiene <code>protobuf</code>, codificato gzip o
+    no, e risponde <code>202</code>. Puntaci un reporter Zipkin o l’exporter
+    Zipkin di un SDK OpenTelemetry:
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="zipkin exporter"
+    samples={[{ lang: 'curl', label: 'Ambiente', shiki: 'bash', code: zipkinEnv }]}
+  />
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="raw Zipkin JSON"
+    samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: zipkinPost }]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Campo Zipkin</th>
+          <th>Diventa</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>localEndpoint.serviceName</code></td><td>il servizio, la risorsa <code>service.name</code></td></tr>
+        <tr><td><code>tags</code></td><td>attributi dello span, quindi i tag <code>gen_ai.*</code> e <code>llm.*</code> si leggono come su OTLP</td></tr>
+        <tr><td><code>kind</code></td><td>l’attributo <code>span.kind</code>, in minuscolo</td></tr>
+        <tr><td><code>annotations</code></td><td>eventi dello span, ognuno con il nome del suo valore</td></tr>
+        <tr><td><code>remoteEndpoint</code></td><td><code>peer.service</code>, <code>network.peer.address</code>, <code>network.peer.port</code></td></tr>
+        <tr><td>tag <code>error</code>, o <code>otel.status_code</code></td><td>lo stato, con il valore del tag come messaggio</td></tr>
+        <tr><td><code>timestamp</code>, <code>duration</code></td><td>inizio e fine; uno span senza durata non è finito</td></tr>
+        <tr><td><code>debug</code></td><td>il bit di campionamento, quindi il campionatore tiene la traccia</td></tr>
+        <tr><td><code>parentId</code></td><td>il genitore</td></tr>
+        <tr><td><code>shared</code></td><td>una metà server, tenuta accanto alla sua metà client</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Un trace id a 64 bit viene portato a 128 bit con zeri in testa, che è l’id
+    che OpenTelemetry dà alla stessa traccia. Uno span server condiviso riusa
+    lo span id del suo client; mcpd identifica uno span con il suo id, quindi la
+    metà server viene archiviata sotto un id derivato da quello condiviso e
+    appesa a esso come figlia, e si tengono tutte e due le metà. Uno span
+    rimandato atterra sulla stessa riga.
+  </p>
+
+  <h2>Jaeger</h2>
+  <p>
+    Sono serviti due ingressi di collector Jaeger: <code>POST /api/traces</code>,
+    che prende un <code>jaeger.Batch</code> nel protocollo binario di Thrift
+    (<code>application/x-thrift</code>) e risponde <code>202</code>, e il
+    servizio gRPC <code>jaeger.api_v2.CollectorService/PostSpans</code>. Tutti e
+    due mappano uno span nello stesso modo.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="jaeger"
+    samples={[{ lang: 'curl', label: 'Ambiente', shiki: 'bash', code: jaegerEnv }]}
+  />
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr>
+          <th>Campo Jaeger</th>
+          <th>Diventa</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>serviceName</code> del processo</td><td>il servizio, la risorsa <code>service.name</code></td></tr>
+        <tr><td>tag del processo</td><td>attributi della risorsa</td></tr>
+        <tr><td>tag dello span</td><td>attributi dello span, con i tipi che ha dato Jaeger</td></tr>
+        <tr><td>log</td><td>eventi dello span, con il nome del campo <code>event</code></td></tr>
+        <tr><td><code>parentSpanId</code>, o il primo <code>CHILD_OF</code> nella stessa traccia</td><td>il genitore</td></tr>
+        <tr><td>ogni altro riferimento</td><td>uno span link, di tipo <code>child_of</code> o <code>follows_from</code></td></tr>
+        <tr><td>tag <code>error</code>, o <code>otel.status_code</code></td><td>lo stato</td></tr>
+        <tr><td>flag sampled o debug</td><td>il bit di campionamento</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Span link</h2>
+  <p>
+    Un link dice che uno span è collegato a un altro span, in questa traccia o
+    in un’altra, senza esserne figlio. mcpd tiene i link da ogni ingresso: i
+    <code>links</code> di uno span OTLP in tutte e due le codifiche e su tutti e
+    due i trasporti, i <code>links</code> di uno span nativo, e i riferimenti di
+    uno span Jaeger che non sono il suo genitore. Il tipo di un link viene dal
+    suo attributo <code>mcpd.link.kind</code>, o da
+    <code>opentracing.ref_type</code>, che è ciò che diventa un riferimento
+    Jaeger. Ogni link è archiviato con lo span e restituito con la traccia.
+  </p>
+
   <h2>Che cosa succede fra l’arrivo e l’archiviazione</h2>
   <p>
-    Uno span OTLP e uno span nativo fanno lo stesso percorso. È a questo che
-    serve avere una pipeline in comune: l’ordine qui sotto non può divergere fra
-    i due ingressi.
+    Uno span OTLP, uno span Zipkin o Jaeger e uno span nativo fanno lo stesso
+    percorso. È a questo che serve avere una pipeline in comune: l’ordine qui
+    sotto non può divergere fra gli ingressi.
   </p>
 
   <PipelineDiagram class="not-prose my-8" />
@@ -530,7 +762,8 @@ const rawPost = `curl -X POST http://localhost:4317/v1/traces \\
     lasciato aperto. Impostali dalla
     <a href={url('/docs/configuration')} class="link">configurazione</a>, poi
     manda la chiave come <code>Authorization: Bearer</code>, che è quello che fa
-    <code>OTEL_EXPORTER_OTLP_HEADERS</code> qui sopra.
+    <code>OTEL_EXPORTER_OTLP_HEADERS</code> qui sopra. Ogni ingresso di questa
+    pagina legge la chiave nello stesso modo, metadata gRPC compresi.
   </p>
 
   <Command
