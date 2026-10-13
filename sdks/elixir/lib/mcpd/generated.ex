@@ -5318,6 +5318,8 @@ defmodule Mcpd.Trace do
           duration_ns: non_neg_integer() | nil,
           usage: Mcpd.TokenUsage.t() | nil,
           cost: Mcpd.Cost.t() | nil,
+          input_preview: String.t() | nil,
+          output_preview: String.t() | nil,
           tags: [String.t()] | nil,
           score_summary: term() | nil,
           feedback_summary: term() | nil
@@ -5342,6 +5344,8 @@ defmodule Mcpd.Trace do
     duration_ns: nil,
     usage: nil,
     cost: nil,
+    input_preview: nil,
+    output_preview: nil,
     tags: [],
     score_summary: nil,
     feedback_summary: nil,

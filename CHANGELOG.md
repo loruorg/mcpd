@@ -29,6 +29,13 @@ rather than every commit.
   version, what changed from the one before, its labels, and the steps that
   ran it. Prompts are stored on SQLite, Postgres and ClickHouse. Wire-contract
   change: the `Prompt` entity and six `/v1/api/prompts` endpoints.
+- **More trace filters and list previews.** `GET /v1/api/traces` also filters
+  on `max_duration_ms`, `max_cost`, `min_tokens`, `score_above` (with
+  `has_score`, and between two bounds with `score_below`) and `has_feedback`.
+  Each listed trace carries `input_preview` and `output_preview`, the start of
+  the root step's input and output as plain text, and the run list shows them
+  as Input and Output columns. Wire-contract change: two `Trace` fields and
+  five query parameters.
 - **Organisations, roles, single sign-on and SCIM.** An account can create
   organisations, which own projects, invite members by email and give each a
   role (owner, admin, member or viewer, optionally replaced on one project)

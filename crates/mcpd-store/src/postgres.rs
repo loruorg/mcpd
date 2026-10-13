@@ -341,6 +341,47 @@ fn escape_like(raw: &str) -> String {
     raw.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
+/// Put the root step's input and output on each trace of a page, as previews.
+///
+/// One read for the whole page, of at most [`crate::PREVIEW_READ_BYTES`] of
+/// each payload.
+async fn pg_fill_previews(
+    conn: &tokio_postgres::Client,
+    project: &str,
+    traces: &mut [Trace],
+) -> Result<()> {
+    let (ids, roots): (Vec<String>, Vec<String>) = traces
+        .iter()
+        .filter_map(|t| t.root_span_id.clone().map(|r| (t.trace_id.clone(), r)))
+        .unzip();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT s.trace_id, left(s.input, {n}), left(s.output, {n})
+                 FROM spans s JOIN unnest($2::text[], $3::text[]) AS r(trace_id, span_id)
+                   ON s.trace_id = r.trace_id AND s.span_id = r.span_id
+                 WHERE s.project = $1",
+                n = crate::PREVIEW_READ_BYTES
+            ),
+            &[&project, &ids, &roots],
+        )
+        .await
+        .map_err(be)?;
+    for r in &rows {
+        let id: String = r.get(0);
+        let input: Option<String> = r.get(1);
+        let output: Option<String> = r.get(2);
+        if let Some(t) = traces.iter_mut().find(|t| t.trace_id == id) {
+            t.input_preview = input.as_deref().and_then(crate::payload_preview);
+            t.output_preview = output.as_deref().and_then(crate::payload_preview);
+        }
+    }
+    Ok(())
+}
+
 /// A `documents` row read as `project, id, version, body, note, created_by,
 /// created_at`.
 fn pg_document(kind: DocKind, r: &Row) -> StoredDocument {
@@ -637,6 +678,8 @@ fn row_to_trace(r: &Row) -> Trace {
         }),
         model_count: r.get::<_, i64>(14).max(0) as u32,
         tool_count: r.get::<_, i64>(15).max(0) as u32,
+        input_preview: None,
+        output_preview: None,
         tags: tags_in(r.get(16)),
         correlation: Correlation {
             project: r.get(17),
@@ -1943,6 +1986,22 @@ impl Store for PostgresStore {
         if let Some(c) = q.min_cost {
             w.push("t.total_cost >= {}", c);
         }
+        if let Some(ms) = q.max_duration_ms {
+            w.push("t.duration_ns <= {}", (ms as i64).saturating_mul(1_000_000));
+        }
+        if let Some(c) = q.max_cost {
+            w.push("t.total_cost <= {}", c);
+        }
+        if let Some(n) = q.min_tokens {
+            w.push("(t.input_tokens + t.output_tokens) >= {}", n as i64);
+        }
+        if let Some(has) = q.has_feedback {
+            w.push_raw(format!(
+                "{}EXISTS (SELECT 1 FROM feedback f WHERE f.project = t.project
+                         AND f.trace_id = t.trace_id)",
+                if has { "" } else { "NOT " }
+            ));
+        }
         if let Some(m) = &q.model {
             w.push(
                 "EXISTS (SELECT 1 FROM spans s WHERE s.project = t.project
@@ -1965,24 +2024,23 @@ impl Store for PostgresStore {
             );
         }
         if let Some(scorer) = &q.has_score {
-            match q.score_below {
-                Some(v) => {
-                    let n = w.next();
-                    w.push_raw(format!(
-                        "EXISTS (SELECT 1 FROM scores sc WHERE sc.project = t.project
-                                 AND sc.trace_id = t.trace_id
-                                 AND sc.scorer_id = ${n} AND sc.value < ${})",
-                        n + 1
-                    ));
-                    w.bind(scorer.clone());
-                    w.bind(v);
-                }
-                None => w.push(
-                    "EXISTS (SELECT 1 FROM scores sc WHERE sc.project = t.project
-                             AND sc.trace_id = t.trace_id AND sc.scorer_id = {})",
-                    scorer.clone(),
-                ),
+            // Both bounds on the same score row, as on the embedded store.
+            let n = w.next();
+            let mut clause = format!(
+                "EXISTS (SELECT 1 FROM scores sc WHERE sc.project = t.project
+                         AND sc.trace_id = t.trace_id AND sc.scorer_id = ${n}"
+            );
+            w.bind(scorer.clone());
+            if let Some(v) = q.score_below {
+                clause.push_str(&format!(" AND sc.value < ${}", w.next()));
+                w.bind(v);
             }
+            if let Some(v) = q.score_above {
+                clause.push_str(&format!(" AND sc.value > ${}", w.next()));
+                w.bind(v);
+            }
+            clause.push(')');
+            w.push_raw(clause);
         }
 
         // The score sort reads `min_score`, which the projection maintains as
@@ -2065,7 +2123,9 @@ impl Store for PostgresStore {
             None
         };
 
-        Ok(Paged { items: items.into_iter().map(|(t, _)| t).collect(), next_cursor, total: None })
+        let mut items: Vec<Trace> = items.into_iter().map(|(t, _)| t).collect();
+        pg_fill_previews(&conn, &q.project, &mut items).await?;
+        Ok(Paged { items, next_cursor, total: None })
     }
 
     async fn get_trace(

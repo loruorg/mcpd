@@ -5179,6 +5179,17 @@ export interface Trace {
    */
   toolCount: number
   /**
+   * The start of the root step's input as plain text, up to 240 characters, for a list
+   * column. For a chat input it is the last user message. Filled by the trace list; the
+   * full input is on the span.
+   */
+  inputPreview?: string
+  /**
+   * The start of the root step's output as plain text, up to 240 characters. Filled by
+   * the trace list; the full output is on the span.
+   */
+  outputPreview?: string
+  /**
    * Tags from the root span.
    */
   tags?: string[]

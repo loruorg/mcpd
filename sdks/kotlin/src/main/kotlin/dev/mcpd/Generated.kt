@@ -4624,6 +4624,17 @@ data class Trace(
     @SerialName("usage") val usage: TokenUsage? = null,
     /** Cost summed across the trace. This is the number a bill is reconciled against. */
     @SerialName("cost") val cost: Cost? = null,
+    /**
+     * The start of the root step's input as plain text, up to 240 characters, for a
+     * list column. For a chat input it is the last user message. Filled by the trace
+     * list; the full input is on the span.
+     */
+    @SerialName("input_preview") val inputPreview: String? = null,
+    /**
+     * The start of the root step's output as plain text, up to 240 characters. Filled
+     * by the trace list; the full output is on the span.
+     */
+    @SerialName("output_preview") val outputPreview: String? = null,
     /** Tags from the root span. */
     @SerialName("tags") val tags: List<String>? = null,
     /**

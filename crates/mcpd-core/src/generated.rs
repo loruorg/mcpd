@@ -5777,6 +5777,15 @@ pub struct Trace {
     pub model_count: u32,
     /// How many tool calls the run made.
     pub tool_count: u32,
+    /// The start of the root step's input as plain text, up to 240 characters, for a list
+    /// column. For a chat input it is the last user message. Filled by the trace list; the
+    /// full input is on the span.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_preview: Option<String>,
+    /// The start of the root step's output as plain text, up to 240 characters. Filled by
+    /// the trace list; the full output is on the span.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_preview: Option<String>,
     /// Tags from the root span.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,

@@ -1,7 +1,7 @@
 /**
  * The property filters on the run list.
  *
- * The daemon declares twenty-one query parameters on `GET /v1/api/traces` and
+ * The daemon declares twenty-six query parameters on `GET /v1/api/traces` and
  * this interface used to send six of them. Every dimension below is one of those
  * parameters: nothing here filters in the browser, so what the list shows is
  * always what the daemon matched, and a count is a count of the whole projection
@@ -134,9 +134,43 @@ export const FILTERS: FilterDef[] = [
     width: 'w-[4rem]',
   },
   {
+    id: 'max_duration_ms',
+    label: 'faster than',
+    help: 'Only runs at most this slow, in milliseconds.',
+    numeric: true,
+    unit: 'ms',
+    placeholder: '2000',
+    width: 'w-[4rem]',
+  },
+  {
+    id: 'max_cost',
+    label: 'cheaper than',
+    help: 'Only runs that cost at most this much.',
+    numeric: true,
+    unit: 'in the run’s own currency',
+    placeholder: '0.10',
+    width: 'w-[4rem]',
+  },
+  {
+    id: 'min_tokens',
+    label: 'tokens over',
+    help: 'Only runs that used at least this many tokens, input and output together.',
+    numeric: true,
+    unit: 'tokens',
+    placeholder: '10000',
+    width: 'w-[5rem]',
+  },
+  {
+    id: 'has_feedback',
+    label: 'feedback',
+    help: 'true for only runs a person gave feedback on, false for only runs with none.',
+    options: ['true', 'false'],
+    width: 'w-[4.5rem]',
+  },
+  {
     id: 'has_score',
     label: 'scored by',
-    help: 'Only runs carrying a score from this scorer. Add a ceiling to find the bad answers.',
+    help: 'Only runs carrying a score from this scorer. Add a floor or a ceiling to find the bad answers.',
     width: 'w-[8rem]',
   },
 ]
@@ -154,6 +188,9 @@ export type FilterValues = Record<string, string>
  * nothing on its own.
  */
 const CEILING = 'score_below'
+/** The same for `score_above`. */
+const FLOOR = 'score_above'
+const NUMERIC = new Set(['min_duration_ms', 'max_duration_ms', 'min_cost', 'max_cost', 'min_tokens', CEILING, FLOOR])
 
 /** The filters as query parameters, dropping every empty one. */
 export function toParams(v: FilterValues): Record<string, string | number | undefined> {
@@ -161,7 +198,7 @@ export function toParams(v: FilterValues): Record<string, string | number | unde
   for (const [k, raw] of Object.entries(v)) {
     const value = raw.trim()
     if (!value) continue
-    if (k === 'min_duration_ms' || k === 'min_cost' || k === CEILING) {
+    if (NUMERIC.has(k)) {
       const n = Number(value)
       if (Number.isFinite(n)) out[k] = n
       continue
@@ -171,6 +208,7 @@ export function toParams(v: FilterValues): Record<string, string | number | unde
   // A ceiling with no scorer matches nothing the daemon can reason about, so it
   // is not sent on its own.
   if (out[CEILING] !== undefined && !out.has_score) delete out[CEILING]
+  if (out[FLOOR] !== undefined && !out.has_score) delete out[FLOOR]
   return out
 }
 
@@ -232,7 +270,10 @@ export function FilterBar({
   const remove = (id: string) => {
     const next = { ...values }
     delete next[id]
-    if (id === 'has_score') delete next[CEILING]
+    if (id === 'has_score') {
+      delete next[CEILING]
+      delete next[FLOOR]
+    }
     onChange(next)
   }
 
@@ -372,13 +413,22 @@ function Applied({
       {def.unit && (
         <span
           className="shrink-0 text-[0.75rem] text-ink-3"
-          title={def.id === 'min_cost' ? 'The currency each run was priced in' : undefined}
+          title={def.id === 'min_cost' || def.id === 'max_cost' ? 'The currency each run was priced in' : undefined}
         >
-          {def.id === 'min_cost' ? 'or more' : def.unit}
+          {def.id === 'min_cost' ? 'or more' : def.id === 'max_cost' ? 'or less' : def.unit}
         </span>
       )}
       {def.id === 'has_score' && (
         <>
+          <span className="legend shrink-0 text-[0.5625rem] text-ink-3">over</span>
+          <ValueField
+            value={values[FLOOR] ?? ''}
+            onCommit={(v) => onSet(FLOOR, v)}
+            label="Score floor"
+            placeholder="0"
+            numeric
+            width="w-[3.25rem]"
+          />
           <span className="legend shrink-0 text-[0.5625rem] text-ink-3">under</span>
           <ValueField
             value={values[CEILING] ?? ''}

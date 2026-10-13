@@ -2286,6 +2286,8 @@ Stored in the `traces` table.
 | `cost` | [`Cost`](#cost) | Cost summed across the trace. This is the number a bill is reconciled against. |
 | `model_count` | `u32` <span class="req">required</span> | How many model calls the run made. |
 | `tool_count` | `u32` <span class="req">required</span> | How many tool calls the run made. |
+| `input_preview` | `string` | The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list; the full input is on the span. |
+| `output_preview` | `string` | The start of the root step's output as plain text, up to 240 characters. Filled by the trace list; the full output is on the span. |
 | `tags` | `string`[] | Tags from the root span. |
 | `correlation` | [`Correlation`](#correlation) <span class="req">required</span> | Context inherited from the root span. |
 | `score_summary` | `json` | Mean score per scorer id, maintained as scores arrive, so the list can sort by quality without a join. |

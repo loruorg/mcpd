@@ -2949,6 +2949,10 @@ class Trace:
     """Token usage summed across every model span in the trace."""
     cost: Cost | None = None
     """Cost summed across the trace. This is the number a bill is reconciled against."""
+    input_preview: str | None = None
+    """The start of the root step's input as plain text, up to 240 characters, for a list column. For a chat input it is the last user message. Filled by the trace list; the full input is on the span."""
+    output_preview: str | None = None
+    """The start of the root step's output as plain text, up to 240 characters. Filled by the trace list; the full output is on the span."""
     tags: list[str] | None = None
     """Tags from the root span."""
     score_summary: Any | None = None

@@ -168,6 +168,8 @@ pub(super) fn row_to_trace(r: &rusqlite::Row<'_>) -> rusqlite::Result<Trace> {
         }),
         model_count: r.get::<_, i64>(14)?.max(0) as u32,
         tool_count: r.get::<_, i64>(15)?.max(0) as u32,
+        input_preview: None,
+        output_preview: None,
         tags: tags_in(r.get(16)?),
         correlation: Correlation {
             project: r.get(17)?,

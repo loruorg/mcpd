@@ -570,6 +570,16 @@ fn documented_answers() -> Answers {
     // Runs sorted by the tokens they used, input and output together.
     e.insert("runs sort by tokens", "big,mid,small".into());
 
+    // The rest of the trace filter vocabulary, and the list previews.
+    e.insert("runs filter on a duration and cost ceiling", "mid,quick".into());
+    e.insert("runs filter on tokens", "mid,slow".into());
+    e.insert("runs filter on a score between two bounds", "mid".into());
+    e.insert("runs filter on feedback, both ways", "mid;quick,slow".into());
+    e.insert(
+        "a run carries previews of its input and output",
+        "Ticket mid: my order is late|Reply to mid".into(),
+    );
+
     // Versioned documents: prompts, scorer definitions, evaluation rules.
     e.insert(
         "a document's versions are assigned, and a repeat is confirmed",
@@ -2317,6 +2327,132 @@ async fn observe_documents(store: &dyn Store, project: String) -> Answers {
     a
 }
 
+async fn observe_trace_filters(store: &dyn Store, project: String) -> Answers {
+    let mut a = Answers::new();
+    let now = OffsetDateTime::now_utc();
+    // Three runs: cheap and quick, dear and slow, and one in between.
+    let runs =
+        [("quick", 5, 0.01, 10, 5), ("mid", 50, 0.10, 300, 100), ("slow", 500, 1.0, 900, 300)];
+    let mut spans = Vec::new();
+    for (i, (label, ms, cost, input, output)) in runs.iter().enumerate() {
+        let at = now - Duration::seconds(i as i64 + 1);
+        let mut s = root(&project, label, at, only_project(&project));
+        s.end_time = Some(at + Duration::milliseconds(*ms));
+        s.usage = Some(tokens(*input, *output));
+        s.cost = Some(Cost {
+            input_cost: None,
+            output_cost: None,
+            total_cost: Some(*cost),
+            currency: "USD".into(),
+            price_book: None,
+            is_estimated: false,
+        });
+        s.input = Some(json!({"messages": [
+            {"role": "system", "content": "You sort tickets."},
+            {"role": "user", "content": format!("Ticket {label}: my order is late")}
+        ]}));
+        s.output = Some(json!(format!("Reply to {label}")));
+        spans.push(s);
+    }
+    store
+        .ingest(Batch { spans, ..Batch::default() })
+        .await
+        .expect("the filter fixture must ingest");
+    let scores = ["quick", "mid", "slow"]
+        .iter()
+        .zip([0.9, 0.5, 0.1])
+        .map(|(label, value)| mcpd_core::Score {
+            score_id: format!("{project}-{label}-s"),
+            trace_id: Some(trace_id(&project, label)),
+            span_id: None,
+            scorer_id: "relevance".into(),
+            scorer_version: None,
+            source: mcpd_core::ScoreSource::Offline,
+            value,
+            min: Some(0.0),
+            max: Some(1.0),
+            label: None,
+            reason: None,
+            score_trace_id: None,
+            cost: None,
+            metadata: None,
+            timestamp: now,
+            correlation: only_project(&project),
+        })
+        .collect();
+    let fb = Feedback {
+        feedback_id: format!("{project}-fb"),
+        trace_id: Some(trace_id(&project, "mid")),
+        span_id: None,
+        kind: FeedbackKind::Thumbs,
+        value: json!(false),
+        comment: None,
+        author_id: None,
+        author_kind: None,
+        timestamp: now,
+        metadata: None,
+        correlation: only_project(&project),
+    };
+    store
+        .ingest(Batch { scores, feedback: vec![fb], ..Batch::default() })
+        .await
+        .expect("the filter scores must ingest");
+    let names = |q: TraceQuery| async move {
+        let mut n: Vec<String> = store
+            .list_traces(&q)
+            .await
+            .expect("list runs")
+            .items
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        n.sort();
+        n.join(",")
+    };
+    let base = || TraceQuery { project: project.clone(), limit: 50, ..Default::default() };
+    a.insert(
+        "runs filter on a duration and cost ceiling",
+        names(TraceQuery { max_duration_ms: Some(100), max_cost: Some(0.5), ..base() }).await,
+    );
+    a.insert("runs filter on tokens", names(TraceQuery { min_tokens: Some(400), ..base() }).await);
+    a.insert(
+        "runs filter on a score between two bounds",
+        names(TraceQuery {
+            has_score: Some("relevance".into()),
+            score_above: Some(0.2),
+            score_below: Some(0.8),
+            ..base()
+        })
+        .await,
+    );
+    a.insert(
+        "runs filter on feedback, both ways",
+        format!(
+            "{};{}",
+            names(TraceQuery { has_feedback: Some(true), ..base() }).await,
+            names(TraceQuery { has_feedback: Some(false), ..base() }).await
+        ),
+    );
+    let page = store
+        .list_traces(&TraceQuery { name: Some("mid".into()), ..base() })
+        .await
+        .expect("list one run");
+    a.insert(
+        "a run carries previews of its input and output",
+        page.items
+            .first()
+            .map(|t| {
+                format!(
+                    "{}|{}",
+                    t.input_preview.clone().unwrap_or_default(),
+                    t.output_preview.clone().unwrap_or_default()
+                )
+            })
+            .unwrap_or_default(),
+    );
+    a
+}
+
 async fn observe_token_sort(store: &dyn Store, project: String) -> Answers {
     let mut a = Answers::new();
     let now = OffsetDateTime::now_utc();
@@ -2809,6 +2945,7 @@ async fn every_backend_gives_the_documented_answer_to_the_same_question() {
         answers.extend(observe_feedback_list(store.as_ref(), unique(&format!("fb-{name}"))).await);
         answers.extend(observe_token_sort(store.as_ref(), unique(&format!("tok-{name}"))).await);
         answers.extend(observe_documents(store.as_ref(), unique(&format!("doc-{name}"))).await);
+        answers.extend(observe_trace_filters(store.as_ref(), unique(&format!("tf-{name}"))).await);
         answers
             .extend(observe_log_correlation(store.as_ref(), unique(&format!("lc-{name}"))).await);
         answers.extend(observe_themes(store.as_ref(), unique(&format!("thm-{name}"))).await);

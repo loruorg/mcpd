@@ -4071,6 +4071,13 @@ type Trace struct {
 	ModelCount uint32 `json:"model_count"`
 	// How many tool calls the run made.
 	ToolCount uint32 `json:"tool_count"`
+	// The start of the root step's input as plain text, up to 240 characters, for a list
+	// column. For a chat input it is the last user message. Filled by the trace list; the
+	// full input is on the span.
+	InputPreview *string `json:"input_preview,omitempty"`
+	// The start of the root step's output as plain text, up to 240 characters. Filled by
+	// the trace list; the full output is on the span.
+	OutputPreview *string `json:"output_preview,omitempty"`
 	// Tags from the root span.
 	Tags []string `json:"tags,omitempty"`
 	// Context inherited from the root span.

@@ -799,6 +799,15 @@ fn trace_where(q: &TraceQuery, spans_table: &str) -> String {
     if let Some(c) = q.min_cost {
         w.push(format!("total_cost >= {c}"));
     }
+    if let Some(d) = q.max_duration_ms {
+        w.push(format!("duration_ns <= {}", d.saturating_mul(1_000_000)));
+    }
+    if let Some(c) = q.max_cost {
+        w.push(format!("total_cost <= {c}"));
+    }
+    if let Some(n) = q.min_tokens {
+        w.push(format!("(input_tokens + output_tokens) >= {n}"));
+    }
     for tag in &q.tags {
         w.push(format!("has(tags, {})", quote(tag)));
     }
@@ -1176,8 +1185,19 @@ impl Store for ClickHouseStore {
             if let Some(below) = q.score_below {
                 cond.push_str(&format!(" AND value < {below}"));
             }
+            if let Some(above) = q.score_above {
+                cond.push_str(&format!(" AND value > {above}"));
+            }
             cond.push(')');
             where_sql.push_str(&format!(" AND {cond}"));
+        }
+        if let Some(has) = q.has_feedback {
+            where_sql.push_str(&format!(
+                " AND trace_id {}IN (SELECT trace_id FROM {} WHERE project = {})",
+                if has { "" } else { "NOT " },
+                self.table("feedback"),
+                quote(&q.project)
+            ));
         }
 
         let rows: Vec<TraceRow> = self
@@ -1188,11 +1208,9 @@ impl Store for ClickHouseStore {
             ))
             .await?;
 
-        Ok(Paged {
-            items: rows.into_iter().map(Into::into).collect(),
-            next_cursor: None,
-            total: None,
-        })
+        let mut items: Vec<Trace> = rows.into_iter().map(Into::into).collect();
+        self.fill_previews(&q.project, &mut items).await?;
+        Ok(Paged { items, next_cursor: None, total: None })
     }
 
     async fn get_trace(
@@ -3619,6 +3637,51 @@ impl ClickHouseStore {
     /// different things: a fingerprint taken over the file rather than over the
     /// resolved statements would match across two different retention settings
     /// and skip the migration that applies the second one.
+    /// Put the root step's input and output on each trace of a page, as
+    /// previews. One read for the whole page, of at most
+    /// [`crate::PREVIEW_READ_BYTES`] characters of each payload.
+    async fn fill_previews(&self, project: &str, traces: &mut [Trace]) -> Result<()> {
+        let pairs: Vec<(String, String)> = traces
+            .iter()
+            .filter_map(|t| t.root_span_id.clone().map(|r| (t.trace_id.clone(), r)))
+            .collect();
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        #[derive(Deserialize)]
+        struct Row {
+            trace_id: String,
+            span_id: String,
+            input: String,
+            output: String,
+        }
+        let list = |pick: fn(&(String, String)) -> &String| {
+            pairs.iter().map(|p| quote(pick(p))).collect::<Vec<_>>().join(", ")
+        };
+        let rows: Vec<Row> = self
+            .select(&format!(
+                "SELECT trace_id, span_id, substringUTF8(input, 1, {n}) AS input,
+                        substringUTF8(output, 1, {n}) AS output
+                 FROM {} FINAL WHERE project = {} AND trace_id IN ({}) AND span_id IN ({})",
+                self.table("spans"),
+                quote(project),
+                list(|p| &p.0),
+                list(|p| &p.1),
+                n = crate::PREVIEW_READ_BYTES
+            ))
+            .await?;
+        for r in rows {
+            if let Some(t) = traces
+                .iter_mut()
+                .find(|t| t.trace_id == r.trace_id && t.root_span_id.as_deref() == Some(&r.span_id))
+            {
+                t.input_preview = crate::payload_preview(&r.input);
+                t.output_preview = crate::payload_preview(&r.output);
+            }
+        }
+        Ok(())
+    }
+
     /// Stored documents, one winning row per id and version, newest version
     /// first. Narrowed to one id, and to one version, when given.
     async fn ch_documents(
@@ -4103,6 +4166,8 @@ impl From<TraceRow> for Trace {
             }),
             model_count: r.model_count,
             tool_count: r.tool_count,
+            input_preview: None,
+            output_preview: None,
             tags: (!r.tags.is_empty()).then_some(r.tags),
             correlation: Correlation {
                 project: r.project,

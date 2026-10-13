@@ -828,6 +828,22 @@ pub(super) fn list_traces_sync(conn: &Connection, q: &TraceQuery) -> Result<Page
     if let Some(c) = q.min_cost {
         w.push("t.total_cost >= ?", c);
     }
+    if let Some(d) = q.max_duration_ms {
+        w.push("t.duration_ns <= ?", (d as i64).saturating_mul(1_000_000));
+    }
+    if let Some(c) = q.max_cost {
+        w.push("t.total_cost <= ?", c);
+    }
+    if let Some(n) = q.min_tokens {
+        w.push("(t.input_tokens + t.output_tokens) >= ?", n as i64);
+    }
+    if let Some(has) = q.has_feedback {
+        w.clauses.push(format!(
+            "{}EXISTS (SELECT 1 FROM feedback f WHERE f.project = t.project \
+             AND f.trace_id = t.trace_id)",
+            if has { "" } else { "NOT " }
+        ));
+    }
     if let Some(m) = &q.model {
         w.push(
             "EXISTS (SELECT 1 FROM spans s WHERE s.project = t.project AND s.trace_id = t.trace_id \
@@ -839,22 +855,22 @@ pub(super) fn list_traces_sync(conn: &Connection, q: &TraceQuery) -> Result<Page
         w.push("EXISTS (SELECT 1 FROM json_each(t.tags) je WHERE je.value = ?)", tag.clone());
     }
     if let Some(scorer) = &q.has_score {
-        match q.score_below {
-            Some(below) => {
-                w.clauses.push(
-                    "EXISTS (SELECT 1 FROM scores sc WHERE sc.project = t.project \
-                     AND sc.trace_id = t.trace_id AND sc.scorer_id = ? AND sc.value < ?)"
-                        .to_owned(),
-                );
-                w.binds.push(Box::new(scorer.clone()));
-                w.binds.push(Box::new(below));
-            }
-            None => w.push(
-                "EXISTS (SELECT 1 FROM scores sc WHERE sc.project = t.project \
-                 AND sc.trace_id = t.trace_id AND sc.scorer_id = ?)",
-                scorer.clone(),
-            ),
+        // Both bounds hold on the same score row, so `score_above=0.2&score_below=0.5`
+        // is one score between them, not one score under and another over.
+        let mut clause = "EXISTS (SELECT 1 FROM scores sc WHERE sc.project = t.project \
+                          AND sc.trace_id = t.trace_id AND sc.scorer_id = ?"
+            .to_owned();
+        w.binds.push(Box::new(scorer.clone()));
+        if let Some(below) = q.score_below {
+            clause.push_str(" AND sc.value < ?");
+            w.binds.push(Box::new(below));
         }
+        if let Some(above) = q.score_above {
+            clause.push_str(" AND sc.value > ?");
+            w.binds.push(Box::new(above));
+        }
+        clause.push(')');
+        w.clauses.push(clause);
     }
     if let Some(raw) = &q.q {
         if let Some(fts) = fts_query(raw) {
@@ -940,7 +956,35 @@ pub(super) fn list_traces_sync(conn: &Connection, q: &TraceQuery) -> Result<Page
         None
     };
 
-    Ok(Paged { items: rows.into_iter().map(|(t, _)| t).collect(), next_cursor, total: None })
+    let mut items: Vec<Trace> = rows.into_iter().map(|(t, _)| t).collect();
+    fill_previews(conn, &q.project, &mut items)?;
+    Ok(Paged { items, next_cursor, total: None })
+}
+
+/// Put the root step's input and output on each trace of a page, as previews.
+///
+/// One indexed read per run, of at most [`crate::PREVIEW_READ_BYTES`] of each
+/// payload, so a page never reads whole prompts.
+fn fill_previews(conn: &Connection, project: &str, traces: &mut [Trace]) -> Result<()> {
+    let mut stmt = conn
+        .prepare_cached(&format!(
+            "SELECT substr(input, 1, {n}), substr(output, 1, {n}) FROM spans
+             WHERE project = ?1 AND trace_id = ?2 AND span_id = ?3",
+            n = crate::PREVIEW_READ_BYTES
+        ))
+        .map_err(be)?;
+    for t in traces.iter_mut() {
+        let Some(root) = t.root_span_id.clone() else { continue };
+        let row: Option<(Option<String>, Option<String>)> = stmt
+            .query_row(rusqlite::params![project, t.trace_id, root], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()
+            .map_err(be)?;
+        if let Some((input, output)) = row {
+            t.input_preview = input.as_deref().and_then(crate::payload_preview);
+            t.output_preview = output.as_deref().and_then(crate::payload_preview);
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn get_trace_sync(
