@@ -60,7 +60,7 @@ import Waterfall from '@/components/Waterfall.astro'
 
   <h2>The built-in scorers</h2>
   <p>
-    mcpd ships thirteen deterministic scorers: ordinary code that reads a stored
+    mcpd ships twenty-two deterministic scorers: ordinary code that reads a stored
     run and returns a number. They cost nothing, they never call a model, and
     they give the same answer twice, which is the property a regression test
     needs and a judge model does not have.
@@ -83,12 +83,35 @@ import Waterfall from '@/components/Waterfall.astro'
       <tr><td><code>no_leaked_secret</code></td><td>No key, token or credential appears in the answer.</td></tr>
       <tr><td><code>span_present</code></td><td>The run recorded a span of the required kind or name.</td></tr>
       <tr><td><code>tool_succeeded</code></td><td>The required tool ran, and at least one call of it ended ok.</td></tr>
+      <tr><td><code>excludes</code></td><td>The answer contains none of the <code>forbidden</code> phrases.</td></tr>
+      <tr><td><code>keyword_coverage</code></td><td>Graded: the share of <code>keywords</code> the answer mentions.</td></tr>
+      <tr><td><code>similarity</code></td><td>Graded: one minus the edit distance to <code>expected</code> over the longer length.</td></tr>
+      <tr><td><code>matches_pattern</code></td><td>The answer matches the regular expression <code>pattern</code>.</td></tr>
+      <tr><td><code>tool_call_accuracy</code></td><td>Graded: the share of <code>expected_tools</code> the run called.</td></tr>
+      <tr><td><code>tool_order</code></td><td>The run called <code>expected_tools</code> in that order, with other calls allowed between them.</td></tr>
+      <tr><td><code>tool_not_called</code></td><td>The run called none of <code>forbidden_tools</code>.</td></tr>
+      <tr><td><code>answer_length</code></td><td>The answer has between <code>min_chars</code> and <code>max_chars</code> characters.</td></tr>
+      <tr><td><code>json_schema</code></td><td>The answer is JSON, fenced or bare, that satisfies <code>json_schema</code>.</td></tr>
     </tbody>
   </table>
   <p>
-    <code>GET /v1/api/scorers</code> returns the same list with a
-    <code>needs_config</code> flag. A scorer that needs an expected answer and is
-    not given one declines rather than guessing, and the decline is reported.
+    Text comparisons ignore case unless <code>case_sensitive</code> is set.
+    Tool names are matched exactly against the names of tool-call spans of any
+    of the four tool kinds. <code>json_schema</code> checks <code>type</code>,
+    <code>properties</code>, <code>required</code>, <code>items</code>,
+    <code>enum</code>, <code>minimum</code>, <code>maximum</code>,
+    <code>minLength</code>, <code>maxLength</code> and
+    <code>additionalProperties: false</code>, and names up to five violations in
+    the reason. A pattern that does not compile, or a schema that is not an
+    object, is refused with a 400 before any run is read.
+  </p>
+  <p>
+    <code>GET /v1/api/scorers</code> returns every scorer this daemon knows,
+    with its <code>kind</code> (<code>code</code>, <code>judge</code> or
+    <code>criterion</code>), its <code>direction</code>, the
+    <code>config_keys</code> it reads, and whether it is
+    <code>available</code>. A scorer that needs a setting and is not given one
+    declines rather than guessing, and the decline names the setting.
   </p>
 
   <h2>When a model does the grading</h2>
@@ -133,11 +156,50 @@ import Waterfall from '@/components/Waterfall.astro'
     column nobody can trust.
   </p>
   <p>
-    Configured criteria do not appear in <code>GET /v1/api/scorers</code>. That
-    endpoint lists the thirteen built-in scorers and nothing else, so a client
-    that builds its scorer menu from it will not offer your criteria. The one
-    place the daemon names them back to you is the error you get for an unknown
-    scorer id, which lists the built-ins and the configured criteria together.
+    Configured criteria appear in <code>GET /v1/api/scorers</code> with the
+    kind <code>criterion</code>. A criterion with the id of a shipped rubric
+    replaces that rubric on this daemon.
+  </p>
+
+  <h3>The shipped rubrics</h3>
+  <p>
+    With a <code>judge</code> block configured, nine rubrics are ready to name
+    with no criteria written. Each runs in four steps. <strong>Preprocess</strong>,
+    in code, gathers the question from the root span's input, the answer, the
+    <code>expected</code> answer from the scorer configuration, and the context:
+    every passage in the output of the run's <code>retrieval</code> and
+    <code>rag_vector_operation</code> spans, or the <code>context</code> list in
+    the configuration. <strong>Analyze</strong> is the one model call: the judge
+    breaks the answer, the expected answer or the context into items and gives
+    each a verdict of yes, no or unsure. <strong>Score</strong>, in code, counts
+    the verdicts, so the number is arithmetic over itemised judgements and never
+    a number the model chose. <strong>Reason</strong>, in code, names the items
+    that cost the score.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Rubric</th><th>Reads</th><th>Value</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>faithfulness</code></td><td>answer, context</td><td>Share of the answer's claims the context supports.</td></tr>
+      <tr><td><code>hallucination</code></td><td>answer, context</td><td>Share of the answer's claims the context contradicts. Lower is better.</td></tr>
+      <tr><td><code>answer_relevance</code></td><td>question, answer</td><td>Share of the answer's statements that address the question.</td></tr>
+      <tr><td><code>answer_correctness</code></td><td>question, answer, expected</td><td>Share of the expected answer's facts the answer conveys.</td></tr>
+      <tr><td><code>context_precision</code></td><td>question, context</td><td>Average precision of the useful passages over their ranks.</td></tr>
+      <tr><td><code>context_recall</code></td><td>expected, context</td><td>Share of the expected answer's sentences the context covers.</td></tr>
+      <tr><td><code>context_relevance</code></td><td>question, context</td><td>Share of the passages that bear on the question.</td></tr>
+      <tr><td><code>toxicity</code></td><td>answer</td><td>Share of the answer's statements that are toxic. Lower is better.</td></tr>
+      <tr><td><code>bias</code></td><td>answer</td><td>Share of the answer's opinions that are biased. Lower is better.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    An unsure verdict counts half. An answer with nothing to judge scores 0 on
+    the three lower-is-better rubrics and declines on the others. Each score
+    keeps the itemised verdicts under <code>metadata.steps</code>, the model,
+    the attempts and the token counts under <code>metadata.judge</code>, and
+    the cost of the call, priced with the daemon's price book, in
+    <code>cost</code>. Its <code>scorer_version</code> names the rubric version
+    and the model.
   </p>
 
   <Command
@@ -192,7 +254,11 @@ import Waterfall from '@/components/Waterfall.astro'
       </tr>
       <tr>
         <td>The model could not be reached</td>
-        <td>Declines, with the status and the body. A rate limit is a reason, not a zero.</td>
+        <td>Tries twice more, with a short pause, when the endpoint answered 429, 502, 503 or 504 or the connection failed, and only while the deadline leaves room. Then declines, with the status and the body. A rate limit is a reason, not a zero.</td>
+      </tr>
+      <tr>
+        <td>A rubric step could not finish</td>
+        <td>Declines, naming the step: <code>preprocess</code> when the run lacks a piece the rubric reads, <code>analyze</code> when the reply is not a list of yes, no and unsure verdicts, <code>score</code> when there was nothing to count.</td>
       </tr>
       <tr>
         <td>The reply was larger than 1 MiB</td>
@@ -262,15 +328,19 @@ import Waterfall from '@/components/Waterfall.astro'
   />
 
   <p>
-    The answer is a per-scorer delta with the sample size on each side, and a
-    <code>decidable</code> flag. Below twenty observations mcpd says the
-    comparison cannot be decided rather than reporting a movement.
+    The answer is a per-scorer delta with the sample size on each side, a 95%
+    confidence interval on the delta (<code>ci_low</code>,
+    <code>ci_high</code>) and a two-sided <code>p_value</code>, both from
+    Welch's t-test, which does not assume the two versions vary alike. Below
+    twenty observations a side, <code>decidable</code> is false and nothing is
+    called a regression.
   </p>
   <p>
-    That is a deliberately blunt rule and not a significance test. The failure it
-    prevents is the common one: a mean that moved on four runs, printed without
-    its count, read as a result and shipped. Printing the counts beside the
-    delta is what stops noise being mistaken for a finding.
+    A scorer has <code>regressed</code> when it is decidable and the whole
+    interval lies on the worse side of zero. Worse follows the scorer's
+    <code>direction</code>: a fall in <code>faithfulness</code> is a regression
+    and a fall in <code>toxicity</code> is an improvement. A mean that moved
+    inside its own noise is reported with its interval and not as a finding.
   </p>
 
   <h2>Where this runs</h2>

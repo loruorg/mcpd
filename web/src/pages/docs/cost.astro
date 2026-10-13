@@ -3,6 +3,23 @@ import Doc from '@/layouts/Doc.astro'
 import Waterfall from '@/components/Waterfall.astro'
 import Command from '@/components/Command.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import fs from 'node:fs'
+import path from 'node:path'
+
+/* The built-in book, read at build time from the file the daemon embeds, so
+   the counts and dates below cannot drift from what the binary prices with. */
+const book = JSON.parse(
+  fs.readFileSync(path.resolve(process.cwd(), '..', 'crates/mcpd-core/prices/builtin.json'), 'utf8'),
+)
+const bookTables = [
+  { name: 'models', note: 'first-party list prices, used when no provider table applies', count: Object.keys(book.models).length },
+  ...Object.entries(book.providers as Record<string, Record<string, unknown>>)
+    .map(([name, t]) => ({ name: `providers.${name}`, note: '', count: Object.keys(t).length }))
+    .sort((a, b) => b.count - a.count),
+]
+const tiered = Object.values(book.models as Record<string, { tiers?: unknown[] }>).filter((m) => m.tiers?.length).length
+const multipliers = Object.entries(book.service_tier_multipliers as Record<string, Record<string, number>>)
+  .flatMap(([p, t]) => Object.entries(t).map(([tier, m]) => ({ provider: p, tier, m })))
 
 /* Written here rather than read from an example program: these are queries a
    reader runs against their own daemon, not code CI can execute. */
@@ -202,6 +219,11 @@ const response = [
         <td>Charged at <code>output</code>.</td>
       </tr>
       <tr>
+        <td><code>image_input</code>, <code>image_output</code></td>
+        <td>Image tokens, where a provider prices them apart from text.</td>
+        <td>Charged at <code>input</code> or <code>output</code>.</td>
+      </tr>
+      <tr>
         <td><code>reasoning</code></td>
         <td>Hidden reasoning tokens, where a provider bills them apart.</td>
         <td>
@@ -212,6 +234,30 @@ const response = [
       </tr>
     </tbody>
   </table>
+
+  <h2>Long prompts and service tiers</h2>
+  <p>
+    Several providers charge more for every token of a long prompt. A model
+    entry can carry <code>tiers</code>, each with an
+    <code>above_input_tokens</code> threshold and its own rates. The prompt is
+    measured with its cached tokens, and when it passes a threshold the whole
+    call is priced at that tier: a 300,000 token prompt to
+    <code>gemini-2.5-pro</code> pays the long-context rate on all 300,000. A
+    meter the tier leaves out keeps the base rate.
+  </p>
+  <p>
+    A call on a cheaper service tier, such as a batch request, is priced at the
+    provider's discount. mcpd reads the tier from
+    <code>gen_ai.response.service_tier</code>, then
+    <code>gen_ai.openai.response.service_tier</code>,
+    <code>mcpd.service_tier</code>, <code>llm.service_tier</code> and the
+    matching request attributes. <code>default</code>, <code>standard</code> and
+    <code>auto</code> read as the standard tier. A model can carry its own rates
+    for a tier under <code>service_tiers</code>; otherwise the book's
+    <code>service_tier_multipliers</code> for the provider apply. The figure
+    records the tier, so a batch call stores
+    <code>builtin+batch</code> as its book and reads as half price for a reason.
+  </p>
 
   <h2>A cached token is charged once</h2>
   <p>
@@ -240,12 +286,9 @@ const response = [
     reported total minus every metered field.
   </p>
   <p>
-    That leaves one gap worth naming. A meter the book holds no rate for is
-    charged only as part of the remainder, so when the provider also sent a
-    <code>text</code> count it is not charged at all. Reasoning tokens sit there
-    whenever your book gives them no rate of their own, and declaring one fixes
-    it. Image tokens sit there always, because a book has no image rate to give,
-    so on a heavily multimodal workload read the figure as low rather than exact.
+    A meter the book holds no rate for is charged as part of the remainder.
+    Give reasoning or image tokens a rate of their own when your provider
+    bills them apart and also reports a separate <code>text</code> count.
   </p>
 
   <h2>An unknown model has no cost, not a cost of zero</h2>
@@ -273,8 +316,10 @@ const response = [
   <p>
     The id on a span is whatever your client sent, and clients decorate it. A
     gateway prefixes its vendor, a cloud prefixes its region, a provider pins a
-    release date. A book is keyed on bare model names, so lookup tries four
-    things in order and stops at the first hit.
+    release date. When the span names a provider, that provider's table in the
+    book is searched first and the first-party <code>models</code> table after
+    it. In each table, lookup tries these steps in order and stops at the first
+    hit.
   </p>
 
   <table>
@@ -308,84 +353,107 @@ const response = [
 
   <p>
     Both <code>-YYYY-MM-DD</code> and <code>-YYYYMMDD</code> suffixes are
-    recognised. Failing all four steps is a normal outcome rather than an error:
-    it means no cost, as above.
+    recognised. When none of the four finds the model, they run again on the id
+    with a cloud version tag removed, so
+    <code>claude-sonnet-4-5@20250929</code> on Vertex AI and
+    <code>anthropic.claude-sonnet-4-5-20250929-v1:0</code> on Bedrock resolve,
+    and then with dots between digits written as dashes, so
+    <code>claude-sonnet-4.5</code> finds <code>claude-sonnet-4-5</code>. No
+    match at all means no cost, as above.
+  </p>
+  <p>
+    A provider is matched the same forgiving way: the name as given, an alias
+    the book lists (<code>azure</code> for <code>az.ai.openai</code>), and the
+    name with one leading vendor segment removed, so
+    <code>aws.bedrock</code> finds the <code>bedrock</code> table.
   </p>
 
   <h2>The book that ships</h2>
   <p>
-    mcpd carries a small built-in book so that <code>docker run</code> produces
-    real figures with no configuration at all. It is called
-    <code>builtin</code>, it prices in USD, and every cost it produces records
-    that name.
+    mcpd carries a built-in book so that <code>docker run</code> produces real
+    figures with no configuration. It is called <code>builtin</code>, it prices
+    in USD, and every cost it produces records that name. It holds the list
+    prices of every major model vendor and of the clouds and gateways that
+    resell their models, as they stood on {book.as_of}. {tiered} of its
+    first-party models carry long-context tiers.
   </p>
 
-  {/* Transcribed from `builtin_book` in crates/mcpd-core/src/cost.rs. When a
-      rate moves there, it moves here. */}
   <table>
     <thead>
-      <tr>
-        <th>Model</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write, 5 min</th><th>Cache write, 1 hour</th>
-      </tr>
+      <tr><th>Table</th><th>Models</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>claude-opus-4</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-1</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-5</code></td><td>5.00</td><td>25.00</td><td>0.50</td><td>6.25</td><td>10.00</td></tr>
-      <tr><td><code>claude-sonnet-4</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-sonnet-4-5</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-haiku-4-5</code></td><td>1.00</td><td>5.00</td><td>0.10</td><td>1.25</td><td>2.00</td></tr>
-      <tr><td><code>claude-3-5-haiku</code></td><td>0.80</td><td>4.00</td><td>0.08</td><td>1.00</td><td>1.60</td></tr>
-      <tr><td><code>gpt-4o</code></td><td>2.50</td><td>10.00</td><td>1.25</td><td>at input</td><td>at input</td></tr>
-      <tr><td><code>gpt-4o-mini</code></td><td>0.15</td><td>0.60</td><td>0.075</td><td>at input</td><td>at input</td></tr>
-      <tr><td><code>gpt-4.1</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>at input</td><td>at input</td></tr>
-      <tr><td><code>gpt-4.1-mini</code></td><td>0.40</td><td>1.60</td><td>0.10</td><td>at input</td><td>at input</td></tr>
-      <tr><td><code>o3</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>at input</td><td>at input</td></tr>
-      <tr><td><code>o4-mini</code></td><td>1.10</td><td>4.40</td><td>0.275</td><td>at input</td><td>at input</td></tr>
-      <tr><td><code>gemini-2.5-pro</code></td><td>1.25</td><td>10.00</td><td>0.31</td><td>at input</td><td>at input</td></tr>
-      <tr><td><code>gemini-2.5-flash</code></td><td>0.30</td><td>2.50</td><td>0.075</td><td>at input</td><td>at input</td></tr>
-      <tr><td><code>text-embedding-3-small</code></td><td>0.02</td><td>0.00</td><td>at input</td><td>at input</td><td>at input</td></tr>
-      <tr><td><code>text-embedding-3-large</code></td><td>0.13</td><td>0.00</td><td>at input</td><td>at input</td><td>at input</td></tr>
+      {bookTables.map((t) => (
+        <tr><td><code>{t.name}</code>{t.note && <>: {t.note}</>}</td><td>{t.count}</td></tr>
+      ))}
+    </tbody>
+  </table>
+
+  <table>
+    <thead>
+      <tr><th>Provider</th><th>Service tier</th><th>Multiplier</th></tr>
+    </thead>
+    <tbody>
+      {multipliers.map((m) => (
+        <tr><td><code>{m.provider}</code></td><td><code>{m.tier}</code></td><td>{m.m}</td></tr>
+      ))}
     </tbody>
   </table>
 
   <p>
-    USD per million tokens, as the book stood when it was last checked against
-    a third-party model catalogue, which the book records as its
-    <code>as_of</code> date. Anthropic's entries carry both cache write rates
-    because the daemon falls back from the one-hour rate to the five-minute one,
-    and a book that omitted the longer one would under-bill in silence. OpenAI
-    charges nothing to write to its cache, so a cache write there is billed at
-    the input rate. <code>gemini-2.5-flash</code> also carries an audio input
-    rate of 1.00; every other entry prices audio at its text rate. There is no
-    <code>claude-haiku-4</code>: the id Anthropic serves is
-    <code>claude-haiku-4-5</code>, and an id that resolves to nothing is left
-    unpriced rather than guessed.
+    These are published list prices. To see what any model is priced at, ask
+    the binary, which uses the same lookup ingest does:
   </p>
+
+  <Command class="not-prose my-6" command="mcpd prices show claude-sonnet-4-5 --provider aws.bedrock" />
+
+  <h2>Your own book</h2>
   <p>
-    These are published list prices, not your prices. If
-    you have negotiated rates, or you run a model that is not in this table, the
-    figures mcpd shows you are an estimate and should be read as one. The book is
-    deliberately short: a long one would go stale in more places and give a
-    stronger impression of accuracy than it deserves.
+    Load a book of your own with <code>--price-book</code>, or the
+    <code>price_book</code> key of the config file. A book is JSON: an
+    <code>id</code>, an ISO 4217 <code>currency</code>, and the
+    <code>models</code> and <code>providers</code> tables, each mapping a model
+    id to the rates above. With <code>"extends": "builtin"</code> it is laid over
+    the built-in book, so it needs only the rates you pay differently:
   </p>
+
+  <pre><code>{`{
+  "id": "acme-2026-10",
+  "currency": "USD",
+  "extends": "builtin",
+  "providers": {
+    "bedrock": {
+      "anthropic.claude-sonnet-4-5-20250929-v1:0": { "input": 2.7, "output": 13.5 }
+    }
+  },
+  "models": {
+    "our-finetune": { "input": 0.5, "output": 1.5 }
+  }
+}`}</code></pre>
+
   <p>
-    You cannot supply your own book. There is no flag, no config file key and no
-    endpoint that loads one: every deployment prices with the built-in table
-    above, and a model that table does not name stays unpriced. Negotiated
-    rates, a model you host yourself and a currency other than US dollars are
-    all out of reach today. That is a gap rather than a decision, and until it
-    is closed the honest reading of every figure on this page is that it is an
-    estimate at list prices.
+    mcpd checks the book when it starts and refuses one with a negative rate,
+    tiers out of order or a currency that is not a three-letter code, naming
+    the entry. Figures from your book record its id, so they can be told apart
+    from list-price estimates after the fact. A project's runs sum their spans
+    arithmetically, so keep every rate in one book to one currency.
   </p>
+
+  <h2>Refreshing the rates</h2>
   <p>
-    What does exist is the shape a book has, which is worth knowing while you
-    weigh whether these figures are close enough for what you need. A book is an
-    id, an ISO 4217 currency and a map of model id to rates. Every figure is
-    stamped with the id of the book that produced it, so two books can be told
-    apart after the fact, and the rates in one project would have to share one
-    currency: mcpd sums a run's spans arithmetically and converts between none
-    of them.
+    Rates move every few weeks. <code>mcpd prices refresh</code> writes a book
+    from a public model catalogue, so a deployment can take new rates without a
+    new release:
+  </p>
+
+  <Command class="not-prose my-6" command="mcpd prices refresh --out /etc/mcpd/prices.json" />
+
+  <p>
+    Point <code>--price-book</code> at the file and restart. A model the book at
+    <code>--out</code> already prices and the catalogue no longer lists is kept,
+    because traffic to a retired model goes on arriving; <code>--prune</code>
+    drops it. <code>--source</code> reads another catalogue, a URL or a file, in
+    the same shape. The built-in book is written by the same command.
   </p>
 
   <h2>Reading the money back</h2>
