@@ -104,3 +104,79 @@ async fn a_histogram_read_names_what_it_needs() {
     let (status, _) = call(&app, "GET", "/v1/api/metrics/points?agg=p95", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn metrics_counts_tokens_and_cost_by_model() {
+    let app = app().await;
+    let span = json!({
+        "trace_id": "0af7651916cd43dd8448eb211c80319c",
+        "span_id": "b7ad6b7169203331",
+        "name": "chat",
+        "kind": "model_generation",
+        "status": "ok",
+        "start_time": "2026-01-01T00:00:00Z",
+        "end_time": "2026-01-01T00:00:01Z",
+        "is_root": true,
+        "is_event": false,
+        "model": "gpt-4o",
+        "provider": "openai",
+        "usage": { "input_tokens": 1000, "output_tokens": 100 },
+        "correlation": { "project": "default" },
+        "received_at": "2026-01-01T00:00:01Z"
+    });
+    let (status, res) = call(&app, "POST", "/v1/ingest", Some(json!({ "spans": [span] }))).await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    let req = Request::builder().uri("/metrics").body(Body::empty()).expect("build the request");
+    let res = app.clone().oneshot(req).await.expect("the router answered");
+    let bytes = res.into_body().collect().await.expect("read the body").to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains(r#"mcpd_model_input_tokens_total{provider="openai",model="gpt-4o"} 1000"#),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#"mcpd_model_cost_total{provider="openai",model="gpt-4o",currency="USD"}"#),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn deltas_stream_as_server_sent_events() {
+    let app = app().await;
+    let span = json!({
+        "trace_id": "1af7651916cd43dd8448eb211c80319c",
+        "span_id": "c7ad6b7169203331",
+        "name": "tailed",
+        "kind": "agent_run",
+        "status": "ok",
+        "start_time": "2026-01-01T00:00:00Z",
+        "end_time": "2026-01-01T00:00:01Z",
+        "is_root": true,
+        "is_event": false,
+        "correlation": { "project": "default" },
+        "received_at": "2026-01-01T00:00:01Z"
+    });
+    let (status, res) = call(&app, "POST", "/v1/ingest", Some(json!({ "spans": [span] }))).await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    let req = Request::builder()
+        .uri("/v1/api/deltas?signal=traces")
+        .header("accept", "text/event-stream")
+        .body(Body::empty())
+        .expect("build the request");
+    let res = app.clone().oneshot(req).await.expect("the router answered");
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/event-stream")));
+    let mut body = res.into_body();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+        .await
+        .expect("an event within five seconds")
+        .expect("a frame")
+        .expect("a readable frame");
+    let text = String::from_utf8_lossy(frame.data_ref().expect("a data frame")).into_owned();
+    assert!(text.contains("event: delta") && text.contains("tailed"), "{text}");
+    assert!(text.contains("id: "), "{text}");
+}

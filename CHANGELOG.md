@@ -240,6 +240,19 @@ rather than every commit.
 
 ### Added
 
+- **A live tail over server-sent events.** `GET /v1/api/deltas` with
+  `Accept: text/event-stream` stays open and sends each batch of new runs,
+  steps or log lines as a `delta` event whose id is the cursor to reconnect
+  with.
+- **Credentials found by their shape, not only their key.** Every string
+  value is searched for private keys, JSON Web Tokens, AWS access keys,
+  provider API keys, GitHub, Slack and Google tokens, bearer tokens and
+  passwords in URLs, and each is replaced in place before storage. Email
+  addresses are left alone.
+- **Tokens and cost by model on `/metrics`.** `mcpd_model_input_tokens_total`,
+  `mcpd_model_output_tokens_total` and `mcpd_model_cost_total`, labelled by
+  provider and model, so a Prometheus alert can watch spend per model. At
+  most 200 series; the rest are counted under `other`.
 - **Log lines keep their whole correlation, and the log list filters on it**
   (wire contract). Service version, thread, resource, run, request,
   experiment and release are stored with every log line on all three

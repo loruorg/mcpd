@@ -40,7 +40,7 @@ What to offer in a filter box. A filter is only usable if you know what to type 
 
 <div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/deltas</code></div>
 
-Refresh a list in place instead of running its query again. Hold the cursor from the last poll, send it back, and get the rows that have arrived since, oldest first. The watermark is a row's arrival time and its id together, because a batch writes every row in it with one timestamp and a watermark that could only say 'after this nanosecond' would either replay the whole batch or skip the rest of it. A row written with an arrival time behind the watermark, which a sender can cause by setting `received_at` itself, is not returned; that is the cost of a watermark and no cursor shape avoids it.
+Refresh a list in place instead of running its query again. Hold the cursor from the last poll, send it back, and get the rows that have arrived since, oldest first. The watermark is a row's arrival time and its id together, because a batch writes every row in it with one timestamp and a watermark that could only say 'after this nanosecond' would either replay the whole batch or skip the rest of it. A row written with an arrival time behind the watermark, which a sender can cause by setting `received_at` itself, is not returned; that is the cost of a watermark and no cursor shape avoids it. Sent with `Accept: text/event-stream`, the same request becomes a live tail: the daemon polls every second and sends each batch that brings rows as one `delta` event carrying this response, with the cursor after it as the event id, so a client that reconnects with that cursor misses nothing. A tail closes after thirty minutes and the client reconnects.
 
 **Query parameters**
 

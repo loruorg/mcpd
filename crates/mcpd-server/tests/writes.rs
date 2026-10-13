@@ -804,36 +804,25 @@ async fn the_author_of_a_piece_of_feedback_is_hashed_in_the_store_not_only_in_th
     assert!(!author.is_empty(), "hashing must not drop the field");
 }
 
-/// `Intake::prepare` passes a feedback comment through `Redactor::redact`, so
-/// the write path reads as though free prose is scanned. It is not: redaction
-/// A credential typed into a free-text comment is NOT masked, and that is the
-/// documented contract rather than a gap. The redactor matches field names, so
-/// it can mask a value that arrived under a key called `api_key` and cannot
-/// know that a sentence a human typed contains one. The security page says so
-/// in as many words: "It does not scan free text, and it is not a content
-/// classifier."
-///
-/// This test pins that boundary from the other side. If someone later adds
-/// value scanning, it fails and makes them decide deliberately rather than
-/// changing the contract by accident.
+/// A credential typed into a free-text comment is found by its shape and
+/// masked in place, and the rest of the sentence is kept. The key rules cannot
+/// see it, because it sits in prose under a key that names nothing; the value
+/// detectors in `mcpd_core::redact` can.
 #[tokio::test]
-async fn a_credential_typed_into_a_free_text_comment_is_not_scanned_for() {
+async fn a_credential_typed_into_a_free_text_comment_is_masked_by_its_shape() {
     let app = seeded(open()).await;
     let mut body = a_feedback();
     body["kind"] = json!("comment");
     body["value"] = json!("text");
-    body["comment"] = json!("it kept printing my api_key: sk-live-abcdefghijklmnop");
+    body["comment"] = json!("it kept printing my key sk-live-abcdefghijklmnopqrstuv");
 
     let res = send(&app, post("/v1/api/feedback", None, body.to_string())).await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.text());
 
     let all = stored_feedback(&app, RUN_OK, None).await;
     let comment = all[0]["comment"].as_str().unwrap_or_default();
-    assert!(
-        comment.contains("sk-live-abcdefghijklmnop"),
-        "free text is documented as unscanned; if this now masks, the security page \
-         needs changing too: {comment}"
-    );
+    assert!(!comment.contains("sk-live-abcdefghijklmnopqrstuv"), "the key was stored: {comment}");
+    assert!(comment.starts_with("it kept printing my key [redacted"), "{comment}");
 }
 
 #[tokio::test]

@@ -156,7 +156,9 @@ pub(crate) async fn finish_pinned(
     let forwarded: Vec<Span> =
         if crate::forward::wanted(state) { batch.spans.clone() } else { Vec::new() };
 
+    let tally = crate::state::SelfMetrics::model_tally(&batch.spans);
     let mut result = state.store.ingest(batch).await?;
+    state.metrics.add_models(tally);
 
     // The sender is told about the batch it sent, not about the batch that was
     // written. Rows the daemon derived for itself are subtracted back out

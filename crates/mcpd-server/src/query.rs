@@ -2253,7 +2253,7 @@ pub async fn poll_deltas(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(p): Query<Params>,
-) -> ApiResult<Json<DeltaResponse>> {
+) -> ApiResult<axum::response::Response> {
     let project = project(&p, &state, &headers);
     authorize_project(&state, &headers, Scope::Read, &project)?;
     require(
@@ -2278,8 +2278,71 @@ pub async fn poll_deltas(
         since: parse_time(&p, "since")?,
         limit: parse::<u32>(&p, "limit")?.unwrap_or(100),
     };
-    let delta = state.store.poll(&q).await?;
+    use axum::response::IntoResponse;
+    let wants_stream = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("text/event-stream"));
+    if !wants_stream {
+        let delta = state.store.poll(&q).await?;
+        return Ok(Json(delta_response(signal, delta)).into_response());
+    }
 
+    // A live tail. The same poll, run on the daemon's side every second, and
+    // each batch that brings something sent as one `delta` event whose id is
+    // the cursor after it. A client that drops reconnects with that cursor and
+    // misses nothing, exactly as a polling client would.
+    let store = Arc::clone(&state.store);
+    let shutdown = state.shutdown.clone();
+    let started = std::time::Instant::now();
+    let stream = futures::stream::unfold(q, move |mut q| {
+        let store = Arc::clone(&store);
+        let shutdown = shutdown.clone();
+        async move {
+            loop {
+                // Bounded, so a forgotten tab does not hold a connection and a
+                // store read every second for ever; the browser reconnects.
+                if started.elapsed() > LIVE_TAIL_MAX || shutdown.is_cancelled() {
+                    return None;
+                }
+                let delta = match store.poll(&q).await {
+                    Ok(d) => d,
+                    Err(_) => return None,
+                };
+                let cursor = delta.cursor.clone();
+                q.cursor = Some(cursor.clone());
+                let more = delta.has_more;
+                if !delta.items.is_empty() {
+                    let out = delta_response(signal, delta);
+                    let data = serde_json::to_string(&out).unwrap_or_default();
+                    let event =
+                        axum::response::sse::Event::default().id(cursor).event("delta").data(data);
+                    return Some((Ok::<_, std::convert::Infallible>(event), q));
+                }
+                if more {
+                    continue;
+                }
+                tokio::select! {
+                    () = shutdown.cancelled() => return None,
+                    () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                }
+            }
+        }
+    });
+    Ok(axum::response::sse::Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response())
+}
+
+/// How long one live tail stays open before the client reconnects.
+const LIVE_TAIL_MAX: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// A store poll as the wire shape: each row sorted into the array its signal
+/// names, the other two absent.
+fn delta_response(
+    signal: DeltaSignal,
+    delta: mcpd_store::Delta<mcpd_store::PolledSignal>,
+) -> DeltaResponse {
     // Sorted into the array its signal names, and the other two stay absent.
     // The store hands back one enum per row so the trait can stay object safe,
     // and a caller that asked for logs should not have to read a tag on every
@@ -2330,7 +2393,7 @@ pub async fn poll_deltas(
             );
         }
     }
-    Ok(Json(out))
+    out
 }
 
 // ------------------------------------------------------- intelligence ---
