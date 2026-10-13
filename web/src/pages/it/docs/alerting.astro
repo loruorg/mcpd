@@ -14,7 +14,7 @@ const href = (route: string) =>
 
 <Doc
   title="Monitor e avvisi"
-  description="Come mcpd sorveglia in sottofondo tasso di errore, latenza, costo e medie dei punteggi, perché un monitor si aggancia, perché una finestra silenziosa non azzera un avviso, e il corpo del webhook."
+  description="Come mcpd sorveglia tasso di errore, latenza, costo, medie dei punteggi, divergenza strutturale e ripetizione delle esecuzioni, perché un monitor si aggancia, perché una finestra silenziosa non azzera un avviso, e il corpo del webhook."
   lede="Una condizione che merita di essere sorvegliata, sorvegliata. mcpd valuta su un timer, aggancia quello che trova, e te lo dice una volta sola."
   og="docs"
 >
@@ -103,6 +103,265 @@ const href = (route: string) =>
       </tr>
     </tbody>
   </table>
+
+  <h2>Quando non sai dare un numero</h2>
+  <p>
+    Ogni sorveglianza qui sopra confronta una misura con un tetto che hai
+    scelto tu. Funziona finché sai quanto dovrebbe valere la misura. La fuga
+    più difficile da prendere è quella che non raggiunge mai nessun tetto che
+    avresti pensato di fissare: un’esecuzione che gira otto volte invece di
+    due, finisce, costa quattro volte quello che dovrebbe, e non riferisce
+    nessun errore. Il suo numero di passi non è alto in assoluto. È alto
+    <em>per quella definizione</em>, e solo le esecuzioni recenti di quella
+    stessa definizione lo possono dire.
+  </p>
+  <p>
+    <code>step_count_divergence</code> non fissa nessuna soglia in passi. Per
+    ogni versione di una definizione prende il numero di passi delle
+    esecuzioni completate di recente di quella versione, ne prende il centro
+    come forma abituale, e riferisce le esecuzioni che stanno più lontano di
+    quanto permetta un limite standardizzato. Nessuno deve sapere che
+    <code>checkout</code> di solito fa undici passi, e nessuno deve rivedere il
+    numero quando comincia a farne quattordici.
+  </p>
+
+  <h3>La statistica, e perché è questa</h3>
+  <p>
+    La misura di quanto lontano sta un’esecuzione è lo z-score modificato:
+    <span class="data">0.6745 &times; (steps &minus; median) &divide; MAD</span>,
+    dove MAD è la mediana delle deviazioni assolute dalla mediana.
+    Un’esecuzione diverge quando quel punteggio supera <code>z_bound</code>,
+    che per impostazione predefinita vale <span class="data">3.5</span>.
+  </p>
+  <p>
+    Tutte e due le costanti sono quelle convenzionali e nessuna delle due è
+    arbitraria. Per dati distribuiti normalmente la deviazione assoluta
+    mediana converge a 0.6745&sigma; e non a &sigma;, quindi il rapporto grezzo
+    si misura in unità di circa due terzi di una deviazione standard.
+    Moltiplicare per 0.6745 lo riporta in unità di &sigma;, ed è questo che
+    permette a 3.5 di voler dire quello che tutti ci leggono. 3.5 è il limite
+    pubblicato insieme alla statistica, circa un’esecuzione su duemila su dati
+    normali. Il numero di passi non è distribuito normalmente, quindi
+    consideralo il valore da cui partire per la taratura, non un tasso di
+    falsi allarmi promesso.
+  </p>
+  <p>
+    Si usano la mediana e la MAD invece di una media e di una deviazione
+    standard perché resistono proprio alla cosa che si cerca. Una sola
+    esecuzione che ha fatto quaranta volte il numero abituale di passi sposta
+    una media e gonfia una deviazione standard abbastanza da nascondersi; la
+    deviazione assoluta mediana tollera fino a metà del campione di valori
+    anomali prima di muoversi.
+  </p>
+
+  <h3>Salvaguardie integrate</h3>
+  <ul>
+    <li>
+      <strong>Un campione abbastanza grande per giudicare.</strong> Una versione
+      di una definizione ha bisogno di <span class="data">12</span> esecuzioni
+      completate nella finestra prima che la sorveglianza la confronti con
+      qualcosa. La mediana di dodici sta fra il sesto e il settimo valore,
+      quindi nessuna esecuzione singola decide dove sta il centro. Sotto quella
+      soglia, un’esecuzione insolita sposta il centro stesso, e la linea di base
+      descrive il valore anomalo invece della norma. Una versione con troppe
+      poche esecuzioni risulta insufficiente, e questo lascia un avviso in corso
+      esattamente dov’era. Le dodici si contano dentro la finestra del monitor
+      stesso, quindi imposta le due cose insieme: una definizione che gira
+      qualche volta all’ora ha bisogno di una <code>window_seconds</code>
+      misurata in ore per raggiungerle.
+    </li>
+    <li>
+      <strong>Nessuna divisione per zero.</strong> Una definizione senza cicli e
+      senza rami fa ogni volta lo stesso numero di passi, quindi la sua MAD è
+      zero e ogni scostamento è infinitamente anomalo. Emettere infinito non è
+      una risposta: non si può confrontare, si stampa come <code>inf</code> in
+      una frase su cui qualcuno deve agire, e arriva a un webhook come
+      <code>null</code>. mcpd ripiega sulla deviazione assoluta media, scalata
+      per &radic;(&pi;/2) così stima la stessa &sigma;. Quando è zero anche
+      quella, perché ogni esecuzione del campione ha fatto esattamente lo
+      stesso numero di passi, non c’è nessun rapporto da riferire e l’avviso lo
+      dice invece in passi: &ldquo;every one of the last 12 completed runs took
+      9&rdquo;. In quel solo caso <code>z_bound</code> non si applica, perché
+      non c’è nessun punteggio da confrontarci: alzare il limite allarga quello
+      che conta come variazione normale, e un gruppo senza variazione non ne ha
+      da allargare.
+    </li>
+    <li>
+      <strong>Una versione di una definizione alla volta.</strong> Le esecuzioni
+      si raggruppano per <em>versione</em> della definizione. Una nuova
+      versione è un cambio di forma voluto, quindi un’esecuzione di v3 non è
+      anomala perché differisce da un’esecuzione di v2, e metterle insieme
+      produce un campione a due gobbe la cui mediana non descrive nessuna delle
+      due. Una versione appena pubblicata quindi non riferisce niente finché non
+      ha dodici esecuzioni completate sue, ed è il verso giusto.
+    </li>
+    <li>
+      <strong>Una sola segnalazione per guasto.</strong> Solo le esecuzioni
+      completate entrano nella linea di base, e solo un’esecuzione completata
+      viene segnalata per aver fatto troppo <em>pochi</em> passi. Finire presto
+      è quello che vogliono dire fallire, essere annullata, scadere e non aver
+      ancora finito, e questa è l’unica sorveglianza che esiste per vedere
+      quello che il tasso di errore non vede. Un’esecuzione ancora in corso
+      riceve comunque un punteggio: un’esecuzione già andata lunga viene
+      segnalata mentre è ancora in corso, che è tutto lo scopo della
+      sorveglianza.
+    </li>
+  </ul>
+
+  <h3>Configurarla</h3>
+  <p>
+    Questa sorveglianza ha due numeri perché fa due domande.
+    <code>z_bound</code> chiede quanto lontano deve stare una singola
+    esecuzione, ed è un punteggio standardizzato, quindi lo stesso 3.5 serve
+    una definizione che di solito fa quattro passi e una che di solito ne fa
+    quattrocento. <code>threshold</code> chiede poi quante di queste
+    esecuzioni può contenere una finestra prima che qualcuno venga avvisato,
+    ed è una scelta operativa. Impostala a <code>0</code> con
+    <code>above</code> per essere avvisato di ognuna. <code>below</code> su
+    questa sorveglianza non serve: che ogni esecuzione sia normale è lo stato
+    sano, non quello per cui vale la pena svegliare qualcuno.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitors": [
+    {
+      "id": "checkout-shape",
+      "name": "A checkout run took an unusual number of steps",
+      "project": "support-desk",
+      "watch": "step_count_divergence",
+      "compare": "above",
+      "threshold": 0,
+      "z_bound": 3.5,
+      "window_seconds": 3600,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    Il valore misurato è il numero di esecuzioni che sono divergenti, quindi
+    <code>compare</code> e <code>threshold</code> contano esecuzioni e non
+    passi. Il dettaglio nomina le tre peggiori: <code>checkout v1 run r_9f2 took 40 steps
+    against a usual 10 (z 20.2)</code>.
+  </p>
+  <p>
+    Questa sorveglianza legge l’archivio delle esecuzioni durevoli invece delle
+    tracce archiviate, perché solo l’intestazione di un’esecuzione sa quale
+    versione della definizione ha fissato e quanti passi ha fatto.
+    <code>run_repetition</code> qui sotto lo legge anche lei, e sono le uniche
+    due a farlo. Un daemon che non serve esecuzioni lo riferisce come
+    insufficiente e lo dice. <code>min_samples</code> qui non viene letto: il
+    campione che conta è per versione della definizione, non per finestra.
+  </p>
+
+  <h2>Quando un’esecuzione continua a fare la stessa cosa</h2>
+  <p>
+    La divergenza chiede quanto un’esecuzione si allontana dalla forma che la
+    sua definizione prende di solito, e ha bisogno di un gruppo di esecuzioni
+    recenti prima di poter rispondere. C’è una domanda più stretta che non ha
+    bisogno di nessun gruppo: quante volte un’esecuzione è girata intorno allo
+    stesso nodo?
+  </p>
+  <p>
+    Qui due guasti si nascondono al tasso di errore. Un ciclo che continua a
+    rientrare in un nodo riesce, e una tempesta di nuovi tentativi che alla
+    fine ci arriva è un successo. Tutti e due rifanno lo stesso lavoro più e
+    più volte mentre il tasso di errore resta a zero. È anche la lettura che un
+    numero di passi da solo non può dare: un’esecuzione di quaranta passi che
+    ha visitato quaranta nodi una volta è una definizione lunga, e
+    un’esecuzione di quaranta passi che ha visitato un nodo quaranta volte è
+    bloccata.
+  </p>
+  <p>
+    <code>run_repetition</code> conta i tentativi. Per ogni esecuzione della
+    finestra prende il numero di tentativi fatti su ogni nodo della
+    definizione di quell’esecuzione, tiene il più grande, e legge la media di
+    quel numero su tutta la finestra. Un nuovo tentativo scrive un altro
+    tentativo sul nodo che ha ritentato, e un giro di ciclo scrive una nuova
+    posizione sul nodo in cui è rientrato, quindi contano tutti e due.
+    <span class="data">1</span> significa che nessun nodo è girato due volte.
+  </p>
+  <p>
+    A differenza della divergenza, questa ha una soglia nell’unità che misura.
+    Una definizione lunga quaranta passi e una definizione lunga quattro
+    leggono tutte e due <span class="data">1</span> quando niente si ripete,
+    quindi il numero vuol dire la stessa cosa in ogni progetto e puoi fissargli
+    un tetto. Questo ne fa una normale sorveglianza a soglia, e dalla
+    sorveglianza qui sopra prende in prestito solo la lettura dell’archivio
+    delle esecuzioni.
+  </p>
+
+  <h3>Che cosa conta</h3>
+  <ul>
+    <li>
+      <strong>Un fan-out conta.</strong> Un <code>foreach</code> su nove
+      elementi sono nove tentativi su un nodo, e il journal non lo sa
+      distinguere da un ciclo che ha girato nove volte: tutti e due sono
+      posizioni indicizzate sotto un nodo, e solo la definizione sa quale
+      costrutto le ha scritte. Quindi un progetto le cui definizioni fanno
+      fan-out sta in alto, e la sua soglia va fissata tenendone conto. Ogni
+      valutazione porta il suo valore, scattata o no, quindi leggi che cosa
+      riferisce una finestra normale prima di sceglierne una.
+    </li>
+    <li>
+      <strong>Una posizione saltata non conta.</strong> Una guardia
+      <code>when</code> falsa scrive una riga di tentativo e il nodo non è mai
+      girato, quindi contarla farebbe leggere come ripetizione un
+      <code>foreach</code> su una lista filtrata.
+    </li>
+    <li>
+      <strong>Un’esecuzione che non ha tentato niente resta fuori.</strong> Non
+      viene contata come zero: non ha ripetuto niente perché non ha eseguito
+      niente, e uno zero nel campione tirerebbe la media sotto quell’<span class="data">1</span>
+      rispetto a cui è fissata la soglia.
+    </li>
+    <li>
+      <strong>Un’esecuzione ancora in corso viene contata.</strong> È buona parte
+      dello scopo. Un’esecuzione bloccata in un ciclo di nuovi tentativi entra
+      nella lettura mentre sta ancora girando, non dopo che alla fine si arrende.
+    </li>
+  </ul>
+
+  <h3>Configurarla</h3>
+  <p>
+    Un solo numero, a differenza della divergenza. <code>threshold</code> è il
+    numero medio di tentativi che la finestra può raggiungere prima che
+    qualcuno venga avvisato, e <span class="data">1.2</span> è un quinto delle
+    esecuzioni di una finestra che gira due volte. <code>below</code> qui non
+    serve: ogni esecuzione del campione ha tentato almeno un nodo almeno una
+    volta, quindi la lettura ha un pavimento di <span class="data">1</span> e
+    non può mai scendere sotto.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitors": [
+    {
+      "id": "checkout-repetition",
+      "name": "Checkout runs are going round the same step",
+      "project": "support-desk",
+      "watch": "run_repetition",
+      "compare": "above",
+      "threshold": 1.2,
+      "window_seconds": 3600,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    <code>min_samples</code> qui viene letto, e conta le esecuzioni che la
+    sorveglianza ha letto dall’archivio delle esecuzioni invece delle tracce,
+    quindi un deployment i cui span vengono ingeriti altrove viene comunque
+    giudicato sulle sue esecuzioni. Una finestra sotto quel valore risulta
+    insufficiente, e questo lascia un avviso in corso esattamente dov’era.
+  </p>
+  <p>
+    Il dettaglio nomina le tre esecuzioni peggiori e il nodo intorno a cui è
+    girata ognuna: <code>checkout v1 run r_9f2 attempted settle 11 times</code>.
+    Le esecuzioni che non hanno ripetuto niente non vengono nominate, perché
+    dentro non c’è niente da aprire.
+  </p>
 
   <h2>Un obiettivo, quando una soglia è la domanda sbagliata</h2>
   <p>
