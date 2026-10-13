@@ -1013,6 +1013,11 @@ async fn main() -> Result<()> {
     // start-up checks and the server all see the lists without blank entries.
     // `ServerConfig::drop_blank_keys` says why an empty variable produces one.
     config.drop_blank_keys();
+    // The demo seeds aspect notes and themes, so it keeps clustering them on
+    // the timer too, unless the config file says otherwise.
+    if matches!(cli.command, Some(Command::Demo)) && file.aspects.is_none() {
+        config.aspects.enabled = true;
+    }
 
     if matches!(cli.command, Some(Command::Config)) {
         let prices_line = prices::describe(&price_book, price_book_path.as_deref());
@@ -1226,6 +1231,8 @@ async fn main() -> Result<()> {
         )
         .await?;
         tracing::info!("seeded {n} demo signals");
+        let noted = demo::seed_aspects(&state, &cli.project).await?;
+        tracing::info!("seeded {noted} demo signals with aspect notes and themes");
         if let Some(runs) = &run_store {
             let seeded = demo::seed_runs(runs.as_ref(), &cli.project).await?;
             tracing::info!("seeded {seeded} demo runs");
