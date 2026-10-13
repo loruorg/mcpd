@@ -169,8 +169,9 @@ const locale = localeOf(Astro.url.pathname)
 
   <h2>Claves y ámbitos</h2>
   <p>
-    La autenticación son claves de API. No hay cuenta, ni sesión, ni inicio de
-    sesión. Una clave se presenta como <code>Authorization: Bearer …</code> o en
+    La autenticación son claves de API. Por defecto no hay cuenta, ni sesión,
+    ni inicio de sesión; <code>--signup</code> y <code>--accounts</code> los
+    añaden, como se describe más abajo. Una clave se presenta como <code>Authorization: Bearer …</code> o en
     la cabecera <code>X-Mcpd-Key</code>, y ambos lados se pasan por SHA-256
     antes de compararse, de modo que ni la longitud de la clave configurada ni
     la posición del primer carácter equivocado se deducen del tiempo de
@@ -220,6 +221,62 @@ const locale = localeOf(Astro.url.pathname)
     <a href={urlFor('/docs/reference/api', locale)} class="link">API HTTP</a>,
     así que hay una sola respuesta a «qué necesita este endpoint» en lugar de
     una por documento.
+  </p>
+
+  <h3>Cuentas, con --signup o --accounts</h3>
+  <p>
+    Con <code>--signup</code>, cualquiera puede crear una cuenta con un correo
+    y una contraseña; con <code>--accounts</code>, las personas llegan por
+    invitación, inicio de sesión único o SCIM. Cada proyecto de cuenta
+    pertenece a una organización, y el rol de un miembro en ella (owner, admin,
+    member o viewer, que se puede sustituir en un proyecto concreto) se traduce
+    a los seis ámbitos. Una sesión lleva los ámbitos que el rol permite en cada
+    proyecto de las organizaciones de la cuenta; una clave lleva un ámbito en
+    un proyecto, y solo mientras el rol de quien la creó lo siga permitiendo.
+    Nada llega a un proyecto de una organización a la que la cuenta no
+    pertenece. Una señal que envía una clave de cuenta se almacena en el
+    proyecto de la clave, sea cual sea el proyecto que nombre, y una clave de
+    idempotencia se guarda por proyecto, así que una cuenta no puede hacer que
+    el lote de otra parezca un reenvío. Solo una sesión puede listar, crear o
+    revocar claves, así que una clave filtrada no puede crear más.
+  </p>
+  <p>
+    Las contraseñas se pasan por argon2id. Los tokens, las claves, los enlaces
+    enviados por correo, los tokens de invitación, los códigos de recuperación
+    y los tokens SCIM son valores aleatorios, se muestran una sola vez y solo
+    se guardan como resúmenes SHA-256. El registro, el inicio de sesión y el
+    restablecimiento de contraseña dan la misma respuesta tenga o no cuenta una
+    dirección, y dicen el resto en un correo a esa dirección. Una dirección se
+    confirma con un enlace antes de que la cuenta pueda iniciar sesión. El
+    inicio de sesión en dos pasos usa códigos basados en el tiempo, rechaza un
+    código ya usado y da diez códigos de recuperación de un solo uso. Cada
+    puerta de credenciales está limitada por dirección de cliente, y los
+    inicios de sesión fallidos por correo. Las sesiones con contraseña duran 30
+    días y las de inicio de sesión único 24 horas; una cuenta puede listar y
+    cerrar sus sesiones, y cambiar o restablecer la contraseña cierra las
+    demás.
+  </p>
+  <p>
+    El inicio de sesión único es OpenID Connect con PKCE, un estado de un solo
+    uso y un nonce, más un secreto que guarda el navegador que empezó el inicio
+    de sesión, así que un enlace de inicio de sesión no se puede pasar a otra
+    persona. Se comprueban la firma, el emisor, la audiencia, la caducidad y el
+    nonce del ID token, y se rechazan los algoritmos simétricos. A una persona
+    se la encuentra por su identidad en el proveedor; solo se crea una cuenta
+    nueva para una dirección de un dominio que la organización reclama, nunca
+    se toma una cuenta existente, y la sesión llega solo a los proyectos de esa
+    organización. SCIM aprovisiona los usuarios y grupos de una organización
+    con un token que no llega a nada más; desaprovisionar cierra la
+    membresía, sus claves y sus sesiones. Consulta
+    <a href="/docs/accounts" class="link">cuentas y organizaciones</a>.
+  </p>
+  <p>
+    El modo también desactiva la regla de que un ámbito sin claves está
+    abierto: una solicitud sin credencial se rechaza en todas partes salvo en
+    las sondas, el registro y el inicio de sesión. Las claves configuradas se
+    prueban primero y conservan el alcance que tienen. Consulta
+    <a href={`${urlFor('/docs/configuration', locale)}#signup`} class="link">Registro abierto</a>
+    para las opciones.
   </p>
 
   <h3>La lista de reserva, y qué significa para una clave que ya tienes</h3>
@@ -364,7 +421,9 @@ const locale = localeOf(Astro.url.pathname)
     toma el ámbito <code>admin</code>.
   </p>
   <p>
-    Se anotan dieciocho acciones: <code>get_trace</code>, <code>list_spans</code>,
+    Se anotan cuarenta y cuatro acciones. Veinte son lecturas y borrados de
+    datos: <code>get_trace</code>, <code>get_trajectory</code>,
+    <code>list_traces</code> cuando se le piden vistas previas, <code>list_spans</code>,
     <code>list_logs</code>, <code>list_feedback</code>,
     <code>list_dataset_items</code>, <code>capture_into_dataset</code>,
     <code>read_trace_aspect_notes</code>, <code>get_theme</code>, <code>get_theme_flow</code>, <code>list_theme_history</code>, <code>list_theme_examples</code>,
@@ -374,10 +433,31 @@ const locale = localeOf(Astro.url.pathname)
     <code>cancel_run</code>. La frontera es el payload, no la solicitud. Listar
     trazas devuelve una proyección de nombres, tiempos, recuentos de tokens y
     costo sin ningún prompt ni respuesta dentro, así que no queda anotado;
-    abrir una de esas trazas sí, porque ahí está el texto. Listar ejecuciones
+    abrir una de esas trazas sí, porque ahí está el texto. Una lista a la que
+    se le piden vistas previas de entrada y salida también queda anotada, por
+    la misma razón. Listar ejecuciones
     duraderas sí queda anotado, porque cada ejecución de la lista lleva su
     entrada, su salida y su estado tal como se enviaron. Una lectura rechazada
     de una ejecución se anota bajo el proyecto dueño de la ejecución.
+  </p>
+  <p>
+    Las otras veinticuatro son cambios en quién puede llegar a qué, en un
+    daemon con cuentas. Se escriben contra el id de la organización en lugar de
+    un proyecto, llevan como subject el correo de la cuenta que actúa, y las lee
+    un admin o un owner con <code>GET /v1/api/orgs/{'{org_id}'}/audit</code>:
+    <code>org_create</code>, <code>org_update</code>, <code>org_delete</code>,
+    <code>member_invite</code>, <code>invite_revoke</code>,
+    <code>invite_accept</code>, <code>member_role</code>,
+    <code>member_project_role</code>, <code>member_remove</code>,
+    <code>project_create</code>, <code>project_delete</code>,
+    <code>org_key_revoke</code>, <code>group_roles_update</code>,
+    <code>sso_update</code>, <code>sso_delete</code>, <code>sso_login</code>,
+    <code>scim_token_rotate</code>, <code>scim_token_revoke</code>,
+    <code>scim_user_create</code>, <code>scim_user_update</code>,
+    <code>scim_user_delete</code>, <code>scim_group_create</code>,
+    <code>scim_group_update</code> y <code>scim_group_delete</code>. Un cambio
+    por SCIM lleva <code>scim</code> como subject y el resumen del token SCIM
+    como principal.
   </p>
   <p>
     Las llamadas de worker no se anotan: reclamar un paso, declarar que ha
@@ -400,8 +480,10 @@ const locale = localeOf(Astro.url.pathname)
       anota como <code>anonymous</code>.
     </li>
     <li>
-      <strong>La persona viene de tu ingress.</strong> Por sí sola, una fila
-      atribuye una acción a una clave. El campo <code>subject</code> lleva
+      <strong>La persona viene de una sesión o de tu ingress.</strong> Una
+      fila de un cambio de organización lleva el correo de la cuenta que actúa.
+      Para una clave, una fila atribuye una acción a la clave y no a una
+      persona. El campo <code>subject</code> lleva
       una identidad cuando <code>--trusted-identity-header</code> y
       <code>--trusted-proxy-cidr</code> están ambos definidos, y está vacío en
       caso contrario, que es lo que hay por defecto. mcpd nunca establece esa
@@ -420,8 +502,9 @@ const locale = localeOf(Astro.url.pathname)
       <strong>Anota qué clave y, opcionalmente, quién.</strong> La clave se
       guarda como un hash truncado, nunca la clave en sí, así que el registro no
       es un sitio donde se acumulen credenciales. Eso responde a «una clave de
-      administración borró esto». Para responder a «qué persona lo hizo», dale
-      la cabecera que tu ingress ya envía y las direcciones
+      administración borró esto». Una sesión además nombra a la persona en los
+      cambios de organización. Para las claves, dale la cabecera que tu
+      ingress ya envía y las direcciones
       autorizadas a enviarla:
       <code>--trusted-identity-header x-forwarded-user</code> con
       <code>--trusted-proxy-cidr 10.42.0.0/16</code>. Hacen falta las dos
@@ -454,7 +537,8 @@ const locale = localeOf(Astro.url.pathname)
       <strong>La interfaz.</strong> El marcado en <code>/</code> se sirve a
       cualquiera que alcance el puerto. Los datos que hay detrás no: cada
       solicitud que hace pasa por la API de consulta y se topa con las mismas
-      claves. No hay pantalla de inicio de sesión en el daemon.
+      claves. No hay pantalla de inicio de sesión en el daemon salvo que
+      <code>--signup</code> o <code>--accounts</code> estén activados.
     </li>
     <li>
       <strong>Las sondas y <code>/metrics</code>.</strong> Sin autenticar a
@@ -495,26 +579,29 @@ const locale = localeOf(Astro.url.pathname)
     <a href={urlFor('/docs/privacy', locale)} class="link">Ocultación y retención</a>.
   </p>
   <p>
-    <strong>Las reglas coinciden con nombres de campo, no con la forma de un
-    valor.</strong> Un valor que llega en un campo llamado <code>content</code>
-    o <code>question</code> se almacena tal como se envió, así que nombra los
-    campos que llevan credenciales e identificadores.
+    Las reglas coinciden con nombres de campo. Una credencial pegada en medio
+    de una frase llega en un campo llamado <code>content</code> o
+    <code>question</code>, así que en cada valor de cadena se buscan además las
+    formas que toman las credenciales: bloques de clave privada, JSON Web
+    Tokens, ids de clave de acceso de AWS, claves de proveedor que empiezan por
+    <code>sk-</code>, tokens de GitHub, Slack y Google, tokens bearer y
+    contraseñas en URL. Cada coincidencia se sustituye en su sitio y el resto
+    de la frase se conserva. La tabla está en
+    <a href={urlFor('/docs/privacy', locale)} class="link">Ocultación y retención</a>.
   </p>
-  <p>La ocultación cubre un alcance preciso:</p>
+  <p>Qué cubre la ocultación:</p>
   <ul>
-    <li>Detiene la captura estructurada de credenciales e identificadores, cuando una credencial llega en un campo que se llama como lo que es.</li>
-    <li>Trabaja sobre nombres de campo. El texto libre bajo un nombre de campo corriente se almacena tal como se envió.</li>
-    <li>Deja el nombre de un span y el mensaje de un registro de log tal como se enviaron. Esos son identificadores que sirven para agrupar y no payloads, y reescribirlos rompería la agrupación. No construyas el nombre de un span con el correo de un cliente.</li>
-    <li>Deja el almacén de ejecuciones tal como se envió. Los payloads de una ejecución duradera son su estado de trabajo; solo se ocultan los spans que una ejecución escribe en el almacén de trazas.</li>
+    <li>Enmascara las credenciales y los identificadores que llegan en un campo que se llama como lo que son, y las credenciales con las formas de arriba dondequiera que aparezcan en una cadena.</li>
+    <li>Un secreto sin prefijo fijo, como una contraseña escrita en una frase, se enmascara por el campo en el que llega.</li>
+    <li>No toca el nombre de un span ni el mensaje de un registro de log. Esos son identificadores que sirven para agrupar y no payloads, y reescribirlos rompería la agrupación. No construyas el nombre de un span con el correo de un cliente.</li>
+    <li>No toca el almacén de ejecuciones. Los payloads de una ejecución duradera son su estado de trabajo y se guardan tal como se enviaron; solo se ocultan los spans que una ejecución escribe en el almacén de trazas.</li>
   </ul>
   <p>
-    Un control trabaja sobre la forma, como detección a posteriori: el
-    evaluador integrado <code>no_leaked_secret</code> baja la nota de una
-    ejecución cuya <em>respuesta</em> lleva un token con aspecto de credencial,
-    por prefijo conocido o por una tirada larga alfanumérica con mayúsculas y
-    minúsculas. Puntúa la respuesta de una ejecución que ya está almacenada, no
-    quita nada, y solo corre cuando lo pides. Úsalo para enterarte de que esto
-    ha pasado, no como una segunda línea de ocultación.
+    El evaluador integrado <code>no_leaked_secret</code> añade detección a
+    posteriori: baja la nota de una ejecución cuya <em>respuesta</em> lleva un
+    token con aspecto de credencial, por prefijo conocido o por una tirada
+    larga alfanumérica con mayúsculas y minúsculas. Puntúa una ejecución que ya
+    está almacenada y solo corre cuando lo pides.
   </p>
   <p>
     Dos límites se aplican haya coincidido una regla o no. Toda cadena de más de
@@ -577,19 +664,7 @@ const locale = localeOf(Astro.url.pathname)
         <td>Termina TLS en tu ingress o en tu malla de servicios, y mantén el puerto del daemon fuera de cualquier red no confiable.</td>
       </tr>
       <tr>
-        <td><strong>Inicio de sesión único.</strong> La identidad de una persona viene del proxy que hay delante de mcpd.</td>
-        <td>Pon la interfaz detrás del proxy de identidad que ya operas. La identidad de una persona es la que establezca ese proxy.</td>
-      </tr>
-      <tr>
-        <td><strong>Aprovisionamiento.</strong> Dentro de mcpd la unidad es una clave.</td>
-        <td>Aprovisiona en el proxy. Dentro de mcpd, añade una clave a una lista o quítala de ella.</td>
-      </tr>
-      <tr>
-        <td><strong>Roles.</strong> La autorización es uno de los seis ámbitos y una lista de proyectos.</td>
-        <td>Separa por clave y por proyecto. Si una distinción importa, hazla un proyecto.</td>
-      </tr>
-      <tr>
-        <td><strong>Quién es una persona.</strong> El registro de auditoría anota el subject que afirmó tu ingress, y solo desde una dirección que tú nombraste.</td>
+        <td><strong>Quién es una persona, para las claves.</strong> Las sesiones nombran la cuenta. Para una clave, el registro de auditoría anota el subject que afirmó tu ingress, desde una dirección que tú nombraste.</td>
         <td>Define <code>--trusted-identity-header</code> y <code>--trusted-proxy-cidr</code> para que la cabecera que tu proxy ya envía llegue a la fila de auditoría. Sin ellas una fila atribuye una acción a una clave, y emitir una clave por equipo estrecha el hash.</td>
       </tr>
       <tr>
