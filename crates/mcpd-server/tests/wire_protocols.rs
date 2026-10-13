@@ -361,7 +361,10 @@ async fn otlp_grpc_refuses_a_missing_or_unknown_key() {
 
 #[tokio::test]
 async fn otlp_grpc_pins_an_account_key_to_its_own_project() {
-    let d = daemon(ServerConfig { signup: true, ..ServerConfig::default() }).await;
+    let outbox = mcpd_server::mail::Outbox::default();
+    let mut config = ServerConfig { signup: true, ..ServerConfig::default() };
+    config.account_settings.mail = mcpd_server::mail::MailConfig::Memory(outbox.clone());
+    let d = daemon(config).await;
     let signup = post(
         &d.app,
         "/v1/api/account/signup",
@@ -373,7 +376,20 @@ async fn otlp_grpc_pins_an_account_key_to_its_own_project() {
     )
     .await;
     assert_eq!(signup.status, StatusCode::OK, "{}", String::from_utf8_lossy(&signup.body));
-    let who = signup.json();
+    // Sign-up mails a confirmation link; confirming it is what opens a session.
+    let mail = outbox.last_to("ana@example.com").expect("a confirmation mail");
+    let at = mail.body.find("#verify=").expect("a verify link");
+    let link_token = mail.body[at + "#verify=".len()..].split_whitespace().next().unwrap();
+    let verified = post(
+        &d.app,
+        "/v1/api/account/verify",
+        "application/json",
+        json!({ "token": link_token }).to_string().into_bytes(),
+        &[],
+    )
+    .await;
+    assert_eq!(verified.status, StatusCode::OK, "{}", String::from_utf8_lossy(&verified.body));
+    let who = verified.json();
     let token = who["token"].as_str().unwrap().to_owned();
     let project = who["project"].as_str().unwrap().to_owned();
     let minted = post(
