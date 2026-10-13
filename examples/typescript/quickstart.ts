@@ -28,6 +28,8 @@ const mcpd = new Mcpd({
 })
 // #endregion init
 
+import { renderPrompt, type McpdSpan } from '@mcpd/sdk'
+
 // ---------------------------------------------------------------------------
 // The agent
 // ---------------------------------------------------------------------------
@@ -37,6 +39,12 @@ interface Ticket {
   customerId: string
   question: string
 }
+
+/** The answer prompt: stored in mcpd at start, and the fallback if it cannot be read. */
+const ANSWER_MESSAGES = [
+  { role: 'system', content: 'You are a support agent. Be brief and exact.' },
+  { role: 'user', content: '{{question}}\n\nOrder: {{order}}' },
+]
 
 const ORDER_BOOK: Record<string, { status: string; eta: string }> = {
   'A-1042': { status: 'in transit', eta: '2026-09-02' },
@@ -97,50 +105,79 @@ async function lookUpOrder(ticket: Ticket): Promise<{ status: string; eta: strin
   )
 }
 
-/** A model generation: the prompt, the completion, and what it cost. */
+/**
+ * Where a real provider call goes. This is the shape Anthropic answers in.
+ *
+ * The span is passed in so the time to the first token can be marked on it.
+ */
+async function callModel(generation: McpdSpan, order: { status: string; eta: string }) {
+  await pause(40)
+  generation.markFirstToken()
+  mcpd.log('info', 'answered from cache-warm prompt', { cached: true })
+  const answer = `Your order is ${order.status} and should arrive on ${order.eta}.`
+  return {
+    id: 'msg_01',
+    type: 'message',
+    model: 'claude-sonnet-4-5',
+    stop_reason: 'end_turn',
+    content: [{ type: 'text', text: answer }],
+    usage: { input_tokens: 172, cache_read_input_tokens: 640, output_tokens: 37 },
+  }
+}
+
+// #region prompt
+/**
+ * A model generation. Its prompt is stored in mcpd, so a new version ships by
+ * moving the `production` label, with no deploy.
+ */
 async function draftAnswer(
   ticket: Ticket,
   order: { status: string; eta: string },
 ): Promise<string> {
+  // Cached for a minute. When the daemon cannot answer, the last copy is
+  // used, and with no copy the fallback, so an outage never stops an answer.
+  const prompt = await mcpd.getPrompt('support-answer', {
+    label: 'production',
+    fallback: ANSWER_MESSAGES,
+  })
+  const messages = renderPrompt(prompt, {
+    question: ticket.question,
+    order: JSON.stringify(order),
+  })
+
   return await mcpd.withSpan(
     'draft_answer',
     async (generation) => {
-      const prompt = [
-        { role: 'system', content: 'You are a support agent. Be brief and exact.' },
-        { role: 'user', content: `${ticket.question}\n\nOrder: ${JSON.stringify(order)}` },
-      ]
-      generation.setInput(prompt)
-
-      // Where a real provider call goes. This is the shape Anthropic answers in.
-      await pause(40)
-      generation.markFirstToken()
-      const answer = `Your order is ${order.status} and should arrive on ${order.eta}.`
-      const response = {
-        id: 'msg_01',
-        type: 'message',
-        model: 'claude-sonnet-4-5',
-        stop_reason: 'end_turn',
-        content: [{ type: 'text', text: answer }],
-        usage: { input_tokens: 172, cache_read_input_tokens: 640, output_tokens: 37 },
-      }
-
+      // Links the call to its prompt version, so spans can be read per version.
+      generation.setPrompt(prompt)
+      generation.setInput(messages)
+      const response = await callModel(generation, order)
+      const answer = response.content[0]?.text ?? ''
       generation.setOutput(answer)
       // The model, the token counts mcpd prices, the response id and the
       // finish reason, read from the response in one call.
       generation.recordResponse(response)
-
-      mcpd.log('info', 'answered from cache-warm prompt', { cached: true })
       return answer
     },
     { kind: 'model_generation', entityKind: 'model', entityName: 'answer_writer' },
   )
 }
+// #endregion prompt
 
 // ---------------------------------------------------------------------------
 // Running it
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
+  // Store the prompt the agent reads, and label it `production`. Posting the
+  // same body again stores nothing, so this is safe on every start.
+  await mcpd.createPrompt({
+    name: 'support-answer',
+    messages: ANSWER_MESSAGES,
+    note: 'first version',
+    labels: ['production'],
+  })
+
   // The good path.
   const { answer, traceId } = await handleTicket({
     id: 'tk-1',

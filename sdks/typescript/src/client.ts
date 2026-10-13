@@ -11,6 +11,7 @@ import type {
   AnalyticsSummary,
   Correlation,
   CostBreakdown,
+  CreatePromptRequest,
   Feedback,
   FeedbackKind,
   FeedbackListResponse,
@@ -22,6 +23,7 @@ import type {
   MetricKind,
   MetricPoint,
   MetricSeriesResponse,
+  Prompt,
   Score,
   ScoreListResponse,
   ScoreSource,
@@ -49,7 +51,15 @@ import type { Signal } from './queue.js'
 import type { Sink } from './sinks.js'
 import { encodeFields, meetsLevel, parseLogLevel } from './logging.js'
 import type { Diagnostics, FetchLike, QueryValue } from './transport.js'
-import { McpdError, RateLimitedDiagnostics, Transport } from './transport.js'
+import {
+  McpdError,
+  PROMPT_OPAQUE_KEYS,
+  RateLimitedDiagnostics,
+  Transport,
+  encodeQuery,
+} from './transport.js'
+import { PromptCache, fallbackPrompt } from './prompts.js'
+import type { PromptFallback } from './prompts.js'
 import { DefinitionsApi, EventsApi, RunsApi, StepsApi } from './runs.js'
 
 /** Every setting, and the environment variable that also sets it. */
@@ -291,6 +301,7 @@ export class Mcpd implements SpanHost {
   readonly #transport: Transport
   readonly #diagnostics: Diagnostics
   readonly #errorIntervalMs: number
+  readonly #prompts = new PromptCache(256)
   /** Durable runs: start, read, watch, cancel, signal. */
   readonly runs: RunsApi
   /** The versioned definitions the daemon walks. */
@@ -691,7 +702,10 @@ export class Mcpd implements SpanHost {
    */
   async listTraces(query: TraceQuery = {}): Promise<TraceListResponse> {
     if (!this.#enabled) return { traces: [], page: { hasMore: false } }
-    return await this.#transport.get<TraceListResponse>('/v1/api/traces', this.#scoped(query))
+    return await this.#transport.get<TraceListResponse>(
+      '/v1/api/traces',
+      this.#scoped(documented(query, TRACE_PARAMS)),
+    )
   }
 
   /** One trace and every span in it, ordered for a waterfall. */
@@ -710,7 +724,10 @@ export class Mcpd implements SpanHost {
   /** Search individual steps across every trace. */
   async listSpans(query: SpanQuery = {}): Promise<SpanListResponse> {
     if (!this.#enabled) return { spans: [], page: { hasMore: false } }
-    return await this.#transport.get<SpanListResponse>('/v1/api/spans', this.#scoped(query))
+    return await this.#transport.get<SpanListResponse>(
+      '/v1/api/spans',
+      this.#scoped(documented(query, SPAN_PARAMS)),
+    )
   }
 
   /** Search logs. Every result carries the trace id that produced it. */
@@ -766,6 +783,92 @@ export class Mcpd implements SpanHost {
       '/v1/api/analytics/cost',
       this.#scoped(pick(query, ['project', 'from', 'to', 'groupBy', 'bucket'])),
     )
+  }
+
+  // -------------------------------------------------------------------------
+  // Prompts
+  // -------------------------------------------------------------------------
+
+  /**
+   * One version of a prompt, by `label`, by `version`, or by the label
+   * `production` when neither is given, falling back to the latest version
+   * when nothing carries that label yet.
+   *
+   * Copies are cached per client for `cacheTtlMs` (60 s by default). When a
+   * fetch fails, the last copy is returned however old it is and the failure
+   * is reported once; with no copy, `fallback` is returned (never cached); with
+   * neither, the error is thrown. Runs even when `enabled` is false: a prompt
+   * is the agent's input, not telemetry.
+   */
+  async getPrompt(name: string, options: GetPromptOptions = {}): Promise<Prompt> {
+    if (typeof name !== 'string' || name.length === 0) {
+      throw new McpdError('getPrompt needs a prompt name')
+    }
+    const { label, version, fallback } = options
+    if (label !== undefined && version !== undefined) {
+      throw new McpdError('getPrompt takes a label or a version, not both')
+    }
+    const ttl = options.cacheTtlMs ?? 60_000
+    const selector =
+      label !== undefined ? `label:${label}` : version !== undefined ? `version:${version}` : 'default'
+    const key = JSON.stringify([this.#project, name, selector])
+    const cached = this.#prompts.get(key)
+    if (cached !== undefined && Date.now() - cached.at < ttl) return { ...cached.prompt }
+
+    try {
+      const prompt = await this.#fetchPrompt(name, label, version)
+      this.#prompts.set(key, prompt, Date.now())
+      return { ...prompt }
+    } catch (error) {
+      if (cached !== undefined) {
+        this.#diagnostics.report(`getPrompt ${name} served a stale copy`, error)
+        return { ...cached.prompt }
+      }
+      if (fallback !== undefined) return fallbackPrompt(this.#project, name, fallback)
+      throw error
+    }
+  }
+
+  async #fetchPrompt(name: string, label?: string, version?: number): Promise<Prompt> {
+    const path = `/v1/api/prompts/${encodeURIComponent(name)}`
+    const opaque = { opaque: PROMPT_OPAQUE_KEYS }
+    if (label !== undefined || version !== undefined) {
+      const query: Record<string, QueryValue> = label !== undefined ? { label } : { version }
+      return await this.#transport.get<Prompt>(path, this.#scoped(query), opaque)
+    }
+    try {
+      return await this.#transport.get<Prompt>(path, this.#scoped({ label: 'production' }), opaque)
+    } catch (error) {
+      // A prompt nobody has labelled yet still has to work, so the default
+      // label's 404 means "the latest version" rather than "no prompt".
+      if (!(error instanceof McpdError) || error.status !== 404) throw error
+      return await this.#transport.get<Prompt>(path, this.#scoped({}), opaque)
+    }
+  }
+
+  /**
+   * Store a version of a prompt and return it. A body identical to the latest
+   * version stores nothing and returns that version, so a deploy can post its
+   * prompts on every start. Does not clear the read cache.
+   */
+  async createPrompt(request: CreatePromptRequest): Promise<Prompt> {
+    return await this.#transport.post<Prompt>(
+      '/v1/api/prompts' + encodeQuery({ project: this.#project }),
+      request,
+      { opaque: PROMPT_OPAQUE_KEYS },
+    )
+  }
+
+  /**
+   * Point a label at a version. Moving `production` releases a version and
+   * moving it back rolls one back. A running agent sees the move within its
+   * cache TTL.
+   */
+  async setPromptLabel(name: string, label: string, version: number): Promise<Prompt> {
+    const path =
+      `/v1/api/prompts/${encodeURIComponent(name)}/labels/${encodeURIComponent(label)}` +
+      encodeQuery({ project: this.#project })
+    return await this.#transport.put<Prompt>(path, { version }, { opaque: PROMPT_OPAQUE_KEYS })
   }
 
   /** Liveness. Never touches storage, so it answers even when the database is slow. */
@@ -966,6 +1069,29 @@ function encodable(signal: Signal): Signal {
   }
 }
 
+// The parameters each list endpoint documents. Anything else is dropped here
+// rather than sent, because the daemon answers 400 to a key it does not take.
+const TRACE_PARAMS: ReadonlySet<keyof TraceQuery & string> = new Set([
+  'project', 'q', 'status', 'kind', 'name', 'tags', 'sessionId', 'threadId', 'userId',
+  'environment', 'model', 'from', 'to', 'minDurationMs', 'maxDurationMs', 'minCost', 'maxCost',
+  'minTokens', 'hasScore', 'scoreBelow', 'scoreAbove', 'hasFeedback', 'sort', 'order', 'limit',
+  'cursor',
+])
+
+const SPAN_PARAMS: ReadonlySet<keyof SpanQuery & string> = new Set([
+  'project', 'q', 'kind', 'status', 'name', 'model', 'traceId', 'prompt', 'promptVersion', 'from',
+  'to', 'minDurationMs', 'sort', 'order', 'limit', 'cursor',
+])
+
+/** The documented keys of a list query, in the order the caller wrote them. */
+function documented(query: Record<string, QueryValue>, allowed: ReadonlySet<string>): Record<string, QueryValue> {
+  const out: Record<string, QueryValue> = {}
+  for (const [key, value] of Object.entries(query ?? {})) {
+    if (allowed.has(key) && value !== undefined) out[key] = value
+  }
+  return out
+}
+
 /** The named keys of a read query and nothing else, ready for the transport. */
 function pick<T extends object>(query: T, keys: ReadonlyArray<keyof T & string>): Record<string, QueryValue> {
   const out: Record<string, QueryValue> = {}
@@ -1088,11 +1214,21 @@ export interface TraceQuery extends BaseQuery {
   environment?: string
   model?: string
   minDurationMs?: number
+  /** Only traces at most this slow. */
+  maxDurationMs?: number
   minCost?: number
+  /** Only traces at most this expensive. */
+  maxCost?: number
+  /** Only traces that used at least this many tokens, input and output together. */
+  minTokens?: number
   /** Only traces carrying a score from this scorer. */
   hasScore?: string
   /** With `hasScore`: only traces that scorer put below this. Finds bad answers. */
   scoreBelow?: number
+  /** With `hasScore`: only traces that scorer put above this. */
+  scoreAbove?: number
+  /** `true` for only traces a person gave feedback on, `false` for only traces with none. */
+  hasFeedback?: boolean
   sort?: string
   order?: 'asc' | 'desc'
 }
@@ -1104,9 +1240,28 @@ export interface SpanQuery extends BaseQuery {
   name?: string
   model?: string
   traceId?: string
+  /** Only spans linked to this prompt by `span.setPrompt`. */
+  prompt?: string
+  /** With `prompt`: only spans that used this version of it. */
+  promptVersion?: number
   minDurationMs?: number
   sort?: string
   order?: 'asc' | 'desc'
+}
+
+/** How `getPrompt` picks a version, how long it keeps it, and what it serves when it cannot. */
+export interface GetPromptOptions {
+  /** Read the version this label points at. Not with `version`. */
+  label?: string
+  /** Read this version. Not with `label`. */
+  version?: number
+  /** How long a fetched copy is served with no request. 0 fetches every time. */
+  cacheTtlMs?: number
+  /**
+   * Served when the fetch fails and nothing was fetched before: a template
+   * becomes a `text` prompt, a list of messages a `chat` prompt. Version 0.
+   */
+  fallback?: PromptFallback
 }
 
 export interface LogQuery extends BaseQuery {
