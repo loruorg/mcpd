@@ -10,7 +10,7 @@ const href = (route: string) => urlFor(route, locale)
 
 <Doc
   title="İzleyiciler ve uyarılar"
-  description="mcpd hata oranını, gecikmeyi, maliyeti ve puan ortalamalarını arka planda nasıl izler, bir izleyici neden mandallanır, sessiz pencere neden uyarıyı temizlemez ve geçişte gönderdiği webhook gövdesi."
+  description="mcpd hata oranını, gecikmeyi, maliyeti, puan ortalamalarını, yapısal sapmayı ve çalıştırma tekrarını nasıl izler, bir izleyici neden mandallanır, sessiz pencere neden duran bir uyarıyı hiç temizlemez ve webhook'u."
   lede="İzlemeye değer bir koşul, izleniyor. mcpd bir zamanlayıcıyla değerlendirir, bulduğunu mandallar ve size bir kez söyler."
   og="docs"
 >
@@ -96,6 +96,255 @@ const href = (route: string) => urlFor(route, locale)
       </tr>
     </tbody>
   </table>
+
+  <h2>Sayıyı adlandıramadığınızda</h2>
+  <p>
+    Yukarıdaki her izleyici bir ölçümü sizin seçtiğiniz bir tavanla
+    karşılaştırır. Ölçümün ne olması gerektiğini bildiğiniz sürece bu işe
+    yarar. Yakalaması en zor kontrolden çıkma, aklınıza koymak gelecek hiçbir
+    tavana ulaşmayandır: iki yerine sekiz kez döngüye giren, biten, olması
+    gerekenin dört katına mal olan ve hiçbir hata bildirmeyen bir çalıştırma.
+    Adım sayısı mutlak olarak yüksek değildir. <em>O tanım için</em> yüksektir
+    ve bunu yalnızca o tanımın kendi son çalıştırmaları söyleyebilir.
+  </p>
+  <p>
+    <code>step_count_divergence</code> adım cinsinden bir eşik koymaz. Her tanım
+    sürümü için o sürümün yakın zamanda tamamlanan çalıştırmalarının adım
+    sayılarını alır, bunların ortasını alışılmış biçim olarak kabul eder ve
+    standartlaştırılmış bir sınırın izin verdiğinden daha uzakta duran
+    çalıştırmaları bildirir. Kimsenin <code>checkout</code> tanımının normalde
+    on bir adım attığını bilmesi gerekmez, on dört atmaya başladığında da
+    kimsenin sayıyı yeniden ele alması gerekmez.
+  </p>
+
+  <h3>İstatistik ve neden bu olduğu</h3>
+  <p>
+    Bir çalıştırmanın ne kadar uzakta durduğunun ölçüsü değiştirilmiş
+    z-skorudur:
+    <span class="data">0.6745 &times; (steps &minus; median) &divide; MAD</span>;
+    burada MAD, medyandan mutlak sapmaların medyanıdır. Bu skor
+    <code>z_bound</code> değerini geçtiğinde çalıştırma sapmış sayılır;
+    varsayılan <span class="data">3.5</span>'tir.
+  </p>
+  <p>
+    İki sabit de alışılmış olanlardır ve hiçbiri keyfi değildir. Normal dağılan
+    verilerde medyan mutlak sapma &sigma;'ya değil 0.6745&sigma;'ya yakınsar, bu
+    yüzden ham oran, standart sapmanın yaklaşık üçte ikisi birimiyle ölçülür.
+    0.6745 ile çarpmak onu &sigma; birimine geri getirir; 3.5'in herkesin
+    anladığı anlama gelmesini sağlayan budur. 3.5, istatistikle birlikte
+    yayımlanan sınırdır, normal veride yaklaşık iki binde bir çalıştırma. Adım
+    sayıları normal dağılmaz, bu yüzden onu söz verilmiş bir yanlış alarm oranı
+    olarak değil, ayarlamaya başlayacağınız değer olarak görün.
+  </p>
+  <p>
+    Ortalama ve standart sapma yerine medyan ve MAD kullanılır, çünkü bunlar
+    aranan şeye dayanır. Alışılmış adım sayısının kırk katını atan tek bir
+    çalıştırma, ortalamayı oynatır ve standart sapmayı kendini gizleyecek kadar
+    şişirir; medyan mutlak sapma ise örneğinin yarısına kadar aykırı değer
+    olsa bile hiç kıpırdamaz.
+  </p>
+
+  <h3>Yerleşik güvenceler</h3>
+  <ul>
+    <li>
+      <strong>Yargıya yetecek büyüklükte bir örnek.</strong> İzleyicinin bir
+      tanım sürümüyle bir şey karşılaştırması için o sürümün pencerede
+      <span class="data">12</span> tamamlanmış çalıştırması olmalıdır. On ikinin
+      medyanı altıncı ile yedinci değerin arasında durur, böylece ortanın nerede
+      olduğuna tek bir çalıştırma karar vermez. Bunun altında alışılmadık tek
+      bir çalıştırma ortanın kendisini oynatır ve taban çizgisi normu değil
+      aykırı değeri tanımlar. Yeterince çalıştırması olmayan bir sürüm yetersiz
+      olarak okunur ve bu, duran bir uyarıyı tam olduğu yerde bırakır. On iki,
+      izleyicinin kendi penceresi içinde sayılır, bu yüzden ikisini birlikte
+      ayarlayın: saatte birkaç kez çalışan bir tanımın bunlara ulaşması için
+      saatlerle ölçülen bir <code>window_seconds</code> gerekir.
+    </li>
+    <li>
+      <strong>Sıfıra bölme yok.</strong> Döngüsü ve dalı olmayan bir tanım her
+      seferinde aynı sayıda adım atar, bu yüzden MAD'i sıfırdır ve ondan her
+      sapma sonsuz derecede anormaldir. Sonsuz döndürmek bir yanıt değildir:
+      karşılaştırılamaz, birinin üzerine iş yapması gereken bir cümlede
+      <code>inf</code> olarak basılır ve bir webhook'a <code>null</code> olarak
+      ulaşır. mcpd, aynı &sigma;'yı tahmin etsin diye &radic;(&pi;/2) ile
+      ölçeklenmiş ortalama mutlak sapmaya geçer. Örnekteki her çalıştırma tam
+      olarak aynı sayıda adım attığı için o da sıfırsa, bildirilecek bir oran
+      yoktur ve uyarı bunu adım cinsinden söyler: &ldquo;son 12 tamamlanmış
+      çalıştırmanın her biri 9 adım attı&rdquo;. Yalnızca bu durumda
+      <code>z_bound</code> uygulanmaz, çünkü ona karşı tutulacak bir skor
+      yoktur: sınırı yükseltmek olağan sayılan değişimi genişletir, hiç
+      değişimi olmayan bir grupta da genişletilecek bir şey yoktur.
+    </li>
+    <li>
+      <strong>Bir anda bir tanım sürümü.</strong> Çalıştırmalar tanım
+      <em>sürümüne</em> göre gruplanır. Yeni bir sürüm, biçimde bilinçli bir
+      değişikliktir; bu yüzden v3'ün bir çalıştırması, v2'nin bir
+      çalıştırmasından farklı olduğu için anormal sayılmaz ve ikisini bir araya
+      koymak, medyanı hiçbirini tanımlamayan iki tepeli bir örnek üretir. Yeni
+      yayımlanmış bir sürüm bu yüzden kendi on iki tamamlanmış çalıştırması
+      olana kadar hiçbir şey bildirmez ve doğru olan da budur.
+    </li>
+    <li>
+      <strong>Her başarısızlık için tek bildirim.</strong> Taban çizgisine
+      yalnızca tamamlanmış çalıştırmalar katılır ve yalnızca tamamlanmış bir
+      çalıştırma çok <em>az</em> adım attığı için bildirilir. Erken bitmek;
+      başarısız olmak, iptal edilmek, zaman aşımına uğramak ve henüz bitmemiş
+      olmak demektir, bu izleyici ise hata oranının göremediğini görmek için
+      vardır. Yine de süren bir çalıştırma da skorlanır: çoktan uzamış bir
+      çalıştırma hâlâ sürerken bildirilir ve izleyicinin bütün amacı budur.
+    </li>
+  </ul>
+
+  <h3>Yapılandırmak</h3>
+  <p>
+    Bu izleyicinin iki sayısı vardır, çünkü iki soru sorar. <code>z_bound</code>
+    tek bir çalıştırmanın ne kadar uzakta olması gerektiğini sorar ve
+    standartlaştırılmış bir skordur; böylece aynı 3.5, genelde dört adım atan
+    bir tanıma da genelde dört yüz adım atan bir tanıma da hizmet eder.
+    <code>threshold</code> ise birine haber verilmeden önce bir pencerenin bu
+    tür kaç çalıştırma tutabileceğini sorar; bu operasyonel bir seçimdir.
+    Herhangi birinden haberdar olmak için onu <code>above</code> ile
+    <code>0</code> yapın. <code>below</code> bu izleyicide işe yaramaz: her
+    çalıştırmanın olağan olması sağlıklı durumdur, birini uyandırmaya değer
+    durum değil.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitors": [
+    {
+      "id": "checkout-shape",
+      "name": "A checkout run took an unusual number of steps",
+      "project": "support-desk",
+      "watch": "step_count_divergence",
+      "compare": "above",
+      "threshold": 0,
+      "z_bound": 3.5,
+      "window_seconds": 3600,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    Ölçülen değer sapan çalıştırmaların sayısıdır, bu yüzden
+    <code>compare</code> ve <code>threshold</code> adım değil çalıştırma sayar.
+    Ayrıntı en kötü üçünü adlandırır: <code>checkout v1 run r_9f2 took 40 steps
+    against a usual 10 (z 20.2)</code>.
+  </p>
+  <p>
+    Bu izleyici saklanmış trace'leri değil kalıcı çalıştırma deposunu okur,
+    çünkü bir çalıştırmanın hangi tanım sürümüne sabitlendiğini ve kaç adım
+    attığını yalnızca çalıştırma başlığı bilir. Aşağıdaki
+    <code>run_repetition</code> de onu okur ve bunu yapan yalnızca bu ikisidir.
+    Hiç çalıştırma sunmayan bir daemon bunu yetersiz olarak bildirir ve bunu
+    söyler. <code>min_samples</code> burada okunmaz: önemli olan örnek pencere
+    başına değil, tanım sürümü başınadır.
+  </p>
+
+  <h2>Bir çalıştırma aynı şeyi yapıp durduğunda</h2>
+  <p>
+    Sapma, bir çalıştırmanın kendi tanımının genelde aldığı biçimden ne kadar
+    uzaklaştığını sorar ve yanıt verebilmek için bir grup yakın çalıştırmaya
+    ihtiyaç duyar. Hiç grup gerektirmeyen daha dar bir soru vardır: bir
+    çalıştırma aynı düğümün etrafında kaç kez döndü?
+  </p>
+  <p>
+    Burada iki hata hata oranından saklanır. Tek bir düğüme tekrar tekrar giren
+    bir döngü başarılı olur, sonunda hedefe ulaşan bir yeniden deneme fırtınası
+    da bir başarıdır. İkisi de hata oranı sıfırda kalırken aynı işi tekrar
+    tekrar yapar. Bu aynı zamanda adım sayısının tek başına veremediği
+    okumadır: kırk düğümü birer kez ziyaret eden kırk adımlık bir çalıştırma
+    uzun bir tanımdır, bir düğümü kırk kez ziyaret eden kırk adımlık bir
+    çalıştırma ise takılmıştır.
+  </p>
+  <p>
+    <code>run_repetition</code> denemeleri sayar. Penceredeki her çalıştırma
+    için o çalıştırmanın tanımındaki her düğümde yapılan deneme sayısını alır,
+    en büyüğünü tutar ve bu sayının pencere genelindeki ortalamasını okur. Bir
+    yeniden deneme, yeniden denediği düğüme bir deneme daha yazar; bir döngü
+    yinelemesi de yeniden girdiği düğüme yeni bir konum yazar, bu yüzden ikisi
+    de sayılır. <span class="data">1</span>, hiçbir düğümün iki kez
+    çalışmadığı anlamına gelir.
+  </p>
+  <p>
+    Sapmadan farklı olarak bunun, ölçtüğü birimde bir eşiği vardır. Kırk
+    adımlık bir tanım da dört adımlık bir tanım da hiçbir şey tekrarlanmadığında
+    <span class="data">1</span> okur, böylece sayı her projede aynı anlama gelir
+    ve onun için bir tavan adlandırabilirsiniz. Bu onu sıradan bir eşik
+    izleyicisi yapar; yukarıdaki izleyiciden yalnızca çalıştırma deposunu
+    okuyuşu ödünç alınmıştır.
+  </p>
+
+  <h3>Neyi sayar</h3>
+  <ul>
+    <li>
+      <strong>Bir yayılım sayılır.</strong> Dokuz öğe üzerindeki bir
+      <code>foreach</code>, tek bir düğümde dokuz denemedir ve günlük bunu dokuz
+      kez dönen bir döngüden ayıramaz: ikisi de tek bir düğüm altında
+      indekslenmiş konumlardır ve onları hangi yapının yazdığını yalnızca tanım
+      bilir. Bu yüzden tanımları yayılan bir proje yüksekte durur ve eşiği buna
+      göre ayarlanmalıdır. Her değerlendirme, tetiklensin ya da tetiklenmesin,
+      değerini taşır; bu yüzden bir eşik seçmeden önce sıradan bir pencerenin ne
+      bildirdiğini okuyun.
+    </li>
+    <li>
+      <strong>Atlanan bir konum sayılmaz.</strong> False olan bir
+      <code>when</code> koruması bir deneme satırı yazar ve düğüm hiç çalışmaz;
+      onu saymak, filtrelenmiş bir liste üzerindeki bir <code>foreach</code>
+      yapısının tekrar gibi okunmasına yol açardı.
+    </li>
+    <li>
+      <strong>Hiçbir şey denemeyen bir çalıştırma dışarıda bırakılır.</strong>
+      Sıfır olarak sayılmaz: hiçbir şey çalıştırmadığı için hiçbir şeyi
+      tekrarlamamıştır ve örnekteki bir sıfır, ortalamayı eşiğin dayandığı
+      <span class="data">1</span>'in altına çekerdi.
+    </li>
+    <li>
+      <strong>Süren bir çalıştırma sayılır.</strong> Asıl amacın büyük kısmı
+      budur. Bir yeniden deneme döngüsünde takılan bir çalıştırma, sonunda pes
+      ettikten sonra değil, hâlâ dönerken okumaya girer.
+    </li>
+  </ul>
+
+  <h3>Yapılandırmak</h3>
+  <p>
+    Sapmadan farklı olarak tek bir sayı. <code>threshold</code>, birine haber
+    verilmeden önce pencerenin ulaşabileceği ortalama deneme sayısıdır;
+    <span class="data">1.2</span>, bir penceredeki çalıştırmaların beşte birinin
+    iki kez dönmesidir. <code>below</code> burada işe yaramaz: örnekteki her
+    çalıştırma en az bir düğümü en az bir kez denemiştir, bu yüzden okumanın
+    <span class="data">1</span> olan bir tabanı vardır ve asla onun altına
+    düşemez.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitors": [
+    {
+      "id": "checkout-repetition",
+      "name": "Checkout runs are going round the same step",
+      "project": "support-desk",
+      "watch": "run_repetition",
+      "compare": "above",
+      "threshold": 1.2,
+      "window_seconds": 3600,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    <code>min_samples</code> burada okunur ve trace'leri değil, izleyicinin
+    çalıştırma deposundan okuduğu çalıştırmaları sayar; böylece span'leri başka
+    bir yerde alınan bir dağıtım da yine çalıştırmalarına göre değerlendirilir.
+    Bunun altındaki bir pencere yetersiz olarak bildirilir ve bu, duran bir
+    uyarıyı tam olduğu yerde bırakır.
+  </p>
+  <p>
+    Ayrıntı en kötü üç çalıştırmayı ve her birinin etrafında döndüğü düğümü
+    adlandırır: <code>checkout v1 run r_9f2 attempted settle 11 times</code>.
+    Hiçbir şeyi tekrarlamayan çalıştırmalar adlandırılmaz, çünkü içlerinde
+    açılacak bir şey yoktur.
+  </p>
 
   <h2>Eşik yanlış soruyken bir hedef</h2>
   <p>
