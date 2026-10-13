@@ -6,20 +6,46 @@ import { localeOf, urlFor } from '@/lib/i18n'
 
 const code = localeOf(Astro.url.pathname)
 const linkTo = (route: string) => urlFor(route, code)
+
+const destinations = `{
+  "forward": [
+    {
+      "vendor": "langfuse",
+      "region": "eu",
+      "public_key": "\${LANGFUSE_PUBLIC_KEY}",
+      "secret_key": "\${LANGFUSE_SECRET_KEY}",
+      "filter": { "projects": ["checkout"], "sample": 0.25 },
+      "redact": { "key_contains": ["email"] }
+    },
+    {
+      "name": "honeycomb-prod",
+      "vendor": "honeycomb",
+      "api_key": "\${HONEYCOMB_API_KEY}",
+      "dataset": "agents",
+      "signals": { "traces": true, "logs": true, "metrics": false }
+    },
+    {
+      "name": "collector",
+      "endpoint": "https://otel.internal.example.com:4318",
+      "protocol": "protobuf",
+      "headers": { "Authorization": "Bearer \${COLLECTOR_TOKEN}" },
+      "redact": { "drop_payloads": true }
+    }
+  ]
+}`
 ---
 
 <Doc
   title="转发"
-  description="把每一个存下的 span 复制到另一个 OTLP 端点，让 mcpd 成为遥测流水线上的一跳，而不是数据被困住的地方。本地存储永远先发生。"
+  description="把 mcpd 存下的数据同时复制到 Langfuse、Datadog、Honeycomb 等 18 个目的地，每个都有自己的过滤和暂存区。"
   lede="mcpd 在两个方向上都讲 OTLP。到达这里的东西，没有一样会被困在这里。"
   og="docs"
 >
-  <h2>向外只讲一种协议，而不是十一个导出器</h2>
+  <h2>一个存储，按需要发出多份副本</h2>
   <p>
-    mcpd 接收 OTLP，它也能发出 OTLP。仅这一条性质，就顶替了一整套按厂商写的导出器
-    所做的大部分事情：Langfuse、Datadog、Honeycomb、Grafana，以及其他每一个值得
-    一提的目的地，都接受基于 HTTP 的 OTLP。于是转发是一套实现，而不是十一套，它
-    也不会落在某个厂商 SDK 的发布后面。
+    mcpd 接收 OTLP，也发出 OTLP。一个目的地就是配置文件里的一个条目：一个厂商名、
+    一份凭据，以及可选的过滤规则、脱敏规则和它接收的信号。mcpd 知道每个厂商的
+    端点、认证请求头和它读取的属性名，所以你写的是密钥，而不是一套集成代码。
   </p>
   <p>
     这同时意味着采用 mcpd 是可逆的。把它指向你之前在用的那个东西，两个星期里两边
@@ -27,40 +53,313 @@ const linkTo = (route: string) => urlFor(route, code)
   </p>
 
   <h2>把它打开</h2>
+  <p>
+    只有一个 OTLP 接收方时，用参数就够了。请给基础 URL，不要给
+    <code>/v1/traces</code>：每种信号的路径会被追加上去。
+  </p>
 
   <Command
     class="not-prose my-6"
     title="存在本地，并向外复制一份"
     command="mcpd serve --forward-endpoint https://otlp.example.com"
+    primaryLabel="OTLP"
+    secondary={[
+      {
+        label: '带请求头',
+        command: "mcpd serve --forward-endpoint https://otlp.example.com --forward-header 'Authorization: Bearer $TOKEN'",
+      },
+      {
+        label: '指定厂商',
+        command: "mcpd serve --forward-vendor honeycomb --forward-header 'x-honeycomb-team: $HONEYCOMB_API_KEY'",
+      },
+      {
+        label: 'Protobuf',
+        command: 'mcpd serve --forward-endpoint https://otlp.example.com --forward-protocol protobuf',
+      },
+    ]}
   />
 
   <p>
-    路径是追加上去的，所以请给基础 URL，不要给 <code>/v1/traces</code>。对于一个
-    需要凭据的目的地，加上请求头：
+    <code>--forward-vendor</code> 选定一个厂商的端点和约定；凭据放在
+    <code>--forward-header</code> 里。厂商有默认端点时，可以省略
+    <code>--forward-endpoint</code>。<code>--forward-protocol</code> 取
+    <code>json</code>、<code>protobuf</code> 或 <code>grpc</code>。用参数给出的
+    目的地会取代文件里的 <code>forward</code> 块，所以可以把某一个实例指向别处，
+    而不必去改一份共享的 ConfigMap。
   </p>
 
-  <Command
-    class="not-prose my-6"
-    title="带上一个 authorization 请求头"
-    command={`mcpd serve \\
-  --forward-endpoint https://otlp.example.com \\
-  --forward-header 'Authorization: Bearer $TOKEN'`}
-  />
+  <h2>多个目的地</h2>
+  <p>
+    配置文件里的 <code>forward</code> 块接受一个对象形式的目的地，这是早先版本
+    读取的写法，现在仍然有效；也接受一个由多个目的地组成的数组。每个目的地有自己的
+    副本、自己的暂存区和自己的重试，所以一个慢的厂商永远拖不住一个快的厂商。
+  </p>
+
+  <pre><code class="language-json">{destinations}</code></pre>
 
   <p>
-    同样这些设置也在配置文件的 <code>forward</code> 下面，那里还可以用
-    <code>batch_size</code> 和 <code>enabled</code>。参数压过文件，所以可以把
-    某一个实例指向别处，而不必去改一份共享的 ConfigMap。
+    任何字符串都可以写成 <code>$&#123;ENV_NAME&#125;</code>。它在启动时从环境
+    变量里读取一次。变量未设置时，启动会被拒绝，并写明是哪个变量，所以 Secret 里
+    缺了一份凭据，会是你在部署时就看到的错误，而不是一周后才发现的 401。
   </p>
 
-  <pre><code class="language-json">{`{
-  "forward": {
-    "endpoint": "https://otlp.example.com",
-    "headers": [["Authorization", "Bearer sk-..."]],
-    "batch_size": 256,
-    "enabled": true
-  }
-}`}</code></pre>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>字段</th><th>作用</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>name</code></td>
+          <td>目的地的名字，用作它指标上的 <code>destination</code> 标签，也用作它的暂存目录名。可以是字母、数字、<code>-</code>、<code>_</code> 和 <code>.</code>。默认是厂商名</td>
+        </tr>
+        <tr>
+          <td><code>vendor</code></td>
+          <td>下面的预设之一。默认是 <code>otlp</code></td>
+        </tr>
+        <tr>
+          <td><code>endpoint</code></td>
+          <td>基础 URL，不带 <code>/v1/traces</code>。<code>otlp</code>、<code>otlp_grpc</code>、<code>elastic</code> 和 <code>dynatrace</code> 必须填写；对于有默认端点的厂商，它会取代那个默认值</td>
+        </tr>
+        <tr>
+          <td><code>protocol</code></td>
+          <td><code>json</code>、<code>protobuf</code> 或 <code>grpc</code>。<code>otlp</code> 默认用 JSON，<code>otlp_grpc</code> 默认用 gRPC，其他每个厂商默认用 protobuf。Dynatrace 不接受 JSON</td>
+        </tr>
+        <tr>
+          <td><code>headers</code></td>
+          <td>一个 <code>[name, value]</code> 对的列表，或一个对象。与预设设置的请求头同名时，会取代那个请求头</td>
+        </tr>
+        <tr>
+          <td><code>enabled</code></td>
+          <td>设为 <code>false</code> 时，条目留在文件里，但什么都不发送</td>
+        </tr>
+        <tr>
+          <td><code>batch_size</code></td>
+          <td>每个请求的 span 数。默认 256</td>
+        </tr>
+        <tr>
+          <td><code>conventions</code></td>
+          <td>副本使用的属性名：<code>gen_ai</code>、<code>gen_ai_messages</code>、<code>openinference</code>、<code>langfuse</code>、<code>langsmith</code>、<code>braintrust</code> 或 <code>laminar</code>。默认用厂商自己的约定</td>
+        </tr>
+        <tr>
+          <td><code>region</code></td>
+          <td>选择厂商的区域端点，列在下表中</td>
+        </tr>
+        <tr>
+          <td><code>api_key</code>、<code>token</code>、<code>public_key</code>、<code>secret_key</code>、<code>instance_id</code>、<code>space_id</code></td>
+          <td>凭据。每个厂商读取下表写明的那几项，并把它们转成自己的请求头</td>
+        </tr>
+        <tr>
+          <td><code>project</code>、<code>workspace</code>、<code>dataset</code>、<code>dsn</code></td>
+          <td>副本落在厂商那边的哪个位置</td>
+        </tr>
+        <tr>
+          <td><code>filter</code></td>
+          <td>这个目的地接收哪些数据。见下文</td>
+        </tr>
+        <tr>
+          <td><code>redact</code></td>
+          <td>这个目的地的副本略去哪些内容。见下文</td>
+        </tr>
+        <tr>
+          <td><code>signals</code></td>
+          <td><code>traces</code>、<code>logs</code> 和 <code>metrics</code>，各自为 true 或 false。默认是厂商接受的每一种信号</td>
+        </tr>
+        <tr>
+          <td><code>spool_max_bytes</code></td>
+          <td>这个目的地的暂存区最多能容纳的字节数。默认取 <code>--spool-max-bytes</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>厂商</h2>
+  <p>
+    每个预设都设定端点、认证方式和约定。信号一列是厂商接受的信号，也就是除非
+    <code>signals</code> 另有规定，一个目的地会发送的信号。
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>厂商</th><th>端点</th><th>凭据与落点</th><th>信号</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>otlp</code></td>
+          <td><code>endpoint</code>，必填</td>
+          <td><code>headers</code>。任何 OTLP/HTTP 接收方，除非 <code>protocol</code> 是 <code>protobuf</code>，否则用 JSON</td>
+          <td>traces、logs、metrics</td>
+        </tr>
+        <tr>
+          <td><code>otlp_grpc</code></td>
+          <td><code>endpoint</code>，必填</td>
+          <td><code>headers</code>。任何 OTLP/gRPC 接收方，路径为 <code>/opentelemetry.proto.collector.&lt;signal&gt;.v1.&lt;Service&gt;/Export</code></td>
+          <td>traces、logs、metrics</td>
+        </tr>
+        <tr>
+          <td><code>langfuse</code></td>
+          <td><code>region</code> 为 <code>eu</code>（默认）时是 <code>https://cloud.langfuse.com/api/public/otel</code>，<code>us</code> 是 <code>us.cloud.langfuse.com</code>，<code>hipaa</code> 是 <code>hipaa.cloud.langfuse.com</code>。自托管的 <code>endpoint</code> 会追加 <code>/api/public/otel</code></td>
+          <td>由 <code>public_key</code> 和 <code>secret_key</code> 组成的 Basic 认证。<code>langfuse.*</code> 属性：观测类型、输入、输出、模型、用量与成本明细、级别、会话、用户、环境、发布版本、trace 名称和标签</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>langsmith</code></td>
+          <td><code>https://api.smith.langchain.com/otel</code>；<code>region</code> 为 <code>eu</code> 时是 <code>eu.api.smith.langchain.com/otel</code></td>
+          <td><code>api_key</code> 作为 <code>x-api-key</code>；<code>project</code> 作为 <code>Langsmith-Project</code> 请求头。<code>langsmith.span.kind</code>、<code>gen_ai.prompt</code> 和 <code>gen_ai.completion</code></td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>braintrust</code></td>
+          <td><code>https://api.braintrust.dev/otel</code></td>
+          <td><code>api_key</code> 作为 Bearer token；<code>project</code> 必填，作为 <code>x-bt-parent: project_name:&lt;project&gt;</code>。<code>braintrust.*</code> 属性</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>arize</code></td>
+          <td><code>https://otlp.arize.com</code>；<code>region</code> 为 <code>eu</code> 时是 <code>https://otlp.eu-west-1a.arize.com</code></td>
+          <td><code>space_id</code> 和 <code>api_key</code> 请求头；<code>project</code> 必填，作为 resource 的 <code>openinference.project.name</code> 和 <code>model_id</code>。OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>phoenix</code></td>
+          <td>未设置 <code>endpoint</code> 时为 <code>http://localhost:6006</code></td>
+          <td>可选的 <code>api_key</code> 作为 Bearer token；<code>project</code> 作为 <code>openinference.project.name</code>。OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>datadog</code></td>
+          <td><code>https://otlp.&lt;site&gt;</code>，其中 <code>region</code> 是站点：<code>datadoghq.com</code>（默认）、<code>us3</code>、<code>us5</code>、<code>eu</code> 或 <code>datadoghq.eu</code>、<code>ap1</code>、<code>ap2</code>、<code>gov</code></td>
+          <td><code>api_key</code> 作为 <code>dd-api-key</code>，并带上 <code>dd-otlp-source: llmobs</code> 以进入 LLM Observability。<code>gen_ai.input.messages</code> 和 <code>gen_ai.output.messages</code></td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>honeycomb</code></td>
+          <td><code>https://api.honeycomb.io</code>；<code>region</code> 为 <code>eu</code> 时是 <code>api.eu1.honeycomb.io</code></td>
+          <td><code>api_key</code> 作为 <code>x-honeycomb-team</code>；<code>dataset</code> 作为 <code>x-honeycomb-dataset</code></td>
+          <td>traces、logs、metrics</td>
+        </tr>
+        <tr>
+          <td><code>newrelic</code></td>
+          <td><code>https://otlp.nr-data.net</code>；<code>region</code> 为 <code>eu</code> 时是 <code>otlp.eu01.nr-data.net</code>，<code>fedramp</code> 是 <code>gov-otlp.nr-data.net</code></td>
+          <td><code>api_key</code> 作为 <code>api-key</code>。字符串值在 4095 字节处截断，并带上一个说明截断的标记</td>
+          <td>traces、logs、metrics</td>
+        </tr>
+        <tr>
+          <td><code>grafana</code></td>
+          <td>把 OTLP 网关 URL 设为 <code>endpoint</code>，或把 <code>region</code> 设为可用区，得到 <code>https://otlp-gateway-&lt;zone&gt;.grafana.net/otlp</code></td>
+          <td>由 <code>instance_id</code> 和 <code>api_key</code>（或 <code>token</code>）组成的 Basic 认证</td>
+          <td>traces、logs、metrics</td>
+        </tr>
+        <tr>
+          <td><code>sentry</code></td>
+          <td>由 <code>dsn</code> 得出：<code>https://&lt;host&gt;/api/&lt;project&gt;/integration/otlp</code></td>
+          <td>DSN 中的密钥作为 <code>x-sentry-auth: sentry sentry_key=&lt;key&gt;</code></td>
+          <td>traces、logs</td>
+        </tr>
+        <tr>
+          <td><code>weave</code></td>
+          <td><code>https://trace.wandb.ai/otel</code></td>
+          <td>Basic 认证 <code>api:&lt;api_key&gt;</code>；<code>project</code>（<code>entity/project</code>）作为 <code>project_id</code> 请求头。OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>laminar</code></td>
+          <td><code>https://api.lmnr.ai</code></td>
+          <td><code>api_key</code> 作为 Bearer token。<code>lmnr.*</code> 属性</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>helicone</code></td>
+          <td><code>https://api.worker.helicone.ai/custom/v1/log</code>，它的日志 API</td>
+          <td><code>api_key</code> 作为 Bearer token。每次模型调用一个请求：发送模型 span，其他 span 计为被过滤</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>opik</code></td>
+          <td><code>https://www.comet.com/opik/api/v1/private/otel</code>；自托管的 Opik 设置 <code>endpoint</code></td>
+          <td><code>api_key</code> 作为 <code>Authorization</code>，<code>workspace</code> 作为 <code>Comet-Workspace</code>，<code>project</code> 作为 <code>projectName</code>。OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>elastic</code></td>
+          <td><code>endpoint</code>，必填</td>
+          <td><code>Authorization: ApiKey &lt;api_key&gt;</code>，或 <code>Bearer &lt;token&gt;</code></td>
+          <td>traces、logs、metrics</td>
+        </tr>
+        <tr>
+          <td><code>dynatrace</code></td>
+          <td>把环境 URL 设为 <code>endpoint</code>；会追加 <code>/api/v2/otlp</code></td>
+          <td><code>Authorization: Api-Token &lt;token&gt;</code>。只支持 Protobuf</td>
+          <td>traces、logs、metrics</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>每一份副本都带着什么</h2>
+  <p>
+    无论目的地用哪种约定，副本都还带着 <code>gen_ai.*</code> 属性：操作名、请求的
+    模型、system 和供应商名、输入和输出 token、会话 id、智能体和工具名，以及请求的
+    temperature、top_p 和 max_tokens。它带着 <code>session.id</code> 和
+    <code>user.id</code>，在 mcpd 做哈希时，这已经是哈希值。它还带着
+    <code>mcpd.*</code> 属性，也就是 span 类型、实体名、成本和标签，resource 上
+    还有 <code>mcpd.project</code>。所以发给另一个 mcpd 的副本会原样落进同一个项目。
+  </p>
+  <p>
+    span 保留它们的链接，链接类型写在 <code>mcpd.link.kind</code> 里，也保留它们的
+    事件：载体在同一个批次里时，事件 span 会作为 OTLP span 事件回到它的载体上。日志
+    以 logger 作为 instrumentation scope 发送。发送方发来的指标点会被转发，计数器作为
+    delta 单调求和，另有 gauge 和直方图。mcpd 从 span 推导出的指标点不会发送：它们
+    重复了 span 已经说过的内容，目的地会把它们算两遍。
+  </p>
+  <p>
+    span 按服务分组装进 <code>resourceSpans</code>，这是接收方期待的形状。评分、
+    反馈和方面注释留在 mcpd 里。
+  </p>
+
+  <h2>过滤</h2>
+  <p>
+    <code>filter</code> 缩小一个目的地接收的范围。每个列表都是可选的，空列表放行
+    一切。
+  </p>
+  <ul>
+    <li><code>projects</code>：只要这些项目。</li>
+    <li><code>environments</code>：只要这些环境。</li>
+    <li><code>kinds</code>：只要这些 span 类型。</li>
+    <li>
+      <code>sample</code>：0 到 1 之间的一个比例。它根据 trace id 决定，所以一条
+      trace 要么整条发出，要么完全不发，trace 里的日志也跟着 trace 走。
+    </li>
+  </ul>
+  <p>
+    过滤扣下的内容计入 <code>mcpd_forward_filtered_total</code>，所以一个收到的
+    数据比你预期少的目的地，会显示出原因。
+  </p>
+
+  <h2>脱敏</h2>
+  <p>
+    转发发生在摄取流水线之后，而流水线在任何东西被写下之前就已就地脱敏。凡是 mcpd
+    被告知要藏起来的东西，也同样到不了任何目的地。
+  </p>
+  <p>
+    <code>redact</code> 对某一个目的地做得更多。它只改变那个目的地的副本，从不改变
+    mcpd 存下的内容。
+  </p>
+  <ul>
+    <li>
+      <code>drop_payloads: true</code> 不发送任何 span 的输入或输出，也不发送日志
+      字段。目的地仍然拿到耗时、模型、用量、成本和错误。
+    </li>
+    <li>
+      <code>key_contains</code> 是一个子串列表。键包含其中之一时，它的值会被替换成
+      <code>[redacted]</code>。
+    </li>
+  </ul>
+  <p>
+    这样你可以在自己的存储里保留完整载荷，而只把每次运行的形状发给厂商，不带它的
+    内容。
+  </p>
 
   {/* 这张图属于这里，不属于页首。它画的摄取过程止于 Store，而这一节讲的正是
       Store 之后发生的事，于是两者读起来是一条连贯的序列，而不是一张在主题开始
@@ -69,66 +368,97 @@ const linkTo = (route: string) => urlFor(route, code)
 
   <h2>本地存储先发生</h2>
   <p>
-    一个 span 在任何东西被转发之前，就先写进 mcpd 自己的存储，转发之后在它自己的
-    任务上运行。由此有两个后果，两个都是有意的。
-  </p>
-  <p>
-    一个慢的目的地，绝不会把它的延迟加到产生这个 span 的那次请求上。你的智能体
-    不会去等别人的 collector。
-  </p>
-  <p>
-    一个挂掉的目的地，绝不会变成一次被拒绝的摄取。mcpd 照常工作，转发在它自己的
-    任务上重试。另一种做法，也就是另一家公司的故障意味着你的遥测根本没被留下，正是
-    这个设计要避免的那种失败。
-  </p>
-  <p>
-    每个批次有三次尝试。429、5xx 或连接失败会在 250 ms 后重试，每次尝试之后等待
-    时间翻倍。以秒给出的 <code>Retry-After</code> 会取代这段等待，最多 30 秒。
-    其他任何 4xx 在第一次答复时就是最终结果，因为这个批次对那个目的地来说会一直是
-    格式错误的。守护进程正在停止时，它会立刻做完剩下的尝试。被最终拒绝、或在最后
-    一次尝试之后仍未投递的批次会记进日志，它的 span 会加到
-    <code>mcpd_forward_dropped_spans_total</code> 上，这样你能看到副本缺了多少。
-  </p>
-  <p>
-    一个接受连接却从不应答的目的地，同样占不走守护进程的内存。同一时刻最多有 64 次摄取请求的副本在等目的地。
-    已经有这么多在等的时候，新的副本会当场被丢弃，并计入 <code>mcpd_forward_dropped_spans_total</code>，
-    本地写入不受影响。
-  </p>
-  <p>
-    批次在重试期间留在内存里等待；转发队列满了时，新的批次会被丢掉，它的 span
-    计入同一个指标，所以一次丢弃总是看得见的。要有保证的投递，请在 mcpd 和目的地
-    之间放一个 collector。
+    一个批次在任何东西被转发之前，就先写进 mcpd 自己的存储。副本在本地写入之后才
+    生成，并交给每个目的地的暂存区。一个慢的目的地，绝不会把它的延迟加到产生这个
+    span 的那次请求上；一个挂掉的目的地，也绝不会变成一次被拒绝的摄取。
   </p>
 
-  <h2>脱敏对发出去的东西同样适用</h2>
+  <h3>暂存区</h3>
   <p>
-    转发发生在摄取流水线之后，而流水线在任何东西被写下之前就已就地脱敏。凡是 mcpd
-    被告知要藏起来的东西，也同样到不了下一跳。一条保护了你的存储、却不保护你的
-    出站流量的规则，算不上一项隐私控制手段。
+    每个目的地有一个暂存目录，<code>&lt;spool-dir&gt;/forward-&lt;name&gt;/</code>。
+    副本先写进一个临时文件，同步到磁盘，再重命名到位，文件权限为 0600，所以崩溃
+    留下的要么是一个完整条目，要么什么都没有。暂存目录默认是 <code>--data</code>
+    旁边的一个 <code>.spool</code> 目录，例如 <code>/data/mcpd.spool</code>；
+    <code>--data</code> 为 <code>:memory:</code> 时放在内存里。
+    <code>--spool-dir memory</code> 会有意把它放在内存里。
+  </p>
+  <p>
+    暂存区的上限是 <code>spool_max_bytes</code>，除非你另行设置，每个目的地为
+    256 MiB。满了之后，新的副本会被丢弃，并计入
+    <code>mcpd_forward_spool_full_total</code>；本地写入不受影响。磁盘上积压的
+    数据在重启后仍然在，并在启动时发送。停止时，内存中的暂存区会得到最后一次尝试。
   </p>
 
-  <h2>什么会被转发</h2>
+  <h3>重试</h3>
   <p>
-    span。日志、指标、评分、反馈和方面注释留在 mcpd 里，因为人们转发去的那些
-    目的地是追踪后端，它们会把其余的丢掉，或者把它们硬塞成属性。
+    每个目的地有两个 worker 发送暂存区里的内容。发送失败会以指数退避加抖动的方式
+    重试：等待从 0.5 秒开始，翻倍直到 60 秒，每次等待在该范围的上半段里随机选取。
+    以秒或 HTTP 日期给出的 <code>Retry-After</code> 会被遵守，最多 300 秒。
   </p>
   <p>
-    span 按服务分组装进 <code>resourceSpans</code>，这是接收方期待的形状；而不是
-    一个 span 一个 resource，那样虽然合法，却会让下游每一处都重新分组一遍。
+    会重试的情况：401、403、404、408、409、425、429、所有 5xx、传输错误，以及 gRPC
+    状态码 <code>CANCELLED</code>、<code>DEADLINE_EXCEEDED</code>、
+    <code>PERMISSION_DENIED</code>、<code>RESOURCE_EXHAUSTED</code>、
+    <code>ABORTED</code>、<code>OUT_OF_RANGE</code>、<code>UNAVAILABLE</code>、
+    <code>DATA_LOSS</code> 和 <code>UNAUTHENTICATED</code>。所以一把过期的密钥，或
+    一个仍在创建中的目的地，会让数据等待，而不是丢失。
+  </p>
+  <p>
+    其他任何 4xx 都是最终结果，因为这个批次对那个目的地来说会一直是格式错误的。
+    条目会被移到暂存目录里的 <code>dead/</code>，保留最新的 100 个，并计数。一天后
+    仍未投递的条目也会被移到 <code>dead/</code>。对 OTLP/HTTP，超过 1 KiB 的请求体
+    会用 gzip 压缩。
+  </p>
+
+  <h2>观察它</h2>
+  <p>
+    每个指标都带着 <code>destination</code> 和 <code>vendor</code> 标签。
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>指标</th><th>类型</th><th>含义</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>mcpd_forward_sent_total</code></td><td>counter</td><td>目的地收下的条目</td></tr>
+        <tr><td><code>mcpd_forward_failed_attempts_total</code></td><td>counter</td><td>失败并将重试的尝试</td></tr>
+        <tr><td><code>mcpd_forward_dead_letter_total</code></td><td>counter</td><td>被最终拒绝或超过一天、移到 <code>dead/</code> 的条目</td></tr>
+        <tr><td><code>mcpd_forward_spool_full_total</code></td><td>counter</td><td>因暂存区已满而被丢弃的条目</td></tr>
+        <tr><td><code>mcpd_forward_filtered_total</code></td><td>counter</td><td>被过滤规则挡在目的地之外的条目</td></tr>
+        <tr><td><code>mcpd_forward_spool_entries</code></td><td>gauge</td><td>在暂存区里等待的请求数</td></tr>
+        <tr><td><code>mcpd_forward_spool_bytes</code></td><td>gauge</td><td>暂存区占用的字节数</td></tr>
+        <tr><td><code>mcpd_forward_up</code></td><td>gauge</td><td>上一次尝试成功或尚未尝试时为 1，失败时为 0</td></tr>
+        <tr><td><code>mcpd_forward_last_success_timestamp_seconds</code></td><td>gauge</td><td>目的地上一次收下请求的时间，以自纪元起的秒数表示，没有则为 0</td></tr>
+        <tr><td><code>mcpd_forward_dropped_spans_total</code></td><td>counter</td><td>进入死信、在暂存区已满时被丢弃，或超过 64 份在途副本时被丢弃的 span</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    请对持续增长的 <code>mcpd_forward_spool_bytes</code> 和长时间不更新的
+    <code>mcpd_forward_last_success_timestamp_seconds</code> 设告警：两者一起说明
+    某个目的地已经不再收数据，而 mcpd 正替你留着这些数据。
+  </p>
+  <p>
+    <code>mcpd doctor</code> 对每个目的地报告一项发现。它用目的地自己的协议发送一次
+    不携带任何内容的导出，从而在不写入数据的情况下验证端点和凭据。Helicone 会被
+    跳过。它还会读取暂存目录，报告条目数、字节数、最早条目的年龄和死信数，并在有
+    死信或最早条目超过一小时时发出警告。
   </p>
 
   <h2>mcpd 转发给 mcpd</h2>
   <p>
     因为两端讲的是同一种协议，一个本地的 mcpd 可以转发给一个共享的 mcpd。开发者
     在自己机器上留一份带完整载荷的快速存储，团队的那个实例拿到同样这些运行，并在
-    到达时施加它自己的保留期和它自己的脱敏规则。
+    到达时施加它自己的保留期和它自己的脱敏规则。要在守护进程前面放一个自己不存储
+    任何东西的采集器，请使用
+    <a href={linkTo('/docs/relay')} class="link">中继</a>。
   </p>
 
   <h2>接下来</h2>
   <ul>
     <li>
-      把一套已有的 OpenTelemetry 配置指向 mcpd：
-      <a href={linkTo('/docs/opentelemetry')} class="link">OpenTelemetry</a>。
+      边缘采集器和多个区域：
+      <a href={linkTo('/docs/relay')} class="link">中继与多区域</a>。
     </li>
     <li>
       一个 span 在被存下或者被发出之前，什么会被移除：

@@ -285,6 +285,36 @@ volumes:
           <td>none</td>
         </tr>
         <tr>
+          <td><code>--forward-vendor</code></td>
+          <td><code>MCPD_FORWARD_VENDOR</code></td>
+          <td><code>otlp</code></td>
+        </tr>
+        <tr>
+          <td><code>--forward-protocol</code></td>
+          <td><code>MCPD_FORWARD_PROTOCOL</code></td>
+          <td>the vendor's own</td>
+        </tr>
+        <tr>
+          <td><code>--spool-dir</code></td>
+          <td><code>MCPD_SPOOL_DIR</code></td>
+          <td>a <code>.spool</code> directory beside <code>--data</code></td>
+        </tr>
+        <tr>
+          <td><code>--spool-max-bytes</code></td>
+          <td><code>MCPD_SPOOL_MAX_BYTES</code></td>
+          <td><code>268435456</code> per destination, <code>1073741824</code> for the relay</td>
+        </tr>
+        <tr>
+          <td><code>--upstream</code></td>
+          <td><code>MCPD_UPSTREAMS</code></td>
+          <td>none</td>
+        </tr>
+        <tr>
+          <td><code>--upstream-key</code></td>
+          <td><code>MCPD_UPSTREAM_KEY</code></td>
+          <td>unset: each sender's key is passed on</td>
+        </tr>
+        <tr>
           <td>none</td>
           <td><code>MCPD_LOG</code></td>
           <td><code>mcpd=info,mcpd_server=info,tower_http=warn</code></td>
@@ -793,6 +823,10 @@ volumes:
           <td><code>mcpd doctor</code></td>
           <td>Grade this deployment and report what is misconfigured. Exits 2 on a fault, so it can gate a deploy. See <a href="/docs/operations" class="link">Running it</a></td>
         </tr>
+        <tr>
+          <td><code>mcpd relay</code></td>
+          <td>Run as an edge collector: accept every ingest request, spool it, and ship it to the daemons <code>--upstream</code> names, in order. Opens no store. See <a href="/docs/relay" class="link">Relay and regions</a></td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -838,6 +872,7 @@ volumes:
       { out: 'objectives      none' },
       { out: 'judge           off' },
       { out: 'forwarding      off' },
+      { out: 'relay           off: no --upstream' },
     ]}
   />
 
@@ -980,13 +1015,28 @@ volumes:
       "webhook": "https://hooks.example.com/mcpd"
     }
   ],
-  "forward": {
-    "endpoint": "https://otlp.example.com",
-    "headers": [["Authorization", "Bearer sk-..."]],
-    "batch_size": 256,
-    "enabled": true
-  }
+  "forward": [
+    {
+      "endpoint": "https://otlp.example.com",
+      "headers": [["Authorization", "Bearer sk-..."]],
+      "batch_size": 256,
+      "enabled": true
+    },
+    {
+      "vendor": "langfuse",
+      "public_key": "\${LANGFUSE_PUBLIC_KEY}",
+      "secret_key": "\${LANGFUSE_SECRET_KEY}"
+    }
+  ]
 }`}</code></pre>
+
+  <p>
+    <code>forward</code> takes one destination as an object or several as an
+    array. Any string in it may be written <code>$&#123;ENV_NAME&#125;</code>
+    and is read from the environment at start; an unset variable refuses the
+    start and names it. Every field is on the
+    <a href="/docs/forwarding" class="link">Forwarding</a> page.
+  </p>
 
   <h3>Projects, and the keys that reach them</h3>
   <p>
@@ -1118,13 +1168,15 @@ volumes:
 
   <h3>--forward-endpoint</h3>
   <p>
-    Copy every stored span on to another OTLP/HTTP endpoint. Give the base URL;
-    <code>/v1/traces</code> is appended. The local write always happens first,
-    so a destination that is down costs you nothing.
+    Copy what mcpd stores on to another endpoint. Give the base URL;
+    <code>/v1/traces</code>, <code>/v1/logs</code> and <code>/v1/metrics</code>
+    are appended. The local write always happens first, so a destination that
+    is down costs you nothing.
   </p>
   <p>
-    This flag beats the <code>forward</code> block in the config file, so one
-    instance can be pointed elsewhere without editing a shared ConfigMap. See
+    A destination given by flags replaces the <code>forward</code> block in the
+    config file, so one instance can be pointed elsewhere without editing a
+    shared ConfigMap. Several destinations at once go in the file. See
     <a href="/docs/forwarding" class="link">Forwarding</a>.
   </p>
 
@@ -1138,6 +1190,47 @@ volumes:
     A value with no colon is refused at start-up, with the form that works,
     rather than dropped. An OpenTelemetry-style <code>key=value</code> header is
     written <code>key: value</code> here.
+  </p>
+
+  <h3>--forward-vendor and --forward-protocol</h3>
+  <p>
+    <code>--forward-vendor</code> picks a vendor preset, such as
+    <code>langfuse</code>, <code>datadog</code> or <code>honeycomb</code>, for
+    its endpoint and its attribute conventions. The credential goes in
+    <code>--forward-header</code>. With a vendor that has a default endpoint,
+    <code>--forward-endpoint</code> may be left out.
+    <code>--forward-protocol</code> is <code>json</code>, <code>protobuf</code>
+    or <code>grpc</code>, and defaults to the vendor's own. The
+    <a href="/docs/forwarding" class="link">Forwarding</a> page lists every
+    vendor.
+  </p>
+
+  <h3>--spool-dir and --spool-max-bytes</h3>
+  <p>
+    Where forwarding and <code>mcpd relay</code> keep their spools, one
+    directory per destination. It defaults to a <code>.spool</code> directory
+    beside <code>--data</code>, such as <code>/data/mcpd.spool</code>, and to
+    memory when <code>--data</code> is <code>:memory:</code>. The value
+    <code>memory</code> keeps the spools in memory on purpose.
+  </p>
+  <p>
+    <code>--spool-max-bytes</code> is the most one spool may hold:
+    268435456 (256 MiB) for each forwarding destination and 1073741824 (1 GiB)
+    for the relay unless you set it. A destination's own
+    <code>spool_max_bytes</code> in the config file beats it.
+  </p>
+
+  <h3>--upstream and --upstream-key</h3>
+  <p>
+    The daemons <code>mcpd relay</code> ships to, in order of preference.
+    Repeat the flag, or give a comma-separated list in
+    <code>MCPD_UPSTREAMS</code>. The first upstream that is not cooling off
+    after a failure gets each request.
+  </p>
+  <p>
+    <code>--upstream-key</code> is the key the relay presents to its upstreams,
+    as a Bearer token. Unset, each sender's own key is kept with its request
+    and passed on. See <a href="/docs/relay" class="link">Relay and regions</a>.
   </p>
 
   <h3>--clickhouse-url</h3>

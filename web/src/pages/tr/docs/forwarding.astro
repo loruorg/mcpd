@@ -5,21 +5,48 @@ import PipelineDiagram from '@/components/PipelineDiagram.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const code = localeOf(Astro.url.pathname)
+
+const destinations = `{
+  "forward": [
+    {
+      "vendor": "langfuse",
+      "region": "eu",
+      "public_key": "\${LANGFUSE_PUBLIC_KEY}",
+      "secret_key": "\${LANGFUSE_SECRET_KEY}",
+      "filter": { "projects": ["checkout"], "sample": 0.25 },
+      "redact": { "key_contains": ["email"] }
+    },
+    {
+      "name": "honeycomb-prod",
+      "vendor": "honeycomb",
+      "api_key": "\${HONEYCOMB_API_KEY}",
+      "dataset": "agents",
+      "signals": { "traces": true, "logs": true, "metrics": false }
+    },
+    {
+      "name": "collector",
+      "endpoint": "https://otel.internal.example.com:4318",
+      "protocol": "protobuf",
+      "headers": { "Authorization": "Bearer \${COLLECTOR_TOKEN}" },
+      "redact": { "drop_payloads": true }
+    }
+  ]
+}`
 ---
 
 <Doc
   title="İletme"
-  description="Saklanan her span'i başka bir OTLP ucuna kopyalayın, böylece mcpd verinin sıkışıp kaldığı bir yer değil, telemetri hattında bir durak olur. Yerel depolama her zaman önce olur."
+  description="mcpd'nin sakladığını Langfuse, Datadog, Honeycomb ve on beş hedefe daha aynı anda kopyalayın; her birinin kendi filtresi ve kalıcı alanı olur."
   lede="mcpd, OTLP'yi iki yönde de konuşur. Buraya gelen hiçbir şey burada mahsur kalmaz."
   og="docs"
 >
-  <h2>Tek bir çıkış protokolü, on bir exporter değil</h2>
+  <h2>Tek depo, gerektiği kadar kopya</h2>
   <p>
-    mcpd OTLP alır ve OTLP yayabilir. Bu tek özellik, sağlayıcı başına bir
-    exporter kümesinin yaptığı işin çoğunun yerine geçer: Langfuse, Datadog,
-    Honeycomb, Grafana ve adı anılmaya değer her hedef, HTTP üzerinden OTLP kabul
-    eder. Dolayısıyla iletme on bir değil tek bir uygulamadır ve bir sağlayıcının
-    SDK sürümünün gerisinde kalamaz.
+    mcpd OTLP alır ve OTLP gönderir. Bir hedef, yapılandırma dosyasında tek bir
+    girdidir: bir sağlayıcı adı, bir kimlik bilgisi ve isteğe bağlı olarak bir
+    filtre, bir maskeleme kuralı ve alacağı sinyaller. mcpd her sağlayıcının
+    ucunu, kimlik doğrulama başlığını ve okuduğu öznitelik adlarını bilir; siz
+    entegrasyonu değil, yalnızca anahtarı yazarsınız.
   </p>
   <p>
     Bu aynı zamanda mcpd'yi benimsemenin geri alınabilir olduğu anlamına gelir.
@@ -29,41 +56,329 @@ const code = localeOf(Astro.url.pathname)
   </p>
 
   <h2>Açmak</h2>
+  <p>
+    Tek bir OTLP alıcısı için seçenekler yeterlidir. <code>/v1/traces</code>
+    değil temel adresi verin: her sinyalin yolu sona eklenir.
+  </p>
 
   <Command
     class="not-prose my-6"
     title="yerelde sakla, ileriye kopyala"
     command="mcpd serve --forward-endpoint https://otlp.example.com"
+    primaryLabel="OTLP"
+    secondary={[
+      {
+        label: 'Bir başlıkla',
+        command: "mcpd serve --forward-endpoint https://otlp.example.com --forward-header 'Authorization: Bearer $TOKEN'",
+      },
+      {
+        label: 'Bir sağlayıcı',
+        command: "mcpd serve --forward-vendor honeycomb --forward-header 'x-honeycomb-team: $HONEYCOMB_API_KEY'",
+      },
+      {
+        label: 'Protobuf',
+        command: 'mcpd serve --forward-endpoint https://otlp.example.com --forward-protocol protobuf',
+      },
+    ]}
   />
 
   <p>
-    Yol sona eklenir, bu yüzden <code>/v1/traces</code> değil temel adresi verin.
-    Kimlik bilgisi isteyen bir hedef için başlık ekleyin:
+    <code>--forward-vendor</code> bir sağlayıcının ucunu ve kurallarını seçer;
+    kimlik bilgisi <code>--forward-header</code> içine yazılır. Varsayılan bir
+    ucu olan bir sağlayıcıda <code>--forward-endpoint</code> verilmeyebilir.
+    <code>--forward-protocol</code> şu değerleri alır: <code>json</code>,
+    <code>protobuf</code> veya <code>grpc</code>. Seçeneklerle verilen bir
+    hedef, dosyadaki <code>forward</code> bloğunun yerini alır; yani paylaşılan
+    bir ConfigMap düzenlenmeden tek bir örnek başka bir yere yöneltilebilir.
   </p>
 
-  <Command
-    class="not-prose my-6"
-    title="bir yetkilendirme başlığıyla"
-    command={`mcpd serve \\
-  --forward-endpoint https://otlp.example.com \\
-  --forward-header 'Authorization: Bearer $TOKEN'`}
-  />
+  <h2>Birden çok hedef</h2>
+  <p>
+    Yapılandırma dosyasındaki <code>forward</code> bloğu tek bir hedefi nesne
+    olarak alır (önceki sürümlerin okuduğu biçim budur ve hâlâ çalışır) ya da
+    hedeflerden oluşan bir dizi alır. Her hedef kendi kopyasını, kendi
+    biriktirme alanını ve kendi yeniden denemelerini alır; böylece yavaş bir
+    sağlayıcı hızlı olanı hiçbir zaman bekletmez.
+  </p>
+
+  <pre><code class="language-json">{destinations}</code></pre>
 
   <p>
-    Aynı ayarlar yapılandırma dosyasında <code>forward</code> altında durur;
-    orada <code>batch_size</code> ve <code>enabled</code> de vardır. Seçenek
-    dosyayı yener, yani paylaşılan bir ConfigMap düzenlenmeden tek bir örnek
-    başka bir yere yöneltilebilir.
+    Her dize <code>$&#123;ENV_NAME&#125;</code> biçiminde yazılabilir. Değer,
+    başlangıçta bir kez ortamdan okunur. Ayarlanmamış bir değişken başlatmayı
+    reddeder ve değişkenin adını verir; böylece bir Secret'ta eksik kalan bir
+    kimlik bilgisi, bir hafta sonra fark ettiğiniz bir 401 değil, dağıtım
+    anında gördüğünüz bir hata olur.
   </p>
 
-  <pre><code class="language-json">{`{
-  "forward": {
-    "endpoint": "https://otlp.example.com",
-    "headers": [["Authorization", "Bearer sk-..."]],
-    "batch_size": 256,
-    "enabled": true
-  }
-}`}</code></pre>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Alan</th><th>Ne yapar</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>name</code></td>
+          <td>Hedefin adı; metriklerinde <code>destination</code> etiketi ve biriktirme dizininin adı olarak kullanılır. Harfler, rakamlar, <code>-</code>, <code>_</code> ve <code>.</code>. Varsayılanı sağlayıcının adıdır</td>
+        </tr>
+        <tr>
+          <td><code>vendor</code></td>
+          <td>Aşağıdaki hazır ayarlardan biri. Varsayılanı <code>otlp</code></td>
+        </tr>
+        <tr>
+          <td><code>endpoint</code></td>
+          <td><code>/v1/traces</code> olmadan temel adres. <code>otlp</code>, <code>otlp_grpc</code>, <code>elastic</code> ve <code>dynatrace</code> için zorunludur; varsayılanı olan bir sağlayıcıda o varsayılanın yerini alır</td>
+        </tr>
+        <tr>
+          <td><code>protocol</code></td>
+          <td><code>json</code>, <code>protobuf</code> veya <code>grpc</code>. <code>otlp</code> için varsayılan JSON, <code>otlp_grpc</code> için gRPC, diğer her sağlayıcı için protobuf'tur. Dynatrace JSON'u reddeder</td>
+        </tr>
+        <tr>
+          <td><code>headers</code></td>
+          <td><code>[name, value]</code> çiftlerinden bir liste ya da bir nesne. Hazır ayarın koyduğu bir başlıkla aynı adı taşıyan başlık onun yerini alır</td>
+        </tr>
+        <tr>
+          <td><code>enabled</code></td>
+          <td><code>false</code> girdiyi dosyada tutar ve hiçbir şey göndermez</td>
+        </tr>
+        <tr>
+          <td><code>batch_size</code></td>
+          <td>İstek başına span sayısı. Varsayılan 256</td>
+        </tr>
+        <tr>
+          <td><code>conventions</code></td>
+          <td>Kopyanın yazıldığı öznitelik adları: <code>gen_ai</code>, <code>gen_ai_messages</code>, <code>openinference</code>, <code>langfuse</code>, <code>langsmith</code>, <code>braintrust</code> veya <code>laminar</code>. Varsayılanı sağlayıcının kendi kurallarıdır</td>
+        </tr>
+        <tr>
+          <td><code>region</code></td>
+          <td>Sağlayıcının bölgesel ucunu seçer; aşağıdaki tabloda listelenmiştir</td>
+        </tr>
+        <tr>
+          <td><code>api_key</code>, <code>token</code>, <code>public_key</code>, <code>secret_key</code>, <code>instance_id</code>, <code>space_id</code></td>
+          <td>Kimlik bilgileri. Her sağlayıcı tablonun adını verdiklerini okur ve kendi başlığına çevirir</td>
+        </tr>
+        <tr>
+          <td><code>project</code>, <code>workspace</code>, <code>dataset</code>, <code>dsn</code></td>
+          <td>Kopyanın sağlayıcıda nereye düşeceği</td>
+        </tr>
+        <tr>
+          <td><code>filter</code></td>
+          <td>Bu hedefin hangi veriyi aldığı. Aşağıya bakın</td>
+        </tr>
+        <tr>
+          <td><code>redact</code></td>
+          <td>Bu hedefin kopyasının neyi dışarıda bıraktığı. Aşağıya bakın</td>
+        </tr>
+        <tr>
+          <td><code>signals</code></td>
+          <td><code>traces</code>, <code>logs</code> ve <code>metrics</code>, her biri true veya false. Varsayılanı sağlayıcının kabul ettiği her sinyaldir</td>
+        </tr>
+        <tr>
+          <td><code>spool_max_bytes</code></td>
+          <td>Bu hedefin biriktirme alanının en fazla tutabileceği boyut. Varsayılanı <code>--spool-max-bytes</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Sağlayıcılar</h2>
+  <p>
+    Her hazır ayar ucu, kimlik doğrulamayı ve kuralları belirler. Sinyaller
+    sütunu sağlayıcının kabul ettiklerini, dolayısıyla <code>signals</code>
+    aksini söylemedikçe bir hedefin gönderdiklerini gösterir.
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Sağlayıcı</th><th>Uç</th><th>Kimlik bilgileri ve yerleşim</th><th>Sinyaller</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>otlp</code></td>
+          <td><code>endpoint</code>, zorunlu</td>
+          <td><code>headers</code>. Herhangi bir OTLP/HTTP alıcısı; <code>protocol</code> <code>protobuf</code> değilse JSON</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>otlp_grpc</code></td>
+          <td><code>endpoint</code>, zorunlu</td>
+          <td><code>headers</code>. Herhangi bir OTLP/gRPC alıcısı, <code>/opentelemetry.proto.collector.&lt;signal&gt;.v1.&lt;Service&gt;/Export</code> üzerinde</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>langfuse</code></td>
+          <td><code>region</code> <code>eu</code> (varsayılan) <code>https://cloud.langfuse.com/api/public/otel</code>, <code>us</code> <code>us.cloud.langfuse.com</code>, <code>hipaa</code> <code>hipaa.cloud.langfuse.com</code> demektir. Kendi barındırdığınız bir <code>endpoint</code> sonuna <code>/api/public/otel</code> eklenir</td>
+          <td><code>public_key</code> ve <code>secret_key</code> ile Basic kimlik doğrulama. <code>langfuse.*</code> öznitelikleri: gözlem türü, girdi, çıktı, model, kullanım ve maliyet ayrıntıları, düzey, oturum, kullanıcı, ortam, sürüm, iz adı ve etiketler</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>langsmith</code></td>
+          <td><code>https://api.smith.langchain.com/otel</code>; <code>region</code> <code>eu</code> <code>eu.api.smith.langchain.com/otel</code> demektir</td>
+          <td><code>api_key</code>, <code>x-api-key</code> olarak; <code>project</code>, <code>Langsmith-Project</code> başlığı olarak. <code>langsmith.span.kind</code>, <code>gen_ai.prompt</code> ve <code>gen_ai.completion</code></td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>braintrust</code></td>
+          <td><code>https://api.braintrust.dev/otel</code></td>
+          <td><code>api_key</code>, Bearer belirteci olarak; zorunlu <code>project</code>, <code>x-bt-parent: project_name:&lt;project&gt;</code> olarak. <code>braintrust.*</code> öznitelikleri</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>arize</code></td>
+          <td><code>https://otlp.arize.com</code>; <code>region</code> <code>eu</code> <code>https://otlp.eu-west-1a.arize.com</code> demektir</td>
+          <td><code>space_id</code> ve <code>api_key</code> başlıkları; zorunlu <code>project</code>, kaynağın <code>openinference.project.name</code> ve <code>model_id</code> değeri olarak. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>phoenix</code></td>
+          <td><code>endpoint</code> ayarlanmadıkça <code>http://localhost:6006</code></td>
+          <td>İsteğe bağlı <code>api_key</code>, Bearer belirteci olarak; <code>project</code>, <code>openinference.project.name</code> olarak. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>datadog</code></td>
+          <td><code>https://otlp.&lt;site&gt;</code>; burada <code>region</code> sitedir: <code>datadoghq.com</code> (varsayılan), <code>us3</code>, <code>us5</code>, <code>eu</code> veya <code>datadoghq.eu</code>, <code>ap1</code>, <code>ap2</code>, <code>gov</code></td>
+          <td><code>api_key</code>, <code>dd-api-key</code> olarak; LLM Observability için <code>dd-otlp-source: llmobs</code> ile. <code>gen_ai.input.messages</code> ve <code>gen_ai.output.messages</code></td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>honeycomb</code></td>
+          <td><code>https://api.honeycomb.io</code>; <code>region</code> <code>eu</code> <code>api.eu1.honeycomb.io</code> demektir</td>
+          <td><code>api_key</code>, <code>x-honeycomb-team</code> olarak; <code>dataset</code>, <code>x-honeycomb-dataset</code> olarak</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>newrelic</code></td>
+          <td><code>https://otlp.nr-data.net</code>; <code>region</code> <code>eu</code> <code>otlp.eu01.nr-data.net</code>, <code>fedramp</code> <code>gov-otlp.nr-data.net</code> demektir</td>
+          <td><code>api_key</code>, <code>api-key</code> olarak. Bir dize değeri 4095 baytta kesilir ve bunu belirten bir işaret eklenir</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>grafana</code></td>
+          <td><code>endpoint</code> olarak OTLP ağ geçidi adresi ya da <code>https://otlp-gateway-&lt;zone&gt;.grafana.net/otlp</code> için bölgeye ayarlanmış <code>region</code></td>
+          <td><code>instance_id</code> ve <code>api_key</code> (veya <code>token</code>) ile Basic kimlik doğrulama</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>sentry</code></td>
+          <td><code>dsn</code> değerinden: <code>https://&lt;host&gt;/api/&lt;project&gt;/integration/otlp</code></td>
+          <td>DSN'deki anahtar, <code>x-sentry-auth: sentry sentry_key=&lt;key&gt;</code> olarak</td>
+          <td>traces, logs</td>
+        </tr>
+        <tr>
+          <td><code>weave</code></td>
+          <td><code>https://trace.wandb.ai/otel</code></td>
+          <td>Basic kimlik doğrulama <code>api:&lt;api_key&gt;</code>; <code>project</code> (<code>entity/project</code>), <code>project_id</code> başlığı olarak. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>laminar</code></td>
+          <td><code>https://api.lmnr.ai</code></td>
+          <td><code>api_key</code>, Bearer belirteci olarak. <code>lmnr.*</code> öznitelikleri</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>helicone</code></td>
+          <td><code>https://api.worker.helicone.ai/custom/v1/log</code>, Helicone'un loglama API'si</td>
+          <td><code>api_key</code>, Bearer belirteci olarak. Model çağrısı başına bir istek: model span'leri gönderilir, diğer span'ler filtrelenmiş olarak sayılır</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>opik</code></td>
+          <td><code>https://www.comet.com/opik/api/v1/private/otel</code>; kendi barındırılan bir Opik <code>endpoint</code> ayarlar</td>
+          <td><code>api_key</code>, <code>Authorization</code> olarak; <code>workspace</code>, <code>Comet-Workspace</code> olarak; <code>project</code>, <code>projectName</code> olarak. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>elastic</code></td>
+          <td><code>endpoint</code>, zorunlu</td>
+          <td><code>Authorization: ApiKey &lt;api_key&gt;</code> veya <code>Bearer &lt;token&gt;</code></td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>dynatrace</code></td>
+          <td><code>endpoint</code> olarak ortam adresi; sonuna <code>/api/v2/otlp</code> eklenir</td>
+          <td><code>Authorization: Api-Token &lt;token&gt;</code>. Yalnızca protobuf</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Her kopyanın taşıdıkları</h2>
+  <p>
+    Bir hedef hangi kuralları kullanırsa kullansın, kopya ayrıca
+    <code>gen_ai.*</code> özniteliklerini taşır: işlem adı, istenen model,
+    sistem ve sağlayıcı adı, girdi ve çıktı token'ları, konuşma kimliği, ajan
+    ve araç adları ve isteğin temperature, top_p ve max_tokens değerleri.
+    <code>session.id</code> ve <code>user.id</code> değerlerini taşır; mcpd
+    özetliyorsa bu değer zaten özettir. Ayrıca <code>mcpd.*</code>
+    özniteliklerini, yani span türünü, varlık adını, maliyeti ve etiketleri
+    taşır; kaynakta da <code>mcpd.project</code> bulunur. Bu yüzden başka bir
+    mcpd'ye gönderilen bir kopya, aynı projeye değişmeden düşer.
+  </p>
+  <p>
+    Span'ler bağlantılarını korur (bağlantı türü <code>mcpd.link.kind</code>
+    olarak) ve olaylarını da: bir olay span'i, taşıyıcısı aynı yığındaysa o
+    taşıyıcıya OTLP span olayı olarak geri döner. Loglar, logger
+    enstrümantasyon kapsamı olacak şekilde gönderilir. Göndericinin gönderdiği
+    metrik noktaları iletilir: sayaçlar delta monoton toplamlar olarak,
+    gauge'lar ve histogramlar da. mcpd'nin span'lerden türettiği noktalar
+    gönderilmez: span'lerin zaten söylediğini tekrarlarlar ve hedef onları iki
+    kez sayardı.
+  </p>
+  <p>
+    Span'ler, bir alıcının beklediği biçim olan <code>resourceSpans</code>
+    içinde servise göre gruplanır. Puanlar, geri bildirimler ve yön notları
+    mcpd'de kalır.
+  </p>
+
+  <h2>Filtreler</h2>
+  <p>
+    <code>filter</code> bir hedefin aldığını daraltır. Her liste isteğe
+    bağlıdır ve boş bir liste her şeyi geçirir.
+  </p>
+  <ul>
+    <li><code>projects</code>: yalnızca bu projeler.</li>
+    <li><code>environments</code>: yalnızca bu ortamlar.</li>
+    <li><code>kinds</code>: yalnızca bu span türleri.</li>
+    <li>
+      <code>sample</code>: 0 ile 1 arasında bir oran. Karar iz kimliğinden
+      verilir; bu yüzden bir iz ya bütün olarak gider ya hiç gitmez ve bir
+      izdeki loglar izi izler.
+    </li>
+  </ul>
+  <p>
+    Bir filtrenin geri tuttuğu <code>mcpd_forward_filtered_total</code> içinde
+    sayılır; böylece beklediğinizden az veri alan bir hedef nedenini gösterir.
+  </p>
+
+  <h2>Maskeleme</h2>
+  <p>
+    İletme, herhangi bir şey yazılmadan önce yerinde maskeleme yapan alım
+    hattından sonra gerçekleşir. mcpd'ye gizlemesi söylenen ne varsa hiçbir
+    hedefe de ulaşmaz.
+  </p>
+  <p>
+    <code>redact</code> tek bir hedef için daha ileri gider. Yalnızca o hedefin
+    kopyasını değiştirir, mcpd'nin sakladığını asla değiştirmez.
+  </p>
+  <ul>
+    <li>
+      <code>drop_payloads: true</code> hiçbir span girdisi veya çıktısı ve
+      hiçbir log alanı göndermez. Hedef yine de zamanlamayı, modeli, kullanımı,
+      maliyeti ve hataları alır.
+    </li>
+    <li>
+      <code>key_contains</code> bir alt dize listesidir. Bunlardan birini
+      içeren bir anahtarın değeri <code>[redacted]</code> ile değiştirilir.
+    </li>
+  </ul>
+  <p>
+    Böylece tam payload'ları kendi deponuzda tutup bir sağlayıcıya her
+    çalıştırmanın içeriğini değil, yalnızca biçimini gönderebilirsiniz.
+  </p>
 
   {/* The diagram belongs here, not at the top. It draws the intake ending at
       Store, and this section is about what happens after Store, so the two read
@@ -73,62 +388,95 @@ const code = localeOf(Astro.url.pathname)
 
   <h2>Yerel depolama önce olur</h2>
   <p>
-    Bir span, herhangi bir şey iletilmeden önce mcpd'nin kendi deposuna yazılır;
-    iletme ise sonrasında kendi görevinde çalışır. Bunun iki sonucu var ve ikisi
-    de bilinçlidir.
-  </p>
-  <p>
-    Yavaş bir hedef, kendi gecikmesini span'i üreten isteğe hiçbir zaman eklemez.
-    Ajanınız başkasının collector'ını beklemez.
-  </p>
-  <p>
-    Çalışmayan bir hedef hiçbir zaman reddedilmiş bir alıma dönüşmez. mcpd
-    çalışmayı sürdürür ve iletmeyi kendi görevinde yeniden dener. Alternatifinde
-    başka bir şirketin kesintisi, telemetrinizin hiç tutulmaması demek olurdu.
-    Bu tasarım tam da bunu önlemek için var.
-  </p>
-  <p>
-    Her yığının üç denemesi vardır. Bir 429, bir 5xx ya da başarısız bir bağlantı
-    250 ms sonra yeniden denenir ve bekleme her denemeden sonra iki katına çıkar.
-    Saniye olarak verilen bir <code>Retry-After</code>, en fazla 30 saniyeye kadar
-    beklemenin yerini alır. Başka her 4xx ilk yanıtta kesindir, çünkü yığın o
-    hedef için bozuk kalacaktır. Daemon dururken kalan denemeleri hemen yapar.
-    Kesin olarak reddedilen ya da son denemeden sonra hâlâ teslim edilmemiş bir
-    yığın loglanır ve span'leri <code>mcpd_forward_dropped_spans_total</code>
-    sayacına eklenir; böylece kopyanın ne kadarının eksik olduğunu görürsünüz.
-  </p>
-  <p>
-    Bağlantıyı kabul edip hiç yanıt vermeyen bir hedef de daemon'un belleğini
-    ele geçiremez. Aynı anda hedefi en fazla 64 alım isteğinin kopyası bekler.
-    Bu kadarı beklerken yeni bir kopya hemen bırakılır ve
-    <code>mcpd_forward_dropped_spans_total</code> içinde sayılır; yerel yazma
-    etkilenmez.
-  </p>
-  <p>
-    Bir yığın yeniden denenirken bellekte bekler; iletme kuyruğu doluysa yeni
-    bir yığın düşürülür ve span'leri aynı metrikte sayılır, böylece bir düşüş her
-    zaman görünür. Teslim güvencesi için mcpd ile hedef arasına bir collector
-    koyun.
+    Bir yığın, herhangi bir şey iletilmeden önce mcpd'nin kendi deposuna
+    yazılır. Kopya yerel yazmadan sonra alınır ve her hedefin biriktirme
+    alanına verilir. Yavaş bir hedef, kendi gecikmesini span'i üreten isteğe
+    hiçbir zaman eklemez; çalışmayan bir hedef de hiçbir zaman reddedilmiş bir
+    alıma dönüşmez.
   </p>
 
-  <h2>Maskeleme, dışarı çıkana da uygulanır</h2>
+  <h3>Biriktirme alanı</h3>
   <p>
-    İletme, herhangi bir şey yazılmadan önce yerinde maskeleme yapan alım
-    hattından sonra gerçekleşir. mcpd'ye gizlemesi söylenen ne varsa bir sonraki
-    durağa da ulaşmaz. Deponuzu koruyup çıkışınızı korumayan bir kural, bir
-    gizlilik denetimi olmazdı.
+    Her hedefin bir biriktirme dizini vardır: <code>&lt;spool-dir&gt;/forward-&lt;name&gt;/</code>.
+    Bir kopya geçici bir dosyaya yazılır, diske eşitlenir ve 0600 kipiyle
+    yerine taşınır; böylece bir çökme ya bütün bir girdi ya da hiç girdi
+    bırakmaz. Biriktirme dizini varsayılan olarak <code>--data</code> yanında
+    bir <code>.spool</code> dizinidir, örneğin <code>/data/mcpd.spool</code>;
+    <code>--data</code> <code>:memory:</code> olduğunda bellekte tutulur.
+    <code>--spool-dir memory</code> onu bilerek bellekte tutar.
+  </p>
+  <p>
+    Bir biriktirme alanı <code>spool_max_bytes</code> ile sınırlıdır; siz
+    ayarlamadıkça hedef başına 256 MiB. Dolduğunda yeni kopya bırakılır ve
+    <code>mcpd_forward_spool_full_total</code> içinde sayılır; yerel yazma
+    etkilenmez. Diskteki birikmiş iş yeniden başlatmadan sağ çıkar ve
+    başlangıçta gönderilir. Dururken, bellekteki bir biriktirme alanı son bir
+    deneme alır.
   </p>
 
-  <h2>Ne iletilir</h2>
+  <h3>Yeniden denemeler</h3>
   <p>
-    Span'ler. Loglar, metrikler, puanlar, geri bildirimler ve yön notları
-    mcpd'de kalır, çünkü insanların ilettiği hedefler izleme arka uçlarıdır ve
-    geri kalanı ya düşürür ya da özniteliklere sıkıştırır.
+    Hedef başına iki işçi, biriktirme alanındakini gönderir. Başarısız bir
+    gönderim üstel geri çekilme ve rastgele sapmayla yeniden denenir: bekleme
+    0,5 saniyeden başlar ve 60'a kadar iki katına çıkar; her bekleme o
+    aralığın üst yarısından rastgele seçilir. Saniye ya da HTTP tarihi olarak
+    verilen bir <code>Retry-After</code>, en fazla 300 saniyeye kadar dikkate
+    alınır.
   </p>
   <p>
-    Span'ler, bir alıcının beklediği biçim olan <code>resourceSpans</code> içinde
-    servise göre gruplanır; span başına bir kaynak biçiminde değil, ki bu da
-    geçerlidir ama sonraki her sistemin yeniden gruplamasına yol açar.
+    Yeniden denenenler: 401, 403, 404, 408, 409, 425, 429, her 5xx, aktarım
+    hataları ve gRPC kodları <code>CANCELLED</code>,
+    <code>DEADLINE_EXCEEDED</code>, <code>PERMISSION_DENIED</code>,
+    <code>RESOURCE_EXHAUSTED</code>, <code>ABORTED</code>,
+    <code>OUT_OF_RANGE</code>, <code>UNAVAILABLE</code>, <code>DATA_LOSS</code>
+    ve <code>UNAUTHENTICATED</code>. Bu yüzden süresi dolmuş bir anahtar ya da
+    hâlâ oluşturulmakta olan bir hedef veri kaybettirmez, bekletir.
+  </p>
+  <p>
+    Başka her 4xx kesindir, çünkü yığın o hedef için bozuk kalacaktır. Girdi
+    biriktirme dizinindeki <code>dead/</code> içine taşınır, en yeni 100 tanesi
+    tutulur ve sayılır. Bir gün sonra hâlâ teslim edilmemiş bir girdi de
+    <code>dead/</code> içine taşınır. OTLP/HTTP için 1 KiB üzerindeki gövdeler
+    gzip ile sıkıştırılır.
+  </p>
+
+  <h2>İzlemek</h2>
+  <p>
+    Her metrik <code>destination</code> ve <code>vendor</code> etiketlerini
+    taşır.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Metrik</th><th>Tür</th><th>Anlamı</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>mcpd_forward_sent_total</code></td><td>counter</td><td>Hedefin kabul ettiği öğeler</td></tr>
+        <tr><td><code>mcpd_forward_failed_attempts_total</code></td><td>counter</td><td>Başarısız olan ve yeniden denenecek girişimler</td></tr>
+        <tr><td><code>mcpd_forward_dead_letter_total</code></td><td>counter</td><td>Kesin olarak reddedilen ya da bir günden eski olup <code>dead/</code> içine taşınan öğeler</td></tr>
+        <tr><td><code>mcpd_forward_spool_full_total</code></td><td>counter</td><td>Biriktirme alanı dolu olduğu için bırakılan öğeler</td></tr>
+        <tr><td><code>mcpd_forward_filtered_total</code></td><td>counter</td><td>Filtrenin hedeften geri tuttuğu öğeler</td></tr>
+        <tr><td><code>mcpd_forward_spool_entries</code></td><td>gauge</td><td>Biriktirme alanında bekleyen istekler</td></tr>
+        <tr><td><code>mcpd_forward_spool_bytes</code></td><td>gauge</td><td>Biriktirme alanının tuttuğu bayt</td></tr>
+        <tr><td><code>mcpd_forward_up</code></td><td>gauge</td><td>Son girişim başarılıysa ya da hiç girişim olmadıysa 1, başarısızsa 0</td></tr>
+        <tr><td><code>mcpd_forward_last_success_timestamp_seconds</code></td><td>gauge</td><td>Hedefin bir isteği en son kabul ettiği an, epoch'tan bu yana saniye olarak, ya da 0</td></tr>
+        <tr><td><code>mcpd_forward_dropped_spans_total</code></td><td>counter</td><td><code>dead/</code> içine taşınan, dolu bir biriktirme alanında bırakılan ya da yoldaki 64 kopya sınırı aşıldığında bırakılan span'ler</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Büyüyen bir <code>mcpd_forward_spool_bytes</code> ve eskiyen bir
+    <code>mcpd_forward_last_success_timestamp_seconds</code> için uyarı kurun:
+    ikisi birlikte, mcpd veriyi sizin için tutarken bir hedefin veri almayı
+    bıraktığını söyler.
+  </p>
+  <p>
+    <code>mcpd doctor</code> her hedef için bir bulgu bildirir. Hedefin kendi
+    protokolünde hiçbir şey taşımayan bir dışa aktarım gönderir; böylece uç ve
+    kimlik bilgisi veri yazılmadan kanıtlanır. Helicone atlanır. Ayrıca
+    biriktirme dizinini okur; girdilerini, baytlarını, en eski girdinin yaşını
+    ve teslim edilemeyen girdi sayısını bildirir ve teslim edilemeyen girdi
+    olduğunda ya da en eski girdi bir saatten eski olduğunda uyarır.
   </p>
 
   <h2>mcpd'den mcpd'ye iletme</h2>
@@ -136,14 +484,16 @@ const code = localeOf(Astro.url.pathname)
     İki uç da aynı protokolü konuştuğu için yerel bir mcpd, paylaşılan bir
     mcpd'ye iletebilir. Geliştiriciler kendi makinelerinde tam payload'larla
     hızlı bir depo tutar; ekibin örneği de aynı çalıştırmaları, kendi saklama
-    süresi ve varışta uygulanan kendi maskeleme kurallarıyla alır.
+    süresi ve varışta uygulanan kendi maskeleme kurallarıyla alır. Kendisi
+    hiçbir şey saklamayan bir daemon'un önüne bir collector koymak için
+    <a href={urlFor('/docs/relay', code)} class="link">aktarıcıyı</a> kullanın.
   </p>
 
   <h2>Sonraki</h2>
   <ul>
     <li>
-      Var olan bir OpenTelemetry kurulumunu mcpd'ye yöneltmek:
-      <a href={urlFor('/docs/opentelemetry', code)} class="link">OpenTelemetry</a>.
+      Kenarda bir collector ve birden çok bölge:
+      <a href={urlFor('/docs/relay', code)} class="link">Aktarıcı ve bölgeler</a>.
     </li>
     <li>
       Bir span saklanmadan veya gönderilmeden önce neyin kaldırıldığı:

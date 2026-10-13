@@ -145,6 +145,9 @@ pub(crate) async fn finish_pinned(
     // Also after the idempotency key is settled, because it changes nothing
     // about that: the derived ids are a function of the spans, so a resent
     // export derives the same ids and replaces the same rows.
+    // Copied before the derived points are added: those restate the spans, and
+    // a destination sent both would count everything twice.
+    let forwarded = crate::forward::copy_of(state, &batch);
     let derived = crate::derive::derive(
         &batch.spans,
         state.config.derived_metrics,
@@ -152,10 +155,6 @@ pub(crate) async fn finish_pinned(
     );
     let derived_count = derived.len() as u32;
     batch.metrics.extend(derived);
-
-    // Forwarding reads the batch, so it happens before `ingest` takes it.
-    let forwarded: Vec<Span> =
-        if crate::forward::wanted(state) { batch.spans.clone() } else { Vec::new() };
 
     let mut result = state.store.ingest(batch).await?;
 
@@ -278,7 +277,10 @@ pub(crate) async fn ingest_spans(
     let now = OffsetDateTime::now_utc();
     let spans: Vec<Span> = otlp::to_spans(decoded, &state.config.default_project, now);
     let pin = crate::auth::pinned_project(state, headers);
-    finish_pinned(state, spans, Batch::default(), grant, pin.as_deref()).await
+    // An `Idempotency-Key` header makes a resend, from a relay or a retrying
+    // client, land once.
+    let batch = Batch { ingest_key: crate::relay::idempotency_key(headers), ..Batch::default() };
+    finish_pinned(state, spans, batch, grant, pin.as_deref()).await
 }
 
 /// Decode and store one OTLP export, whichever door it came in by.
@@ -322,12 +324,14 @@ pub(crate) async fn ingest_otlp(
         // of them was a stored row. Counted after decoding, because OTLP nests
         // its records three deep and the count is not knowable before.
         hold_to_cap(state, logs.len(), signal.noun())?;
-        let ingest_key = export_key("otlp-logs", logs.iter().map(|l| l.log_id.as_str()));
+        let ingest_key = crate::relay::idempotency_key(headers)
+            .or_else(|| export_key("otlp-logs", logs.iter().map(|l| l.log_id.as_str())));
         Batch { logs, ingest_key, ..Batch::default() }
     } else {
         let metrics = otlp_metrics_decode(&value, project)?;
         hold_to_cap(state, metrics.len(), signal.noun())?;
-        let ingest_key = export_key("otlp-metrics", metrics.iter().map(|m| m.metric_id.as_str()));
+        let ingest_key = crate::relay::idempotency_key(headers)
+            .or_else(|| export_key("otlp-metrics", metrics.iter().map(|m| m.metric_id.as_str())));
         Batch { metrics, ingest_key, ..Batch::default() }
     };
     let pin = crate::auth::pinned_project(state, headers);
@@ -1117,6 +1121,11 @@ pub async fn native(
                 native.add(incoming, cap)?;
             }
         }
+    }
+
+    // A header key covers the signals the body gave no key of its own.
+    if let (Some(at), Some(key)) = (native.keyless, crate::relay::idempotency_key(&headers)) {
+        native.units[at].ingest_key = Some(key);
     }
 
     // One pass per unit, after the whole request has been decoded and both caps

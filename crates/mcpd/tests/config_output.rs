@@ -175,9 +175,58 @@ fn every_structured_setting_is_read_back_by_a_line_of_its_own() {
     );
     assert_eq!(
         line(&out, "forwarding"),
-        "forwarding      https://otlp.example.invalid/v1/traces (100 spans per request), headers \
-         Authorization, X-Scope-OrgID"
+        "forwarding      otlp at https://otlp.example.invalid/v1/traces (json, 100 per request), \
+         headers Authorization, X-Scope-OrgID; spool at ./mcpd.spool, 256 MiB each"
     );
+    assert_eq!(line(&out, "relay"), "relay           off: no --upstream");
+}
+
+#[test]
+fn several_destinations_and_a_relay_are_each_read_back() {
+    let file = config_file(
+        "forward-many",
+        r#"{ "forward": [
+            { "vendor": "honeycomb", "api_key": "hc-secret-key", "region": "eu" },
+            { "vendor": "otlp_grpc", "name": "collector", "endpoint": "http://collector:4317" }
+        ] }"#,
+    );
+    let out = config(&[
+        "--config-file",
+        &file,
+        "--spool-dir",
+        "/var/spool/mcpd",
+        "--upstream",
+        "https://a.example.invalid,https://user:up-secret@b.example.invalid",
+        "--upstream-key",
+        "upstream-secret",
+    ]);
+    for secret in ["hc-secret-key", "up-secret", "upstream-secret"] {
+        assert!(!out.contains(secret), "{secret} was printed:\n{out}");
+    }
+    assert_eq!(
+        line(&out, "forwarding"),
+        "forwarding      honeycomb at https://api.eu1.honeycomb.io/v1/traces (protobuf, 256 per \
+         request), headers x-honeycomb-team; collector at \
+         http://collector:4317/opentelemetry.proto.collector.trace.v1.TraceService/Export (grpc, \
+         256 per request); spool at /var/spool/mcpd, 256 MiB each"
+    );
+    assert_eq!(
+        line(&out, "relay"),
+        "relay           2 upstream(s) in order, https://a.example.invalid, \
+         https://b.example.invalid; upstream key set; spool at /var/spool/mcpd/relay, 1024 MiB"
+    );
+}
+
+#[test]
+fn a_destination_naming_an_unset_variable_refuses_to_start_and_names_it() {
+    let file = config_file(
+        "forward-env",
+        r#"{ "forward": { "vendor": "datadog", "api_key": "${MCPD_TEST_UNSET_DD_KEY}" } }"#,
+    );
+    let out = mcpd().args(["config", "--config-file", &file]).output().expect("run");
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("MCPD_TEST_UNSET_DD_KEY") && err.contains("not set"), "{err}");
 }
 
 #[test]

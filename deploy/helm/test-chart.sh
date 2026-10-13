@@ -237,6 +237,55 @@ has 'key: smtp-password'
 has 'name: OIDC_CLIENT_SECRET'
 lacks 'name: MCPD_SIGNUP'
 
+render "a vendor destination from the flags" "${KEYS[@]}" \
+  --set forward.vendor=honeycomb --set 'forward.headers[0]=x-honeycomb-team: k' \
+  --set spool.dir=/data/spool --set spool.maxBytes=1048576
+has 'name: MCPD_FORWARD_VENDOR'
+has 'value: "honeycomb"'
+has 'name: MCPD_SPOOL_DIR'
+has 'value: "1048576"'
+has 'forward-headers: "x-honeycomb-team: k"'
+
+render "several destinations in a Secret config file" "${KEYS[@]}" --set configFile.kind=Secret \
+  --set 'configFile.content.forward[0].vendor=langfuse' \
+  --set 'configFile.content.forward[0].secret_key=sk-lf-1'
+has 'secretName: mcpd-config'
+
+render "destinations reading their keys from the environment, in a ConfigMap" "${KEYS[@]}" \
+  --set 'configFile.content.forward[0].vendor=datadog' \
+  --set 'configFile.content.forward[0].api_key=${DD_API_KEY}'
+has '^kind: ConfigMap'
+
+EXAMPLES="$(cd "$(dirname "$0")/examples" && pwd)"
+render "example: the core region" --set keys.existingSecret=mcpd-keys -f "$EXAMPLES/region-core.yaml"
+has '^  replicas: 3$'
+has 'type: RollingUpdate'
+has 'name: MCPD_POSTGRES_URL'
+has '^kind: PodDisruptionBudget'
+lacks 'args: \["relay"\]'
+
+render "example: the standby region" --set keys.existingSecret=mcpd-keys -f "$EXAMPLES/region-standby.yaml"
+has '^  replicas: 2$'
+has 'name: MCPD_POSTGRES_URL'
+
+render "example: an edge relay" --set keys.ingest=edge --set relay.upstreamKey=core \
+  -f "$EXAMPLES/region-edge-relay.yaml"
+has 'args: \["relay"\]'
+has 'name: MCPD_UPSTREAMS'
+has 'value: "https://mcpd.eu-west.example:4317,https://mcpd.us-east.example:4317"'
+has 'upstream-key: "core"'
+has 'value: "4294967296"'
+has '^kind: PersistentVolumeClaim'
+has 'type: Recreate'
+lacks 'read-keys'
+lacks 'MCPD_POSTGRES_URL'
+
+render "relays without a volume may scale out" --set mode=relay --set keys.ingest=edge \
+  --set 'relay.upstreams[0]=https://core:4317' --set persistence.enabled=false --set replicaCount=3
+has '^  replicas: 3$'
+lacks '^kind: PersistentVolumeClaim'
+has 'emptyDir: \{\}'
+
 echo
 echo "refuses"
 
@@ -304,6 +353,19 @@ render "a webhook in a Secret" "${KEYS[@]}" --set configFile.kind=Secret \
 refuse "forward headers beside an existing key Secret" "forward.headers would be ignored" \
   --set keys.existingSecret=mine --set 'forward.endpoint=https://collector.example:4318' \
   --set 'forward.headers[0]=Authorization: Bearer x'
+
+refuse "a relay with no upstream" "relay.upstreams is empty" \
+  --set mode=relay --set keys.ingest=a
+refuse "a relay with a store" "A relay opens no store" \
+  --set mode=relay --set keys.ingest=a --set 'relay.upstreams[0]=https://core' "${PG[@]}"
+refuse "relay pods sharing one spool volume" "share one spool volume" \
+  --set mode=relay --set keys.ingest=a --set 'relay.upstreams[0]=https://core' --set replicaCount=2
+refuse "upstreams on a daemon" "relay.upstreams is set but mode is daemon" \
+  "${KEYS[@]}" --set 'relay.upstreams[0]=https://core'
+refuse "an unknown mode" "Set it to daemon or relay" "${KEYS[@]}" --set mode=edge
+refuse "a destination key in a ConfigMap" "forward[0].api_key" "${KEYS[@]}" \
+  --set 'configFile.content.forward[0].vendor=honeycomb' \
+  --set 'configFile.content.forward[0].api_key=hc-plain-key'
 
 echo
 if [ "$failures" -gt 0 ]; then

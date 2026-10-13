@@ -5,22 +5,48 @@ import PipelineDiagram from '@/components/PipelineDiagram.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const code = localeOf(Astro.url.pathname)
+
+const destinations = `{
+  "forward": [
+    {
+      "vendor": "langfuse",
+      "region": "eu",
+      "public_key": "\${LANGFUSE_PUBLIC_KEY}",
+      "secret_key": "\${LANGFUSE_SECRET_KEY}",
+      "filter": { "projects": ["checkout"], "sample": 0.25 },
+      "redact": { "key_contains": ["email"] }
+    },
+    {
+      "name": "honeycomb-prod",
+      "vendor": "honeycomb",
+      "api_key": "\${HONEYCOMB_API_KEY}",
+      "dataset": "agents",
+      "signals": { "traces": true, "logs": true, "metrics": false }
+    },
+    {
+      "name": "collector",
+      "endpoint": "https://otel.internal.example.com:4318",
+      "protocol": "protobuf",
+      "headers": { "Authorization": "Bearer \${COLLECTOR_TOKEN}" },
+      "redact": { "drop_payloads": true }
+    }
+  ]
+}`
 ---
 
 <Doc
   title="Transfert"
-  description="Copiez chaque span stocké vers un autre endpoint OTLP : mcpd devient un saut d’un pipeline de télémétrie, pas un endroit où les données restent prises. Le stockage local a toujours lieu d’abord."
+  description="Copiez ce que mcpd stocke vers Langfuse, Datadog, Honeycomb et quinze autres destinations à la fois, chacune avec son filtre, son masquage et son spool."
   lede="mcpd parle OTLP dans les deux sens. Rien de ce qui arrive ici n’y reste prisonnier."
   og="docs"
 >
-  <h2>Un seul protocole en sortie, pas onze exporters</h2>
+  <h2>Un seul stockage, autant de copies qu’il vous faut</h2>
   <p>
-    mcpd reçoit de l’OTLP, et il peut en émettre. Cette seule propriété remplace
-    l’essentiel de ce que fait un jeu d’exporters par éditeur : Langfuse,
-    Datadog, Honeycomb, Grafana et toutes les autres destinations qui méritent
-    d’être nommées acceptent l’OTLP sur HTTP. Le transfert est donc une
-    implémentation et non onze, et il ne peut pas prendre du retard sur la
-    sortie du SDK d’un éditeur.
+    mcpd reçoit de l’OTLP, et il en émet. Une destination est une entrée du
+    fichier de configuration : un nom d’éditeur, un identifiant, et en option un
+    filtre, une règle de masquage et les signaux qu’elle reçoit. mcpd connaît
+    l’endpoint, l’en-tête d’authentification et les noms d’attributs que lit
+    chaque éditeur : vous écrivez la clé, pas l’intégration.
   </p>
   <p>
     Cela veut aussi dire qu’adopter mcpd est réversible. Pointez-le sur ce que
@@ -30,42 +56,332 @@ const code = localeOf(Astro.url.pathname)
   </p>
 
   <h2>L’activer</h2>
+  <p>
+    Pour un seul récepteur OTLP, les options suffisent. Donnez l’URL de base et
+    non <code>/v1/traces</code> : le chemin de chaque signal est ajouté à la fin.
+  </p>
 
   <Command
     class="not-prose my-6"
     title="stocker en local et copier plus loin"
     command="mcpd serve --forward-endpoint https://otlp.example.com"
+    primaryLabel="OTLP"
+    secondary={[
+      {
+        label: 'Avec un en-tête',
+        command: "mcpd serve --forward-endpoint https://otlp.example.com --forward-header 'Authorization: Bearer $TOKEN'",
+      },
+      {
+        label: 'Un éditeur',
+        command: "mcpd serve --forward-vendor honeycomb --forward-header 'x-honeycomb-team: $HONEYCOMB_API_KEY'",
+      },
+      {
+        label: 'Protobuf',
+        command: 'mcpd serve --forward-endpoint https://otlp.example.com --forward-protocol protobuf',
+      },
+    ]}
   />
 
   <p>
-    Le chemin est ajouté à la fin : donnez l’URL de base et non
-    <code>/v1/traces</code>. Pour une destination qui exige des identifiants,
-    ajoutez des en-têtes :
+    <code>--forward-vendor</code> choisit l’endpoint et les conventions d’un
+    éditeur ; l’identifiant va dans <code>--forward-header</code>. Avec un
+    éditeur qui a un endpoint par défaut, <code>--forward-endpoint</code> peut
+    être omis. <code>--forward-protocol</code> accepte <code>json</code>,
+    <code>protobuf</code> ou <code>grpc</code>. Une destination donnée par les
+    options remplace le bloc <code>forward</code> du fichier : une instance peut
+    donc être pointée ailleurs sans modifier une ConfigMap partagée.
   </p>
 
-  <Command
-    class="not-prose my-6"
-    title="avec un en-tête d’autorisation"
-    command={`mcpd serve \\
-  --forward-endpoint https://otlp.example.com \\
-  --forward-header 'Authorization: Bearer $TOKEN'`}
-  />
+  <h2>Plusieurs destinations</h2>
+  <p>
+    Le bloc <code>forward</code> du fichier de configuration accepte une
+    destination sous forme d’objet, la forme que lisaient les versions
+    précédentes et qui fonctionne toujours, ou un tableau de destinations.
+    Chacune reçoit sa propre copie, son propre spool et ses propres nouvelles
+    tentatives : un éditeur lent ne retient donc jamais un éditeur rapide.
+  </p>
+
+  <pre><code class="language-json">{destinations}</code></pre>
 
   <p>
-    Les mêmes réglages vivent sous <code>forward</code> dans le fichier de
-    configuration, où <code>batch_size</code> et <code>enabled</code> sont aussi
-    disponibles. Une option l’emporte sur le fichier : une instance peut donc
-    être pointée ailleurs sans modifier une ConfigMap partagée.
+    Toute chaîne peut s’écrire <code>$&#123;ENV_NAME&#125;</code>. Elle est lue
+    dans l’environnement une seule fois, au démarrage. Une variable absente
+    empêche le démarrage et le message la nomme : un identifiant qui manque dans
+    un secret devient une erreur visible au déploiement, et non un 401 découvert
+    une semaine plus tard.
   </p>
 
-  <pre><code class="language-json">{`{
-  "forward": {
-    "endpoint": "https://otlp.example.com",
-    "headers": [["Authorization", "Bearer sk-..."]],
-    "batch_size": 256,
-    "enabled": true
-  }
-}`}</code></pre>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Champ</th><th>Rôle</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>name</code></td>
+          <td>Le nom de la destination, utilisé comme label <code>destination</code> de ses métriques et comme nom de son répertoire de spool. Lettres, chiffres, <code>-</code>, <code>_</code> et <code>.</code>. Par défaut, le nom de l’éditeur</td>
+        </tr>
+        <tr>
+          <td><code>vendor</code></td>
+          <td>L’un des préréglages ci-dessous. Par défaut <code>otlp</code></td>
+        </tr>
+        <tr>
+          <td><code>endpoint</code></td>
+          <td>L’URL de base, sans <code>/v1/traces</code>. Obligatoire pour <code>otlp</code>, <code>otlp_grpc</code>, <code>elastic</code> et <code>dynatrace</code> ; pour un éditeur qui a une valeur par défaut, il la remplace</td>
+        </tr>
+        <tr>
+          <td><code>protocol</code></td>
+          <td><code>json</code>, <code>protobuf</code> ou <code>grpc</code>. <code>otlp</code> utilise JSON par défaut, <code>otlp_grpc</code> gRPC, et tous les autres éditeurs protobuf. Dynatrace refuse JSON</td>
+        </tr>
+        <tr>
+          <td><code>headers</code></td>
+          <td>Une liste de paires <code>[name, value]</code> ou un objet. Un en-tête qui porte le même nom qu’un en-tête posé par le préréglage le remplace</td>
+        </tr>
+        <tr>
+          <td><code>enabled</code></td>
+          <td><code>false</code> garde l’entrée dans le fichier et n’envoie rien</td>
+        </tr>
+        <tr>
+          <td><code>batch_size</code></td>
+          <td>Spans par requête. 256 par défaut</td>
+        </tr>
+        <tr>
+          <td><code>conventions</code></td>
+          <td>Les noms d’attributs dans lesquels la copie est écrite : <code>gen_ai</code>, <code>gen_ai_messages</code>, <code>openinference</code>, <code>langfuse</code>, <code>langsmith</code>, <code>braintrust</code> ou <code>laminar</code>. Par défaut, celles de l’éditeur</td>
+        </tr>
+        <tr>
+          <td><code>region</code></td>
+          <td>Choisit l’endpoint régional de l’éditeur, listé dans le tableau ci-dessous</td>
+        </tr>
+        <tr>
+          <td><code>api_key</code>, <code>token</code>, <code>public_key</code>, <code>secret_key</code>, <code>instance_id</code>, <code>space_id</code></td>
+          <td>Identifiants. Chaque éditeur lit ceux que nomme le tableau et les transforme en son propre en-tête</td>
+        </tr>
+        <tr>
+          <td><code>project</code>, <code>workspace</code>, <code>dataset</code>, <code>dsn</code></td>
+          <td>L’endroit, chez l’éditeur, où la copie arrive</td>
+        </tr>
+        <tr>
+          <td><code>filter</code></td>
+          <td>Les données que reçoit cette destination. Voir plus bas</td>
+        </tr>
+        <tr>
+          <td><code>redact</code></td>
+          <td>Ce que la copie de cette destination laisse de côté. Voir plus bas</td>
+        </tr>
+        <tr>
+          <td><code>signals</code></td>
+          <td><code>traces</code>, <code>logs</code> et <code>metrics</code>, chacun à true ou false. Par défaut, tous les signaux que l’éditeur accepte</td>
+        </tr>
+        <tr>
+          <td><code>spool_max_bytes</code></td>
+          <td>Le maximum que peut contenir le spool de cette destination. Par défaut <code>--spool-max-bytes</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Éditeurs</h2>
+  <p>
+    Chaque préréglage fixe l’endpoint, l’authentification et les conventions.
+    La colonne des signaux indique ce que l’éditeur accepte, et donc ce qu’une
+    destination envoie, sauf si <code>signals</code> en décide autrement.
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Éditeur</th><th>Endpoint</th><th>Identifiants et emplacement</th><th>Signaux</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>otlp</code></td>
+          <td><code>endpoint</code>, obligatoire</td>
+          <td><code>headers</code>. Tout récepteur OTLP/HTTP, en JSON sauf si <code>protocol</code> vaut <code>protobuf</code></td>
+          <td>traces, logs, métriques</td>
+        </tr>
+        <tr>
+          <td><code>otlp_grpc</code></td>
+          <td><code>endpoint</code>, obligatoire</td>
+          <td><code>headers</code>. Tout récepteur OTLP/gRPC, sur <code>/opentelemetry.proto.collector.&lt;signal&gt;.v1.&lt;Service&gt;/Export</code></td>
+          <td>traces, logs, métriques</td>
+        </tr>
+        <tr>
+          <td><code>langfuse</code></td>
+          <td><code>region</code> <code>eu</code> (par défaut) donne <code>https://cloud.langfuse.com/api/public/otel</code>, <code>us</code> donne <code>us.cloud.langfuse.com</code>, <code>hipaa</code> donne <code>hipaa.cloud.langfuse.com</code>. Un <code>endpoint</code> auto-hébergé reçoit <code>/api/public/otel</code> à la fin</td>
+          <td>Authentification Basic à partir de <code>public_key</code> et <code>secret_key</code>. Attributs <code>langfuse.*</code> : type d’observation, entrée, sortie, modèle, détails d’usage et de coût, niveau, session, utilisateur, environnement, version, nom de trace et tags</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>langsmith</code></td>
+          <td><code>https://api.smith.langchain.com/otel</code> ; <code>region</code> <code>eu</code> donne <code>eu.api.smith.langchain.com/otel</code></td>
+          <td><code>api_key</code> dans <code>x-api-key</code> ; <code>project</code> dans l’en-tête <code>Langsmith-Project</code>. <code>langsmith.span.kind</code>, <code>gen_ai.prompt</code> et <code>gen_ai.completion</code></td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>braintrust</code></td>
+          <td><code>https://api.braintrust.dev/otel</code></td>
+          <td><code>api_key</code> en jeton Bearer ; <code>project</code>, obligatoire, dans <code>x-bt-parent: project_name:&lt;project&gt;</code>. Attributs <code>braintrust.*</code></td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>arize</code></td>
+          <td><code>https://otlp.arize.com</code> ; <code>region</code> <code>eu</code> donne <code>https://otlp.eu-west-1a.arize.com</code></td>
+          <td>En-têtes <code>space_id</code> et <code>api_key</code> ; <code>project</code>, obligatoire, dans <code>openinference.project.name</code> et <code>model_id</code> de la ressource. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>phoenix</code></td>
+          <td><code>http://localhost:6006</code> sauf si <code>endpoint</code> est défini</td>
+          <td><code>api_key</code> facultatif en jeton Bearer ; <code>project</code> dans <code>openinference.project.name</code>. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>datadog</code></td>
+          <td><code>https://otlp.&lt;site&gt;</code>, où <code>region</code> est le site : <code>datadoghq.com</code> (par défaut), <code>us3</code>, <code>us5</code>, <code>eu</code> ou <code>datadoghq.eu</code>, <code>ap1</code>, <code>ap2</code>, <code>gov</code></td>
+          <td><code>api_key</code> dans <code>dd-api-key</code>, avec <code>dd-otlp-source: llmobs</code> pour LLM Observability. <code>gen_ai.input.messages</code> et <code>gen_ai.output.messages</code></td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>honeycomb</code></td>
+          <td><code>https://api.honeycomb.io</code> ; <code>region</code> <code>eu</code> donne <code>api.eu1.honeycomb.io</code></td>
+          <td><code>api_key</code> dans <code>x-honeycomb-team</code> ; <code>dataset</code> dans <code>x-honeycomb-dataset</code></td>
+          <td>traces, logs, métriques</td>
+        </tr>
+        <tr>
+          <td><code>newrelic</code></td>
+          <td><code>https://otlp.nr-data.net</code> ; <code>region</code> <code>eu</code> donne <code>otlp.eu01.nr-data.net</code>, <code>fedramp</code> donne <code>gov-otlp.nr-data.net</code></td>
+          <td><code>api_key</code> dans <code>api-key</code>. Une valeur texte est coupée à 4095 octets, avec un marqueur qui l’indique</td>
+          <td>traces, logs, métriques</td>
+        </tr>
+        <tr>
+          <td><code>grafana</code></td>
+          <td>L’URL de la passerelle OTLP comme <code>endpoint</code>, ou <code>region</code> réglé sur la zone pour <code>https://otlp-gateway-&lt;zone&gt;.grafana.net/otlp</code></td>
+          <td>Authentification Basic à partir de <code>instance_id</code> et <code>api_key</code> (ou <code>token</code>)</td>
+          <td>traces, logs, métriques</td>
+        </tr>
+        <tr>
+          <td><code>sentry</code></td>
+          <td>Tiré de <code>dsn</code> : <code>https://&lt;host&gt;/api/&lt;project&gt;/integration/otlp</code></td>
+          <td>La clé du DSN dans <code>x-sentry-auth: sentry sentry_key=&lt;key&gt;</code></td>
+          <td>traces, logs</td>
+        </tr>
+        <tr>
+          <td><code>weave</code></td>
+          <td><code>https://trace.wandb.ai/otel</code></td>
+          <td>Authentification Basic <code>api:&lt;api_key&gt;</code> ; <code>project</code> (<code>entity/project</code>) dans l’en-tête <code>project_id</code>. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>laminar</code></td>
+          <td><code>https://api.lmnr.ai</code></td>
+          <td><code>api_key</code> en jeton Bearer. Attributs <code>lmnr.*</code></td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>helicone</code></td>
+          <td><code>https://api.worker.helicone.ai/custom/v1/log</code>, son API de journalisation</td>
+          <td><code>api_key</code> en jeton Bearer. Une requête par appel de modèle : les spans de modèle sont envoyés, et les autres spans sont comptés comme filtrés</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>opik</code></td>
+          <td><code>https://www.comet.com/opik/api/v1/private/otel</code> ; un Opik auto-hébergé définit <code>endpoint</code></td>
+          <td><code>api_key</code> dans <code>Authorization</code>, <code>workspace</code> dans <code>Comet-Workspace</code>, <code>project</code> dans <code>projectName</code>. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>elastic</code></td>
+          <td><code>endpoint</code>, obligatoire</td>
+          <td><code>Authorization: ApiKey &lt;api_key&gt;</code>, ou <code>Bearer &lt;token&gt;</code></td>
+          <td>traces, logs, métriques</td>
+        </tr>
+        <tr>
+          <td><code>dynatrace</code></td>
+          <td>L’URL de l’environnement comme <code>endpoint</code> ; <code>/api/v2/otlp</code> est ajouté à la fin</td>
+          <td><code>Authorization: Api-Token &lt;token&gt;</code>. Protobuf uniquement</td>
+          <td>traces, logs, métriques</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Ce que contient chaque copie</h2>
+  <p>
+    Quelles que soient les conventions d’une destination, la copie porte aussi
+    les attributs <code>gen_ai.*</code> : le nom de l’opération, le modèle
+    demandé, le nom du système et du fournisseur, les tokens d’entrée et de
+    sortie, l’identifiant de conversation, les noms de l’agent et de l’outil, et
+    les paramètres temperature, top_p et max_tokens de la requête. Elle porte
+    <code>session.id</code> et <code>user.id</code>, déjà sous forme de hash
+    quand mcpd le hache. Elle porte enfin les attributs <code>mcpd.*</code>, le
+    type de span, le nom d’entité, le coût et les tags, avec
+    <code>mcpd.project</code> sur la ressource. Une copie envoyée à un autre
+    mcpd arrive donc telle quelle, dans le même projet.
+  </p>
+  <p>
+    Les spans gardent leurs liens, avec le type de lien dans
+    <code>mcpd.link.kind</code>, et leurs événements : un span d’événement
+    redevient un événement de span OTLP sur son porteur quand le porteur est
+    dans le même lot. Les logs sont envoyés avec le logger comme scope
+    d’instrumentation. Les points de métriques envoyés par l’émetteur sont
+    transférés : les compteurs en sommes monotones delta, les jauges et les
+    histogrammes. Les points que mcpd dérive des spans ne sont pas envoyés : ils
+    répètent ce que disent déjà les spans, et la destination les compterait deux
+    fois.
+  </p>
+  <p>
+    Les spans sont regroupés par service dans <code>resourceSpans</code>, la
+    forme qu’un récepteur attend. Les scores, les retours et les notes d’aspect
+    restent dans mcpd.
+  </p>
+
+  <h2>Filtres</h2>
+  <p>
+    <code>filter</code> restreint ce que reçoit une destination. Chaque liste
+    est facultative, et une liste vide laisse tout passer.
+  </p>
+  <ul>
+    <li><code>projects</code> : seulement ces projets.</li>
+    <li><code>environments</code> : seulement ces environnements.</li>
+    <li><code>kinds</code> : seulement ces types de span.</li>
+    <li>
+      <code>sample</code> : une fraction entre 0 et 1. La décision se prend à
+      partir de l’identifiant de trace : une trace part entière ou pas du tout,
+      et les logs d’une trace suivent la trace.
+    </li>
+  </ul>
+  <p>
+    Ce qu’un filtre retient est compté dans
+    <code>mcpd_forward_filtered_total</code> : une destination qui reçoit moins
+    que prévu montre ainsi pourquoi.
+  </p>
+
+  <h2>Masquage</h2>
+  <p>
+    Le transfert a lieu après le pipeline d’ingestion, qui masque sur place
+    avant toute écriture. Ce que mcpd a reçu l’ordre de cacher n’atteint pas
+    non plus une destination.
+  </p>
+  <p>
+    <code>redact</code> va plus loin pour une destination. Il ne change que la
+    copie de cette destination, jamais ce que mcpd stocke.
+  </p>
+  <ul>
+    <li>
+      <code>drop_payloads: true</code> n’envoie ni l’entrée ni la sortie des
+      spans, ni les champs des logs. La destination reçoit toujours la durée, le
+      modèle, l’usage, le coût et les erreurs.
+    </li>
+    <li>
+      <code>key_contains</code> est une liste de sous-chaînes. Une clé qui en
+      contient une voit sa valeur remplacée par <code>[redacted]</code>.
+    </li>
+  </ul>
+  <p>
+    Vous pouvez ainsi garder les payloads complets dans votre propre stockage
+    et envoyer à un éditeur la forme de chaque exécution sans son contenu.
+  </p>
 
   {/* The diagram belongs here, not at the top. It draws the intake ending at
       Store, and this section is about what happens after Store, so the two read
@@ -75,67 +391,96 @@ const code = localeOf(Astro.url.pathname)
 
   <h2>Le stockage local a lieu d’abord</h2>
   <p>
-    Un span est écrit dans le stockage propre à mcpd avant tout transfert, et le
-    transfert tourne ensuite sur sa propre tâche. Deux conséquences, toutes deux
-    délibérées.
-  </p>
-  <p>
-    Une destination lente n’ajoute jamais sa latence à la requête qui a produit
-    le span. Votre agent n’attend pas le collecteur de quelqu’un d’autre.
-  </p>
-  <p>
-    Une destination en panne ne se transforme jamais en ingestion refusée. mcpd
-    continue de fonctionner et réessaie le transfert sur sa propre tâche.
-    L’autre solution, où la panne d’une autre entreprise vous prive de toute
-    télémétrie conservée, est exactement la défaillance que cette conception
-    vise à éviter.
-  </p>
-  <p>
-    Chaque lot a droit à trois tentatives. Un 429, un 5xx ou une connexion
-    échouée est réessayé après 250 ms, et l’attente double après chaque
-    tentative. Un <code>Retry-After</code> exprimé en secondes remplace
-    l’attente, jusqu’à 30 secondes. Tout autre 4xx est définitif dès la première
-    réponse, parce que le lot restera mal formé pour cette destination. Quand le
-    daemon s’arrête, il fait les tentatives restantes tout de suite. Un lot
-    refusé pour de bon, ou toujours non livré après sa dernière tentative, est
-    journalisé, et ses spans sont ajoutés à
-    <code>mcpd_forward_dropped_spans_total</code>, pour que vous voyiez quelle
-    part de la copie manque.
-  </p>
-  <p>
-    Une destination qui accepte la connexion et ne répond jamais ne peut pas non
-    plus prendre la mémoire du daemon. Au plus 64 requêtes d’ingestion ont leur
-    copie en attente de la destination à la fois. Tant qu’elles sont aussi
-    nombreuses à attendre, une nouvelle copie est abandonnée aussitôt et comptée
-    dans <code>mcpd_forward_dropped_spans_total</code>, et l’écriture locale
-    n’est pas touchée.
-  </p>
-  <p>
-    Un lot attend en mémoire pendant qu’il est réessayé, et quand la file de
-    transfert est pleine, un nouveau lot est jeté et ses spans sont comptés dans
-    la même métrique, si bien qu’une perte est toujours visible. Pour une
-    livraison garantie, placez un collecteur entre mcpd et la destination.
+    Un lot est écrit dans le stockage propre à mcpd avant tout transfert. La
+    copie est prise après l’écriture locale et confiée au spool de chaque
+    destination. Une destination lente n’ajoute jamais sa latence à la requête
+    qui a produit le span, et une destination en panne ne se transforme jamais
+    en ingestion refusée.
   </p>
 
-  <h2>Le masquage s’applique à ce qui sort</h2>
+  <h3>Le spool</h3>
   <p>
-    Le transfert a lieu après le pipeline d’ingestion, qui masque sur place
-    avant toute écriture. Ce que mcpd a reçu l’ordre de cacher n’atteint pas non
-    plus le saut suivant. Une règle qui protégerait votre stockage mais pas
-    votre sortie ne serait pas un contrôle de confidentialité.
+    Chaque destination a un répertoire de spool,
+    <code>&lt;spool-dir&gt;/forward-&lt;name&gt;/</code>. Une copie est écrite
+    dans un fichier temporaire, synchronisée puis renommée à sa place, avec le
+    mode 0600 : un plantage laisse une entrée entière ou rien. Le répertoire de
+    spool est par défaut un répertoire <code>.spool</code> à côté de
+    <code>--data</code>, par exemple <code>/data/mcpd.spool</code>, et il est
+    tenu en mémoire quand <code>--data</code> vaut <code>:memory:</code>.
+    <code>--spool-dir memory</code> le garde en mémoire de façon délibérée.
+  </p>
+  <p>
+    Un spool est borné par <code>spool_max_bytes</code>, 256 MiB par
+    destination sauf réglage contraire. Quand il est plein, la nouvelle copie
+    est abandonnée et comptée dans <code>mcpd_forward_spool_full_total</code> ;
+    l’écriture locale n’est pas touchée. Un arriéré sur disque survit à un
+    redémarrage et part au démarrage. À l’arrêt, un spool en mémoire a droit à
+    une dernière tentative.
   </p>
 
-  <h2>Ce qui est transféré</h2>
+  <h3>Nouvelles tentatives</h3>
   <p>
-    Les spans. Les logs, les métriques, les scores, les retours et les notes
-    d’aspect restent dans mcpd, parce que les destinations vers lesquelles on
-    transfère sont des backends de tracing : elles jetteraient le reste, ou le
-    tordraient en attributs.
+    Deux workers par destination envoient le contenu du spool. Un envoi échoué
+    est réessayé avec un backoff exponentiel et du jitter : l’attente commence
+    à 0,5 seconde et double jusqu’à 60, et chaque attente est tirée au hasard
+    dans la moitié haute de cet intervalle. Un <code>Retry-After</code> en
+    secondes ou sous forme de date HTTP est respecté, jusqu’à 300 secondes.
   </p>
   <p>
-    Les spans sont regroupés par service dans <code>resourceSpans</code>, la
-    forme qu’un récepteur attend, plutôt qu’une ressource par span, qui est
-    valide et oblige chaque système en aval à les regrouper.
+    Sont réessayés : 401, 403, 404, 408, 409, 425, 429, tous les 5xx, les
+    erreurs de transport, et les codes gRPC <code>CANCELLED</code>,
+    <code>DEADLINE_EXCEEDED</code>, <code>PERMISSION_DENIED</code>,
+    <code>RESOURCE_EXHAUSTED</code>, <code>ABORTED</code>,
+    <code>OUT_OF_RANGE</code>, <code>UNAVAILABLE</code>, <code>DATA_LOSS</code>
+    et <code>UNAUTHENTICATED</code>. Une clé expirée ou une destination encore
+    en cours de création fait donc attendre au lieu de perdre des données.
+  </p>
+  <p>
+    Tout autre 4xx est définitif, parce que le lot restera mal formé pour cette
+    destination. L’entrée est déplacée dans <code>dead/</code> du répertoire de
+    spool, les 100 plus récentes sont gardées, et elle est comptée. Une entrée
+    toujours non livrée au bout d’un jour part aussi dans <code>dead/</code>.
+    Les corps de plus de 1 KiB sont compressés en gzip pour OTLP/HTTP.
+  </p>
+
+  <h2>Le surveiller</h2>
+  <p>
+    Chaque métrique porte les labels <code>destination</code> et
+    <code>vendor</code>.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Métrique</th><th>Type</th><th>Signification</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>mcpd_forward_sent_total</code></td><td>compteur</td><td>Éléments acceptés par la destination</td></tr>
+        <tr><td><code>mcpd_forward_failed_attempts_total</code></td><td>compteur</td><td>Tentatives échouées qui seront réessayées</td></tr>
+        <tr><td><code>mcpd_forward_dead_letter_total</code></td><td>compteur</td><td>Éléments refusés pour de bon ou vieux de plus d’un jour, déplacés dans <code>dead/</code></td></tr>
+        <tr><td><code>mcpd_forward_spool_full_total</code></td><td>compteur</td><td>Éléments abandonnés parce que le spool était plein</td></tr>
+        <tr><td><code>mcpd_forward_filtered_total</code></td><td>compteur</td><td>Éléments que le filtre a tenus à l’écart de la destination</td></tr>
+        <tr><td><code>mcpd_forward_spool_entries</code></td><td>jauge</td><td>Requêtes en attente dans le spool</td></tr>
+        <tr><td><code>mcpd_forward_spool_bytes</code></td><td>jauge</td><td>Octets contenus dans le spool</td></tr>
+        <tr><td><code>mcpd_forward_up</code></td><td>jauge</td><td>1 quand la dernière tentative a réussi ou qu’aucune n’a eu lieu, 0 quand elle a échoué</td></tr>
+        <tr><td><code>mcpd_forward_last_success_timestamp_seconds</code></td><td>jauge</td><td>Moment où la destination a accepté une requête pour la dernière fois, en secondes depuis l’epoch, ou 0</td></tr>
+        <tr><td><code>mcpd_forward_dropped_spans_total</code></td><td>compteur</td><td>Spans passés en lettre morte, abandonnés devant un spool plein, ou abandonnés au-delà des 64 copies en cours</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Alertez sur un <code>mcpd_forward_spool_bytes</code> qui grandit et un
+    <code>mcpd_forward_last_success_timestamp_seconds</code> qui ne bouge plus :
+    ensemble, ils indiquent qu’une destination ne prend plus de données pendant
+    que mcpd les garde pour vous.
+  </p>
+  <p>
+    <code>mcpd doctor</code> rend un constat par destination. Il envoie un
+    export vide, dans le protocole propre à la destination : l’endpoint et
+    l’identifiant sont ainsi vérifiés sans écrire de données. Helicone est
+    ignoré. Il lit aussi le répertoire de spool et indique ses entrées, ses
+    octets, l’âge de l’entrée la plus ancienne et le nombre de lettres mortes,
+    et il avertit quand il y a des lettres mortes ou que l’entrée la plus
+    ancienne a plus d’une heure.
   </p>
 
   <h2>mcpd qui transfère vers mcpd</h2>
@@ -144,14 +489,16 @@ const code = localeOf(Astro.url.pathname)
     transférer vers un mcpd partagé. Les développeurs gardent un stockage rapide
     sur leur machine, avec les payloads complets, et l’instance de l’équipe
     reçoit les mêmes exécutions, avec sa propre conservation et ses propres
-    règles de masquage appliquées à l’arrivée.
+    règles de masquage appliquées à l’arrivée. Pour placer devant un daemon un
+    collecteur qui ne stocke rien lui-même, utilisez
+    <a href={urlFor('/docs/relay', code)} class="link">le relais</a>.
   </p>
 
   <h2>La suite</h2>
   <ul>
     <li>
-      Pointer une installation OpenTelemetry existante vers mcpd :
-      <a href={urlFor('/docs/opentelemetry', code)} class="link">OpenTelemetry</a>.
+      Un collecteur en périphérie et plusieurs régions :
+      <a href={urlFor('/docs/relay', code)} class="link">Relais et régions</a>.
     </li>
     <li>
       Ce qui est retiré avant qu’un span soit stocké ou envoyé :

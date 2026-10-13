@@ -1,0 +1,233 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import { localeOf, urlFor } from '@/lib/i18n'
+
+const code = localeOf(Astro.url.pathname)
+const linkTo = (route: string) => urlFor(route, code)
+---
+
+<Doc
+  title="リレーとリージョン"
+  description="各リージョンで mcpd relay を動かすと、取り込みをディスクに書いてからデーモンへ順に送ります。二重に数えません。"
+  lede="エージェントの隣にコレクターを置き、リージョン間の区間は再試行付きで渡ります。"
+  og="docs"
+>
+  <h2>リレーとは</h2>
+  <p>
+    <code>mcpd relay</code> は、同じバイナリを、自分では何も保存しない
+    コレクターとして動かします。デーモンが受け付ける HTTP の取り込み
+    リクエストをすべて受け付け、リクエストをディスク上のスプールに書き、
+    送信元に応答してから、<code>--upstream</code> が示すデーモンへその
+    リクエストを送ります。ストアは開きません。
+  </p>
+  <p>
+    エージェントが動く各リージョンに 1 つずつ置いてください。送信元は数ミリ秒
+    先のコレクターと話すことになり、リージョン間の区間は、各エージェントが
+    それぞれ渡るのではなく、リレーが再試行付きで渡ります。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="上流が 2 つあるエッジのリレー"
+    command={`mcpd relay \\
+  --ingest-key $INGEST_KEY \\
+  --upstream http://mcpd.eu.internal:4317 \\
+  --upstream http://mcpd.us.internal:4317`}
+    primaryLabel="フラグ"
+    secondary={[
+      {
+        label: '環境変数',
+        command: 'MCPD_INGEST_KEYS=$INGEST_KEY MCPD_UPSTREAMS=http://mcpd.eu.internal:4317,http://mcpd.us.internal:4317 mcpd relay',
+      },
+      {
+        label: '上流のキーを 1 つ',
+        command: 'mcpd relay --upstream http://mcpd.eu.internal:4317 --upstream-key $UPSTREAM_KEY',
+      },
+    ]}
+  />
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="リレー"
+    lines={[
+      { cmd: 'MCPD_UPSTREAMS=http://mcpd.eu.internal:4317,http://mcpd.us.internal:4317 mcpd --data /data/mcpd.db config | grep ^relay' },
+      { out: "relay           2 upstream(s) in order, http://mcpd.eu.internal:4317, http://mcpd.us.internal:4317; each sender's key passed on; spool at /data/mcpd.spool/relay, 1024 MiB" },
+      { cmd: 'curl -s -D - -o /dev/null localhost:4317/v1/ingest -H "content-type: application/json" -d @batch.json | grep -e ^HTTP -e mcpd-relay' },
+      { out: 'HTTP/1.1 202 Accepted', tone: 'ok' },
+      { out: 'mcpd-relay: spooled' },
+      { cmd: 'curl -s localhost:4317/v1/ingest -H "content-type: application/json" -d @batch.json' },
+      { out: '{"accepted":0,"duplicate":0,"rejected":0}' },
+    ]}
+  />
+
+  <h2>何を応答するか</h2>
+  <p>
+    プローブ以外のパスなら、どのパスへの POST も受け付けます。OTLP のパス
+    <code>/v1/traces</code>、<code>/v1/logs</code>、<code>/v1/metrics</code>
+    は、OTLP の <code>partialSuccess</code> とともに 200 を返します。
+    OpenTelemetry のエクスポーターが期待する応答です。それ以外のパスは、
+    ヘッダー <code>mcpd-relay: spooled</code> と本文
+    <code>&#123;"accepted":0,"duplicate":0,"rejected":0&#125;</code> とともに
+    202 を返します。リクエストは預かられ、届けられます。本当の件数はまだ
+    それを見ていない上流のものです。どの SDK も、2xx はすべて成功として読みます。
+  </p>
+  <p>
+    リレーは何かを書く前に <code>--ingest-key</code> を自分で確かめ、
+    <code>--max-body-bytes</code> と <code>--request-timeout-seconds</code> を
+    デーモンと同じように適用します。応答を送る前に、リクエストはスプール
+    <code>&lt;spool-dir&gt;/relay</code> に入っています。
+  </p>
+
+  <h2>配送とフェイルオーバー</h2>
+  <p>
+    4 つのワーカーがスプールを送ります。各リクエストは、<code>--upstream</code>
+    の順で、待機中でない最初の上流に送られます。再試行できる失敗があると、
+    その上流はバックオフとジッターで、または <code>Retry-After</code> が示す
+    あいだ待機に入り、リクエストはすぐに次の上流へ送られます。待機が終わると
+    再び第一の上流が先に試されるので、トラフィックはひとりでにそこへ戻ります。
+  </p>
+  <p>
+    400 のような最終的な拒否は、次の上流には送られません。次の上流も同じ
+    バイト列を拒否するからです。リクエストはスプールディレクトリーの
+    <code>dead/</code> に移され、数えられます。
+  </p>
+
+  <h3>二重に数えない</h3>
+  <p>
+    配送は少なくとも 1 回で、再送は 1 回だけ保存されます。どのリクエストも
+    <code>Idempotency-Key</code> ヘッダーを持ちます。送信元が送ったならその
+    キー、そうでなければ <code>relay-</code> の後にパス、コンテンツエンコー
+    ディング、本文のダイジェストを続けたものです。デーモンの取り込み口は
+    どれもこのヘッダーを尊重し、ネイティブのバッチ本文にあるキーはヘッダーより
+    優先されます。タイムアウトの後にリレーが再送したリクエストや、第一の上流が
+    受け取ったのに応答が失われ、第二の上流へ送ったリクエストは、重複として
+    認識され、そう報告されます。
+  </p>
+
+  <h3>キー</h3>
+  <p>
+    <code>--upstream-key</code> があれば、リレーはそのキーを Bearer トークン
+    として、すべての上流に提示します。なければ、送信元の
+    <code>Authorization</code> または <code>x-mcpd-key</code> ヘッダーが、
+    リレーのユーザーだけが読めるファイルに、スプールしたリクエストとともに
+    保たれ、そのまま渡されます。後者の形なら、各送信元のプロジェクトと
+    スコープが、上流からもそのまま見えます。
+  </p>
+
+  <h2>背圧と準備状態</h2>
+  <p>
+    スプールの大きさは <code>--spool-max-bytes</code> で制限され、設定しな
+    ければリレーは 1 GiB です。いっぱいになると、リクエストは 503 と
+    <code>Retry-After: 5</code> で拒否されます。どの SDK も OpenTelemetry の
+    エクスポーターもこれを再試行するので、リレーがデータを捨てるのではなく、
+    送信元がデータを持ち続けます。
+  </p>
+  <p>
+    <code>/healthz</code> は常に 200 を返します。<code>/readyz</code> の
+    応答は次のとおりです。
+  </p>
+  <ul>
+    <li>上流に届くあいだは 200 <code>ok</code>。</li>
+    <li>
+      直近 30 秒に、どの上流も <code>/readyz</code> に応答せず、配送も受け
+      取っていなければ、<code>detail</code> 付きの 200 <code>degraded</code>。
+      上流は 5 秒ごとに確かめられます。
+    </li>
+    <li>
+      スプールがいっぱいのとき、またはどの上流にも届かずスプールが 80% 以上
+      埋まっているときは 503。
+    </li>
+  </ul>
+  <p>
+    そのため、ロードバランサーはバッファーしているリレーには送り続け、もう
+    受け取れないリレーからはトラフィックを移します。
+  </p>
+
+  <h3>リレーのメトリクス</h3>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>メトリクス</th><th>種類</th><th>意味</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>mcpd_relay_accepted_total</code></td><td>counter</td><td>スプールに書かれたリクエスト</td></tr>
+        <tr><td><code>mcpd_relay_refused_full_total</code></td><td>counter</td><td>スプールがいっぱいで、503 で拒否されたリクエスト</td></tr>
+        <tr><td><code>mcpd_relay_failovers_total</code></td><td>counter</td><td>最初以外の上流に届けられたリクエスト</td></tr>
+        <tr><td><code>mcpd_relay_dead_letter_total</code></td><td>counter</td><td>上流が最終的に拒否し、<code>dead/</code> に移されたリクエスト</td></tr>
+        <tr><td><code>mcpd_relay_spool_entries</code></td><td>gauge</td><td>スプールで待っているリクエスト</td></tr>
+        <tr><td><code>mcpd_relay_spool_bytes</code></td><td>gauge</td><td>スプールが持っているバイト数</td></tr>
+        <tr><td><code>mcpd_relay_spool_oldest_seconds</code></td><td>gauge</td><td>待っている最も古いリクエストの経過時間、なければ 0</td></tr>
+        <tr><td><code>mcpd_relay_delivered_total</code></td><td>counter</td><td>上流が受け付けたリクエスト。ラベルは <code>upstream</code> と <code>order</code></td></tr>
+        <tr><td><code>mcpd_relay_failed_attempts_total</code></td><td>counter</td><td>上流が受け付けなかった試行。ラベルは同じです</td></tr>
+        <tr><td><code>mcpd_relay_upstream_up</code></td><td>gauge</td><td>上流が直近 30 秒に応答していれば 1、そうでなければ 0</td></tr>
+        <tr><td><code>mcpd_uptime_seconds</code></td><td>gauge</td><td>このプロセスが起動してからの秒数</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    <code>mcpd_relay_failovers_total</code> が増えているなら、第一の上流が
+    失敗していて、第二の上流がそのトラフィックを運んでいます。
+    <code>mcpd_relay_spool_oldest_seconds</code> は、配送がどれだけ遅れて
+    いるかを示します。
+  </p>
+
+  <h2>複数のリージョン</h2>
+  <p>
+    1 つまたは複数のリージョンで、複数のデーモンのレプリカを 1 つの Postgres
+    か ClickHouse のストアに向けて動かし、実行はオフにします。実行のストアは
+    組み込みのファイルで、1 つのプロセスに属するからです。各レプリカの
+    <code>/readyz</code> は、ストアに届くかどうかをすでに反映しています。各
+    リージョンでその前にリレーを置き、<code>--upstream</code> には最も近い
+    デーモンを最初に、別のリージョンのデーモンを 2 番目に並べてください。
+  </p>
+  <p>
+    レプリカが 2 つ以上になると、4 つの設定のふるまいが変わります。
+  </p>
+  <ul>
+    <li>
+      冪等性キーは共有ストアに置かれるので、別のレプリカに届いた再送も認識
+      されます。Postgres は、バッチと同じトランザクションでキーを記録します。
+    </li>
+    <li>
+      1 分あたりのクォータの上限は、レプリカごとに数えられます。望む上限を
+      レプリカの数で割ってください。
+    </li>
+    <li>
+      モニターと目標は、それを設定したすべてのレプリカから発火します。1 つの
+      レプリカの設定ファイルにだけ書いてください。
+    </li>
+    <li>観点の分析も同じです。1 つのレプリカにだけ設定してください。</li>
+  </ul>
+
+  <h3>デプロイの例</h3>
+  <p>
+    <code>deploy/docker/docker-compose.multi-region.yml</code> は、1 台の
+    マシンで Postgres、2 つのデーモン、1 つのリレーを起動します。構成全体を
+    試せる形にしたものです。
+  </p>
+  <p>
+    Helm チャートは <code>mode: relay</code> を受け付けます。
+    <code>deploy/helm/examples/</code> にある 3 つの values ファイルは、それぞれ
+    1 つのリージョンを表します。<code>region-core.yaml</code>、
+    <code>region-standby.yaml</code>、<code>region-edge-relay.yaml</code> で、
+    最後のものはリレーだけを動かすリージョン用です。
+  </p>
+
+  <h2>次に</h2>
+  <ul>
+    <li>
+      データを他のベンダーへ複製する：
+      <a href={linkTo('/docs/forwarding')} class="link">転送</a>。
+    </li>
+    <li>
+      プローブ、メトリクス、ストア：
+      <a href={linkTo('/docs/operations')} class="link">運用</a>。
+    </li>
+    <li>
+      すべてのフラグ：
+      <a href={linkTo('/docs/configuration')} class="link">設定</a>。
+    </li>
+  </ul>
+</Doc>

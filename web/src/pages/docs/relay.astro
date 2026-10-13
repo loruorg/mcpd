@@ -1,0 +1,226 @@
+---
+import Doc from '@/layouts/Doc.astro'
+import Command from '@/components/Command.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+---
+
+<Doc
+  title="Relay and regions"
+  description="Run mcpd relay in each region: it spools every ingest request to disk and ships it to your daemons in order, with failover and no double counting."
+  lede="A collector beside your agents, and the link between regions crossed with retries."
+  og="docs"
+>
+  <h2>What a relay is</h2>
+  <p>
+    <code>mcpd relay</code> runs the same binary as a collector that stores
+    nothing itself. It accepts every HTTP ingest request a daemon accepts,
+    writes the request to a spool on disk, answers the sender, and then ships
+    the request to the daemons <code>--upstream</code> names. It opens no store.
+  </p>
+  <p>
+    Run one in each region your agents run in. A sender then talks to a
+    collector a few milliseconds away, and the link between regions is crossed
+    by the relay, with retries, rather than by every agent on its own.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="an edge relay with two upstreams"
+    command={`mcpd relay \\
+  --ingest-key $INGEST_KEY \\
+  --upstream http://mcpd.eu.internal:4317 \\
+  --upstream http://mcpd.us.internal:4317`}
+    primaryLabel="Flags"
+    secondary={[
+      {
+        label: 'Environment',
+        command: 'MCPD_INGEST_KEYS=$INGEST_KEY MCPD_UPSTREAMS=http://mcpd.eu.internal:4317,http://mcpd.us.internal:4317 mcpd relay',
+      },
+      {
+        label: 'One upstream key',
+        command: 'mcpd relay --upstream http://mcpd.eu.internal:4317 --upstream-key $UPSTREAM_KEY',
+      },
+    ]}
+  />
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="relay"
+    lines={[
+      { cmd: 'MCPD_UPSTREAMS=http://mcpd.eu.internal:4317,http://mcpd.us.internal:4317 mcpd --data /data/mcpd.db config | grep ^relay' },
+      { out: "relay           2 upstream(s) in order, http://mcpd.eu.internal:4317, http://mcpd.us.internal:4317; each sender's key passed on; spool at /data/mcpd.spool/relay, 1024 MiB" },
+      { cmd: 'curl -s -D - -o /dev/null localhost:4317/v1/ingest -H "content-type: application/json" -d @batch.json | grep -e ^HTTP -e mcpd-relay' },
+      { out: 'HTTP/1.1 202 Accepted', tone: 'ok' },
+      { out: 'mcpd-relay: spooled' },
+      { cmd: 'curl -s localhost:4317/v1/ingest -H "content-type: application/json" -d @batch.json' },
+      { out: '{"accepted":0,"duplicate":0,"rejected":0}' },
+    ]}
+  />
+
+  <h2>What it answers</h2>
+  <p>
+    Any POST, on any path other than the probes, is accepted. The OTLP paths
+    <code>/v1/traces</code>, <code>/v1/logs</code> and <code>/v1/metrics</code>
+    answer 200 with an OTLP <code>partialSuccess</code>, which is what an
+    OpenTelemetry exporter expects. Every other path answers 202 with the header
+    <code>mcpd-relay: spooled</code> and the body
+    <code>&#123;"accepted":0,"duplicate":0,"rejected":0&#125;</code>: the
+    request is held and will be delivered, and the real counts belong to the
+    upstream, which has not seen it yet. Every SDK reads any 2xx as success.
+  </p>
+  <p>
+    The relay checks <code>--ingest-key</code> itself, before it writes
+    anything, and applies <code>--max-body-bytes</code> and
+    <code>--request-timeout-seconds</code> as a daemon does. The request is in
+    the spool, <code>&lt;spool-dir&gt;/relay</code>, before the answer is sent.
+  </p>
+
+  <h2>Delivery and failover</h2>
+  <p>
+    Four workers ship the spool. Each request goes to the first upstream in
+    <code>--upstream</code> order that is not cooling off. A retryable failure
+    cools that upstream, with backoff and jitter or for as long as its
+    <code>Retry-After</code> says, and the request goes to the next upstream at
+    once. When the cool-off ends, the primary is tried first again, so traffic
+    returns to it on its own.
+  </p>
+  <p>
+    A final refusal, such as a 400, is not sent to the next upstream: the next
+    one would refuse the same bytes. The request is moved to
+    <code>dead/</code> in the spool directory and counted.
+  </p>
+
+  <h3>No double counting</h3>
+  <p>
+    Delivery is at least once, and a resend is stored once. Every request
+    carries an <code>Idempotency-Key</code> header: the sender's own when it
+    sent one, otherwise <code>relay-</code> followed by a digest of the path,
+    the content encoding and the body. Every ingest door on the daemon honours
+    the header, and a key in a native batch body wins over it. A request the
+    relay resends after a timeout, or sends to the secondary after the primary
+    took it and the answer was lost, is recognised and reported as a duplicate.
+  </p>
+
+  <h3>Keys</h3>
+  <p>
+    With <code>--upstream-key</code>, the relay presents that key to every
+    upstream as a Bearer token. Without it, the sender's
+    <code>Authorization</code> or <code>x-mcpd-key</code> header is kept with
+    the spooled request, in a file only the relay's user can read, and passed
+    on. The second form keeps each sender's project and scope as the upstream
+    sees them.
+  </p>
+
+  <h2>Back-pressure and readiness</h2>
+  <p>
+    The spool is bounded by <code>--spool-max-bytes</code>, 1 GiB for the relay
+    unless you set it. When it is full, a request is refused with a 503 and
+    <code>Retry-After: 5</code>. Every SDK and OpenTelemetry exporter retries
+    that, so the sender holds the data rather than the relay dropping it.
+  </p>
+  <p>
+    <code>/healthz</code> always answers 200. <code>/readyz</code> answers:
+  </p>
+  <ul>
+    <li>200 <code>ok</code> while an upstream is reachable;</li>
+    <li>
+      200 <code>degraded</code>, with a <code>detail</code>, when no upstream
+      has answered its <code>/readyz</code> or taken a delivery in the last 30
+      seconds. Upstreams are probed every 5 seconds;
+    </li>
+    <li>
+      503 when the spool is full, or when no upstream is reachable and the
+      spool is at least 80% full.
+    </li>
+  </ul>
+  <p>
+    A load balancer therefore keeps sending to a relay that is buffering, and
+    moves traffic away from one that can no longer take it.
+  </p>
+
+  <h3>Relay metrics</h3>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Metric</th><th>Type</th><th>Meaning</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>mcpd_relay_accepted_total</code></td><td>counter</td><td>Requests written to the spool</td></tr>
+        <tr><td><code>mcpd_relay_refused_full_total</code></td><td>counter</td><td>Requests refused with a 503 because the spool was full</td></tr>
+        <tr><td><code>mcpd_relay_failovers_total</code></td><td>counter</td><td>Requests delivered to an upstream other than the first</td></tr>
+        <tr><td><code>mcpd_relay_dead_letter_total</code></td><td>counter</td><td>Requests an upstream refused for good, moved to <code>dead/</code></td></tr>
+        <tr><td><code>mcpd_relay_spool_entries</code></td><td>gauge</td><td>Requests waiting in the spool</td></tr>
+        <tr><td><code>mcpd_relay_spool_bytes</code></td><td>gauge</td><td>Bytes the spool holds</td></tr>
+        <tr><td><code>mcpd_relay_spool_oldest_seconds</code></td><td>gauge</td><td>Age of the oldest request waiting, or 0</td></tr>
+        <tr><td><code>mcpd_relay_delivered_total</code></td><td>counter</td><td>Requests an upstream accepted, labelled <code>upstream</code> and <code>order</code></td></tr>
+        <tr><td><code>mcpd_relay_failed_attempts_total</code></td><td>counter</td><td>Attempts an upstream did not accept, labelled the same way</td></tr>
+        <tr><td><code>mcpd_relay_upstream_up</code></td><td>gauge</td><td>1 when the upstream answered in the last 30 seconds, 0 otherwise</td></tr>
+        <tr><td><code>mcpd_uptime_seconds</code></td><td>gauge</td><td>Seconds since this process started</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    A rising <code>mcpd_relay_failovers_total</code> means the primary is
+    failing and the secondary is carrying its traffic.
+    <code>mcpd_relay_spool_oldest_seconds</code> is how far behind delivery is.
+  </p>
+
+  <h2>Several regions</h2>
+  <p>
+    Run several daemon replicas, in one region or more, against one Postgres or
+    ClickHouse store, with runs off: the run store is an embedded file and
+    belongs to one process. Each replica's <code>/readyz</code> already
+    reflects whether it can reach the store. Put a relay in each region in
+    front of them, with <code>--upstream</code> listing the nearest daemon
+    first and a daemon in another region second.
+  </p>
+  <p>
+    Four settings behave differently once there is more than one replica:
+  </p>
+  <ul>
+    <li>
+      Idempotency keys are held in the shared store, so a resend that lands on
+      another replica is still recognised. Postgres records the key in the same
+      transaction as the batch.
+    </li>
+    <li>
+      Per-minute quota ceilings are counted per replica. Divide the ceiling you
+      want by the number of replicas.
+    </li>
+    <li>
+      Monitors and objectives fire from every replica that has them configured.
+      Configure them in one replica's config file only.
+    </li>
+    <li>Aspect analysis is the same: configure it on one replica.</li>
+  </ul>
+
+  <h3>Example deployments</h3>
+  <p>
+    <code>deploy/docker/docker-compose.multi-region.yml</code> starts Postgres,
+    two daemons and a relay on one machine, which is the whole topology in a
+    form you can try.
+  </p>
+  <p>
+    The Helm chart takes <code>mode: relay</code>. Three values files under
+    <code>deploy/helm/examples/</code> describe one region each:
+    <code>region-core.yaml</code>, <code>region-standby.yaml</code> and
+    <code>region-edge-relay.yaml</code>, the last for a region that runs only
+    a relay.
+  </p>
+
+  <h2>Next</h2>
+  <ul>
+    <li>
+      Copying data on to other vendors:
+      <a href="/docs/forwarding" class="link">Forwarding</a>.
+    </li>
+    <li>
+      Probes, metrics and the stores:
+      <a href="/docs/operations" class="link">Running it</a>.
+    </li>
+    <li>
+      Every flag:
+      <a href="/docs/configuration" class="link">Configuration</a>.
+    </li>
+  </ul>
+</Doc>

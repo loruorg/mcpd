@@ -297,6 +297,33 @@ rather than every commit.
   read as on OTLP. A Jaeger reference that is not the parent becomes a span
   link, so links are kept from every door. A Zipkin or Jaeger reporter needs
   only its endpoint pointed at the daemon.
+- **Forward to several destinations at once, by vendor.** The config file's
+  `forward` block now takes a list. Each destination names a vendor (Langfuse,
+  LangSmith, Braintrust, Arize AX, Phoenix, Datadog LLM Observability,
+  Honeycomb, New Relic, Grafana Cloud, Sentry, Weave, Laminar, Helicone, Opik,
+  Elastic, Dynatrace, or any OTLP receiver over HTTP or gRPC) and the key,
+  region and project that vendor needs; mcpd fills in the endpoint, headers and
+  attribute conventions. Each has its own filter (projects, environments, span
+  kinds, sample), its own redaction and its own signals. Credentials can be read
+  from the environment as `${NAME}`. The old single-object form still works.
+  New flags: `--forward-vendor` and `--forward-protocol`.
+- **Links, events, logs and metrics are forwarded.** Span links and events used
+  to be dropped by the forwarder, and only spans were sent.
+- **Forwarding survives outages and restarts.** Each destination has a bounded
+  spool on disk (`--spool-dir`, `--spool-max-bytes`) and retries with backoff,
+  jitter and `Retry-After` until a batch is accepted, refused for good or a day
+  old; refused batches are kept in `dead/`. `/metrics` reports deliveries,
+  retries, dead letters, spool depth and health per destination, and
+  `mcpd doctor` checks each one and reads its spool.
+- **`mcpd relay`, an edge collector.** It accepts every HTTP ingest door,
+  spools each request to disk before answering, and ships to the daemons named
+  by `--upstream` in order, failing over to the next and back. `/readyz`
+  follows the spool and the upstreams, and a full spool answers 503 with
+  `Retry-After`. The Helm chart gains `mode: relay` and multi-region examples.
+- **`Idempotency-Key` on every ingest door (wire-contract change).** A request
+  repeated under the same key is stored once and reported as a duplicate. The
+  relay sends one with every request, so a resend is never counted twice.
+
 - **Open sign-up, with `--signup`** (wire contract). Anyone may create an
   account with an email and a password. Each account owns one new project and
   mints its own API keys for it, one scope each; nothing it holds reaches

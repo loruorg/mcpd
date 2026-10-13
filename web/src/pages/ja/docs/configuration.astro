@@ -220,6 +220,36 @@ volumes:
           <td>なし</td>
         </tr>
         <tr>
+          <td><code>--forward-vendor</code></td>
+          <td><code>MCPD_FORWARD_VENDOR</code></td>
+          <td><code>otlp</code></td>
+        </tr>
+        <tr>
+          <td><code>--forward-protocol</code></td>
+          <td><code>MCPD_FORWARD_PROTOCOL</code></td>
+          <td>ベンダー自身の既定</td>
+        </tr>
+        <tr>
+          <td><code>--spool-dir</code></td>
+          <td><code>MCPD_SPOOL_DIR</code></td>
+          <td><code>--data</code> の隣の <code>.spool</code> ディレクトリー</td>
+        </tr>
+        <tr>
+          <td><code>--spool-max-bytes</code></td>
+          <td><code>MCPD_SPOOL_MAX_BYTES</code></td>
+          <td>送信先ごとに <code>268435456</code>、リレーは <code>1073741824</code></td>
+        </tr>
+        <tr>
+          <td><code>--upstream</code></td>
+          <td><code>MCPD_UPSTREAMS</code></td>
+          <td>なし</td>
+        </tr>
+        <tr>
+          <td><code>--upstream-key</code></td>
+          <td><code>MCPD_UPSTREAM_KEY</code></td>
+          <td>未設定：各送信元のキーをそのまま渡す</td>
+        </tr>
+        <tr>
           <td>なし</td>
           <td><code>MCPD_LOG</code></td>
           <td><code>mcpd=info,mcpd_server=info,tower_http=warn</code></td>
@@ -702,6 +732,10 @@ volumes:
           <td><code>mcpd doctor</code></td>
           <td>このデプロイを採点し、設定の誤りを報告します。障害があれば終了コード 2 で終わるので、デプロイの門番にできます。<a href={to('/docs/operations')} class="link">運用</a>を参照してください</td>
         </tr>
+        <tr>
+          <td><code>mcpd relay</code></td>
+          <td>エッジのコレクターとして動きます。取り込みリクエストをすべて受け付けてスプールに書き、<code>--upstream</code> が示すデーモンへ順に送ります。ストアは開きません。<a href={to('/docs/relay')} class="link">リレーとリージョン</a>を参照してください</td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -747,6 +781,7 @@ volumes:
       { out: 'objectives      none' },
       { out: 'judge           off' },
       { out: 'forwarding      off' },
+      { out: 'relay           off: no --upstream' },
     ]}
   />
 
@@ -877,13 +912,28 @@ volumes:
       "webhook": "https://hooks.example.com/mcpd"
     }
   ],
-  "forward": {
-    "endpoint": "https://otlp.example.com",
-    "headers": [["Authorization", "Bearer sk-..."]],
-    "batch_size": 256,
-    "enabled": true
-  }
+  "forward": [
+    {
+      "endpoint": "https://otlp.example.com",
+      "headers": [["Authorization", "Bearer sk-..."]],
+      "batch_size": 256,
+      "enabled": true
+    },
+    {
+      "vendor": "langfuse",
+      "public_key": "\${LANGFUSE_PUBLIC_KEY}",
+      "secret_key": "\${LANGFUSE_SECRET_KEY}"
+    }
+  ]
 }`}</code></pre>
+
+  <p>
+    <code>forward</code> は、送信先 1 つをオブジェクトで、複数を配列で受け取り
+    ます。その中の文字列はどれも <code>$&#123;ENV_NAME&#125;</code> と書けて、
+    起動時に環境変数から読まれます。設定されていない変数があると起動は拒否
+    され、その変数の名前が示されます。すべてのフィールドは
+    <a href={to('/docs/forwarding')} class="link">転送</a>のページにあります。
+  </p>
 
   <h3>プロジェクトと、そこに届くキー</h3>
   <p>
@@ -994,14 +1044,16 @@ volumes:
 
   <h3>--forward-endpoint</h3>
   <p>
-    保存したスパンをすべて、別の OTLP/HTTP エンドポイントに複製します。
-    ベース URL を渡してください。<code>/v1/traces</code> は自動で付きます。
-    ローカルへの書き込みが常に先なので、宛先が落ちていても損はありません。
+    mcpd が保存したものを、別のエンドポイントに複製します。ベース URL を
+    渡してください。<code>/v1/traces</code>、<code>/v1/logs</code>、
+    <code>/v1/metrics</code> は自動で付きます。ローカルへの書き込みが常に先
+    なので、宛先が落ちていても損はありません。
   </p>
   <p>
-    このフラグは設定ファイルの <code>forward</code> ブロックより優先される
-    ので、共有の ConfigMap を編集せずに 1 つのインスタンスだけ別の宛先に
-    向けられます。<a href={to('/docs/forwarding')} class="link">転送</a>を
+    フラグで与えた送信先は設定ファイルの <code>forward</code> ブロックを
+    置き換えるので、共有の ConfigMap を編集せずに 1 つのインスタンスだけ
+    別の宛先に向けられます。複数の送信先を同時に使うなら、ファイルに書いて
+    ください。<a href={to('/docs/forwarding')} class="link">転送</a>を
     参照してください。
   </p>
 
@@ -1015,6 +1067,47 @@ volumes:
     コロンのない値は捨てられるのではなく、正しい書き方を示して起動時に拒否されます。
     OpenTelemetry 流の <code>key=value</code> のヘッダーは、
     ここでは <code>key: value</code> と書きます。
+  </p>
+
+  <h3>--forward-vendor と --forward-protocol</h3>
+  <p>
+    <code>--forward-vendor</code> は、<code>langfuse</code>、
+    <code>datadog</code>、<code>honeycomb</code> などのベンダーのプリセットを
+    選び、そのエンドポイントと属性の規約を使います。資格情報は
+    <code>--forward-header</code> に書きます。既定のエンドポイントを持つ
+    ベンダーなら、<code>--forward-endpoint</code> は省けます。
+    <code>--forward-protocol</code> は <code>json</code>、<code>protobuf</code>、
+    <code>grpc</code> のどれかで、既定はベンダー自身のものです。すべての
+    ベンダーは<a href={to('/docs/forwarding')} class="link">転送</a>のページに
+    並んでいます。
+  </p>
+
+  <h3>--spool-dir と --spool-max-bytes</h3>
+  <p>
+    転送と <code>mcpd relay</code> がスプールを置く場所で、送信先ごとに
+    1 つのディレクトリーを使います。既定は <code>--data</code> の隣の
+    <code>.spool</code> ディレクトリー、たとえば <code>/data/mcpd.spool</code>
+    で、<code>--data</code> が <code>:memory:</code> のときはメモリーです。
+    値に <code>memory</code> を渡すと、意図してスプールをメモリーに置きます。
+  </p>
+  <p>
+    <code>--spool-max-bytes</code> は 1 つのスプールが持てる最大量です。
+    設定しなければ、転送の送信先ごとに 268435456（256 MiB）、リレーは
+    1073741824（1 GiB）です。設定ファイルで送信先ごとに書いた
+    <code>spool_max_bytes</code> は、こちらより優先されます。
+  </p>
+
+  <h3>--upstream と --upstream-key</h3>
+  <p>
+    <code>mcpd relay</code> の送り先のデーモンで、優先する順に並べます。
+    フラグを繰り返すか、<code>MCPD_UPSTREAMS</code> にカンマ区切りのリストを
+    渡してください。各リクエストは、失敗の後の待機中でない最初の上流が
+    受け取ります。
+  </p>
+  <p>
+    <code>--upstream-key</code> は、リレーが上流に Bearer トークンとして提示
+    するキーです。未設定なら、各送信元自身のキーがリクエストとともに保たれ、
+    そのまま渡されます。<a href={to('/docs/relay')} class="link">リレーとリージョン</a>を参照してください。
   </p>
 
   <h3>--clickhouse-url</h3>

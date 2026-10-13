@@ -2,21 +2,48 @@
 import Doc from '@/layouts/Doc.astro'
 import Command from '@/components/Command.astro'
 import PipelineDiagram from '@/components/PipelineDiagram.astro'
+
+const destinations = `{
+  "forward": [
+    {
+      "vendor": "langfuse",
+      "region": "eu",
+      "public_key": "\${LANGFUSE_PUBLIC_KEY}",
+      "secret_key": "\${LANGFUSE_SECRET_KEY}",
+      "filter": { "projects": ["checkout"], "sample": 0.25 },
+      "redact": { "key_contains": ["email"] }
+    },
+    {
+      "name": "honeycomb-prod",
+      "vendor": "honeycomb",
+      "api_key": "\${HONEYCOMB_API_KEY}",
+      "dataset": "agents",
+      "signals": { "traces": true, "logs": true, "metrics": false }
+    },
+    {
+      "name": "collector",
+      "endpoint": "https://otel.internal.example.com:4318",
+      "protocol": "protobuf",
+      "headers": { "Authorization": "Bearer \${COLLECTOR_TOKEN}" },
+      "redact": { "drop_payloads": true }
+    }
+  ]
+}`
 ---
 
 <Doc
   title="Forwarding"
-  description="Copy every stored span on to another OTLP endpoint, so mcpd is one hop in a telemetry pipeline rather than a place data goes to be trapped. Local storage always happens first."
+  description="Copy what mcpd stores to Langfuse, Datadog, Honeycomb and fifteen more destinations at once, each with its own filter, redaction and durable spool."
   lede="mcpd speaks OTLP in both directions. Nothing that arrives is stuck here."
   og="docs"
 >
-  <h2>One protocol out, not eleven exporters</h2>
+  <h2>One store, as many copies as you need</h2>
   <p>
-    mcpd receives OTLP, and it can emit OTLP. That single property replaces most
-    of what a set of per-vendor exporters does: Langfuse, Datadog, Honeycomb,
-    Grafana, and every other destination worth naming accept OTLP over HTTP.
-    Forwarding is therefore one implementation rather than eleven, and it cannot
-    fall behind a vendor's SDK release.
+    mcpd receives OTLP, and it sends OTLP. A destination is one entry in the
+    config file: a vendor name, a credential, and optionally a filter, a
+    redaction rule and the signals it takes. mcpd knows the endpoint, the
+    authentication header and the attribute names each vendor reads, so you
+    write the key and not the integration.
   </p>
   <p>
     It also means adopting mcpd is reversible. Point it at whatever you were
@@ -25,42 +52,325 @@ import PipelineDiagram from '@/components/PipelineDiagram.astro'
   </p>
 
   <h2>Turning it on</h2>
+  <p>
+    For one OTLP receiver, the flags are enough. Give the base URL and not
+    <code>/v1/traces</code>: the path of each signal is appended.
+  </p>
 
   <Command
     class="not-prose my-6"
     title="store locally and copy onward"
     command="mcpd serve --forward-endpoint https://otlp.example.com"
+    primaryLabel="OTLP"
+    secondary={[
+      {
+        label: 'With a header',
+        command: "mcpd serve --forward-endpoint https://otlp.example.com --forward-header 'Authorization: Bearer $TOKEN'",
+      },
+      {
+        label: 'A vendor',
+        command: "mcpd serve --forward-vendor honeycomb --forward-header 'x-honeycomb-team: $HONEYCOMB_API_KEY'",
+      },
+      {
+        label: 'Protobuf',
+        command: 'mcpd serve --forward-endpoint https://otlp.example.com --forward-protocol protobuf',
+      },
+    ]}
   />
 
   <p>
-    The path is appended, so give the base URL and not
-    <code>/v1/traces</code>. For a destination that needs credentials, add
-    headers:
+    <code>--forward-vendor</code> picks a vendor's endpoint and conventions;
+    the credential goes in <code>--forward-header</code>. With a vendor that has
+    a default endpoint, <code>--forward-endpoint</code> may be left out.
+    <code>--forward-protocol</code> takes <code>json</code>,
+    <code>protobuf</code> or <code>grpc</code>. A destination given by flags
+    replaces the file's <code>forward</code> block, so one instance can be
+    pointed elsewhere without editing a shared ConfigMap.
   </p>
 
-  <Command
-    class="not-prose my-6"
-    title="with an authorization header"
-    command={`mcpd serve \\
-  --forward-endpoint https://otlp.example.com \\
-  --forward-header 'Authorization: Bearer $TOKEN'`}
-  />
+  <h2>Several destinations</h2>
+  <p>
+    The <code>forward</code> block in the config file takes one destination as
+    an object, which is the form earlier releases read and still works, or an
+    array of them. Each destination gets its own copy, its own spool and its
+    own retries, so a slow vendor never holds back a fast one.
+  </p>
+
+  <pre><code class="language-json">{destinations}</code></pre>
 
   <p>
-    The same settings live under <code>forward</code> in the config file, where
-    <code>batch_size</code> and <code>enabled</code> are also available. A flag
-    beats the file, so one instance can be pointed elsewhere without editing a
-    shared ConfigMap.
+    Any string may be written <code>$&#123;ENV_NAME&#125;</code>. It is read
+    from the environment once, at start. A variable that is not set refuses
+    the start and names the variable, so a credential missing from a secret is
+    an error you see at deploy time and not a 401 you find a week later.
   </p>
 
-  <pre><code class="language-json">{`{
-  "forward": {
-    "endpoint": "https://otlp.example.com",
-    "headers": [["Authorization", "Bearer sk-..."]],
-    "batch_size": 256,
-    "enabled": true
-  }
-}`}</code></pre>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Field</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>name</code></td>
+          <td>The destination's name, used as the <code>destination</code> label on its metrics and as its spool directory. Letters, digits, <code>-</code>, <code>_</code> and <code>.</code>. Defaults to the vendor name</td>
+        </tr>
+        <tr>
+          <td><code>vendor</code></td>
+          <td>One of the presets below. Defaults to <code>otlp</code></td>
+        </tr>
+        <tr>
+          <td><code>endpoint</code></td>
+          <td>The base URL, without <code>/v1/traces</code>. Required for <code>otlp</code>, <code>otlp_grpc</code>, <code>elastic</code> and <code>dynatrace</code>; for a vendor with a default, it replaces that default</td>
+        </tr>
+        <tr>
+          <td><code>protocol</code></td>
+          <td><code>json</code>, <code>protobuf</code> or <code>grpc</code>. <code>otlp</code> defaults to JSON, <code>otlp_grpc</code> to gRPC, every other vendor to protobuf. Dynatrace refuses JSON</td>
+        </tr>
+        <tr>
+          <td><code>headers</code></td>
+          <td>A list of <code>[name, value]</code> pairs or an object. A header with the same name as one the preset sets replaces it</td>
+        </tr>
+        <tr>
+          <td><code>enabled</code></td>
+          <td><code>false</code> keeps the entry in the file and sends nothing</td>
+        </tr>
+        <tr>
+          <td><code>batch_size</code></td>
+          <td>Spans per request. Default 256</td>
+        </tr>
+        <tr>
+          <td><code>conventions</code></td>
+          <td>The attribute names the copy is written in: <code>gen_ai</code>, <code>gen_ai_messages</code>, <code>openinference</code>, <code>langfuse</code>, <code>langsmith</code>, <code>braintrust</code> or <code>laminar</code>. Defaults to the vendor's own</td>
+        </tr>
+        <tr>
+          <td><code>region</code></td>
+          <td>Picks the vendor's regional endpoint, listed in the table below</td>
+        </tr>
+        <tr>
+          <td><code>api_key</code>, <code>token</code>, <code>public_key</code>, <code>secret_key</code>, <code>instance_id</code>, <code>space_id</code></td>
+          <td>Credentials. Each vendor reads the ones the table names and turns them into its own header</td>
+        </tr>
+        <tr>
+          <td><code>project</code>, <code>workspace</code>, <code>dataset</code>, <code>dsn</code></td>
+          <td>Where in the vendor the copy lands</td>
+        </tr>
+        <tr>
+          <td><code>filter</code></td>
+          <td>Which data this destination receives. See below</td>
+        </tr>
+        <tr>
+          <td><code>redact</code></td>
+          <td>What this destination's copy leaves out. See below</td>
+        </tr>
+        <tr>
+          <td><code>signals</code></td>
+          <td><code>traces</code>, <code>logs</code> and <code>metrics</code>, each true or false. Defaults to every signal the vendor accepts</td>
+        </tr>
+        <tr>
+          <td><code>spool_max_bytes</code></td>
+          <td>The most this destination's spool may hold. Defaults to <code>--spool-max-bytes</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Vendors</h2>
+  <p>
+    Each preset sets the endpoint, the authentication and the conventions. The
+    signals column is what the vendor accepts, and so what a destination sends
+    unless <code>signals</code> says otherwise.
+  </p>
+
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Vendor</th><th>Endpoint</th><th>Credentials and placement</th><th>Signals</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>otlp</code></td>
+          <td><code>endpoint</code>, required</td>
+          <td><code>headers</code>. Any OTLP/HTTP receiver, JSON unless <code>protocol</code> is <code>protobuf</code></td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>otlp_grpc</code></td>
+          <td><code>endpoint</code>, required</td>
+          <td><code>headers</code>. Any OTLP/gRPC receiver, on <code>/opentelemetry.proto.collector.&lt;signal&gt;.v1.&lt;Service&gt;/Export</code></td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>langfuse</code></td>
+          <td><code>region</code> <code>eu</code> (default) is <code>https://cloud.langfuse.com/api/public/otel</code>, <code>us</code> is <code>us.cloud.langfuse.com</code>, <code>hipaa</code> is <code>hipaa.cloud.langfuse.com</code>. A self-hosted <code>endpoint</code> gets <code>/api/public/otel</code> appended</td>
+          <td>Basic auth from <code>public_key</code> and <code>secret_key</code>. <code>langfuse.*</code> attributes: observation type, input, output, model, usage and cost details, level, session, user, environment, release, trace name and tags</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>langsmith</code></td>
+          <td><code>https://api.smith.langchain.com/otel</code>; <code>region</code> <code>eu</code> is <code>eu.api.smith.langchain.com/otel</code></td>
+          <td><code>api_key</code> as <code>x-api-key</code>; <code>project</code> as the <code>Langsmith-Project</code> header. <code>langsmith.span.kind</code>, <code>gen_ai.prompt</code> and <code>gen_ai.completion</code></td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>braintrust</code></td>
+          <td><code>https://api.braintrust.dev/otel</code></td>
+          <td><code>api_key</code> as a Bearer token; <code>project</code>, required, as <code>x-bt-parent: project_name:&lt;project&gt;</code>. <code>braintrust.*</code> attributes</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>arize</code></td>
+          <td><code>https://otlp.arize.com</code>; <code>region</code> <code>eu</code> is <code>https://otlp.eu-west-1a.arize.com</code></td>
+          <td><code>space_id</code> and <code>api_key</code> headers; <code>project</code>, required, as the resource's <code>openinference.project.name</code> and <code>model_id</code>. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>phoenix</code></td>
+          <td><code>http://localhost:6006</code> unless <code>endpoint</code> is set</td>
+          <td>Optional <code>api_key</code> as a Bearer token; <code>project</code> as <code>openinference.project.name</code>. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>datadog</code></td>
+          <td><code>https://otlp.&lt;site&gt;</code>, where <code>region</code> is the site: <code>datadoghq.com</code> (default), <code>us3</code>, <code>us5</code>, <code>eu</code> or <code>datadoghq.eu</code>, <code>ap1</code>, <code>ap2</code>, <code>gov</code></td>
+          <td><code>api_key</code> as <code>dd-api-key</code>, with <code>dd-otlp-source: llmobs</code> for LLM Observability. <code>gen_ai.input.messages</code> and <code>gen_ai.output.messages</code></td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>honeycomb</code></td>
+          <td><code>https://api.honeycomb.io</code>; <code>region</code> <code>eu</code> is <code>api.eu1.honeycomb.io</code></td>
+          <td><code>api_key</code> as <code>x-honeycomb-team</code>; <code>dataset</code> as <code>x-honeycomb-dataset</code></td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>newrelic</code></td>
+          <td><code>https://otlp.nr-data.net</code>; <code>region</code> <code>eu</code> is <code>otlp.eu01.nr-data.net</code>, <code>fedramp</code> is <code>gov-otlp.nr-data.net</code></td>
+          <td><code>api_key</code> as <code>api-key</code>. A string value is cut at 4095 bytes, with a marker that says so</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>grafana</code></td>
+          <td>The OTLP gateway URL as <code>endpoint</code>, or <code>region</code> set to the zone for <code>https://otlp-gateway-&lt;zone&gt;.grafana.net/otlp</code></td>
+          <td>Basic auth from <code>instance_id</code> and <code>api_key</code> (or <code>token</code>)</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>sentry</code></td>
+          <td>From <code>dsn</code>: <code>https://&lt;host&gt;/api/&lt;project&gt;/integration/otlp</code></td>
+          <td>The DSN's key as <code>x-sentry-auth: sentry sentry_key=&lt;key&gt;</code></td>
+          <td>traces, logs</td>
+        </tr>
+        <tr>
+          <td><code>weave</code></td>
+          <td><code>https://trace.wandb.ai/otel</code></td>
+          <td>Basic auth <code>api:&lt;api_key&gt;</code>; <code>project</code> (<code>entity/project</code>) as the <code>project_id</code> header. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>laminar</code></td>
+          <td><code>https://api.lmnr.ai</code></td>
+          <td><code>api_key</code> as a Bearer token. <code>lmnr.*</code> attributes</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>helicone</code></td>
+          <td><code>https://api.worker.helicone.ai/custom/v1/log</code>, its logging API</td>
+          <td><code>api_key</code> as a Bearer token. One request per model call: model spans are sent, and other spans are counted as filtered</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>opik</code></td>
+          <td><code>https://www.comet.com/opik/api/v1/private/otel</code>; a self-hosted Opik sets <code>endpoint</code></td>
+          <td><code>api_key</code> as <code>Authorization</code>, <code>workspace</code> as <code>Comet-Workspace</code>, <code>project</code> as <code>projectName</code>. OpenInference</td>
+          <td>traces</td>
+        </tr>
+        <tr>
+          <td><code>elastic</code></td>
+          <td><code>endpoint</code>, required</td>
+          <td><code>Authorization: ApiKey &lt;api_key&gt;</code>, or <code>Bearer &lt;token&gt;</code></td>
+          <td>traces, logs, metrics</td>
+        </tr>
+        <tr>
+          <td><code>dynatrace</code></td>
+          <td>The environment URL as <code>endpoint</code>; <code>/api/v2/otlp</code> is appended</td>
+          <td><code>Authorization: Api-Token &lt;token&gt;</code>. Protobuf only</td>
+          <td>traces, logs, metrics</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>What every copy carries</h2>
+  <p>
+    Whichever conventions a destination uses, the copy also carries the
+    <code>gen_ai.*</code> attributes: the operation name, the request model,
+    the system and provider name, input and output tokens, the conversation id,
+    the agent and tool names, and the request's temperature, top_p and
+    max_tokens. It carries <code>session.id</code> and <code>user.id</code>,
+    which is already the hash when mcpd hashes it. And it carries the
+    <code>mcpd.*</code> attributes, the span kind, entity name, cost and tags,
+    with <code>mcpd.project</code> on the resource. A copy sent to another mcpd
+    therefore lands unchanged, in the same project.
+  </p>
+  <p>
+    Spans keep their links, with the link kind as <code>mcpd.link.kind</code>,
+    and their events: an event span goes back onto its carrier as an OTLP span
+    event when the carrier is in the same batch. Logs are sent with the logger
+    as the instrumentation scope. Metric points the sender sent are forwarded,
+    counters as delta monotonic sums, gauges and histograms. The points mcpd
+    derives from spans are not sent: they repeat what the spans already say,
+    and the destination would count them twice.
+  </p>
+  <p>
+    Spans are grouped by service into <code>resourceSpans</code>, the shape a
+    receiver expects. Scores, feedback and aspect notes stay in mcpd.
+  </p>
+
+  <h2>Filters</h2>
+  <p>
+    <code>filter</code> narrows what one destination receives. Every list is
+    optional, and an empty one lets everything through.
+  </p>
+  <ul>
+    <li><code>projects</code>: only these projects.</li>
+    <li><code>environments</code>: only these environments.</li>
+    <li><code>kinds</code>: only these span kinds.</li>
+    <li>
+      <code>sample</code>: a fraction from 0 to 1. It is decided from the trace
+      id, so a trace goes whole or not at all, and the logs in a trace follow
+      the trace.
+    </li>
+  </ul>
+  <p>
+    What a filter holds back is counted in
+    <code>mcpd_forward_filtered_total</code>, so a destination that receives
+    less than you expect shows why.
+  </p>
+
+  <h2>Redaction</h2>
+  <p>
+    Forwarding happens after the intake pipeline, which redacts in place before
+    anything is written. Whatever mcpd was told to hide never reaches a
+    destination either.
+  </p>
+  <p>
+    <code>redact</code> goes further for one destination. It changes that
+    destination's copy only, never what mcpd stores.
+  </p>
+  <ul>
+    <li>
+      <code>drop_payloads: true</code> sends no span input or output and no log
+      fields. The destination still gets timing, model, usage, cost and errors.
+    </li>
+    <li>
+      <code>key_contains</code> is a list of substrings. A key that contains
+      one has its value replaced by <code>[redacted]</code>.
+    </li>
+  </ul>
+  <p>
+    So you can keep full payloads in your own store and send a vendor the shape
+    of each run without its content.
+  </p>
 
   {/* The diagram belongs here, not at the top. It draws the intake ending at
       Store, and this section is about what happens after Store, so the two read
@@ -70,62 +380,92 @@ import PipelineDiagram from '@/components/PipelineDiagram.astro'
 
   <h2>Local storage happens first</h2>
   <p>
-    A span is written to mcpd's own store before anything is forwarded, and the
-    forward runs on its own task afterwards. Two consequences, both deliberate.
-  </p>
-  <p>
-    A slow destination never adds its latency to the request that produced the
-    span. Your agent does not wait on someone else's collector.
-  </p>
-  <p>
-    A destination that is down never turns into a rejected ingest. mcpd keeps
-    working and retries the forward on its own task. The alternative, where
-    another company's outage means your telemetry is not kept at all, is the
-    exact failure this design exists to avoid.
-  </p>
-  <p>
-    Each batch gets three attempts. A 429, a 5xx or a failed connection is
-    retried after 250 ms, and the wait doubles after each attempt. A
-    <code>Retry-After</code> given in seconds replaces the wait, up to 30
-    seconds. Any other 4xx is final on the first answer, because the batch will
-    stay malformed for that destination. When the daemon is stopping, it makes
-    the remaining attempts at once. A batch that is refused for good, or is
-    still undelivered after its last attempt, is logged, and its spans are added
-    to <code>mcpd_forward_dropped_spans_total</code>, so you can see how much of
-    the copy is missing.
-  </p>
-  <p>
-    A destination that accepts a connection and never answers cannot take the
-    daemon's memory either. At most 64 ingest requests' copies wait on the
-    destination at once. While that many are waiting, a new copy is dropped at
-    once and counted in <code>mcpd_forward_dropped_spans_total</code>, and the
-    local write is unaffected.
-  </p>
-  <p>
-    A batch waits in memory while it is retried, and when the forwarding queue
-    is full, a new batch is dropped and its spans are counted in the same
-    metric, so a drop is always visible. For guaranteed delivery, put a
-    collector between mcpd and the destination.
+    A batch is written to mcpd's own store before anything is forwarded. The
+    copy is taken after the local write and handed to each destination's
+    spool. A slow destination never adds its latency to the request that
+    produced the span, and a destination that is down never turns into a
+    rejected ingest.
   </p>
 
-  <h2>Redaction applies to what leaves</h2>
+  <h3>The spool</h3>
   <p>
-    Forwarding happens after the intake pipeline, which redacts in place before
-    anything is written. Whatever mcpd was told to hide never reaches the next
-    hop either. A rule that protected your storage but not your egress would not
-    be a privacy control.
+    Each destination has a spool directory, <code>&lt;spool-dir&gt;/forward-&lt;name&gt;/</code>.
+    A copy is written to a temporary file, synced and renamed into place, with
+    mode 0600, so a crash leaves a whole entry or none. The spool directory
+    defaults to a <code>.spool</code> directory beside <code>--data</code>, such
+    as <code>/data/mcpd.spool</code>, and is held in memory when
+    <code>--data</code> is <code>:memory:</code>. <code>--spool-dir memory</code>
+    keeps it in memory on purpose.
+  </p>
+  <p>
+    A spool is bounded by <code>spool_max_bytes</code>, 256 MiB per destination
+    unless you set it. When it is full, the new copy is dropped and counted in
+    <code>mcpd_forward_spool_full_total</code>; the local write is unaffected. A
+    backlog on disk survives a restart and is sent at start. On stop, a spool in
+    memory gets one final attempt.
   </p>
 
-  <h2>What gets forwarded</h2>
+  <h3>Retries</h3>
   <p>
-    Spans. Logs, metrics, scores, feedback and aspect notes stay in mcpd,
-    because the destinations people forward to are tracing backends and would
-    drop the rest or mangle it into attributes.
+    Two workers per destination send what is in the spool. A failed send is
+    retried with exponential backoff and jitter: the wait starts at 0.5 seconds
+    and doubles up to 60, and each wait is chosen at random in the upper half of
+    that range. A <code>Retry-After</code> in seconds or as an HTTP date is
+    honoured, up to 300 seconds.
   </p>
   <p>
-    Spans are grouped by service into <code>resourceSpans</code>, the shape a
-    receiver expects, rather than one resource per span, which is valid and
-    makes every downstream regroup it.
+    Retried: 401, 403, 404, 408, 409, 425, 429, every 5xx, transport errors,
+    and the gRPC codes <code>CANCELLED</code>, <code>DEADLINE_EXCEEDED</code>,
+    <code>PERMISSION_DENIED</code>, <code>RESOURCE_EXHAUSTED</code>,
+    <code>ABORTED</code>, <code>OUT_OF_RANGE</code>, <code>UNAVAILABLE</code>,
+    <code>DATA_LOSS</code> and <code>UNAUTHENTICATED</code>. An expired key or a
+    destination still being created therefore waits rather than losing data.
+  </p>
+  <p>
+    Any other 4xx is final, because the batch will stay malformed for that
+    destination. The entry is moved to <code>dead/</code> in the spool
+    directory, the newest 100 are kept, and it is counted. An entry still
+    undelivered after a day is moved to <code>dead/</code> too. Bodies over
+    1 KiB are gzipped for OTLP/HTTP.
+  </p>
+
+  <h2>Watching it</h2>
+  <p>
+    Every metric carries the <code>destination</code> and <code>vendor</code>
+    labels.
+  </p>
+  <div class="scroll-x">
+    <table>
+      <thead>
+        <tr><th>Metric</th><th>Type</th><th>Meaning</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>mcpd_forward_sent_total</code></td><td>counter</td><td>Items the destination accepted</td></tr>
+        <tr><td><code>mcpd_forward_failed_attempts_total</code></td><td>counter</td><td>Attempts that failed and will be retried</td></tr>
+        <tr><td><code>mcpd_forward_dead_letter_total</code></td><td>counter</td><td>Items refused for good or older than a day, moved to <code>dead/</code></td></tr>
+        <tr><td><code>mcpd_forward_spool_full_total</code></td><td>counter</td><td>Items dropped because the spool was full</td></tr>
+        <tr><td><code>mcpd_forward_filtered_total</code></td><td>counter</td><td>Items the filter kept from the destination</td></tr>
+        <tr><td><code>mcpd_forward_spool_entries</code></td><td>gauge</td><td>Requests waiting in the spool</td></tr>
+        <tr><td><code>mcpd_forward_spool_bytes</code></td><td>gauge</td><td>Bytes the spool holds</td></tr>
+        <tr><td><code>mcpd_forward_up</code></td><td>gauge</td><td>1 when the last attempt succeeded or none has been made, 0 when it failed</td></tr>
+        <tr><td><code>mcpd_forward_last_success_timestamp_seconds</code></td><td>gauge</td><td>When the destination last accepted a request, in seconds since the epoch, or 0</td></tr>
+        <tr><td><code>mcpd_forward_dropped_spans_total</code></td><td>counter</td><td>Spans dead-lettered, dropped at a full spool, or dropped past the 64 copies in flight</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Alert on a growing <code>mcpd_forward_spool_bytes</code> and a stale
+    <code>mcpd_forward_last_success_timestamp_seconds</code>: together they say
+    a destination has stopped taking data while mcpd keeps it for you.
+  </p>
+  <p>
+    <code>mcpd doctor</code> reports one finding per destination. It sends an
+    export that carries nothing, in the destination's own protocol, so the
+    endpoint and the credential are proved without writing data. Helicone is
+    skipped. It also reads the
+    spool directory and reports its entries, bytes, the age of the oldest entry
+    and the dead-letter count, and warns when there are dead letters or the
+    oldest entry is over an hour old.
   </p>
 
   <h2>mcpd forwarding to mcpd</h2>
@@ -133,14 +473,16 @@ import PipelineDiagram from '@/components/PipelineDiagram.astro'
     Because both ends speak the same protocol, a local mcpd can forward to a
     shared one. Developers keep a fast store on their own machine with full
     payloads, and the team's instance gets the same runs with its own retention
-    and its own redaction rules applied on arrival.
+    and its own redaction rules applied on arrival. To put a collector in front
+    of a daemon that stores nothing itself, use
+    <a href="/docs/relay" class="link">the relay</a>.
   </p>
 
   <h2>Next</h2>
   <ul>
     <li>
-      Pointing an existing OpenTelemetry setup at mcpd:
-      <a href="/docs/opentelemetry" class="link">OpenTelemetry</a>.
+      An edge collector and several regions:
+      <a href="/docs/relay" class="link">Relay and regions</a>.
     </li>
     <li>
       What is removed before a span is stored or sent:

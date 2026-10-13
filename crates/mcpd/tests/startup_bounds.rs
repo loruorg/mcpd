@@ -246,7 +246,7 @@ fn a_forward_header_with_a_colon_is_still_accepted() {
         "--forward-header",
         "Authorization: Bearer sk-1",
     ]);
-    assert!(out.contains("forwarding      http://collector.example/v1/traces"), "{out}");
+    assert!(out.contains("forwarding      otlp at http://collector.example/v1/traces"), "{out}");
 }
 
 #[test]
