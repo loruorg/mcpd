@@ -47,17 +47,21 @@ def answer(question: str, user_id: str) -> "tuple[str, str]":
                     tags=["support", "orders"]) as run:
         run.set_input({"question": question})
 
-        # A model call. `set_usage` is what mcpd prices the run from, so the
-        # cost on the trace is the cost you were actually billed.
+        # A model call. `record_response` reads the model, the token counts
+        # mcpd prices the run from, the id and the finish reason off the reply.
         with mcpd.span("plan", kind=SpanKind.MODEL_GENERATION) as generation:
-            generation.set_model("gpt-4o-mini", provider="openai")
             generation.set_input([
                 {"role": "system", "content": "You are a support agent."},
                 {"role": "user", "content": question},
             ])
             time.sleep(0.12)  # stand-in for the provider round trip
             generation.set_output("I should look the order up first.")
-            generation.set_usage(input_tokens=812, output_tokens=96, cache_read=128)
+            generation.record_response({  # the shape OpenAI answers in
+                "id": "chatcmpl-1", "model": "gpt-4o-mini",
+                "choices": [{"finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 812, "completion_tokens": 96,
+                          "prompt_tokens_details": {"cached_tokens": 128}},
+            })
 
         # A tool call that fails. The `with` block records the exception on the
         # span, marks it as an error, and lets the exception through unchanged.

@@ -37,6 +37,7 @@ defmodule Mcpd.SpanKind do
           :client_tool_call |
           :provider_tool_call |
           :mcp_tool_call |
+          :handoff |
           :workflow_run |
           :workflow_step |
           :workflow_conditional |
@@ -72,6 +73,7 @@ defmodule Mcpd.SpanKind do
     :client_tool_call,
     :provider_tool_call,
     :mcp_tool_call,
+    :handoff,
     :workflow_run,
     :workflow_step,
     :workflow_conditional,
@@ -113,6 +115,7 @@ defmodule Mcpd.SpanKind do
   def to_wire(:client_tool_call), do: "client_tool_call"
   def to_wire(:provider_tool_call), do: "provider_tool_call"
   def to_wire(:mcp_tool_call), do: "mcp_tool_call"
+  def to_wire(:handoff), do: "handoff"
   def to_wire(:workflow_run), do: "workflow_run"
   def to_wire(:workflow_step), do: "workflow_step"
   def to_wire(:workflow_conditional), do: "workflow_conditional"
@@ -155,6 +158,7 @@ defmodule Mcpd.SpanKind do
   def from_wire("client_tool_call"), do: {:ok, :client_tool_call}
   def from_wire("provider_tool_call"), do: {:ok, :provider_tool_call}
   def from_wire("mcp_tool_call"), do: {:ok, :mcp_tool_call}
+  def from_wire("handoff"), do: {:ok, :handoff}
   def from_wire("workflow_run"), do: {:ok, :workflow_run}
   def from_wire("workflow_step"), do: {:ok, :workflow_step}
   def from_wire("workflow_conditional"), do: {:ok, :workflow_conditional}

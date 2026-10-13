@@ -44,6 +44,8 @@ class SpanKind(str, Enum):
     """A tool the model provider executes server-side, such as hosted web search or code execution."""
     MCP_TOOL_CALL = "mcp_tool_call"
     """A tool reached over the Model Context Protocol."""
+    HANDOFF = "handoff"
+    """Control passing from one agent to another. The span's name is the agent handed to; its parent is the agent handing off."""
     WORKFLOW_RUN = "workflow_run"
     """One workflow execution. Usually the root of a trace."""
     WORKFLOW_STEP = "workflow_step"

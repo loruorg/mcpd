@@ -67,6 +67,8 @@ pub(crate) struct ClientInner {
     failed: AtomicU64,
     /// Spans [`Mcpd::record`] refused.
     rejected: AtomicU64,
+    /// Values the configured redactor panicked on, dropped rather than sent.
+    redaction_failures: AtomicU64,
     /// Rate limiter for the "something is wrong with mcpd" messages. Without it
     /// an unreachable server turns into a second outage in the log pipeline.
     pub(crate) warn: Throttle,
@@ -149,6 +151,7 @@ impl Mcpd {
             exported: AtomicU64::new(0),
             failed: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
+            redaction_failures: AtomicU64::new(0),
             warn: Throttle::new(config.flush_interval),
             send_lock: Arc::new(tokio::sync::Mutex::new(())),
             worker_started: AtomicBool::new(false),
@@ -304,6 +307,7 @@ impl Mcpd {
             exported: self.inner.exported.load(Ordering::Relaxed),
             failed: self.inner.failed.load(Ordering::Relaxed),
             rejected: self.inner.rejected.load(Ordering::Relaxed),
+            redaction_failures: self.inner.redaction_failures.load(Ordering::Relaxed),
         }
     }
 
@@ -788,10 +792,76 @@ impl ClientInner {
             }
             return;
         }
+        let signal = match &self.config.redact {
+            Some(redact) => self.redacted(redact, signal),
+            None => signal,
+        };
         self.shared.queue.push(signal);
         // A client built before the runtime started, or on a thread with none,
         // gets its worker at the first signal instead of never.
         self.ensure_worker();
+    }
+
+    /// The signal with the redactor applied to its payload fields. The queued
+    /// record is already a copy, so the caller's span keeps what it was
+    /// given. Fails closed, field by field (contract section 2.1.1).
+    fn redacted(&self, redact: &crate::Redactor, signal: Signal) -> Signal {
+        match signal {
+            Signal::Span(mut span) => {
+                let s = &mut *span;
+                for (field, slot) in [
+                    ("input", &mut s.input),
+                    ("output", &mut s.output),
+                    ("attributes", &mut s.attributes),
+                    ("metadata", &mut s.metadata),
+                ] {
+                    self.redact_slot(redact, field, slot);
+                }
+                Signal::Span(span)
+            }
+            Signal::Log(mut log) => {
+                self.redact_slot(redact, "fields", &mut log.fields);
+                Signal::Log(log)
+            }
+            other => other,
+        }
+    }
+
+    /// Run the redactor on one field. A panic inside it, or a result of the
+    /// wrong shape for an object field, drops the field. A panic is caught, because
+    /// user code must not unwind through instrumentation (B1), and the field
+    /// is dropped, because a broken redactor is the case where sending the
+    /// original does the most harm.
+    fn redact_slot(
+        &self,
+        redact: &crate::Redactor,
+        field: &'static str,
+        slot: &mut Option<serde_json::Value>,
+    ) {
+        let Some(value) = slot.take() else { return };
+        // The closure owns the value and the redactor is shared, immutable
+        // code; a panic half way through leaves nothing of ours inconsistent.
+        let failed = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| redact(value)))
+        {
+            // Null is the redactor saying "drop it", which is a choice, not a
+            // failure.
+            Ok(serde_json::Value::Null) => false,
+            // Attributes, metadata and log fields are objects on the wire; any
+            // other shape is unusable, and dropped and counted like a panic
+            // so every SDK agrees on what a broken redactor costs.
+            Ok(kept) if field != "input" && field != "output" && !kept.is_object() => true,
+            Ok(kept) => {
+                *slot = Some(kept);
+                false
+            }
+            Err(_) => true,
+        };
+        if failed {
+            self.redaction_failures.fetch_add(1, Ordering::Relaxed);
+            if self.warn.allow() {
+                tracing::warn!(field, "the mcpd redactor failed on this field; it was dropped");
+            }
+        }
     }
 
     /// Start the background worker, once, if there is a runtime to start it on.
@@ -890,7 +960,7 @@ impl ClientInner {
     }
 }
 
-/// What a client has done since it was built. The same six names in every
+/// What a client has done since it was built. The same seven names in every
 /// SDK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stats {
@@ -906,6 +976,9 @@ pub struct Stats {
     pub failed: u64,
     /// Spans [`Mcpd::record`] refused.
     pub rejected: u64,
+    /// Values the configured redactor panicked on, dropped rather than sent
+    /// (contract section 2.1.1).
+    pub redaction_failures: u64,
 }
 
 /// Why a recorded span is refused, if it is.

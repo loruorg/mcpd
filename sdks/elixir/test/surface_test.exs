@@ -438,7 +438,7 @@ defmodule Mcpd.SurfaceTest do
       end)
 
     c = client(endpoint: d.endpoint, max_queue: 2, batch_size: 10)
-    assert Mcpd.stats(c) == %{queued: 0, dropped: 0, capacity: 2, exported: 0, failed: 0, rejected: 0}
+    assert Mcpd.stats(c) == %{queued: 0, dropped: 0, capacity: 2, exported: 0, failed: 0, rejected: 0, redaction_failures: 0}
 
     capture_io(:stderr, fn ->
       for n <- 1..3, do: Mcpd.log(c, :info, "line #{n}")
@@ -456,7 +456,7 @@ defmodule Mcpd.SurfaceTest do
     end)
 
     :ok = Mcpd.shutdown(c)
-    assert Mcpd.stats(c) == %{queued: 0, dropped: 0, capacity: 0, exported: 0, failed: 0, rejected: 0}
+    assert Mcpd.stats(c) == %{queued: 0, dropped: 0, capacity: 0, exported: 0, failed: 0, rejected: 0, redaction_failures: 0}
   end
 
   # -------------------------------------------- 2.4 deadlines, and B3 bounds ---

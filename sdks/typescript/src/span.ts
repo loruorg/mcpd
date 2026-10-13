@@ -6,6 +6,7 @@
  * instrumentation that can fail is worse than no instrumentation at all (B1).
  */
 
+import { responseFacts } from './model-call.js'
 import type {
   Correlation,
   EntityKind,
@@ -339,6 +340,55 @@ export class McpdSpan {
   setModelParameters(parameters: ModelParameterInput): this {
     return this.#set('setModelParameters', () => {
       this.#data.modelParameters = buildModelParameters(parameters)
+    })
+  }
+
+  /**
+   * Record what an OpenAI- or Anthropic-shaped response says about its call:
+   * the model, the provider, the token usage with its cache and reasoning
+   * meters, and the response id, finish reasons and service tier as
+   * `gen_ai.response.*` attributes. The daemon prices a batch or flex call
+   * from the tier.
+   *
+   * It never records the text: set it with `setOutput` if you want it kept.
+   * An unknown shape records what it can and raises nothing.
+   */
+  recordResponse(response: unknown, provider?: string): this {
+    return this.#set('recordResponse', () => {
+      const facts = responseFacts(response, provider)
+      if (facts.model !== undefined) this.#data.model = facts.model
+      if (facts.provider !== undefined) this.#data.provider = facts.provider
+      if (facts.usage !== undefined) this.#data.usage = facts.usage
+      if (Object.keys(facts.attributes).length > 0) {
+        this.#data.attributes = { ...(this.#data.attributes as object), ...facts.attributes }
+      }
+    })
+  }
+
+  /**
+   * Record the time to first token, from this span's start to now, as
+   * `mcpd.time_to_first_token_ms`. Only the first call counts, so it can sit
+   * inside a streaming loop.
+   */
+  markFirstToken(): this {
+    return this.#set('markFirstToken', () => {
+      const attrs = (this.#data.attributes ?? {}) as Record<string, unknown>
+      if (attrs['mcpd.time_to_first_token_ms'] !== undefined) return
+      const ms = Number(nowNs() - this.#startNs) / 1e6
+      this.#data.attributes = { ...attrs, 'mcpd.time_to_first_token_ms': ms }
+    })
+  }
+
+  /**
+   * Record a guardrail's outcome as `mcpd.guardrail.tripped` and, when given,
+   * `mcpd.guardrail.reason`. Tripping is not an error by itself; call
+   * `setError` as well if it should fail the span.
+   */
+  setGuardrail(tripped: boolean, reason?: string): this {
+    return this.#set('setGuardrail', () => {
+      const add: Record<string, unknown> = { 'mcpd.guardrail.tripped': tripped }
+      if (reason !== undefined) add['mcpd.guardrail.reason'] = reason
+      this.#data.attributes = { ...(this.#data.attributes as object), ...add }
     })
   }
 

@@ -109,22 +109,25 @@ async function draftAnswer(
         { role: 'system', content: 'You are a support agent. Be brief and exact.' },
         { role: 'user', content: `${ticket.question}\n\nOrder: ${JSON.stringify(order)}` },
       ]
-      generation.setModel('claude-sonnet-4', 'anthropic')
       generation.setInput(prompt)
 
-      // Where a real provider call goes.
+      // Where a real provider call goes. This is the shape Anthropic answers in.
       await pause(40)
+      generation.markFirstToken()
       const answer = `Your order is ${order.status} and should arrive on ${order.eta}.`
+      const response = {
+        id: 'msg_01',
+        type: 'message',
+        model: 'claude-sonnet-4-5',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: answer }],
+        usage: { input_tokens: 172, cache_read_input_tokens: 640, output_tokens: 37 },
+      }
 
       generation.setOutput(answer)
-      // Token counts are what mcpd prices. Report what the provider told you.
-      generation.setUsage({
-        inputTokens: 812,
-        outputTokens: 37,
-        inputDetails: { cacheRead: 640, text: 172 },
-      })
-      // A point in time inside the span, not a duration of its own.
-      generation.event('first_token', { kind: 'model_chunk' })
+      // The model, the token counts mcpd prices, the response id and the
+      // finish reason, read from the response in one call.
+      generation.recordResponse(response)
 
       mcpd.log('info', 'answered from cache-warm prompt', { cached: true })
       return answer

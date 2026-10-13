@@ -52,6 +52,9 @@ const (
 	SpanKindProviderToolCall SpanKind = "provider_tool_call"
 	// A tool reached over the Model Context Protocol.
 	SpanKindMcpToolCall SpanKind = "mcp_tool_call"
+	// Control passing from one agent to another. The span's name is the agent handed to;
+	// its parent is the agent handing off.
+	SpanKindHandoff SpanKind = "handoff"
 	// One workflow execution. Usually the root of a trace.
 	SpanKindWorkflowRun SpanKind = "workflow_run"
 	// One step within a workflow.
@@ -103,7 +106,7 @@ const (
 )
 
 // AllSpanKinds lists every SpanKind value, in declaration order.
-var AllSpanKinds = []SpanKind{SpanKindAgentRun, SpanKindModelGeneration, SpanKindModelStep, SpanKindModelInference, SpanKindModelChunk, SpanKindToolCall, SpanKindClientToolCall, SpanKindProviderToolCall, SpanKindMcpToolCall, SpanKindWorkflowRun, SpanKindWorkflowStep, SpanKindWorkflowConditional, SpanKindWorkflowConditionalEval, SpanKindWorkflowParallel, SpanKindWorkflowLoop, SpanKindWorkflowSleep, SpanKindWorkflowWaitEvent, SpanKindMemoryOperation, SpanKindRagIngestion, SpanKindRagEmbedding, SpanKindRagVectorOperation, SpanKindRagAction, SpanKindGraphAction, SpanKindProcessorRun, SpanKindScorerRun, SpanKindScorerStep, SpanKindGuardrail, SpanKindRetrieval, SpanKindMapping, SpanKindSkillResolution, SpanKindWorkspaceAction, SpanKindHTTPRequest, SpanKindGeneric}
+var AllSpanKinds = []SpanKind{SpanKindAgentRun, SpanKindModelGeneration, SpanKindModelStep, SpanKindModelInference, SpanKindModelChunk, SpanKindToolCall, SpanKindClientToolCall, SpanKindProviderToolCall, SpanKindMcpToolCall, SpanKindHandoff, SpanKindWorkflowRun, SpanKindWorkflowStep, SpanKindWorkflowConditional, SpanKindWorkflowConditionalEval, SpanKindWorkflowParallel, SpanKindWorkflowLoop, SpanKindWorkflowSleep, SpanKindWorkflowWaitEvent, SpanKindMemoryOperation, SpanKindRagIngestion, SpanKindRagEmbedding, SpanKindRagVectorOperation, SpanKindRagAction, SpanKindGraphAction, SpanKindProcessorRun, SpanKindScorerRun, SpanKindScorerStep, SpanKindGuardrail, SpanKindRetrieval, SpanKindMapping, SpanKindSkillResolution, SpanKindWorkspaceAction, SpanKindHTTPRequest, SpanKindGeneric}
 
 // String returns the wire representation.
 func (v SpanKind) String() string { return string(v) }

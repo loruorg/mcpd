@@ -59,6 +59,11 @@ enum class SpanKind(val wire: String) {
     @SerialName("provider_tool_call") PROVIDER_TOOL_CALL("provider_tool_call"),
     /** A tool reached over the Model Context Protocol. */
     @SerialName("mcp_tool_call") MCP_TOOL_CALL("mcp_tool_call"),
+    /**
+     * Control passing from one agent to another. The span's name is the agent handed
+     * to; its parent is the agent handing off.
+     */
+    @SerialName("handoff") HANDOFF("handoff"),
     /** One workflow execution. Usually the root of a trace. */
     @SerialName("workflow_run") WORKFLOW_RUN("workflow_run"),
     /** One step within a workflow. */

@@ -42,6 +42,9 @@ export const SpanKind = {
   ProviderToolCall: 'provider_tool_call',
   // A tool reached over the Model Context Protocol.
   McpToolCall: 'mcp_tool_call',
+  // Control passing from one agent to another. The span's name is the agent handed to;
+  // its parent is the agent handing off.
+  Handoff: 'handoff',
   // One workflow execution. Usually the root of a trace.
   WorkflowRun: 'workflow_run',
   // One step within a workflow.
@@ -95,7 +98,7 @@ export const SpanKind = {
 export type SpanKind = typeof SpanKind[keyof typeof SpanKind]
 
 /** Every `SpanKind` value, in declaration order. */
-export const ALL_SPAN_KIND: readonly SpanKind[] = ['agent_run', 'model_generation', 'model_step', 'model_inference', 'model_chunk', 'tool_call', 'client_tool_call', 'provider_tool_call', 'mcp_tool_call', 'workflow_run', 'workflow_step', 'workflow_conditional', 'workflow_conditional_eval', 'workflow_parallel', 'workflow_loop', 'workflow_sleep', 'workflow_wait_event', 'memory_operation', 'rag_ingestion', 'rag_embedding', 'rag_vector_operation', 'rag_action', 'graph_action', 'processor_run', 'scorer_run', 'scorer_step', 'guardrail', 'retrieval', 'mapping', 'skill_resolution', 'workspace_action', 'http_request', 'generic']
+export const ALL_SPAN_KIND: readonly SpanKind[] = ['agent_run', 'model_generation', 'model_step', 'model_inference', 'model_chunk', 'tool_call', 'client_tool_call', 'provider_tool_call', 'mcp_tool_call', 'handoff', 'workflow_run', 'workflow_step', 'workflow_conditional', 'workflow_conditional_eval', 'workflow_parallel', 'workflow_loop', 'workflow_sleep', 'workflow_wait_event', 'memory_operation', 'rag_ingestion', 'rag_embedding', 'rag_vector_operation', 'rag_action', 'graph_action', 'processor_run', 'scorer_run', 'scorer_step', 'guardrail', 'retrieval', 'mapping', 'skill_resolution', 'workspace_action', 'http_request', 'generic']
 
 /**
   * The outcome of an operation. */

@@ -45,6 +45,9 @@ pub enum SpanKind {
     ProviderToolCall,
     /// A tool reached over the Model Context Protocol.
     McpToolCall,
+    /// Control passing from one agent to another. The span's name is the agent handed to;
+    /// its parent is the agent handing off.
+    Handoff,
     /// One workflow execution. Usually the root of a trace.
     WorkflowRun,
     /// One step within a workflow.
@@ -108,6 +111,7 @@ impl SpanKind {
             Self::ClientToolCall => "client_tool_call",
             Self::ProviderToolCall => "provider_tool_call",
             Self::McpToolCall => "mcp_tool_call",
+            Self::Handoff => "handoff",
             Self::WorkflowRun => "workflow_run",
             Self::WorkflowStep => "workflow_step",
             Self::WorkflowConditional => "workflow_conditional",
@@ -146,6 +150,7 @@ impl SpanKind {
         Self::ClientToolCall,
         Self::ProviderToolCall,
         Self::McpToolCall,
+        Self::Handoff,
         Self::WorkflowRun,
         Self::WorkflowStep,
         Self::WorkflowConditional,
@@ -186,6 +191,7 @@ impl std::str::FromStr for SpanKind {
             "client_tool_call" => Ok(Self::ClientToolCall),
             "provider_tool_call" => Ok(Self::ProviderToolCall),
             "mcp_tool_call" => Ok(Self::McpToolCall),
+            "handoff" => Ok(Self::Handoff),
             "workflow_run" => Ok(Self::WorkflowRun),
             "workflow_step" => Ok(Self::WorkflowStep),
             "workflow_conditional" => Ok(Self::WorkflowConditional),

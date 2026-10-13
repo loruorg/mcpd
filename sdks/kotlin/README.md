@@ -91,6 +91,16 @@ can override it for itself, in either direction, with `capturePayloads` as it
 starts. Redaction on the daemon is the other end of the same wire, and the
 wrong end for a team that must not send the bytes at all.
 
+`redact` masks values before they are queued. It gets each span's `input`,
+`output`, `attributes` and `metadata`, and each log line's `fields`, and returns
+the value to keep, or null to drop it. A redactor that throws drops that value
+and counts it in `stats().redactionFailures`; the original is never sent.
+
+```kotlin
+val card = Regex("\\d{4}-\\d{4}")
+val mcpd = Mcpd(McpdConfig(redact = { Json.parseToJsonElement(it.toString().replace(card, "****")) }))
+```
+
 ## Tracing
 
 `span` is the idiomatic form. It ends the span, records what the block threw,
@@ -140,6 +150,19 @@ you leave out is absent; one you pass is kept whatever it is, so `seed = 0` is
 a seed. A second call replaces the first, because one set of settings describes
 one model call.
 
+`recordResponse` reads an OpenAI or Anthropic response, as a `JsonElement` or
+a `Map`: the model, the provider, the usage with its cache and reasoning
+meters, and the response id, finish reasons and service tier. It never records
+the text. `markFirstToken` records the time to first token, once, and
+`setGuardrail` a guardrail's outcome. `usageFromOpenAI` and `usageFromAnthropic`
+give the usage alone.
+
+```kotlin
+mcpd.span("chat", SpanKind.MODEL_GENERATION) { call ->
+    call.recordResponse(Json.parseToJsonElement(body))
+}
+```
+
 A span that belongs to another tracer's tree names it with
 `externalParentSpanId`: carried for correlation, never used as a parent inside
 mcpd's own tree. A span another system already finished is handed over whole:
@@ -186,8 +209,8 @@ val loud = Mcpd(McpdConfig(sink = ConsoleSink()))
 
 A sink that throws is a failed batch, reported once per interval; the caller
 recording the signal never hears about it. `mcpd.stats()` answers `queued`,
-`dropped`, `capacity`, `exported`, `failed` and `rejected`, the same six names
-in every SDK.
+`dropped`, `capacity`, `exported`, `failed`, `rejected` and
+`redactionFailures`, the same seven names in every SDK.
 
 ## The other four signals
 

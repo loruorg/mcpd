@@ -123,11 +123,26 @@ fun main() = runBlocking {
 /** A model call. Token usage is what mcpd turns into cost. */
 private suspend fun planAnswer(mcpd: Mcpd, question: String): String =
     mcpd.span("plan_answer", SpanKind.MODEL_GENERATION) { generation ->
-        generation.setModel("gpt-4o", provider = "openai")
         generation.setInput(listOf(mapOf("role" to "user", "content" to question)))
+        // Where a real provider call goes. This is the shape Anthropic answers in.
         val completion = callModel(question)
+        generation.markFirstToken()
+        val response = mapOf(
+            "id" to "msg_01",
+            "type" to "message",
+            "model" to "claude-sonnet-4-5",
+            "stop_reason" to "end_turn",
+            "content" to listOf(mapOf("type" to "text", "text" to completion)),
+            "usage" to mapOf(
+                "input_tokens" to 540,
+                "cache_read_input_tokens" to 640,
+                "output_tokens" to 96,
+            ),
+        )
         generation.setOutput(completion)
-        generation.setUsage(inputTokens = 1_180, outputTokens = 96)
+        // The model, the token counts mcpd prices, the response id and the
+        // finish reason, read from the response in one call.
+        generation.recordResponse(response)
         completion
     }
 

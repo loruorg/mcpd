@@ -102,6 +102,14 @@ export interface McpdOptions {
    * them. Chosen in code only.
    */
   sink?: Sink
+  /**
+   * Applied to every span's input, output, attributes and metadata, and to
+   * every log line's fields, before the record is queued. Return the value to
+   * keep. A redactor that throws drops that value and counts it in
+   * `stats().redactionFailures`: a broken redactor never lets the original
+   * through (SDK contract 2.1.1).
+   */
+  redact?: (value: unknown) => unknown
   /** Correlation fields to put on every signal, such as a release sha. */
   correlation?: Partial<Correlation>
   /** Replace `fetch`. Useful in tests and in runtimes with an unusual client. */
@@ -192,6 +200,8 @@ export interface McpdStats {
   failed: number
   /** Spans `record()` refused. */
   rejected: number
+  /** Values `redact` threw on, dropped rather than sent. */
+  redactionFailures: number
   /** Which context mechanism is in use. */
   context: 'async-local-storage' | 'fallback'
 }
@@ -274,6 +284,8 @@ export class Mcpd implements SpanHost {
   readonly #capture: boolean
   readonly #logLevel: LogLevel
   #rejected = 0
+  #redactionFailures = 0
+  readonly #redact: ((value: unknown) => unknown) | undefined
   readonly #queue: SignalQueue
   readonly #exporter: Exporter
   readonly #transport: Transport
@@ -298,6 +310,7 @@ export class Mcpd implements SpanHost {
     const serviceVersion = options.serviceVersion ?? env('MCPD_SERVICE_VERSION')
 
     this.#project = project
+    this.#redact = typeof options.redact === 'function' ? options.redact : undefined
     this.#enabled = options.enabled ?? envBoolean('MCPD_ENABLED') ?? true
     this.#capture = options.capturePayloads ?? envBoolean('MCPD_CAPTURE_PAYLOADS') ?? true
     // An unreadable name is ignored rather than refused: a typo in a
@@ -363,6 +376,7 @@ export class Mcpd implements SpanHost {
       ...this.#queue.stats(),
       ...this.#exporter.stats(),
       rejected: this.#rejected,
+      redactionFailures: this.#redactionFailures,
       context: contextStore().kind,
     }
   }
@@ -822,8 +836,43 @@ export class Mcpd implements SpanHost {
   // -------------------------------------------------------------------------
 
   #push(signal: Parameters<SignalQueue['push']>[0]): void {
+    if (this.#redact !== undefined) signal = this.#redacted(signal)
     this.#queue.push(encodable(signal))
     this.#exporter.notify()
+  }
+
+  /**
+   * The signal with `redact` applied to its payload fields, on a copy so the
+   * caller's span keeps what it was given. Fails closed, field by field.
+   */
+  #redacted(signal: Parameters<SignalQueue['push']>[0]): Parameters<SignalQueue['push']>[0] {
+    const keys =
+      signal.kind === 'span'
+        ? (['input', 'output', 'attributes', 'metadata'] as const)
+        : signal.kind === 'log'
+          ? (['fields'] as const)
+          : ([] as const)
+    if (keys.length === 0) return signal
+    const value = { ...(signal.value as unknown as Record<string, unknown>) }
+    for (const key of keys) {
+      if (value[key] === undefined) continue
+      try {
+        const kept = this.#redact!(value[key])
+        const mapField = key !== 'input' && key !== 'output'
+        if (kept === undefined || kept === null) delete value[key]
+        else if (mapField && (typeof kept !== 'object' || Array.isArray(kept))) {
+          // A map field the redactor turned into something else cannot be
+          // stored as one, so it fails closed like a throw does.
+          delete value[key]
+          this.#redactionFailures++
+        } else value[key] = kept
+      } catch (error) {
+        delete value[key]
+        this.#redactionFailures++
+        this.#diagnostics.report('redact', error)
+      }
+    }
+    return { ...signal, value } as unknown as Parameters<SignalQueue['push']>[0]
   }
 
   /** The root sampling decision (B4). */

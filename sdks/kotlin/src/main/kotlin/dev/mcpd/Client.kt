@@ -21,6 +21,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Clock
 import kotlin.time.Instant
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import java.util.UUID
 import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.atomic.AtomicBoolean
@@ -150,6 +152,17 @@ data class McpdConfig(
      * them. Chosen in code only: there is no environment variable for it.
      */
     val sink: Sink? = null,
+    /**
+     * Applied to every span's `input`, `output`, `attributes` and `metadata`,
+     * and to every log line's `fields`, before the record is queued. Return the
+     * value to keep, or null to drop it. A redactor that throws, or returns
+     * something other than an object for `attributes`, `metadata` or `fields`,
+     * drops that value and counts it in [Stats.redactionFailures]: a broken redactor never
+     * lets the original through (contract section 2.1.1). It runs after
+     * [capturePayloads], so a payload that capture stripped is never handed to it.
+     * Chosen in code only: no environment variable can carry a function.
+     */
+    val redact: ((JsonElement) -> JsonElement?)? = null,
 )
 
 /** What the client has done since it was built. */
@@ -166,6 +179,8 @@ data class Stats(
     val failed: Long,
     /** Spans [Mcpd.record] refused. */
     val rejected: Long,
+    /** Values [McpdConfig.redact] threw on, dropped rather than sent. */
+    val redactionFailures: Long,
 )
 
 /**
@@ -220,6 +235,7 @@ class Mcpd(
     private val exportedCount = AtomicLong()
     private val failedCount = AtomicLong()
     private val rejectedCount = AtomicLong()
+    private val redactionFailureCount = AtomicLong()
 
     /** Nudges the worker when a full batch is ready, rather than waiting out the interval. */
     private val wake = Channel<Unit>(Channel.CONFLATED)
@@ -249,6 +265,7 @@ class Mcpd(
         exported = exportedCount.get(),
         failed = failedCount.get(),
         rejected = rejectedCount.get(),
+        redactionFailures = redactionFailureCount.get(),
     )
 
     // ------------------------------------------------------------- tracing ---
@@ -420,7 +437,7 @@ class Mcpd(
             } else {
                 span.copy(correlation = correlation, input = null, output = null)
             }
-            enqueue(Signal.SpanSlot(record))
+            enqueue(Signal.SpanSlot(redacted(record)))
         }
     }
 
@@ -892,7 +909,7 @@ class Mcpd(
 
     private fun recordSpanStart(span: ActiveSpan) {
         if (!span.recorded || closed.get()) return
-        val slot = Signal.SpanSlot(span.toRecord(Clock.System.now()))
+        val slot = Signal.SpanSlot(redacted(span.toRecord(Clock.System.now())))
         span.slot = slot
         enqueue(slot)
     }
@@ -901,7 +918,7 @@ class Mcpd(
         if (!span.recorded || closed.get()) return
         // Build the record before touching the queue: the span's lock is never
         // held while the queue's is, so the two can never deadlock.
-        val record = span.toRecord(Clock.System.now())
+        val record = redacted(span.toRecord(Clock.System.now()))
         val slot = span.slot
         span.slot = null
         if (slot != null && queue.update(slot, record)) return
@@ -922,7 +939,7 @@ class Mcpd(
             val now = Clock.System.now()
             enqueue(
                 Signal.LogSlot(
-                    LogRecord(
+                    redacted(LogRecord(
                         logId = newId(),
                         timestamp = now,
                         level = level,
@@ -932,7 +949,7 @@ class Mcpd(
                         traceId = span?.traceId,
                         spanId = span?.spanId,
                         fields = encodeFields(fields),
-                    )
+                    ))
                 )
             )
         }
@@ -1074,6 +1091,61 @@ class Mcpd(
         if (t is ThreadDeath) throw t
         diagnostics.warn(operation) { "$operation failed and was ignored: $t" }
         null
+    }
+
+    /**
+     * The span with [McpdConfig.redact] applied to its payload fields. The
+     * record is immutable, so the caller's live span keeps what it was given.
+     */
+    private fun redacted(record: Span): Span {
+        if (config.redact == null) return record
+        return record.copy(
+            input = redactField(record.input),
+            output = redactField(record.output),
+            attributes = redactField(record.attributes, objectOnly = true),
+            metadata = redactField(record.metadata, objectOnly = true),
+        )
+    }
+
+    /** The log line with [McpdConfig.redact] applied to its fields. */
+    private fun redacted(record: LogRecord): LogRecord {
+        if (config.redact == null) return record
+        return record.copy(fields = redactField(record.fields, objectOnly = true))
+    }
+
+    /**
+     * One value through the redactor, failing closed.
+     *
+     * Throwable, as in [guard], because a redactor that recurses through a deep
+     * payload can overflow the stack, and that must cost the field, not the
+     * caller. The field is dropped rather than sent as it was: a broken
+     * redactor is the case where the original does the most harm.
+     *
+     * With [objectOnly], a result that is not a JSON object is unusable too,
+     * because the field is a key-value map on the wire, and is dropped and
+     * counted the same way. A null result is a deliberate drop and is not
+     * counted.
+     */
+    private fun redactField(value: JsonElement?, objectOnly: Boolean = false): JsonElement? {
+        val redact = config.redact ?: return value
+        if (value == null) return null
+        return try {
+            val kept = redact(value)
+            if (kept != null && objectOnly && kept !is JsonObject) {
+                redactionFailureCount.incrementAndGet()
+                diagnostics.warn("redact") { "redact returned a value that is not an object; it was dropped" }
+                null
+            } else {
+                kept
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            if (t is ThreadDeath) throw t
+            redactionFailureCount.incrementAndGet()
+            diagnostics.warn("redact") { "redact failed and the value was dropped: $t" }
+            null
+        }
     }
 
     /** A signal is worth queueing only when the client is on and its trace was kept. */

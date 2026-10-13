@@ -26,6 +26,7 @@ from .context import (
     nanotime,
     now_ns,
 )
+from .model_call import response_facts
 
 __all__ = ["Span"]
 
@@ -404,6 +405,58 @@ class Span:
         """Kind-specific structured detail, as described in the attribute reference."""
         self._attributes = dict(self._attributes or {})
         self._attributes.update(attributes)
+        return self
+
+    @_guard
+    def record_response(self, response: Any, provider: Optional[str] = None) -> "Span":
+        """Record what an OpenAI- or Anthropic-shaped response says about its call.
+
+        Sets the model, the provider, the token usage with its cache and
+        reasoning meters, and the response id, finish reasons and service tier
+        as `gen_ai.response.*` attributes. The daemon prices a batch or flex
+        call from the tier.
+
+        It never records the text: set it with `set_output` if you want it
+        kept. An unknown shape records what it can and raises nothing.
+        """
+        facts = response_facts(response, provider)
+        if facts.model is not None:
+            self._model = facts.model
+        if facts.provider is not None:
+            self._provider = str(facts.provider)
+        if facts.usage is not None:
+            self._usage = facts.usage
+        if facts.attributes:
+            self._attributes = {**(self._attributes or {}), **facts.attributes}
+        return self
+
+    @_guard
+    def mark_first_token(self) -> "Span":
+        """Record the time to first token, from this span's start to now.
+
+        Kept as `mcpd.time_to_first_token_ms`. Only the first call counts, so
+        it can sit inside a streaming loop.
+        """
+        attrs = self._attributes or {}
+        if attrs.get("mcpd.time_to_first_token_ms") is not None:
+            return self
+        # The monotonic clock, as for duration: a wall-clock step mid-stream
+        # must not turn into a negative latency.
+        ms = (perf_counter_ns() - self._start_mono) / 1e6
+        self._attributes = {**attrs, "mcpd.time_to_first_token_ms": ms}
+        return self
+
+    @_guard
+    def set_guardrail(self, tripped: bool, reason: Optional[str] = None) -> "Span":
+        """Record a guardrail's outcome as `mcpd.guardrail.tripped` and `mcpd.guardrail.reason`.
+
+        Tripping is not an error by itself; call `set_error` as well if it
+        should fail the span.
+        """
+        add: Dict[str, Any] = {"mcpd.guardrail.tripped": bool(tripped)}
+        if reason is not None:
+            add["mcpd.guardrail.reason"] = str(reason)
+        self._attributes = {**(self._attributes or {}), **add}
         return self
 
     @_guard

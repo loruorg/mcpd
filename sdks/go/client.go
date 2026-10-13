@@ -71,6 +71,9 @@ type config struct {
 	httpClient *http.Client
 	logger     Logger
 	sink       Sink
+	// redact rewrites payload fields before they leave the process. Nil
+	// means no redaction.
+	redact func(any) (any, error)
 }
 
 // Option configures a Client. Code wins over the environment.
@@ -203,6 +206,26 @@ func WithSink(sink Sink) Option {
 	}
 }
 
+// WithRedact sets a function the client applies to every span's input,
+// output, attributes and metadata, and to every log line's fields, before the
+// record is exported (contract 2.1.1). It receives the field decoded from
+// JSON (maps, slices, strings, json.Number, bools) and returns the value to
+// keep; returning nil drops the field. It is code only: no environment
+// variable can carry a function.
+//
+// It fails closed. A redactor that returns an error, panics, returns a value
+// that cannot be encoded, or returns something that is not an object for
+// attributes, metadata or log fields, drops that field and counts it in
+// Stats().RedactionFailures, because sending the original is what a broken
+// redactor must never do. It never runs on a payload that payload capture has
+// already stripped.
+//
+// It runs on the exporter's goroutine, so it must be safe to call from a
+// goroutine other than the one that recorded the value.
+func WithRedact(redact func(value any) (any, error)) Option {
+	return func(c *config) { c.redact = redact }
+}
+
 // Client records signals and queries them back. It is safe for concurrent use
 // and cheap to keep for the life of the process.
 type Client struct {
@@ -229,6 +252,9 @@ type Client struct {
 	exported atomic.Uint64
 	failed   atomic.Uint64
 	rejected atomic.Uint64
+	// redactionFailures counts payload fields the redactor could not
+	// process and that were dropped instead.
+	redactionFailures atomic.Uint64
 
 	logMu   sync.Mutex
 	lastLog time.Time
@@ -467,6 +493,9 @@ type Stats struct {
 	Failed uint64
 	// Rejected is how many spans Record refused as malformed.
 	Rejected uint64
+	// RedactionFailures is how many payload fields the redactor failed on,
+	// dropped rather than sent.
+	RedactionFailures uint64
 }
 
 // Stats returns the counters as they stand.
@@ -481,6 +510,8 @@ func (c *Client) Stats() Stats {
 		Exported: c.exported.Load(),
 		Failed:   c.failed.Load(),
 		Rejected: c.rejected.Load(),
+
+		RedactionFailures: c.redactionFailures.Load(),
 	}
 }
 
@@ -1217,6 +1248,7 @@ func (c *Client) export(ctx context.Context, limit int) error {
 		return nil
 	}
 	batch := buildBatch(signals)
+	c.redactBatch(&batch)
 	// The idempotency key is minted once per batch and reused across the
 	// transport's retries, which is what makes a retry after a timeout safe:
 	// mcpd recognises the replay and counts it once.

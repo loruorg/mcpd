@@ -155,6 +155,7 @@ impl SpanKind {
             Self::ClientToolCall => "Client tool",
             Self::ProviderToolCall => "Provider tool",
             Self::McpToolCall => "MCP tool",
+            Self::Handoff => "Handoff",
             Self::WorkflowRun => "Workflow",
             Self::WorkflowStep => "Step",
             Self::WorkflowConditional => "Branch",

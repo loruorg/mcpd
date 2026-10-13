@@ -23,7 +23,8 @@ defmodule Mcpd.Config do
           enabled: boolean(),
           capture_payloads: boolean(),
           log_level: Mcpd.LogLevel.t(),
-          sink: {module(), term()}
+          sink: {module(), term()},
+          redact: (term() -> term()) | nil
         }
 
   defstruct endpoint: "http://localhost:4317",
@@ -40,7 +41,8 @@ defmodule Mcpd.Config do
             enabled: true,
             capture_payloads: true,
             log_level: :debug,
-            sink: {Mcpd.Sink.Http, []}
+            sink: {Mcpd.Sink.Http, []},
+            redact: nil
 
   @doc """
   Build a config from keyword options, falling back to the environment.
@@ -65,7 +67,8 @@ defmodule Mcpd.Config do
       enabled: flag(opts, :enabled, "MCPD_ENABLED"),
       capture_payloads: flag(opts, :capture_payloads, "MCPD_CAPTURE_PAYLOADS"),
       log_level: level(opts[:log_level]),
-      sink: sink(opts[:sink])
+      sink: sink(opts[:sink]),
+      redact: redact(opts[:redact])
     }
   end
 
@@ -115,6 +118,16 @@ defmodule Mcpd.Config do
   defp sink(nil), do: {Mcpd.Sink.Http, []}
   defp sink({module, opts}) when is_atom(module), do: {module, opts}
   defp sink(module) when is_atom(module), do: {module, []}
+
+  # A function applied to every span's payload fields and every log line's
+  # fields before they are queued (contract section 2.1.1). Code only: no
+  # environment variable can carry a function. A value that is not a 1-arity
+  # function is not refused, so a misconfiguration never stops the
+  # application's boot (B1), and it is not ignored either: the caller asked
+  # for redaction, so it fails closed and every payload field is dropped.
+  defp redact(nil), do: nil
+  defp redact(fun) when is_function(fun, 1), do: fun
+  defp redact(_other), do: fn _value -> raise ArgumentError, "redact is not a 1-arity function" end
 
   @doc "The URL a batch is POSTed to."
   @spec ingest_url(t()) :: String.t()

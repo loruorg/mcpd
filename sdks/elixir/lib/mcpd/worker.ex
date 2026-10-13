@@ -79,10 +79,18 @@ defmodule Mcpd.Worker do
 
   def config(_), do: nil
 
-  @doc "Queue one signal under a key. Never blocks, never raises."
+  @doc """
+  Queue one signal under a key. Never blocks, never raises.
+
+  The client's `redact` function, when it has one, runs here, in the caller's
+  process and before the signal is queued (contract section 2.1.1). Here
+  because every span and log line passes through this one door, and in the
+  caller rather than the worker so a slow redactor slows its own caller, never
+  every other process recording through the same client.
+  """
   @spec record(pid(), term(), atom(), map()) :: :ok
   def record(pid, key, kind, payload) when is_atom(kind) and is_map(payload) do
-    admit(pid, {:record, key, kind, payload})
+    admit(pid, {:record, key, kind, redacted(pid, kind, payload)})
   end
 
   @doc "Report an SDK problem through the worker's once-per-interval throttle."
@@ -144,8 +152,9 @@ defmodule Mcpd.Worker do
 
   @doc """
   What the worker has done since it started: `queued`, `dropped`, `capacity`,
-  `exported` (signals the sink took), `failed` (batches the sink refused) and
-  `rejected` (spans `Mcpd.record/3` refused). Zeros once it has stopped.
+  `exported` (signals the sink took), `failed` (batches the sink refused),
+  `rejected` (spans `Mcpd.record/3` refused) and `redaction_failures` (values
+  `redact` could not process). Zeros once it has stopped.
   """
   @spec stats(pid()) :: %{
           queued: non_neg_integer(),
@@ -153,12 +162,14 @@ defmodule Mcpd.Worker do
           capacity: pos_integer(),
           exported: non_neg_integer(),
           failed: non_neg_integer(),
-          rejected: non_neg_integer()
+          rejected: non_neg_integer(),
+          redaction_failures: non_neg_integer()
         }
   def stats(pid) do
     GenServer.call(pid, :stats, 5_000)
   catch
-    _, _ -> %{queued: 0, dropped: 0, capacity: 0, exported: 0, failed: 0, rejected: 0}
+    _, _ ->
+      %{queued: 0, dropped: 0, capacity: 0, exported: 0, failed: 0, rejected: 0, redaction_failures: 0}
   end
 
   # ------------------------------------------------------------ callbacks ---
@@ -169,7 +180,10 @@ defmodule Mcpd.Worker do
     # gets one last flush. Losing the final batch is exactly the case B5 exists
     # to prevent.
     Process.flag(:trap_exit, true)
-    shed = :counters.new(1, [:write_concurrency])
+    # Slot 1 counts signals shed at a full mailbox, slot 2 values `redact`
+    # failed on. Both are written from callers' processes, never from here, so
+    # a counter rather than a message keeps them off the worker's mailbox.
+    shed = :counters.new(2, [:write_concurrency])
     :persistent_term.put({__MODULE__, self()}, {config, shed})
 
     {:ok,
@@ -235,7 +249,8 @@ defmodule Mcpd.Worker do
        capacity: state.queue.max,
        exported: state.exported,
        failed: state.failed,
-       rejected: state.rejected
+       rejected: state.rejected,
+       redaction_failures: :counters.get(state.shed, 2)
      }, state}
   end
 
@@ -298,6 +313,62 @@ defmodule Mcpd.Worker do
   catch
     # A dead worker must not take the caller's request down. B1 again.
     _, _ -> :ok
+  end
+
+  # The fields `redact` sees, per signal (contract section 2.1.1). Metrics,
+  # scores and feedback carry no payload of the caller's, so they pass as
+  # they are.
+  @redacted %{spans: ["input", "output", "attributes", "metadata"], logs: ["fields"]}
+
+  # The signal with `redact` applied field by field. It fails closed: a field
+  # the redactor raised, threw or exited on is dropped and counted, never sent
+  # as it was, because a broken redactor is the case where the original does
+  # the most harm. What the redactor returns is made JSON-safe again, since a
+  # tuple it hands back would otherwise cost the whole batch at encode time.
+  # Capture has already stripped `input` and `output` when it is off, so a
+  # value capture kept back never reaches the redactor.
+  defp redacted(pid, kind, payload) do
+    with {:ok, fields} <- Map.fetch(@redacted, kind),
+         {%Config{redact: redact}, shed} when is_function(redact, 1) <-
+           :persistent_term.get({__MODULE__, pid}, nil) do
+      Enum.reduce(fields, payload, fn field, acc ->
+        case acc do
+          %{^field => value} when value != nil -> redact_field(acc, field, value, redact, pid, shed)
+          _ -> acc
+        end
+      end)
+    else
+      _ -> payload
+    end
+  end
+
+  # A `nil` answer is the redactor dropping the field on purpose, so it is not
+  # counted. `attributes`, `metadata` and a log line's `fields` are maps on the
+  # wire, so anything else the redactor returns for them is unusable and fails
+  # closed like a raise; `input` and `output` may be any value.
+  @maps ["attributes", "metadata", "fields"]
+
+  defp redact_field(payload, field, value, redact, pid, shed) do
+    case redact.(value) do
+      nil ->
+        Map.delete(payload, field)
+
+      kept when field in @maps and (not is_map(kept) or is_struct(kept)) ->
+        redaction_failed(payload, field, pid, shed, "it returned something that is not a map")
+
+      kept ->
+        Map.put(payload, field, Mcpd.Logs.encode_fields(kept))
+    end
+  rescue
+    e -> redaction_failed(payload, field, pid, shed, Exception.message(e))
+  catch
+    kind, reason -> redaction_failed(payload, field, pid, shed, "#{kind} #{inspect(reason)}")
+  end
+
+  defp redaction_failed(payload, field, pid, shed, why) do
+    :counters.add(shed, 2, 1)
+    warn(pid, "redact failed on #{field}, which was dropped: #{why}")
+    Map.delete(payload, field)
   end
 
   defp backlogged?(pid, max) when node(pid) == node() do

@@ -27,6 +27,7 @@ What an operation *is*. The kind drives how a span is rendered in the waterfall,
 | `client_tool_call` | A tool the calling client executes. The server records the marker; the client returns the detail. |
 | `provider_tool_call` | A tool the model provider executes server-side, such as hosted web search or code execution. |
 | `mcp_tool_call` | A tool reached over the Model Context Protocol. |
+| `handoff` | Control passing from one agent to another. The span's name is the agent handed to; its parent is the agent handing off. |
 | `workflow_run` | One workflow execution. Usually the root of a trace. |
 | `workflow_step` | One step within a workflow. |
 | `workflow_conditional` | A branch point, with the conditions it evaluated. |
