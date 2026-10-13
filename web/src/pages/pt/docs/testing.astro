@@ -2,7 +2,11 @@
 import Doc from '@/layouts/Doc.astro'
 import Command from '@/components/Command.astro'
 import Waterfall from '@/components/Waterfall.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { exampleLanguages } from '@/lib/snippets'
 import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+const experimentLangs = exampleLanguages('experiment')
 
 /* Os links internos continuam escritos como rotas em inglês e são localizados
    aqui. Uma rota cuja página em português ainda não existe leva para a página
@@ -14,7 +18,7 @@ const url = (route: string) =>
 
 <Doc
   title="Testes de regressão"
-  description="Transforme uma execução que deu errado num caso de teste permanente, rode os avaliadores nativos do mcpd sobre execuções guardadas, e compare duas versões com a amostra ao lado de cada delta."
+  description="Transforme uma execução de produção que deu errado num caso de teste permanente, rode os avaliadores nativos do mcpd sobre execuções guardadas, e compare duas versões de um agente com o tamanho das amostras ao lado de cada delta."
   lede="A execução que quebrou na terça-feira vira o caso que toda versão seguinte tem que passar."
   og="docs"
 >
@@ -53,6 +57,17 @@ const url = (route: string) =>
 
   <Waterfall class="not-prose my-8" />
 
+  <h2>Congelando um dataset</h2>
+  <p>
+    Um dataset cresce conforme execuções são capturadas nele. Para comparar duas
+    versões de um agente sobre os mesmos casos, congele-o antes:
+    <code>POST /v1/api/datasets/{'{id}'}/versions</code> copia os casos atuais
+    para uma versão numerada que nunca muda, e congelar os mesmos casos de novo
+    confirma essa versão em vez de fazer uma cópia. Leia os casos de uma versão
+    com <code>GET /v1/api/datasets/{'{id}'}/items?version=2</code>, e liste as
+    versões com <code>GET /v1/api/datasets/{'{id}'}/versions</code>.
+  </p>
+
   <h2>A resposta da própria execução não é a resposta esperada</h2>
   <p>
     <code>use_output_as_expected</code> vem desligado, e esse padrão é a parte
@@ -69,10 +84,10 @@ const url = (route: string) =>
 
   <h2>Os avaliadores nativos</h2>
   <p>
-    O mcpd traz treze avaliadores determinísticos: código comum que lê uma
-    execução guardada e devolve um número. Eles não custam nada, nunca chamam
-    um modelo, e dão a mesma resposta duas vezes, que é a propriedade de que um
-    teste de regressão precisa e que um modelo juiz não tem.
+    O mcpd traz vinte e dois avaliadores determinísticos: código comum que lê
+    uma execução guardada e devolve um número. Eles não custam nada, nunca
+    chamam um modelo, e dão a mesma resposta duas vezes, que é a propriedade de
+    que um teste de regressão precisa e que um modelo juiz não tem.
   </p>
   <table>
     <thead>
@@ -91,14 +106,38 @@ const url = (route: string) =>
       <tr><td><code>not_a_refusal</code></td><td>A resposta não é uma recusa nem um pedido de desculpas.</td></tr>
       <tr><td><code>no_leaked_secret</code></td><td>Nenhuma chave, token ou credencial aparece na resposta.</td></tr>
       <tr><td><code>span_present</code></td><td>A execução registrou um span do tipo ou do nome exigido.</td></tr>
-      <tr><td><code>tool_succeeded</code></td><td>A ferramenta exigida rodou e ao menos uma chamada terminou bem.</td></tr>
+      <tr><td><code>tool_succeeded</code></td><td>A ferramenta exigida rodou, e pelo menos uma chamada dela terminou ok.</td></tr>
+      <tr><td><code>excludes</code></td><td>A resposta não contém nenhuma das frases em <code>forbidden</code>.</td></tr>
+      <tr><td><code>keyword_coverage</code></td><td>Graduado: a fração de <code>keywords</code> que a resposta menciona.</td></tr>
+      <tr><td><code>similarity</code></td><td>Graduado: um menos a distância de edição até <code>expected</code>, dividida pelo comprimento maior.</td></tr>
+      <tr><td><code>matches_pattern</code></td><td>A resposta corresponde à expressão regular <code>pattern</code>.</td></tr>
+      <tr><td><code>tool_call_accuracy</code></td><td>Graduado: a fração de <code>expected_tools</code> que a execução chamou.</td></tr>
+      <tr><td><code>tool_order</code></td><td>A execução chamou <code>expected_tools</code> nessa ordem, com outras chamadas permitidas entre elas.</td></tr>
+      <tr><td><code>tool_not_called</code></td><td>A execução não chamou nenhuma de <code>forbidden_tools</code>.</td></tr>
+      <tr><td><code>answer_length</code></td><td>A resposta tem entre <code>min_chars</code> e <code>max_chars</code> caracteres.</td></tr>
+      <tr><td><code>json_schema</code></td><td>A resposta é JSON, cercado ou solto, que satisfaz <code>json_schema</code>.</td></tr>
+      <tr><td><code>trajectory</code></td><td>O caminho da execução: as ferramentas que ela chamou contra <code>expected_tools</code>, comparadas como <code>trajectory_match</code> manda (<code>strict</code>, <code>ordered</code> ou <code>unordered</code>, com crédito parcial), os passos dela contra <code>max_steps</code>, e se ela chegou a uma resposta. A média das partes pedidas. <code>GET /v1/api/traces/{'{id}'}/trajectory</code> mostra o caminho que ele lê.</td></tr>
     </tbody>
   </table>
   <p>
-    <code>GET /v1/api/scorers</code> devolve a mesma lista com uma marca
-    <code>needs_config</code>. Um avaliador que precisa de uma resposta
-    esperada e não recebe uma se recusa em vez de chutar, e a recusa é
-    reportada.
+    Comparações de texto ignoram maiúsculas e minúsculas, a menos que
+    <code>case_sensitive</code> esteja definido. Nomes de ferramenta são
+    comparados exatamente com os nomes dos spans de chamada de ferramenta de
+    qualquer um dos quatro tipos de ferramenta. <code>json_schema</code> confere
+    <code>type</code>, <code>properties</code>, <code>required</code>,
+    <code>items</code>, <code>enum</code>, <code>minimum</code>,
+    <code>maximum</code>, <code>minLength</code>, <code>maxLength</code> e
+    <code>additionalProperties: false</code>, e nomeia até cinco violações no
+    motivo. Um padrão que não compila, ou um schema que não é um objeto, é
+    recusado com um 400 antes de qualquer execução ser lida.
+  </p>
+  <p>
+    <code>GET /v1/api/scorers</code> devolve todo avaliador que este daemon
+    conhece, com o seu <code>kind</code> (<code>code</code>, <code>judge</code>
+    ou <code>criterion</code>), a sua <code>direction</code>, as
+    <code>config_keys</code> que ele lê, e se ele está <code>available</code>.
+    Um avaliador que precisa de uma configuração e não a recebe se recusa em vez
+    de chutar, e a recusa nomeia a configuração.
   </p>
 
   <h2>Quando é um modelo que dá a nota</h2>
@@ -111,9 +150,8 @@ const url = (route: string) =>
   <p>
     A avaliação por juiz fica desligada até você configurá-la, e um avaliador
     por juiz nunca roda sem que você o nomeie. Os dois padrões existem pelo
-    mesmo motivo: dar nota gasta dinheiro em cada execução que ele lê, e um
-    recurso que faz isso caladinho é um recurso de que você fica sabendo pela
-    fatura.
+    mesmo motivo: dar nota gasta dinheiro em cada execução lida, e um recurso
+    que faz isso caladinho é um recurso de que você fica sabendo pela fatura.
   </p>
 
   <pre><code class="language-json">{`{
@@ -146,12 +184,51 @@ const url = (route: string) =>
     quanto a pergunta construiria uma coluna em que ninguém pode confiar.
   </p>
   <p>
-    Os critérios configurados não aparecem em <code>GET /v1/api/scorers</code>.
-    Esse endpoint lista os treze avaliadores nativos e mais nada, então um
-    cliente que monta o menu de avaliadores a partir dele não vai oferecer os
-    seus critérios. O único lugar em que o daemon nomeia os critérios de volta
-    para você é o erro que você recebe por um id de avaliador desconhecido, que
-    lista os nativos e os critérios configurados juntos.
+    Os critérios configurados aparecem em <code>GET /v1/api/scorers</code> com
+    o kind <code>criterion</code>. Um critério com o id de uma rubrica que vem
+    junto substitui essa rubrica neste daemon.
+  </p>
+
+  <h3>As rubricas que vêm junto</h3>
+  <p>
+    Com um bloco <code>judge</code> configurado, nove rubricas ficam prontas
+    para nomear, sem critério nenhum escrito. Cada uma roda em quatro passos.
+    <strong>Preprocess</strong>, em código, reúne a pergunta a partir da entrada
+    do span raiz, a resposta, a resposta <code>expected</code> da configuração
+    do avaliador, e o contexto: todo trecho na saída dos spans
+    <code>retrieval</code> e <code>rag_vector_operation</code> da execução, ou
+    a lista <code>context</code> da configuração. <strong>Analyze</strong> é a
+    única chamada ao modelo: o juiz quebra a resposta, a resposta esperada ou o
+    contexto em itens e dá a cada um o veredito sim, não ou incerto.
+    <strong>Score</strong>, em código, conta os vereditos, então o número é
+    aritmética sobre julgamentos item a item, e nunca um número que o modelo
+    escolheu. <strong>Reason</strong>, em código, nomeia os itens que custaram
+    a nota.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Rubrica</th><th>Lê</th><th>Valor</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>faithfulness</code></td><td>resposta, contexto</td><td>Fração das afirmações da resposta que o contexto sustenta.</td></tr>
+      <tr><td><code>hallucination</code></td><td>resposta, contexto</td><td>Fração das afirmações da resposta que o contexto contradiz. Menor é melhor.</td></tr>
+      <tr><td><code>answer_relevance</code></td><td>pergunta, resposta</td><td>Fração das declarações da resposta que tratam da pergunta.</td></tr>
+      <tr><td><code>answer_correctness</code></td><td>pergunta, resposta, esperada</td><td>Fração dos fatos da resposta esperada que a resposta transmite.</td></tr>
+      <tr><td><code>context_precision</code></td><td>pergunta, contexto</td><td>Precisão média dos trechos úteis ao longo das suas posições.</td></tr>
+      <tr><td><code>context_recall</code></td><td>esperada, contexto</td><td>Fração das frases da resposta esperada que o contexto cobre.</td></tr>
+      <tr><td><code>context_relevance</code></td><td>pergunta, contexto</td><td>Fração dos trechos que dizem respeito à pergunta.</td></tr>
+      <tr><td><code>toxicity</code></td><td>resposta</td><td>Fração das declarações da resposta que são tóxicas. Menor é melhor.</td></tr>
+      <tr><td><code>bias</code></td><td>resposta</td><td>Fração das opiniões da resposta que são enviesadas. Menor é melhor.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Um veredito incerto conta pela metade. Uma resposta sem nada a julgar tira 0
+    nas três rubricas em que menor é melhor e é recusada nas outras. Cada nota
+    guarda os vereditos item a item em <code>metadata.steps</code>, o modelo, as
+    tentativas e as contagens de tokens em <code>metadata.judge</code>, e o
+    custo da chamada, precificado com a tabela de preços do daemon, em
+    <code>cost</code>. O <code>scorer_version</code> dela nomeia a versão da
+    rubrica e o modelo.
   </p>
 
   <Command
@@ -207,7 +284,11 @@ const url = (route: string) =>
       </tr>
       <tr>
         <td>O modelo não pôde ser alcançado</td>
-        <td>Recusa, com o status e o corpo. Um limite de taxa é um motivo, não um zero.</td>
+        <td>Tenta mais duas vezes, com uma pausa curta, quando o endpoint respondeu 429, 502, 503 ou 504 ou a conexão falhou, e só enquanto o prazo deixa espaço. Depois recusa, com o status e o corpo. Um limite de taxa é um motivo, não um zero.</td>
+      </tr>
+      <tr>
+        <td>Um passo da rubrica não pôde terminar</td>
+        <td>Recusa, nomeando o passo: <code>preprocess</code> quando falta à execução uma peça que a rubrica lê, <code>analyze</code> quando a resposta não é uma lista de vereditos sim, não e incerto, <code>score</code> quando não havia nada a contar.</td>
       </tr>
       <tr>
         <td>A resposta passou de 1 MiB</td>
@@ -223,6 +304,68 @@ const url = (route: string) =>
     Toda nota dada por juiz registra o modelo como o seu
     <code>scorer_version</code>. Duas notas de dois juízes diferentes não são
     comparáveis, e é esse campo que diz isso no registro.
+  </p>
+  <p>
+    Toda nota dada por juiz também nomeia a execução da própria chamada ao
+    modelo em <code>score_trace_id</code>. Essa execução é um span
+    <code>scorer_run</code> com o prompt enviado ao juiz, a resposta que ele
+    escreveu, os tokens e o custo, com um link para a execução que ele avaliou.
+    Uma nota que parece errada é aberta e lida como qualquer outra chamada de
+    modelo; no app, o link <em>judge call</em> ao lado da nota a abre.
+  </p>
+
+  <h2>Avaliadores que você define</h2>
+  <p>
+    Um projeto guarda os próprios avaliadores com
+    <code>POST /v1/api/scorer-definitions</code>. Uma definição
+    <code>judge</code> é um critério escrito para o seu agente, como
+    <q>A resposta nomeia a seção da política de reembolso em que se apoia</q>,
+    avaliado de 0 a 1 pelo juiz configurado. Uma definição <code>code</code> é
+    um dos avaliadores acima com as configurações fixadas, como
+    <code>keyword_coverage</code> com as palavras-chave que as suas respostas
+    precisam mencionar.
+  </p>
+  <p>
+    Cada gravação é uma versão nova, e um corpo idêntico não é guardado de novo.
+    Nomeie uma definição em qualquer lugar que aceite um id de avaliador:
+    <code>cites_policy</code> roda a versão mais recente e
+    <code>cites_policy@2</code> roda a versão 2. A versão vai em toda nota,
+    então mudar um prompt nunca muda o que uma nota antiga significava. Uma
+    definição não pode usar o id de um avaliador que vem com o mcpd nem de um
+    critério do arquivo de configuração. <code>GET /v1/api/scorers?project=</code>
+    lista as definições de um projeto ao lado dos avaliadores que vêm junto, com
+    o kind <code>custom</code>. A tela Evaluations do app as cria e edita.
+  </p>
+
+  <h2>Avaliação ao vivo</h2>
+  <p>
+    Uma regra de avaliação dá nota às execuções conforme elas terminam, em
+    segundo plano, e grava notas com a origem <code>live</code>. Ela nomeia os
+    avaliadores a rodar, a fração de execuções a avaliar e para quais execuções
+    ela vale: um nome de passo raiz, um tipo, um ambiente, um desfecho, tags.
+    Guarde uma com <code>POST /v1/api/evaluation-rules</code>.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="avalie um décimo das execuções de checkout conforme terminam"
+    command={`curl -X POST 'localhost:4317/v1/api/evaluation-rules?project=support-desk' \\
+  -H 'content-type: application/json' \\
+  -d '{"id": "checkout-quality", "enabled": true, "scorers": ["answered", "cites_policy"],
+       "sample_rate": 0.1, "name": "checkout"}'`}
+  />
+
+  <p>
+    Uma regra é guardada desligada, a menos que a requisição a ligue, e todo
+    avaliador que ela nomeia é resolvido quando ela é guardada. Quais execuções
+    entram na amostra é decidido por um hash do id da regra e do id do trace,
+    então a mesma execução fica dentro ou fora em toda réplica e depois de todo
+    reinício, e duas regras a 10% avaliam décimos diferentes. Cada execução é
+    avaliada uma vez por regra. <code>max_judged_per_minute</code>, 30 por
+    padrão, limita as chamadas ao modelo que uma regra faz; uma execução acima
+    do limite é pulada, e não enfileirada. Uma mudança em uma regra é uma versão
+    nova e vale a partir da próxima passada, a cada 15 segundos. Envie a regra
+    com <code>"enabled": false</code> para pará-la.
   </p>
 
   <h2>A avaliação acontece depois do fato</h2>
@@ -267,6 +410,37 @@ const url = (route: string) =>
     sem listar ids.
   </p>
 
+  <h2>Rodando um experimento a partir do código</h2>
+  <p>
+    Todo SDK tem um executor de experimentos. Dê a ele um dataset e a sua
+    própria função: ele registra um experimento, chama a função uma vez por
+    caso dentro de uma execução que nomeia o experimento e o caso, avalia cada
+    resposta contra a resposta esperada daquele caso, e devolve os resultados
+    caso a caso com uma média por avaliador.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    example="experiment"
+    region="experiment"
+    only={experimentLangs}
+    title="rode um dataset pelo seu código"
+  />
+
+  <p>
+    Quatro casos rodam ao mesmo tempo, a menos que você passe outro
+    <code>concurrency</code>. Um caso cuja função lança erro é registrado como
+    uma execução falha com o seu erro, e os casos seguintes continuam rodando.
+    O span raiz de cada execução carrega <code>correlation.experiment_id</code>
+    e o atributo <code>mcpd.dataset_item_id</code>, e os spans que a sua função
+    abre ficam aninhados sob ele, então um caso que falhou abre no waterfall
+    como qualquer outra execução. Quando o próprio executor não consegue
+    terminar, o experimento é marcado como <code>failed</code> com o motivo.
+    Leia os resultados de novo depois com
+    <code>GET /v1/api/experiments/{'{id}'}/results</code>, e o caminho de uma
+    execução com <code>GET /v1/api/traces/{'{id}'}/trajectory</code>.
+  </p>
+
   <h2>Comparando duas versões</h2>
   <p>
     Registre um experimento para cada versão que você quer comparar, marque as
@@ -280,16 +454,42 @@ const url = (route: string) =>
   />
 
   <p>
-    A resposta é um delta por avaliador com o tamanho da amostra de cada lado, e
-    uma marca <code>decidable</code>. Abaixo de vinte observações o mcpd diz que
-    a comparação não pode ser decidida, em vez de reportar um movimento.
+    A resposta é um delta por avaliador com o tamanho da amostra de cada lado,
+    um intervalo de confiança de 95% sobre o delta (<code>ci_low</code>,
+    <code>ci_high</code>) e um <code>p_value</code> bilateral, os dois a partir
+    do teste t de Welch, que não supõe que as duas versões variam do mesmo
+    jeito. Abaixo de vinte observações por lado, <code>decidable</code> é false
+    e nada é chamado de regressão.
   </p>
   <p>
-    Essa é uma regra propositalmente grosseira, e não um teste de significância.
-    A falha que ela evita é a mais comum: uma média que se moveu em quatro
-    execuções, impressa sem a contagem, lida como resultado e colocada no ar.
-    Imprimir as contagens ao lado do delta é o que impede que ruído seja
-    confundido com achado.
+    Um avaliador <code>regressed</code> quando é decidível e o intervalo
+    inteiro fica do lado pior do zero. O lado pior segue a
+    <code>direction</code> do avaliador: uma queda em
+    <code>faithfulness</code> é uma regressão e uma queda em
+    <code>toxicity</code> é uma melhora. Uma média que se moveu dentro do
+    próprio ruído é reportada com o seu intervalo, e não como achado.
+  </p>
+
+  <h3>Condicionando uma implantação a isso</h3>
+  <p>
+    <code>mcpd eval</code> pede a mesma comparação a um daemon em execução e a
+    transforma em um código de saída: 0 quando nenhum avaliador regrediu, 1
+    quando algum regrediu, 2 quando a comparação não pôde ser feita. Coloque-o
+    no job de CI que roda o seu candidato contra o dataset, depois que as notas
+    forem guardadas.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="faça o build falhar numa regressão"
+    command="mcpd eval --baseline v3 --candidate v4 --endpoint https://mcpd.internal"
+  />
+
+  <p>
+    Ele lê <code>MCPD_ENDPOINT</code> e <code>MCPD_API_KEY</code> como os SDKs,
+    imprime uma tabela de todos os avaliadores com os seus intervalos, ou JSON
+    com <code>--json</code>, e com <code>--require-decidable</code> também falha
+    quando um avaliador tem menos de vinte observações por lado.
   </p>
 
   <h2>Onde isto roda</h2>
