@@ -684,8 +684,8 @@ same id again replaces the record, which is how a status is moved.
 `score_experiment` posts `ExperimentScoreRequest` to
 `/v1/api/experiments/{id}/score` and `experiment_results` reads
 `/v1/api/experiments/{id}/results`, both with the client's project. Each of
-these raises on an error answer: it is the caller's own code path, so B1 does
-not apply.
+these raises on an error answer (Elixir returns `{:error, reason}`, as its
+other reads do): it is the caller's own code path, so B1 does not apply.
 
 **The runner.** `run_experiment` does these steps in order:
 
