@@ -11,6 +11,7 @@ import type {
   Correlation,
   EntityKind,
   ModelParameters,
+  Prompt,
   Span as SpanData,
   SpanKind,
   SpanLink,
@@ -18,6 +19,7 @@ import type {
   TokenUsage,
 } from './generated.js'
 import { modelParametersDefaults } from './generated.js'
+import { promptAttributes } from './prompts.js'
 import type { SpanContext } from './context.js'
 import { formatTraceparent, newSpanId, nowNs, formatTimestamp } from './context.js'
 
@@ -389,6 +391,19 @@ export class McpdSpan {
       const add: Record<string, unknown> = { 'mcpd.guardrail.tripped': tripped }
       if (reason !== undefined) add['mcpd.guardrail.reason'] = reason
       this.#data.attributes = { ...(this.#data.attributes as object), ...add }
+    })
+  }
+
+  /**
+   * Link the prompt this step used, as `mcpd.prompt.name` and
+   * `mcpd.prompt.version`, so `listSpans({ prompt, promptVersion })` finds it.
+   * A fallback (version 0) sets the name only, and anything that is not a
+   * prompt sets nothing: instrumentation must not break the call it watches.
+   */
+  setPrompt(prompt: Prompt | null | undefined): this {
+    return this.#set('setPrompt', () => {
+      const add = promptAttributes(prompt)
+      if (add !== undefined) this.#data.attributes = { ...(this.#data.attributes as object), ...add }
     })
   }
 

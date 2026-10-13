@@ -434,6 +434,12 @@ analytics_cost(from, to, group_by?, bucket?) -> CostBreakdown
 health() -> HealthStatus
 ```
 
+`list_traces` takes every filter `GET /v1/api/traces` documents, including
+`max_duration_ms`, `max_cost`, `min_tokens`, `score_above` (with `has_score`)
+and `has_feedback`, a boolean sent as `true` or `false`. `list_spans` takes
+`prompt` and `prompt_version`, which match the spans a prompt was linked to
+(section 5.1).
+
 Three more are part of this contract and are **not implemented in any SDK yet**.
 They are written down here rather than left out, because the obligation is the
 contract's and a surface the daemon serves that no client can reach is a gap
@@ -468,6 +474,86 @@ answers for one tag instead of all of them, with a 200.
 The metric `filter` is label equality pairs in the daemon's own spelling,
 `key:value` joined by commas: `filter=model:gpt-4o,status:ok`. A JSON object in
 that place matches no point, and the daemon answers 200 with an empty series.
+
+### 5.1 Prompts
+
+A prompt is stored in the daemon as numbered versions, and labels such as
+`production` point at the version a caller should use. The SDK fetches one,
+renders it, and links the spans that used it.
+
+```
+get_prompt(name, label? | version?, cache_ttl? = 60s, fallback?) -> Prompt
+render_prompt(prompt, variables) -> string | messages
+create_prompt(name, kind?, template? | messages?, config?, note?, labels?) -> Prompt
+set_prompt_label(name, label, version) -> Prompt
+span.set_prompt(prompt)
+```
+
+**Which version.** `label` reads `GET /v1/api/prompts/{name}?label=`, `version`
+reads `?version=`, and giving both is refused before the wire. Given neither,
+the SDK asks for the label `production`, and when the daemon answers 404 for it
+asks again with no selector, which returns the latest version. A prompt with no
+`production` label yet still works, and labelling a version later changes what
+the same call returns without a deploy.
+
+**Caching.** Each client keeps fetched prompts in memory, keyed by project, name
+and selector (the label, the version, or the default). The cache holds at most
+256 entries and evicts the oldest when full (B3).
+
+- A copy younger than `cache_ttl` is returned with no request.
+- An older copy, or none, is fetched. A successful fetch replaces the copy.
+- When the fetch fails for any reason (unreachable daemon, a 5xx, a 404, a
+  timeout) and a copy exists, the copy is returned however old it is, and the
+  failure is reported once through the diagnostics channel. A daemon outage
+  never breaks an agent that has fetched its prompt once.
+- When the fetch fails and no copy exists, `fallback` is returned if given: a
+  template (a `text` prompt) or a list of messages (a `chat` prompt), returned
+  as a `Prompt` with the requested name, version `0`, no labels and its
+  variables computed by the rule below. A fallback is never cached, so the next
+  call tries the daemon again.
+- With no copy and no fallback, the call raises the fetch error. `get_prompt`
+  is the caller's own code path, not instrumentation, so B1 does not apply.
+
+`cache_ttl = 0` fetches every time and still serves a stale copy when the
+fetch fails. `enabled = false` does not stop a fetch: a prompt is the agent's
+input, not telemetry.
+
+**Rendering.** `render_prompt` substitutes variables by the daemon's own rule
+(`variables_in` in `crates/mcpd-server/src/prompts.rs`):
+
+- A placeholder is `{{`, then everything up to the next `}}`. The text between,
+  with surrounding whitespace removed, is the name: `{{city}}` and `{{ city }}`
+  are the same variable.
+- A name starts with an ASCII letter or `_` and continues with ASCII letters,
+  digits, `_` and `.`. A placeholder whose text is not a name, and a `{{` with no
+  closing `}}`, is left in the output as written.
+- Substitution is one pass. A value that itself contains `{{x}}` is not
+  rendered again.
+- A variable the template names and `variables` lacks is an error that names
+  every missing variable in order of first use. Rendering is user code, so it
+  raises rather than sending a prompt with a hole in it. Extra variables are
+  ignored.
+
+A `text` prompt renders to a string. A `chat` prompt renders to a copy of its
+messages in which every `content` that is a string is rendered; any other field,
+and a `content` that is not a string, is copied unchanged. Typed languages take
+string values; dynamic languages write a non-string value in its plain string
+form.
+
+**Writing.** `create_prompt` posts `CreatePromptRequest` and returns the stored
+version. Posting a body identical to the latest version stores nothing and
+returns that version, so a deploy script can post its prompts on every start.
+`set_prompt_label` puts `{version}` to `/v1/api/prompts/{name}/labels/{label}`:
+moving `production` releases a version, and moving it back rolls one back. Both
+raise on an error answer, and neither clears the read cache, so a running agent
+sees a moved label within `cache_ttl`.
+
+**Linking.** `span.set_prompt(prompt)` sets the attributes `mcpd.prompt.name`
+(a string) and `mcpd.prompt.version` (an integer) on the span. A prompt with
+version `0`, a fallback, sets the name only. It never raises (B1): a missing or
+malformed prompt sets nothing. `list_spans(prompt=, prompt_version=)` then
+finds every span that used a prompt or one version of it. Elixir has no mutable
+span handle and returns the attributes instead, for the `attributes:` option.
 
 ## 6. Wire format
 
@@ -687,4 +773,13 @@ error. `start_and_wait` is the two in one call.
   in both directions across every level; and, in the languages that can carry a
   key with no value, that key falling through to the run's own value rather
   than erasing it.
+- Tests for the prompts of section 5.1: the default label falling back to the
+  latest version on a 404, a fresh copy served with no request, a stale copy
+  served when the refetch fails, a fallback when nothing was fetched, both
+  selectors refused, rendering with whitespace in braces, a name left alone
+  when it is not a name, one-pass substitution, a missing variable named in the
+  error, chat `content` rendered and other fields kept, and `set_prompt` setting
+  both attributes without raising on a bad prompt.
+- Tests that `list_traces` and `list_spans` send the filters of section 5 and
+  nothing else.
 - An example under `examples/<language>/` that the docs include **by reference**.

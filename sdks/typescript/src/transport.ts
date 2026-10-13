@@ -159,25 +159,34 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null
 }
 
-function convert(value: unknown, key: (k: string) => string): unknown {
-  if (Array.isArray(value)) return value.map((v) => convert(v, key))
+/**
+ * `OPAQUE_KEYS` plus the free-form fields of a prompt.
+ *
+ * Kept apart because `config` is not opaque everywhere: a scorer's `config`
+ * is typed and has to be converted. A prompt's `messages` and `config` are
+ * the user's own JSON, sent to a model as written.
+ */
+export const PROMPT_OPAQUE_KEYS: ReadonlySet<string> = new Set([...OPAQUE_KEYS, 'messages', 'config'])
+
+function convert(value: unknown, key: (k: string) => string, opaque: ReadonlySet<string>): unknown {
+  if (Array.isArray(value)) return value.map((v) => convert(v, key, opaque))
   if (!isPlainObject(value)) return value
   const out: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(value)) {
     if (v === undefined) continue
-    out[key(k)] = OPAQUE_KEYS.has(k) ? v : convert(v, key)
+    out[key(k)] = opaque.has(k) ? v : convert(v, key, opaque)
   }
   return out
 }
 
 /** Convert a value from the SDK's camelCase model into the daemon's shape. */
-export function toWire<T>(value: T): unknown {
-  return convert(value, snakeKey)
+export function toWire<T>(value: T, opaque: ReadonlySet<string> = OPAQUE_KEYS): unknown {
+  return convert(value, snakeKey, opaque)
 }
 
 /** Convert a daemon response into the SDK's camelCase model. */
-export function fromWire<T>(value: unknown): T {
-  return convert(value, camelKey) as T
+export function fromWire<T>(value: unknown, opaque: ReadonlySet<string> = OPAQUE_KEYS): T {
+  return convert(value, camelKey, opaque) as T
 }
 
 // ---------------------------------------------------------------------------
@@ -346,8 +355,12 @@ export class Transport {
   }
 
   /** A read request. Query values are converted to the daemon's key case. */
-  async get<T>(path: string, query?: Record<string, QueryValue>): Promise<T> {
-    return await this.#send<T>('GET', path + encodeQuery(query))
+  async get<T>(
+    path: string,
+    query?: Record<string, QueryValue>,
+    options: { opaque?: ReadonlySet<string> } = {},
+  ): Promise<T> {
+    return await this.#send<T>('GET', path + encodeQuery(query), { opaque: options.opaque })
   }
 
   /**
@@ -358,18 +371,37 @@ export class Transport {
    * the configured timeout; otherwise the client would cancel a poll longer
    * than its own timeout, which is every idle claim.
    */
-  async post<T>(path: string, payload: unknown, options: { waitMs?: number | undefined } = {}): Promise<T> {
+  async post<T>(
+    path: string,
+    payload: unknown,
+    options: { waitMs?: number | undefined; opaque?: ReadonlySet<string> } = {},
+  ): Promise<T> {
     return await this.#send<T>('POST', path, {
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(toWire(payload)),
+      body: JSON.stringify(toWire(payload, options.opaque)),
       waitMs: options.waitMs,
+      opaque: options.opaque,
+    })
+  }
+
+  /** A write request that replaces a resource, such as a prompt label. */
+  async put<T>(path: string, payload: unknown, options: { opaque?: ReadonlySet<string> } = {}): Promise<T> {
+    return await this.#send<T>('PUT', path, {
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(toWire(payload, options.opaque)),
+      opaque: options.opaque,
     })
   }
 
   async #send<T>(
     method: string,
     path: string,
-    init: { headers?: Record<string, string>; body?: BodyInit; waitMs?: number | undefined } = {},
+    init: {
+      headers?: Record<string, string>
+      body?: BodyInit
+      waitMs?: number | undefined
+      opaque?: ReadonlySet<string> | undefined
+    } = {},
   ): Promise<T> {
     const url = this.endpoint + path
     const fetchImpl = this.#fetch()
@@ -421,7 +453,7 @@ export class Transport {
       if (outcome.ok) {
         if (!outcome.text) return undefined as T
         try {
-          return fromWire<T>(JSON.parse(outcome.text))
+          return fromWire<T>(JSON.parse(outcome.text), init.opaque)
         } catch (error) {
           // A 200 that is not JSON is a proxy or a captive portal, not mcpd.
           throw new McpdError(`${method} ${path} returned a body that is not JSON`, {

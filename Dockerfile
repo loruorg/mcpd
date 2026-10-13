@@ -45,6 +45,8 @@ COPY spec ./spec
 COPY examples ./examples
 COPY deploy ./deploy
 COPY tests/e2e ./tests/e2e
+# The cost page renders the built-in price table from its data file.
+COPY crates/mcpd-core/prices ./crates/mcpd-core/prices
 COPY web ./web
 RUN cd web && npm run build
 

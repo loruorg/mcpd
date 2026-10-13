@@ -15,7 +15,9 @@ import dev.mcpd.LogLevel
 import dev.mcpd.Mcpd
 import dev.mcpd.McpdConfig
 import dev.mcpd.MetricKind
+import dev.mcpd.PromptFallback
 import dev.mcpd.SpanKind
+import dev.mcpd.renderText
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlin.time.Clock
@@ -35,6 +37,33 @@ fun main() = runBlocking {
         )
     )
     // #endregion init
+
+    // A deploy script stores the prompt; posting the same body again stores nothing.
+    mcpd.createPrompt(
+        "support/answer",
+        template = "Answer in a {{ tone }} tone: {{question}}",
+        labels = listOf("production"),
+    )
+
+    // #region prompt
+    // The version labelled production. The client caches it for a minute and
+    // serves its last copy if mcpd is down; the fallback covers a first start
+    // with no daemon at all.
+    val prompt = mcpd.getPrompt(
+        "support/answer",
+        label = "production",
+        fallback = PromptFallback.Template("Answer in a {{ tone }} tone: {{question}}"),
+    )
+    val text = prompt.renderText(mapOf("tone" to "friendly", "question" to "where is order 41?"))
+
+    mcpd.span("draft_reply", SpanKind.MODEL_GENERATION) { generation ->
+        // Links the call to the prompt version, so the trace shows which
+        // version wrote the answer and listSpans(prompt = ...) finds it.
+        generation.setPrompt(prompt)
+        generation.setInput(listOf(mapOf("role" to "user", "content" to text)))
+        generation.setOutput(callModel(text))
+    }
+    // #endregion prompt
 
     // #region trace
     val question = "where is my order 41?"

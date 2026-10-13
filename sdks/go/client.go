@@ -258,6 +258,10 @@ type Client struct {
 
 	logMu   sync.Mutex
 	lastLog time.Time
+
+	// prompts holds what GetPrompt fetched, so a daemon outage after the
+	// first fetch never breaks the agent that reads them.
+	prompts promptCache
 }
 
 type flushRequest struct {

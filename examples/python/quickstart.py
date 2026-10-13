@@ -86,7 +86,45 @@ def answer(question: str, user_id: str) -> "tuple[str, str]":
     # #endregion trace
 
 
+# #region prompt
+from mcpd import render_prompt
+
+
+def plan(question: str) -> str:
+    """Draft a plan with the system prompt the team released as `production`."""
+    # Served from memory for 60 s, and from the last copy fetched while the daemon
+    # is down. The fallback covers a first start with no daemon and no copy.
+    prompt = mcpd.get_prompt(
+        "support-system",
+        label="production",
+        fallback="You are a support agent for {{company}}. Reply in {{language}}.",
+    )
+    system = render_prompt(prompt, {"company": "Acme", "language": "English"})
+
+    with mcpd.span("draft_plan", kind=SpanKind.MODEL_GENERATION) as generation:
+        # Links the span to this prompt version: `list_spans(prompt=...)` finds it.
+        generation.set_prompt(prompt)
+        generation.set_input([
+            {"role": "system", "content": system},
+            {"role": "user", "content": question},
+        ])
+        time.sleep(0.05)  # stand-in for the provider round trip
+        draft = "Look the order up, then give a delivery window."
+        generation.set_output(draft)
+        return draft
+# #endregion prompt
+
+
 def main() -> None:
+    # A deploy posts its prompts on every start. An identical body stores
+    # nothing new, so this is safe to repeat.
+    mcpd.create_prompt(
+        "support-system",
+        template="You are a support agent for {{company}}. Reply in {{language}}.",
+        labels=["production"],
+    )
+    print(plan("where is my order?"))
+
     reply, trace_id = answer("where is my order?", user_id="u-3312")
     print(reply)
 
