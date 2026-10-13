@@ -13,7 +13,7 @@ const link = (route: string) => urlFor(route, loc)
 
 <Doc
   title="Execuções"
-  description="Uma execução durável no mcpd: iniciar uma de forma idempotente, o diário e como acompanhá-lo, eventos e esperas, cancelamento, temporizadores e limites, e onde ela aparece no trace."
+  description="Uma execução durável no mcpd: iniciar uma de forma idempotente, o diário e como acompanhá-lo, eventos e esperas, cancelamento, temporizadores e limites, por que uma etapa falhou e qual etapa verde causou isso, e a execução dentro do trace."
   lede="Uma execução é uma linha, um cursor, um diário de tentativas, um conjunto de prazos e um conjunto de suspensões. Esta página é o que você pode fazer com uma, e o que ela conta de volta."
   og="docs"
 >
@@ -121,6 +121,101 @@ const link = (route: string) => urlFor(route, loc)
     instante em que termina.
   </p>
 
+  <h2>Por que uma etapa falhou</h2>
+  <p>
+    Os templates de uma definição são arestas declaradas. Quando a entrada de
+    uma etapa lê <code>{'${steps.classify.output.kind}'}</code>, ela nomeia a
+    saída de outra etapa, na versão do documento que esta execução fixou ao
+    começar, e o daemon precisa resolver essa referência para renderizar a
+    entrada. Por isso o daemon consegue responder, para uma etapa de uma
+    execução, a saída de quais ancestrais aquela etapa consumiu, diretamente e
+    pelas etapas no meio do caminho.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="explicar uma etapa"
+    command={`curl -G http://localhost:4317/v1/api/runs/run_1c4f9b02e7d3a856/cause \\
+  -H 'authorization: Bearer $MCPD_API_KEY' \\
+  --data-urlencode 'step=charge'`}
+  />
+
+  <p>
+    Vale ler a resposta pelo que ela encontra. A etapa que produziu o valor
+    ruim normalmente <strong>deu certo</strong>: um classificador devolveu uma
+    lista vazia em vez de um erro, a etapa seguinte repassou a lista vazia sem
+    perceber, e a etapa depois dessa falhou sem nada com que trabalhar. Todo
+    status nesse caminho é <code>succeeded</code>, menos o último, então
+    nenhuma busca por status chega à etapa que causou o problema. Cada salto da
+    cadeia carrega o caminho de template por onde o valor passou e
+    <code>silent_producer</code>, que é verdadeiro quando aquele ancestral
+    terminou como <code>succeeded</code> e toda etapa entre ele e a falha
+    também. É essa a leitura que um código de status não dá: esta etapa está
+    verde, e é dela que veio o seu problema.
+  </p>
+  <p>
+    <code>value_kind</code> e <code>value_empty</code> informam o formato do
+    que passou pelo caminho, nunca o valor. Um ancestral que terminou como
+    <code>succeeded</code> e entregou um array vazio é o caso para o qual o
+    endpoint inteiro existe, e o formato basta para enxergá-lo sem que o daemon
+    guarde nada que pertence a quem chama.
+  </p>
+  <p>
+    A chave da etapa é um parâmetro de consulta, e não um segmento do caminho,
+    porque uma chave pode conter uma barra: <code>refund/issue</code> é um ramo
+    de um <code>parallel</code>, e uma barra codificada dentro de um segmento
+    de caminho é reescrita ou recusada por proxies suficientes para tornar isso
+    um contrato ruim. Chaves com índice funcionam do mesmo jeito:
+    <code>classify[3]</code> é um item de <code>foreach</code> e
+    <code>poll[7]/classify</code> é uma iteração de laço. Uma etapa aninhada
+    também carrega o que o contêiner dela leu, porque foi o contêiner que a
+    decidiu: um item de <code>foreach</code> nomeia a etapa de onde veio o
+    array sobre o qual ele se espalhou, que é a razão de aquele item existir. Um
+    <code>subworkflow</code> é um salto, lido da linha da própria execução
+    filha; por que uma etapa da filha falhou é a resposta da própria filha,
+    pedida pelo id de execução dela. Um template que lê <code>input</code> não
+    nomeia ancestral nenhum, e a cadeia fica então vazia em vez de inventada.
+  </p>
+  <p>
+    <code>max_depth</code> limita o percurso e vale 32 por padrão, que é também
+    o teto. Um percurso que parou com ancestrais ainda não visitados define
+    <code>truncated</code>, então uma cadeia curta nunca é confundida com uma
+    completa. Nada aqui lê um prompt, uma resposta ou um modelo: a resposta vem
+    do diário e da definição, então ela é a mesma com a captura de payload dos
+    spans desligada.
+  </p>
+
+  <h2>Uma execução que se repete</h2>
+  <p>
+    Uma execução cuja mesma chave de etapa continua falhando com uma entrada
+    renderizada idêntica não está progredindo. A chave da etapa incorpora o
+    ramo, o item e a iteração, então uma chave idêntica é uma posição idêntica
+    no grafo, e uma entrada idêntica além disso significa que o contexto a
+    partir do qual ela é renderizada também não andou. O daemon conta essas
+    falhas e encerra a execução quando elas chegam a
+    <code>max_step_repeats</code>, nomeando a etapa e a contagem, do mesmo jeito
+    que um <code>max_steps</code> esgotado encerra uma.
+  </p>
+  <p>
+    <code>retry.max_attempts</code> não cobre isso, e é por isso que o teto
+    existe. Dois caminhos repetem sem gastar orçamento de repetição nenhum: uma
+    falha classificada como <code>unservable</code> volta depois de um período
+    de lease, para sempre, porque o worker disse que a etapa não era dele para
+    servir, e não que ela falhou; e um lease recuperado volta para a fila de
+    graça, porque o daemon perdeu o contato e cobrar isso da etapa deixaria uma
+    implantação encerrar todas as execuções. Uma execução presa em qualquer um
+    dos dois repete o mesmo trabalho até que outra coisa a pare.
+  </p>
+  <p>
+    O teto é do daemon, não de uma definição: ele é definido junto com os
+    outros tempos do armazenamento de execuções no bloco <code>runs</code> do
+    arquivo de configuração e vale 16 por padrão. Zero o desliga. Ele conta
+    entradas idênticas, e não falhas, então uma etapa cuja entrada muda entre
+    tentativas, porque um ramo paralelo ao lado dela terminou, fica em paz. Ele
+    fica na frente de uma repetição e em nenhum outro lugar, então uma falha
+    que ia encerrar a execução ou seguir adiante mantém o próprio erro.
+  </p>
+
   <h2>A execução dentro do seu trace</h2>
   <p>
     Toda execução também é um trace. O daemon abre um span raiz para a execução
@@ -172,6 +267,15 @@ const link = (route: string) => urlFor(route, loc)
     desliga a superfície de execuções por inteiro, caso em que todo endpoint de
     execução responde 503. Faça backup dele junto com o armazenamento de
     traces; o <code>mcpd doctor</code> o avalia como um grupo próprio.
+  </p>
+  <p>
+    <code>--runs-data postgres://...</code> as guarda no Postgres em vez disso,
+    e várias réplicas passam então a servir execuções a partir de um único
+    armazenamento. Toda transação do armazenamento de execuções ali é
+    <code>SERIALIZABLE</code>, então duas réplicas que reivindicam a mesma
+    etapa, ou disparam o mesmo prazo, terminam como terminaria um único daemon
+    fazendo as duas coisas, uma depois da outra. As regras acima valem nos dois
+    armazenamentos: uma única suíte de conformidade roda contra ambos.
   </p>
   <p>
     O armazenamento de execuções guarda os payloads como eles foram enviados. A
