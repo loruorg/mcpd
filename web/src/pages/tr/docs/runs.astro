@@ -13,7 +13,7 @@ const link = (route: string) => urlFor(route, loc)
 
 <Doc
   title="Çalıştırmalar"
-  description="mcpd'de kalıcı bir çalıştırma: idempotent başlatma, günlük ve onu izleme, olaylar ve beklemeler, iptal, zamanlayıcılar ve sınırlar, bir de çalıştırmanın kendi trace'indeki yeri."
+  description="mcpd'de kalıcı bir çalıştırma: idempotent başlatma, günlük, olaylar ve beklemeler, iptal, zamanlayıcılar ve sınırlar, bir adımın neden başarısız olduğu ve buna hangi yeşil adımın yol açtığı, bir de çalıştırmanın kendi trace'indeki yeri."
   lede="Bir çalıştırma; bir satır, bir imleç, denemelerin günlüğü, bir dizi süre sonu ve bir dizi askıya almadır. Bu sayfa, ona ne yapabileceğinizi ve onun size ne söylediğini anlatır."
   og="docs"
 >
@@ -121,6 +121,102 @@ const link = (route: string) => urlFor(route, loc)
     bütçesinden düşülür.
   </p>
 
+  <h2>Bir adım neden başarısız oldu</h2>
+  <p>
+    Bir tanımın şablonları bildirilmiş kenarlardır. Bir adımın girdisi
+    <code>{'${steps.classify.output.kind}'}</code> değerini okuduğunda, bu
+    çalıştırmanın başlangıçta sabitlediği belge sürümündeki başka bir adımın
+    çıktısını adlandırır ve daemon girdiyi işleyebilmek için bu başvuruyu
+    çözmek zorundadır. Bu yüzden daemon, bir çalıştırmanın bir adımı için o
+    adımın hangi atalarının çıktısını tükettiğini, doğrudan ve aradaki adımlar
+    üzerinden, yanıtlayabilir.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    label="bir adımı açıklama"
+    command={`curl -G http://localhost:4317/v1/api/runs/run_1c4f9b02e7d3a856/cause \\
+  -H 'authorization: Bearer $MCPD_API_KEY' \\
+  --data-urlencode 'step=charge'`}
+  />
+
+  <p>
+    Yanıt, bulduğu şey yüzünden okunmaya değer. Kötü değeri üreten adım
+    genellikle <strong>başarılı olmuştur</strong>: bir sınıflandırıcı hata
+    yerine boş bir liste döndürmüş, ondan sonraki adım boş listeyi fark etmeden
+    aktarmış ve ondan sonraki adım üzerinde çalışacak bir şey olmadığı için
+    başarısız olmuştur. O yoldaki her durum sonuncusu dışında
+    <code>succeeded</code> olduğundan, durumlar üzerinde yapılan hiçbir arama
+    bunu yapan adıma ulaşmaz. Zincirdeki her halka, değerin içinden aktığı
+    şablon yolunu ve <code>silent_producer</code> alanını taşır; bu alan, o ata
+    <code>succeeded</code> ile bittiğinde ve onunla hata arasındaki her adım da
+    öyle bittiğinde true olur. Bir durum kodunun size veremeyeceği okuma budur:
+    bu adım yeşil ve sorununuz buradan geldi.
+  </p>
+  <p>
+    <code>value_kind</code> ve <code>value_empty</code>, yol boyunca akan şeyin
+    değerini değil, biçimini bildirir. <code>succeeded</code> ile bitip boş bir
+    dizi aktaran bir ata, bu endpoint'in var olma nedeni olan durumdur ve biçim,
+    daemon bir çağıranın sahip olduğu hiçbir şeyi tutmadan bunu görmeye
+    yeter.
+  </p>
+  <p>
+    Adım anahtarı bir yol parçası değil, bir sorgu parametresidir, çünkü bir
+    anahtar eğik çizgi içerebilir: <code>refund/issue</code> bir
+    <code>parallel</code> dalıdır ve bir yol parçası içindeki kodlanmış eğik
+    çizgi, onu kötü bir sözleşme yapacak kadar çok proxy tarafından yeniden
+    yazılır ya da reddedilir. Dizin içeren anahtarlar da aynı biçimde çalışır:
+    <code>classify[3]</code> bir <code>foreach</code> öğesidir,
+    <code>poll[7]/classify</code> ise bir döngü yinelemesidir. İç içe bir adım,
+    kapsayıcısının okuduğu şeyi de taşır, çünkü onu kapsayıcı belirlemiştir:
+    bir <code>foreach</code> öğesi, üzerinde yayıldığı dizinin geldiği adımı
+    adlandırır, o öğenin var olma nedeni de budur. Bir
+    <code>subworkflow</code>, alt çalıştırmanın kendi satırından okunan tek bir
+    halkadır; alt çalıştırmanın bir adımının neden başarısız olduğu alt
+    çalıştırmanın kendi yanıtıdır ve alt çalıştırmanın kimliğiyle sorulur.
+    <code>input</code> okuyan bir şablon hiçbir atayı adlandırmaz ve zincir o
+    durumda uydurulmak yerine boş kalır.
+  </p>
+  <p>
+    <code>max_depth</code> yürüyüşü sınırlar; varsayılanı 32'dir ve bu aynı
+    zamanda tavanıdır. Ziyaret edilmemiş atalar bırakarak duran bir yürüyüş
+    <code>truncated</code> alanını ayarlar, böylece kısa bir zincir hiçbir
+    zaman eksiksiz bir zincir sanılmaz. Burada hiçbir şey bir prompt'u, bir
+    tamamlamayı ya da bir modeli okumaz: yanıt günlükten ve tanımdan gelir, bu
+    yüzden span payload yakalama kapalıyken de aynıdır.
+  </p>
+
+  <h2>Kendini tekrarlayan bir çalıştırma</h2>
+  <p>
+    Aynı adım anahtarı, işlenmiş girdisi birebir aynıyken başarısız olmayı
+    sürdüren bir çalıştırma ilerlemiyordur. Adım anahtarı dalı, öğeyi ve
+    yinelemeyi içerir; yani aynı anahtar grafikte aynı konum demektir, üstüne
+    aynı girdi de girdinin işlendiği bağlamın kıpırdamadığı anlamına gelir.
+    Daemon bu hataları sayar ve <code>max_step_repeats</code> değerine
+    ulaştıklarında, tükenen bir <code>max_steps</code> gibi, adımı ve sayıyı
+    adlandırarak çalıştırmayı sona erdirir.
+  </p>
+  <p>
+    <code>retry.max_attempts</code> bunu kapsamaz, tavanın var olma nedeni de
+    budur. İki yol, hiç yeniden deneme bütçesi harcamadan yeniden dener:
+    <code>unservable</code> olarak sınıflandırılan bir hata her seferinde bir
+    lease süresi sonra yeniden gelir, çünkü worker adımın başarısız olduğunu
+    değil, sunmanın kendisine düşmediğini söylemiştir; geri alınan bir lease
+    ise ücretsiz olarak yeniden kuyruğa girer, çünkü bağlantıyı daemon
+    kaybetmiştir ve bunu adıma yüklemek tek bir dağıtımın her çalıştırmayı
+    bitirmesine yol açardı. Bunlardan birinde takılan bir çalıştırma, başka bir
+    şey onu durdurana kadar aynı işi yeniden dener.
+  </p>
+  <p>
+    Tavan bir tanımın değil, daemon'undur: yapılandırma dosyasının
+    <code>runs</code> bloğunda çalıştırma deposunun diğer zamanlamalarıyla
+    birlikte ayarlanır ve varsayılanı 16'dır. Sıfır onu kapatır. Hataları değil
+    aynı girdileri sayar; bu yüzden girdisi denemeler arasında değişen bir
+    adıma, örneğin yanındaki paralel bir dal bittiği için, dokunulmaz. Yalnızca
+    bir yeniden denemenin önünde durur; çalıştırmayı sona erdirecek ya da onu
+    geçip devam edecek bir hata kendi hatasını korur.
+  </p>
+
   <h2>Çalıştırmanın trace'indeki yeri</h2>
   <p>
     Her çalıştırma aynı zamanda bir trace'tir. Daemon çalıştırma için bir kök
@@ -175,6 +271,15 @@ const link = (route: string) => urlFor(route, loc)
     çalıştırma yüzeyini tamamen kapatır, o durumda her çalıştırma endpoint'i 503
     döndürür. Yedeğini trace deposuyla birlikte alın; <code>mcpd doctor</code>
     ona kendi grubu olarak not verir.
+  </p>
+  <p>
+    <code>--runs-data postgres://...</code> onları bunun yerine Postgres'te
+    tutar ve birden çok replika çalıştırmaları o zaman tek bir depodan sunar.
+    Oradaki her çalıştırma deposu işlemi <code>SERIALIZABLE</code> olur; bu
+    yüzden aynı adımı talep eden ya da aynı süre sonunu tetikleyen iki replika,
+    ikisini sırayla yapan tek bir daemon'un ulaşacağı sonuca ulaşır. Yukarıdaki
+    kurallar iki depoda da geçerlidir: tek bir uyumluluk test takımı ikisine
+    karşı da çalışır.
   </p>
   <p>
     Çalıştırma deposu payload'ları gönderildikleri gibi tutar. Bir
