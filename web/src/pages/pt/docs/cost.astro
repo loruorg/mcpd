@@ -3,9 +3,26 @@ import Doc from '@/layouts/Doc.astro'
 import Waterfall from '@/components/Waterfall.astro'
 import Command from '@/components/Command.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import fs from 'node:fs'
+import path from 'node:path'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const locale = localeOf(Astro.url.pathname)
+
+/* The built-in book, read at build time from the file the daemon embeds, so
+   the counts and dates below cannot drift from what the binary prices with. */
+const book = JSON.parse(
+  fs.readFileSync(path.resolve(process.cwd(), '..', 'crates/mcpd-core/prices/builtin.json'), 'utf8'),
+)
+const bookTables = [
+  { name: 'models', note: 'preços de tabela do próprio fornecedor, usados quando nenhuma tabela de provedor se aplica', count: Object.keys(book.models).length },
+  ...Object.entries(book.providers as Record<string, Record<string, unknown>>)
+    .map(([name, t]) => ({ name: `providers.${name}`, note: '', count: Object.keys(t).length }))
+    .sort((a, b) => b.count - a.count),
+]
+const tiered = Object.values(book.models as Record<string, { tiers?: unknown[] }>).filter((m) => m.tiers?.length).length
+const multipliers = Object.entries(book.service_tier_multipliers as Record<string, Record<string, number>>)
+  .flatMap(([p, t]) => Object.entries(t).map(([tier, m]) => ({ provider: p, tier, m })))
 
 /* Written here rather than read from an example program: these are queries a
    reader runs against their own daemon, not code CI can execute. */
@@ -207,6 +224,11 @@ const response = [
         <td>Cobrados como <code>output</code>.</td>
       </tr>
       <tr>
+        <td><code>image_input</code>, <code>image_output</code></td>
+        <td>Tokens de imagem, onde um provedor os precifica à parte do texto.</td>
+        <td>Cobrados como <code>input</code> ou <code>output</code>.</td>
+      </tr>
+      <tr>
         <td><code>reasoning</code></td>
         <td>Tokens de raciocínio ocultos, onde um provedor os cobra à parte.</td>
         <td>
@@ -218,6 +240,32 @@ const response = [
       </tr>
     </tbody>
   </table>
+
+  <h2>Prompts longos e níveis de serviço</h2>
+  <p>
+    Vários provedores cobram mais por todo token de um prompt longo. Uma entrada
+    de modelo pode trazer <code>tiers</code>, cada um com um limiar
+    <code>above_input_tokens</code> e tarifas próprias. O prompt é medido junto
+    com os tokens em cache, e quando ele passa de um limiar a chamada inteira é
+    precificada naquele nível: um prompt de 300.000 tokens para o
+    <code>gemini-2.5-pro</code> paga a tarifa de contexto longo sobre todos os
+    300.000. Um medidor que o nível deixa de fora mantém a tarifa base.
+  </p>
+  <p>
+    Uma chamada em um nível de serviço mais barato, como uma requisição em lote,
+    é precificada com o desconto do provedor. O mcpd lê o nível de
+    <code>gen_ai.response.service_tier</code>, depois de
+    <code>gen_ai.openai.response.service_tier</code>,
+    <code>mcpd.service_tier</code>, <code>llm.service_tier</code> e dos
+    atributos de requisição correspondentes. <code>default</code>,
+    <code>standard</code> e <code>auto</code> são lidos como o nível padrão. Um
+    modelo pode trazer tarifas próprias para um nível em
+    <code>service_tiers</code>; caso contrário, valem os
+    <code>service_tier_multipliers</code> da tabela para o provedor. O valor
+    registra o nível, então uma chamada em lote guarda
+    <code>builtin+batch</code> como a sua tabela e aparece pela metade do preço
+    por um motivo.
+  </p>
 
   <h2>Um token em cache é cobrado uma vez</h2>
   <p>
@@ -246,13 +294,10 @@ const response = [
     informado menos todos os campos com medidor.
   </p>
   <p>
-    Uma regra cobre os medidores sem tarifa. Um medidor para o qual a tabela não
-    tem tarifa só é cobrado como parte do restante, então, quando o provedor
-    também mandou uma contagem <code>text</code>, ele não é cobrado de jeito
-    nenhum. Tokens de raciocínio caem aí sempre que a sua tabela não lhes dá uma
-    tarifa própria, e declarar uma resolve isso. Tokens de imagem caem aí
-    sempre, porque uma tabela não tem tarifa de imagem para dar, então, em uma
-    carga de trabalho bastante multimodal, leia o valor como baixo, e não como exato.
+    Um medidor para o qual a tabela não tem tarifa é cobrado como parte do
+    restante. Dê aos tokens de raciocínio ou de imagem uma tarifa própria quando
+    o seu provedor os cobra à parte e também informa uma contagem
+    <code>text</code> separada.
   </p>
 
   <h2>Um modelo desconhecido não tem custo, e não um custo de zero</h2>
@@ -261,8 +306,8 @@ const response = [
     custo nenhum. Ele não guarda um zero.
   </p>
   <p>
-    Zero é uma afirmação: esta chamada foi gratuita. Ausente diz que a tabela
-    não tem preço para esta chamada. As duas levam a decisões diferentes, e uma
+    Zero é uma afirmação: esta chamada foi gratuita. Ausente é uma admissão: não
+    sabemos quanto esta chamada custou. As duas levam a decisões diferentes, e uma
     ferramenta que informa a segunda como se fosse a primeira está mentindo
     sobre uma conta. A mesma regra atravessa o caminho de leitura, onde uma
     execução cujos spans somam nada é devolvida sem valor de custo, em vez de com
@@ -282,9 +327,10 @@ const response = [
   <p>
     O id em um span é o que o seu cliente enviou, e clientes enfeitam esse id.
     Um gateway prefixa o fornecedor dele, uma nuvem prefixa a região dela, um
-    provedor fixa uma data de lançamento. Uma tabela é indexada por nomes de
-    modelo puros, então a busca tenta quatro coisas em ordem e para na primeira
-    que acerta.
+    provedor fixa uma data de lançamento. Quando o span nomeia um provedor, a
+    tabela desse provedor na tabela de preços é procurada primeiro, e a tabela
+    <code>models</code> do próprio fornecedor depois dela. Em cada tabela, a
+    busca tenta estes passos em ordem e para no primeiro que acerta.
   </p>
 
   <table>
@@ -318,73 +364,110 @@ const response = [
 
   <p>
     Os sufixos <code>-YYYY-MM-DD</code> e <code>-YYYYMMDD</code> são os dois
-    reconhecidos. Falhar nos quatro passos é um desfecho normal, e não um erro:
-    quer dizer nenhum custo, como acima.
+    reconhecidos. Quando nenhum dos quatro encontra o modelo, eles rodam de novo
+    sobre o id sem a marca de versão da nuvem, para que
+    <code>claude-sonnet-4-5@20250929</code> na Vertex AI e
+    <code>anthropic.claude-sonnet-4-5-20250929-v1:0</code> no Bedrock resolvam,
+    e depois com os pontos entre dígitos escritos como hífens, para que
+    <code>claude-sonnet-4.5</code> encontre <code>claude-sonnet-4-5</code>.
+    Nenhuma correspondência quer dizer nenhum custo, como acima.
+  </p>
+  <p>
+    Um provedor é encontrado do mesmo jeito tolerante: o nome como veio, um
+    apelido que a tabela lista (<code>azure</code> para
+    <code>az.ai.openai</code>) e o nome sem um segmento inicial de fornecedor,
+    para que <code>aws.bedrock</code> encontre a tabela <code>bedrock</code>.
   </p>
 
   <h2>A tabela que vem junto</h2>
   <p>
-    O mcpd carrega uma pequena tabela embutida para que um <code>docker run</code>
-    produza valores reais sem configuração nenhuma. Ela se chama
-    <code>builtin</code>, precifica em USD, e todo custo que ela produz registra
-    esse nome.
+    O mcpd carrega uma tabela embutida para que um <code>docker run</code>
+    produza valores reais sem configuração. Ela se chama <code>builtin</code>,
+    precifica em USD, e todo custo que ela produz registra esse nome. Ela traz os
+    preços de tabela de todos os grandes fornecedores de modelos e das nuvens e
+    gateways que revendem esses modelos, como estavam em {book.as_of}. {tiered}
+    dos modelos do próprio fornecedor trazem níveis de contexto longo.
   </p>
 
-  {/* Transcribed from `builtin_book` in crates/mcpd-core/src/cost.rs. When a
-      rate moves there, it moves here. */}
   <table>
     <thead>
-      <tr>
-        <th>Modelo</th><th>Entrada</th><th>Saída</th><th>Leitura de cache</th><th>Gravação de cache, 5 min</th><th>Gravação de cache, 1 hora</th>
-      </tr>
+      <tr><th>Tabela</th><th>Modelos</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>claude-opus-4</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-1</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-5</code></td><td>5.00</td><td>25.00</td><td>0.50</td><td>6.25</td><td>10.00</td></tr>
-      <tr><td><code>claude-sonnet-4</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-sonnet-4-5</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-haiku-4-5</code></td><td>1.00</td><td>5.00</td><td>0.10</td><td>1.25</td><td>2.00</td></tr>
-      <tr><td><code>claude-3-5-haiku</code></td><td>0.80</td><td>4.00</td><td>0.08</td><td>1.00</td><td>1.60</td></tr>
-      <tr><td><code>gpt-4o</code></td><td>2.50</td><td>10.00</td><td>1.25</td><td>como input</td><td>como input</td></tr>
-      <tr><td><code>gpt-4o-mini</code></td><td>0.15</td><td>0.60</td><td>0.075</td><td>como input</td><td>como input</td></tr>
-      <tr><td><code>gpt-4.1</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>como input</td><td>como input</td></tr>
-      <tr><td><code>gpt-4.1-mini</code></td><td>0.40</td><td>1.60</td><td>0.10</td><td>como input</td><td>como input</td></tr>
-      <tr><td><code>o3</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>como input</td><td>como input</td></tr>
-      <tr><td><code>o4-mini</code></td><td>1.10</td><td>4.40</td><td>0.275</td><td>como input</td><td>como input</td></tr>
-      <tr><td><code>gemini-2.5-pro</code></td><td>1.25</td><td>10.00</td><td>0.31</td><td>como input</td><td>como input</td></tr>
-      <tr><td><code>gemini-2.5-flash</code></td><td>0.30</td><td>2.50</td><td>0.075</td><td>como input</td><td>como input</td></tr>
-      <tr><td><code>text-embedding-3-small</code></td><td>0.02</td><td>0.00</td><td>como input</td><td>como input</td><td>como input</td></tr>
-      <tr><td><code>text-embedding-3-large</code></td><td>0.13</td><td>0.00</td><td>como input</td><td>como input</td><td>como input</td></tr>
+      {bookTables.map((t) => (
+        <tr><td><code>{t.name}</code>{t.note && <>: {t.note}</>}</td><td>{t.count}</td></tr>
+      ))}
+    </tbody>
+  </table>
+
+  <table>
+    <thead>
+      <tr><th>Provedor</th><th>Nível de serviço</th><th>Multiplicador</th></tr>
+    </thead>
+    <tbody>
+      {multipliers.map((m) => (
+        <tr><td><code>{m.provider}</code></td><td><code>{m.tier}</code></td><td>{m.m}</td></tr>
+      ))}
     </tbody>
   </table>
 
   <p>
-    USD por milhão de tokens, como a tabela estava na última vez em que foi
-    conferida contra um catálogo de modelos de terceiros, o que a tabela registra
-    como a data <code>as_of</code> dela. As entradas da Anthropic trazem as duas
-    tarifas de gravação de cache porque o daemon recua da tarifa de uma hora para
-    a de cinco minutos, e uma tabela que omitisse a mais longa cobraria a menos
-    em silêncio. A OpenAI não cobra nada para gravar no cache dela, então uma
-    gravação de cache ali é cobrada na tarifa de entrada. O
-    <code>gemini-2.5-flash</code> também traz uma tarifa de áudio de entrada de
-    1.00; toda outra entrada precifica áudio na tarifa de texto dela. Não existe
-    <code>claude-haiku-4</code>: o id que a Anthropic serve é
-    <code>claude-haiku-4-5</code>, e um id que não resolve para nada fica sem
-    preço em vez de adivinhado.
+    Estes são preços de tabela publicados. Para ver o preço de qualquer modelo,
+    pergunte ao binário, que usa a mesma busca da ingestão:
   </p>
+
+  <Command class="not-prose my-6" command="mcpd prices show claude-sonnet-4-5 --provider aws.bedrock" />
+
+  <h2>A sua própria tabela</h2>
   <p>
-    Estes são preços de tabela publicados, em dólares americanos. Toda
-    implantação precifica com a tabela embutida acima, e um modelo que essa
-    tabela não nomeia fica sem preço. A tabela é curta de propósito, porque uma
-    tabela longa envelheceria em mais lugares.
+    Carregue uma tabela sua com <code>--price-book</code>, ou com a chave
+    <code>price_book</code> do arquivo de configuração. Uma tabela é JSON: um
+    <code>id</code>, uma <code>currency</code> ISO 4217, e as tabelas
+    <code>models</code> e <code>providers</code>, cada uma mapeando um id de
+    modelo para as tarifas acima. Com <code>"extends": "builtin"</code>, ela é
+    sobreposta à tabela embutida, então só precisa das tarifas que você paga
+    de forma diferente:
   </p>
+
+  <pre><code>{`{
+  "id": "acme-2026-10",
+  "currency": "USD",
+  "extends": "builtin",
+  "providers": {
+    "bedrock": {
+      "anthropic.claude-sonnet-4-5-20250929-v1:0": { "input": 2.7, "output": 13.5 }
+    }
+  },
+  "models": {
+    "our-finetune": { "input": 0.5, "output": 1.5 }
+  }
+}`}</code></pre>
+
   <p>
-    Uma tabela é um id, uma moeda ISO 4217 e um mapa de id de modelo para
-    tarifas, e todo valor que ela produz é carimbado com o id dela, para que
-    duas tabelas possam ser distinguidas depois do fato. Os preços de um mesmo
-    projeto compartilham uma moeda: o mcpd soma os spans de uma execução
-    aritmeticamente e não converte entre moedas.
+    O mcpd confere a tabela ao iniciar e recusa uma com tarifa negativa, níveis
+    fora de ordem ou uma moeda que não seja um código de três letras, nomeando a
+    entrada. Os valores da sua tabela registram o id dela, para que possam ser
+    distinguidos depois das estimativas por preço de tabela. As execuções de um
+    projeto somam os spans aritmeticamente, então mantenha toda tarifa de uma
+    tabela em uma só moeda.
+  </p>
+
+  <h2>Atualizar as tarifas</h2>
+  <p>
+    As tarifas mudam a cada poucas semanas. <code>mcpd prices refresh</code>
+    escreve uma tabela a partir de um catálogo público de modelos, para que uma
+    implantação receba tarifas novas sem uma versão nova:
+  </p>
+
+  <Command class="not-prose my-6" command="mcpd prices refresh --out /etc/mcpd/prices.json" />
+
+  <p>
+    Aponte <code>--price-book</code> para o arquivo e reinicie. Um modelo que a
+    tabela em <code>--out</code> já precifica e que o catálogo não lista mais é
+    mantido, porque o tráfego para um modelo aposentado continua chegando;
+    <code>--prune</code> o descarta. <code>--source</code> lê outro catálogo, uma
+    URL ou um arquivo, no mesmo formato. A tabela embutida é escrita pelo mesmo
+    comando.
   </p>
 
   <h2>Ler o dinheiro de volta</h2>
