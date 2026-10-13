@@ -12,6 +12,9 @@ import type {
   Correlation,
   CostBreakdown,
   CreatePromptRequest,
+  DatasetItem,
+  Experiment,
+  ExperimentResults,
   Feedback,
   FeedbackKind,
   FeedbackListResponse,
@@ -26,13 +29,18 @@ import type {
   Prompt,
   Score,
   ScoreListResponse,
+  ScoreRunResult,
   ScoreSource,
+  ScorerConfig,
   Span as SpanData,
   SpanKind,
   SpanListResponse,
   TraceDetail,
   TraceListResponse,
+  Trajectory,
 } from './generated.js'
+import { runExperiment } from './experiment.js'
+import type { ExperimentTarget, RunExperimentOptions } from './experiment.js'
 import type { SpanContext } from './context.js'
 import {
   contextReady,
@@ -54,6 +62,8 @@ import type { Diagnostics, FetchLike, QueryValue } from './transport.js'
 import {
   McpdError,
   PROMPT_OPAQUE_KEYS,
+  RESULTS_OPAQUE_KEYS,
+  SCORER_OPAQUE_KEYS,
   RateLimitedDiagnostics,
   Transport,
   encodeQuery,
@@ -871,6 +881,89 @@ export class Mcpd implements SpanHost {
     return await this.#transport.put<Prompt>(path, { version }, { opaque: PROMPT_OPAQUE_KEYS })
   }
 
+  // -------------------------------------------------------------------------
+  // Experiments
+  // -------------------------------------------------------------------------
+
+  /** A run as the tool calls, model generations and handoffs its agent took. */
+  async getTrajectory(traceId: string): Promise<Trajectory> {
+    return await this.#transport.get<Trajectory>(
+      `/v1/api/traces/${encodeURIComponent(traceId)}/trajectory`,
+      this.#scoped({}),
+    )
+  }
+
+  /**
+   * The cases of a dataset. Sends `limit` only: the daemon finds the project
+   * from the dataset.
+   */
+  async listDatasetItems(datasetId: string, options: { limit?: number } = {}): Promise<DatasetItem[]> {
+    const query: Record<string, QueryValue> = {}
+    if (options.limit !== undefined) query['limit'] = options.limit
+    return await this.#transport.get<DatasetItem[]>(
+      `/v1/api/datasets/${encodeURIComponent(datasetId)}/items`,
+      query,
+    )
+  }
+
+  /**
+   * Record an experiment, or replace one: the daemon upserts on
+   * `experimentId`, and an empty id gets a new one. The client's project is
+   * used when the correlation names none.
+   */
+  async createExperiment(experiment: Experiment): Promise<Experiment> {
+    const correlation = { ...experiment.correlation }
+    if (!correlation.project) correlation.project = this.#project
+    return await this.#transport.post<Experiment>('/v1/api/experiments', { ...experiment, correlation })
+  }
+
+  /**
+   * Score every run of an experiment, each against the expected answer of the
+   * dataset case it names. No scorers runs the code scorers that need no
+   * settings.
+   */
+  async scoreExperiment(
+    experimentId: string,
+    scorers: string[] = [],
+    config?: ScorerConfig,
+  ): Promise<ScoreRunResult> {
+    const body: Record<string, unknown> = { scorers }
+    if (config !== undefined) body['config'] = config
+    return await this.#transport.post<ScoreRunResult>(
+      `/v1/api/experiments/${encodeURIComponent(experimentId)}/score` +
+        encodeQuery({ project: this.#project }),
+      body,
+      { opaque: SCORER_OPAQUE_KEYS },
+    )
+  }
+
+  /** An experiment case by case, with a summary per scorer. */
+  async experimentResults(experimentId: string): Promise<ExperimentResults> {
+    return await this.#transport.get<ExperimentResults>(
+      `/v1/api/experiments/${encodeURIComponent(experimentId)}/results`,
+      this.#scoped({}),
+      { opaque: RESULTS_OPAQUE_KEYS },
+    )
+  }
+
+  /**
+   * Run `target` over every case of a dataset and score the answers.
+   *
+   * Each case runs inside a root span named after the experiment, carrying
+   * the experiment id and the case id, at most `concurrency` (4) at a time. A
+   * target that throws fails its own run and the next case still runs. Then
+   * the runs are flushed and scored, the experiment is marked `succeeded`
+   * with each scorer's mean, and the results are returned. When the runner
+   * itself fails, the experiment is marked `failed` and the error is thrown.
+   */
+  async runExperiment(
+    datasetId: string,
+    target: ExperimentTarget,
+    options: RunExperimentOptions = {},
+  ): Promise<ExperimentResults> {
+    return await runExperiment(this, datasetId, target, options)
+  }
+
   /** Liveness. Never touches storage, so it answers even when the database is slow. */
   async health(): Promise<HealthStatus> {
     return await this.#transport.get<HealthStatus>('/healthz')
@@ -1074,7 +1167,8 @@ function encodable(signal: Signal): Signal {
 const TRACE_PARAMS: ReadonlySet<keyof TraceQuery & string> = new Set([
   'project', 'q', 'status', 'kind', 'name', 'tags', 'sessionId', 'threadId', 'userId',
   'environment', 'model', 'from', 'to', 'minDurationMs', 'maxDurationMs', 'minCost', 'maxCost',
-  'minTokens', 'hasScore', 'scoreBelow', 'scoreAbove', 'hasFeedback', 'sort', 'order', 'limit',
+  'minTokens', 'hasScore', 'scoreBelow', 'scoreAbove', 'hasFeedback', 'experimentId', 'preview',
+  'sort', 'order', 'limit',
   'cursor',
 ])
 
@@ -1229,6 +1323,10 @@ export interface TraceQuery extends BaseQuery {
   scoreAbove?: number
   /** `true` for only traces a person gave feedback on, `false` for only traces with none. */
   hasFeedback?: boolean
+  /** Only the runs of this experiment. */
+  experimentId?: string
+  /** `true` fills each trace's `inputPreview` and `outputPreview`. */
+  preview?: boolean
   sort?: string
   order?: 'asc' | 'desc'
 }

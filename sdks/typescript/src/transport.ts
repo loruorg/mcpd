@@ -168,6 +168,15 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  */
 export const PROMPT_OPAQUE_KEYS: ReadonlySet<string> = new Set([...OPAQUE_KEYS, 'messages', 'config'])
 
+/** `OPAQUE_KEYS` plus a scorer's JSON Schema, which is the user's own document. */
+export const SCORER_OPAQUE_KEYS: ReadonlySet<string> = new Set([...OPAQUE_KEYS, 'jsonSchema', 'json_schema'])
+
+/**
+ * `OPAQUE_KEYS` plus each case's `scores`, keyed by scorer ids such as
+ * `exact_match` that must read back as written.
+ */
+export const RESULTS_OPAQUE_KEYS: ReadonlySet<string> = new Set([...OPAQUE_KEYS, 'scores'])
+
 function convert(value: unknown, key: (k: string) => string, opaque: ReadonlySet<string>): unknown {
   if (Array.isArray(value)) return value.map((v) => convert(v, key, opaque))
   if (!isPlainObject(value)) return value

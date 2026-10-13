@@ -40,6 +40,10 @@ export type {
 
 export { McpdSpan } from './span.js'
 
+// Experiments: run a dataset through your code and score the answers.
+export { DATASET_ITEM_ATTRIBUTE } from './experiment.js'
+export type { ExperimentHost, ExperimentTarget, RunExperimentOptions } from './experiment.js'
+
 // Prompts: fetched with `mcpd.getPrompt`, filled in here, linked with
 // `span.setPrompt`.
 export { PromptRenderError, renderPrompt } from './prompts.js'
