@@ -41,7 +41,7 @@ pub use clickhouse::{ClickHouseConfig, ClickHouseStore};
 #[cfg(feature = "postgres")]
 pub mod postgres;
 #[cfg(feature = "postgres")]
-pub use postgres::{PostgresConfig, PostgresStore};
+pub use postgres::{connect_pool as connect_postgres_pool, PostgresConfig, PostgresStore};
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStore;
 

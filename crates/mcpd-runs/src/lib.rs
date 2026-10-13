@@ -42,11 +42,15 @@
 //! evaluated here against the context [`context`] builds, and every document is
 //! checked by [`validate`] before it is stored.
 //!
+//! Every rule is written once, in the engine, against a narrow SQL surface.
+//! [`SqliteRunStore`] runs it on an embedded file, and `PostgresRunStore`,
+//! behind the `postgres` feature, on a database several replicas share.
+//!
 //! # What is not here
 //!
 //! Section 10 of the contract: request keys and a `step_requests` table,
-//! `after` constraints, compensation, retry-from-step, token deltas, a
-//! Postgres run store, the agent loop and multi-step bodies for a branch, an
+//! `after` constraints, compensation, retry-from-step, token deltas, the
+//! agent loop and multi-step bodies for a branch, an
 //! item or an iteration. The pricing of usage is the server's: this crate
 //! takes a cost in USD and charges it, and holds no price book.
 
@@ -56,8 +60,12 @@
 pub mod canonical;
 pub mod cause;
 pub mod context;
+mod db;
+mod engine;
 pub mod graph;
 pub mod model;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 pub mod predicate;
 pub mod requirements;
 pub mod sqlite;
@@ -74,6 +82,8 @@ pub use model::{
     RunEvent, RunEventKind, RunId, RunStatus, Slot, StepErrorClass, StepKey, StepKind, Timer,
     TimerKind, Wait, WaitTimeout,
 };
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresRunStore;
 pub use predicate::Predicate;
 pub use requirements::{
     attempt_requirements, cursor_requirements, settles_on_arrival, Requirement, Requirements,
