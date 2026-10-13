@@ -137,7 +137,21 @@ const locale = localeOf(Astro.url.pathname)
   <p>
     <code>score_trace_id</code> は同じ考えのもう半分です。スコアリングの実行そのものを
     トレースすれば、その id がスコアに載ります。何もかも低く付け始めたジャッジを開いて読み、
-    壊れていることを示せます。
+    壊れていることを示せます。デーモン自身のジャッジは、出すすべてのスコアで
+    これを行います。
+  </p>
+
+  <h2>レビューキュー</h2>
+  <p>
+    人が見るべき実行は、レビューキューに入れます。トレース id を付けて
+    <code>POST /v1/api/review-queue</code> を呼び、必要ならステップ、きっかけに
+    なったフィードバック、担当者、メモも添えます。項目は <code>pending</code>
+    から始まります。<code>PATCH /v1/api/review-queue/{'{id}'}</code> で担当者を
+    割り当てるか、レビューした人の所見とともに <code>reviewed</code> か
+    <code>dismissed</code> にします。変更のたびに項目の新しいバージョンができる
+    ので、誰がいつ何を決めたかが残ります。<code>GET /v1/api/review-queue</code>
+    は状態と担当者で絞り込み、まだ pending のものを数えます。アプリの Review
+    画面はこれを使って作業し、実行パネルから実行をキューに入れることもできます。
   </p>
 
   <h2>人によるフィードバック</h2>
@@ -201,6 +215,126 @@ mcpd.feedback({
     <code>author_id</code> は送られたまま保存されるので、メールアドレスではなく
     仮名の id を送ってください。
     <a href={urlFor('/docs/privacy', locale)} class="link">マスキングと保持</a>を参照してください。
+  </p>
+
+  <h2>実行が言ったことではなく、したことを採点する</h2>
+  <p>
+    たいていのスコアラーは実行の回答を読みます。<em>すべてのテストを実行し、
+    回帰はありませんでした</em>で終わるエージェントは、そのどれをも満たします。
+    ジャッジモデルも満たします。文は整っていて、正しいことを言っているから
+    です。その文はエージェントによる自分の仕事の説明であり、説明は証拠では
+    ありません。テストのコマンドが一度も動いていなくても、回答を読む
+    スコアラーにはそれがわかりません。
+  </p>
+  <p>
+    組み込みのスコアラーのうち 2 つは、代わりにトレースを読みます。回答は
+    まったく見ず、実行が何を記録したかを問います。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>スコアラー</th><th>1 を付ける条件</th><th>設定</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>span_present</code></td>
+        <td>求める種別または名前のスパンを、実行が少なくとも 1 つ記録した。</td>
+        <td><code>span_kind</code>、<code>span_name</code>、またはその両方。両方を設定すると、両方が成り立つ必要があります。</td>
+      </tr>
+      <tr>
+        <td><code>tool_succeeded</code></td>
+        <td>その名前のツールスパンが動き、その呼び出しの少なくとも 1 つが <code>ok</code> で終わった。</td>
+        <td><code>tool_name</code>。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    どちらも設定が必要なので、既定のセットでは動きません。何を探すか誰にも
+    言われずに合格するスコアラーは、誰も確かめていない仕事をどの実行もした
+    と報告することになり、それはまさに捕まえるべき失敗です。名前を挙げ、
+    設定を渡してください。
+  </p>
+
+  <pre><code class="language-json">{`{
+  "trace_ids": ["4bf92f3577b34da6a3ce929d0e0e4736"],
+  "scorers": ["tool_succeeded", "span_present"],
+  "config": {
+    "tool_name": "run_tests",
+    "span_kind": "tool_call",
+    "span_name": "run_tests"
+  }
+}`}</code></pre>
+
+  <p>
+    <code>span_name</code> と <code>tool_name</code> は完全一致で比べ、
+    <code>case_sensitive</code> で緩めることはできません。スパン名は文章では
+    なく、あなたのコードが選んだ識別子です。緩い比較では
+    <code>run_tests_dry</code> が <code>run_tests</code> についての主張を
+    満たしてしまい、しかもそれはまさにこの確認を書いた対象の実行で起きます。
+    <code>tool_succeeded</code> は 4 つのツールスパン種別、
+    <code>tool_call</code>、<code>client_tool_call</code>、
+    <code>provider_tool_call</code>、<code>mcp_tool_call</code> のどれでも
+    受け付けます。実行がどれを記録するかはツールがどこにあるかを示すもので、
+    動いたかどうかを示すものではないからです。
+  </p>
+
+  <h3>ゼロの付き方は 2 通りあり、それぞれ別のバグです</h3>
+  <p>
+    一度も動かなかったツールも、動いて失敗したツールも、どちらもゼロです。
+    そして直す作業は正反対です。一方はエージェントが飛ばしたステップで、
+    もう一方は壊れたステップです。<code>reason</code> がこの 2 つを分け、
+    記録されたエラーも運ぶので、実行を開かなくてもスコアから対応できます。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>起きたこと</th><th><code>reason</code></th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>ツールが一度も動かなかった。</td>
+        <td><code>"run_tests" never ran; the run records 2 tool call(s), named: lookup_order, send_email</code></td>
+      </tr>
+      <tr>
+        <td>動いて失敗した。</td>
+        <td><code>"run_tests" ran 1 time(s) and none ended ok; the last ended error: pytest exited 1: 3 failed</code></td>
+      </tr>
+      <tr>
+        <td>失敗し、再試行され、うまくいった。</td>
+        <td><code>"run_tests" ran 2 time(s), 1 ended ok and 1 did not</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>span_present</code> も自分のゼロについて同じことをします。何を探し
+    たか、そして実行が実際に何を持っているかを挙げます。名前の誤りと計装の
+    欠落は、ただの<em>見つかりません</em>では区別できず、直し方には何の共通点
+    もないからです。
+  </p>
+
+  <h3>これらのスコアラーが証明すること、しないこと</h3>
+  <p>
+    証明するのは、ある行動が<strong>記録された</strong>ことです。それが正しかった
+    ことは証明しません。<code>ok</code> で終わった <code>run_tests</code> スパンが
+    言うのは、ツールが例外を出さずに戻ったことです。正しいスイートを動かした
+    ことも、スイート全体を動かしたことも、誰かが結果を読んだことも言いません。
+    緑の <code>tool_succeeded</code> をコードが動く証拠とみなすのは、文を
+    信じるのと同じ誤りを、一歩先で犯すことです。
+  </p>
+  <p>
+    これらが測るのも、世界ではなくトレースです。スパンがあるのは、あなたの
+    プロセスがそれを記録したからです。計装していないステップの中で起きた仕事は
+    ここでは見えず、起きなかった仕事とまったく同じに読めます。これらの
+    スコアラーが失敗でないものを失敗と報告するのは、この場合だけです。どちらかが
+    ゼロを付けたら、エージェントが嘘をついたと結論する前に計装を確かめて
+    ください。
+  </p>
+  <p>
+    どちらも、ペイロードの取得がオフでも成り立ちます。入力、出力、
+    コンプリーションはどれも読みません。読むのはスパンの種別、名前、状態で、
+    デーモンは取得の設定にかかわらずそれらを保持しています。
   </p>
 
   <h2>悪い回答を見つけるクエリ</h2>
