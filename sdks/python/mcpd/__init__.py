@@ -124,6 +124,7 @@ from .logs import (
 from .runs import DefinitionsApi, EventsApi, RunFailedError, RunResult, RunsApi, StepConflictError, StepsApi
 from .sinks import ConsoleSink, RecordingSink, Sink
 from .span import Span
+from .stream import STREAM_MAX_TOOL_CALLS, STREAM_TEXT_BUDGET
 from .transport import McpdError, TransportError
 from .worker import RetryableError, StepContext, StepFailure, StepOutcome, Worker, WorkerStats
 from .workflow import (
@@ -172,6 +173,9 @@ __all__ = [
     "response_shape",
     "usage_from_anthropic",
     "usage_from_openai",
+    # Streamed model calls: the budget `Span.record_stream` keeps to (contract 3.2).
+    "STREAM_MAX_TOOL_CALLS",
+    "STREAM_TEXT_BUDGET",
     # The run surface: the builder, the worker, and the client namespaces.
     "BranchBuilder",
     "DefinitionsApi",

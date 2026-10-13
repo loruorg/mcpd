@@ -14,7 +14,9 @@ Then open http://localhost:4317 and read the run.
 
 import os
 import random
+import re
 import time
+from typing import Iterator
 
 # #region init
 from mcpd import FeedbackKind, Mcpd, SpanKind
@@ -86,9 +88,69 @@ def answer(question: str, user_id: str) -> "tuple[str, str]":
     # #endregion trace
 
 
+def fake_chat_stream(text: str) -> Iterator[dict]:
+    """Chunks in the shape OpenAI streams a chat completion in."""
+    base = {"id": "chatcmpl-01", "model": "gpt-4o-mini"}
+    for word in re.split(r"(?= )", text):
+        time.sleep(0.005)
+        yield {**base, "choices": [{"index": 0, "delta": {"content": word}}]}
+    yield {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+    usage = {"prompt_tokens": 24, "completion_tokens": 6, "total_tokens": 30}
+    yield {**base, "choices": [], "usage": usage}
+
+
+# #region stream
+def stream_answer(client: Mcpd, question: str) -> str:
+    """A streamed model call.
+
+    Read the wrapper instead of the provider's stream: every chunk comes
+    through unchanged, and when the stream ends the span gets the time to
+    first token, the text, the usage and the finish reason. It works the same
+    way with an async stream and `async for`.
+    """
+    with client.span("stream_answer", kind=SpanKind.MODEL_GENERATION) as generation:
+        generation.set_input([{"role": "user", "content": question}])
+        # Where `openai.chat.completions.create(..., stream=True)` goes.
+        stream = fake_chat_stream("Your order is in transit.")
+        answer = ""
+        for chunk in generation.record_stream(stream):
+            for choice in chunk["choices"]:
+                answer += choice["delta"].get("content") or ""
+        return answer
+# #endregion stream
+
+
+# #region testing
+from mcpd.testing import TestClient  # noqa: E402
+
+
+def test_stream_answer() -> None:
+    """A unit test.
+
+    Pass a `TestClient` where your code takes an `Mcpd`, then read back what
+    it recorded: no daemon, no port, no flush.
+    """
+    test = TestClient()
+    answer = stream_answer(test, "Where is my order A-1042?")
+
+    call = test.recorded_span("stream_answer")
+    assert call.output == answer
+    assert call.model == "gpt-4o-mini"
+    assert call.usage.output_tokens == 6
+
+    [run] = test.trees()
+    assert run.span.name == "stream_answer"
+    test.shutdown()
+# #endregion testing
+
+
 def main() -> None:
     reply, trace_id = answer("where is my order?", user_id="u-3312")
     print(reply)
+
+    # A streamed call, and the unit test that checks what it records.
+    print("streamed:", stream_answer(mcpd, "Is A-1042 on its way?"))
+    test_stream_answer()
 
     # #region score
     # A machine evaluation. `min` and `max` are required: a bare number with no
