@@ -202,6 +202,17 @@ const serverless = `def handler(event, context):
     <code>status</code> を <code>error</code> にし、メッセージを必ず埋めます。
     「何かが失敗した」では、打つ手が決まりません。
   </p>
+  <p>
+    <code>set_model_parameters</code> は、呼び出しに使った設定を記録します。
+    <code>temperature</code>、<code>top_p</code>、<code>top_k</code>、
+    <code>max_tokens</code>、<code>seed</code>、<code>stop_sequences</code>、
+    <code>has_response_format</code> です。これらはペイロードではなく設定なので、
+    <code>capture_payloads=False</code> でも残ります。そして大事なのはまさにその
+    場合です。実行を再現する人が合わせなければならないのは、これらの値だから
+    です。省いた引数は存在せず、渡した引数は値が何であれ保たれるので、
+    <code>seed=0</code> もシードです。<code>has_response_format</code> の背後に
+    あるスキーマは記録されず、それが有効だったかどうかだけが記録されます。
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -219,6 +230,24 @@ const serverless = `def handler(event, context):
     親を指しますが、相関のために運ばれるだけで、親子関係には使われません。
   </p>
 
+  <h3>ストリーミングの呼び出し</h3>
+  <p>
+    プロバイダーのストリームを <code>span.record_stream</code> に渡し、代わりに
+    ラッパーを読んでください。イテレーターにはジェネレーターが、非同期
+    イテレーターには非同期ジェネレーターが返ります。OpenAI の chat completion の
+    チャンクと Anthropic の message イベントを、dict としてもプロバイダー SDK 自身の
+    オブジェクトとしても受け取り、すべてのチャンクはそのまま通ります。テキストか
+    ツール呼び出しを持つ最初のチャンクが、最初のトークンまでの時間を記録します。
+    ストリームが終わったとき、例外を投げたとき、<code>break</code> で抜けたときに、
+    スパンは、同じ呼び出しをストリーミングなしで行った場合に
+    <code>record_response</code> が記録する内容と、出力としてのテキストを受け取り、
+    終了します。ストリームからのエラーはスパンに記録され、そのままあなたに届きます。
+    保持するテキストは 32,768 文字までで、上限に達したときは
+    <code>mcpd.stream.truncated</code> が設定されます。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="stream" title="ストリーミングの呼び出し" />
+
   <h2>ペイロード、シンク、完了済みスパン</h2>
   <p>
     シンクは、吐き出されたバッチの行き先です。既定は HTTP トランスポート
@@ -235,6 +264,23 @@ const serverless = `def handler(event, context):
     title="記録内容の検証"
     samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: sinks }]}
   />
+
+  <p>
+    <code>mcpd.testing</code> の <code>TestClient</code> は、メモリに記録する
+    <code>Mcpd</code> です。あなたのコードがクライアントを受け取る場所に渡し、
+    記録された内容を読み返してください。名前や種別で引く <code>spans()</code>、
+    必ず存在するはずの 1 つのスパンを引く <code>recorded_span(name)</code>、
+    実行ごとのツリーを返す <code>trees()</code>、そして <code>logs()</code>、
+    <code>metrics()</code>、<code>scores()</code>、
+    <code>recorded_feedback()</code>、<code>reset()</code> です。どのアクセサーも
+    先にフラッシュします。保持される内容は、デーモンへ向かうときと同じように
+    サンプリング、ペイロードの取り込み、<code>redact</code> を通っており、テストの
+    実行に <code>MCPD_ENABLED=false</code> が設定されていても有効なままです。
+    <code>recorded_span</code> は <code>AssertionError</code> を投げるので、
+    スパンが無ければ、実際に見えた名前を添えてテストが失敗します。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="testing" title="ユニットテスト" />
 
   <p>
     <code>mcpd.record(span)</code> は、すでに終了した <code>SpanRecord</code> を、
