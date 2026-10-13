@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -32,6 +33,19 @@ func main() {
 	// A short-lived process that skips it loses whatever had not been sent.
 	defer m.Shutdown(ctx)
 	// #endregion init
+
+	// Store the prompt the agent reads and label it production. Posting the
+	// same body again stores nothing, so this can run on every start.
+	if _, err := m.CreatePrompt(ctx, mcpd.CreatePromptRequest{
+		Name: "support/answer",
+		Messages: json.RawMessage(`[
+			{"role": "system", "content": "You answer billing questions for {{company}}."},
+			{"role": "user", "content": "{{question}}"}
+		]`),
+		Labels: []string{"production"},
+	}); err != nil {
+		log.Printf("store the prompt: %v", err)
+	}
 
 	traceID := handleTicket(ctx, m, "My invoice for March charged me twice.")
 
@@ -109,16 +123,34 @@ func handleTicket(ctx context.Context, m *mcpd.Client, question string) string {
 
 // draftAnswer stands in for a model call.
 func draftAnswer(ctx context.Context, m *mcpd.Client, question string) string {
+	// #region prompt
+	// The version labelled production, cached for a minute. If the daemon is
+	// down before the first fetch, the fallback keeps the agent working.
+	prompt, err := m.GetPrompt(ctx, "support/answer", mcpd.PromptOptions{
+		Label: "production",
+		FallbackMessages: []map[string]any{
+			{"role": "system", "content": "You answer billing questions for {{company}}."},
+			{"role": "user", "content": "{{question}}"},
+		},
+	})
+	if err != nil {
+		log.Fatalf("read the prompt: %v", err)
+	}
+	rendered, err := mcpd.RenderPrompt(prompt, map[string]string{
+		"company": "Acme", "question": question,
+	})
+	if err != nil {
+		log.Fatalf("render the prompt: %v", err)
+	}
+
 	ctx, span := m.Start(ctx, "draft_answer",
 		mcpd.WithSpanKind(mcpd.SpanKindModelGeneration),
-		mcpd.WithInput(map[string]any{
-			"messages": []map[string]string{
-				{"role": "system", "content": "You are a billing support agent."},
-				{"role": "user", "content": question},
-			},
-		}),
+		mcpd.WithInput(map[string]any{"messages": rendered.Messages}),
 	)
 	defer span.End()
+	// The run now shows which prompt version wrote the answer.
+	span.SetPrompt(prompt)
+	// #endregion prompt
 
 	// Where a real provider call goes. This is the shape Anthropic answers in.
 	time.Sleep(40 * time.Millisecond)
