@@ -3,10 +3,27 @@ import Doc from '@/layouts/Doc.astro'
 import Waterfall from '@/components/Waterfall.astro'
 import Command from '@/components/Command.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import fs from 'node:fs'
+import path from 'node:path'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const code = localeOf(Astro.url.pathname)
 const linkTo = (route: string) => urlFor(route, code)
+
+/* 内置价目表，在构建时从守护进程内嵌的那个文件里读取，所以下面的数量和日期
+   不会和二进制定价时用的东西对不上。 */
+const book = JSON.parse(
+  fs.readFileSync(path.resolve(process.cwd(), '..', 'crates/mcpd-core/prices/builtin.json'), 'utf8'),
+)
+const bookTables = [
+  { name: 'models', note: '第一方标价，在没有适用的供应商表时使用', count: Object.keys(book.models).length },
+  ...Object.entries(book.providers as Record<string, Record<string, unknown>>)
+    .map(([name, t]) => ({ name: `providers.${name}`, note: '', count: Object.keys(t).length }))
+    .sort((a, b) => b.count - a.count),
+]
+const tiered = Object.values(book.models as Record<string, { tiers?: unknown[] }>).filter((m) => m.tiers?.length).length
+const multipliers = Object.entries(book.service_tier_multipliers as Record<string, Record<string, number>>)
+  .flatMap(([p, t]) => Object.entries(t).map(([tier, m]) => ({ provider: p, tier, m })))
 
 /* 写在这里，而不是从示例程序里读：这些是读者对着自己的守护进程运行的查询，
    不是 CI 能执行的代码。 */
@@ -200,6 +217,11 @@ const response = [
         <td>按 <code>output</code> 计费。</td>
       </tr>
       <tr>
+        <td><code>image_input</code>、<code>image_output</code></td>
+        <td>图像 token，用于供应商把它们和文本分开定价的场合。</td>
+        <td>按 <code>input</code> 或 <code>output</code> 计费。</td>
+      </tr>
+      <tr>
         <td><code>reasoning</code></td>
         <td>隐藏的推理 token，用于供应商分开计费的场合。</td>
         <td>
@@ -210,6 +232,26 @@ const response = [
       </tr>
     </tbody>
   </table>
+
+  <h2>长提示词与服务层级</h2>
+  <p>
+    有几家供应商对长提示词的每一个 token 都收更高的价。一个模型条目可以带着
+    <code>tiers</code>，每一档有一个 <code>above_input_tokens</code> 阈值和自己的
+    费率。提示词连同它的缓存 token 一起计量，一旦越过某个阈值，整次调用都按那一档
+    定价：一个发给 <code>gemini-2.5-pro</code> 的 300,000 token 提示词，全部
+    300,000 个都按长上下文费率付费。这一档没有写出的计费项保持基础费率。
+  </p>
+  <p>
+    一次走更便宜服务层级的调用，比如一个批处理请求，按供应商的折扣定价。mcpd 依次
+    从 <code>gen_ai.response.service_tier</code>、
+    <code>gen_ai.openai.response.service_tier</code>、
+    <code>mcpd.service_tier</code>、<code>llm.service_tier</code> 以及对应的请求
+    属性读取层级。<code>default</code>、<code>standard</code> 和
+    <code>auto</code> 都读作标准层级。一个模型可以在 <code>service_tiers</code>
+    下带着自己某个层级的费率；否则就套用价目表里这个供应商的
+    <code>service_tier_multipliers</code>。数字会记下层级，所以一次批处理调用存下的
+    价目表是 <code>builtin+batch</code>，它读作半价是有原因的。
+  </p>
 
   <h2>一个缓存 token 只计一次费</h2>
   <p>
@@ -234,11 +276,9 @@ const response = [
     当它没有给时，余下部分是上报合计减去每一个计费项字段。
   </p>
   <p>
-    没有费率的计费项遵循一条规则。一个价目表没有费率的计费项，只会作为余下部分的
-    一部分被计费，于是当供应商同时发来了一个 <code>text</code> 计数时，它根本
-    不会被计费。只要你的价目表没给推理 token 自己的费率，它们就落在这里，而声明
-    一个费率就能解决。图像 token 则永远落在这里，因为价目表没有图像费率可给，
-    所以在一个多模态很重的工作负载上，请把这个数字读作偏低，而不是精确。
+    一个价目表没有费率的计费项，作为余下部分的一部分计费。当你的供应商把推理或
+    图像 token 分开计费，并且还上报了一个单独的 <code>text</code> 计数时，给它们
+    一个自己的费率。
   </p>
 
   <h2>一个未知模型是没有成本，不是成本为零</h2>
@@ -247,7 +287,7 @@ const response = [
     存一个零。
   </p>
   <p>
-    零是一项主张：这次调用是免费的。缺席表示价目表里没有这次调用的价格。
+    零是一项主张：这次调用是免费的。缺席是一种承认：我们不知道这次调用花了多少钱。
     两者导向不同的决定，而一个把后者报成前者的工具，是在账单上撒谎。同一条规则
     贯穿读取路径：一次运行的那些 span 合计不出任何东西时，返回的是不带成本数字，
     而不是成本为零，所以一个空白的成本列意味着<em>未定价</em>，绝不意味着
@@ -263,8 +303,9 @@ const response = [
   <h2>解析一个模型 id</h2>
   <p>
     span 上的那个 id 是你的客户端发来的样子，而客户端会给它加装饰。一个网关会加上
-    它的厂商前缀，一个云会加上它的区域前缀，一个供应商会钉上一个发布日期。价目表
-    是按裸模型名做键的，所以查找会依次试四件事，在第一个命中处停下。
+    它的厂商前缀，一个云会加上它的区域前缀，一个供应商会钉上一个发布日期。当 span
+    写明了供应商时，先查价目表里这个供应商的表，再查第一方的 <code>models</code>
+    表。在每张表里，查找都按顺序试下面这几步，在第一个命中处停下。
   </p>
 
   <table>
@@ -297,66 +338,101 @@ const response = [
   </table>
 
   <p>
-    <code>-YYYY-MM-DD</code> 和 <code>-YYYYMMDD</code> 两种后缀都认得。四步全都
-    失败是一个正常的结果，不是一个错误：它意味着没有成本，如上所述。
+    <code>-YYYY-MM-DD</code> 和 <code>-YYYYMMDD</code> 两种后缀都认得。当这四步
+    都找不到模型时，会在去掉云版本标签的 id 上再跑一遍，于是 Vertex AI 上的
+    <code>claude-sonnet-4-5@20250929</code> 和 Bedrock 上的
+    <code>anthropic.claude-sonnet-4-5-20250929-v1:0</code> 都能解析；然后再把数字
+    之间的点号写成连字符跑一遍，于是 <code>claude-sonnet-4.5</code> 找到
+    <code>claude-sonnet-4-5</code>。完全没有匹配就意味着没有成本，如上所述。
+  </p>
+  <p>
+    供应商也以同样宽容的方式匹配：名字原样、价目表列出的别名（<code>azure</code>
+    对应 <code>az.ai.openai</code>），以及去掉开头一段厂商前缀后的名字，于是
+    <code>aws.bedrock</code> 找到 <code>bedrock</code> 那张表。
   </p>
 
   <h2>随附的那份价目表</h2>
   <p>
-    mcpd 带着一份小小的内置价目表，好让 <code>docker run</code> 在完全没有配置的
-    情况下也产出真实的数字。它叫 <code>builtin</code>，以 USD 计价，它产出的每一份
-    成本都记下这个名字。
+    mcpd 带着一份内置价目表，好让 <code>docker run</code> 在完全没有配置的情况下
+    也产出真实的数字。它叫 <code>builtin</code>，以 USD 计价，它产出的每一份成本都
+    记下这个名字。它收录了每一家主要模型厂商的标价，以及转售它们模型的各家云和
+    网关的标价，截至 {book.as_of}。它的第一方模型中有 {tiered} 个带着长上下文
+    分档。
   </p>
 
-  {/* 从 crates/mcpd-core/src/cost.rs 里的 `builtin_book` 誊抄而来。那边的某个
-      费率一动，这里也要动。 */}
   <table>
     <thead>
-      <tr>
-        <th>模型</th><th>输入</th><th>输出</th><th>缓存读取</th><th>缓存写入，5 分钟</th><th>缓存写入，1 小时</th>
-      </tr>
+      <tr><th>表</th><th>模型数</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>claude-opus-4</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-1</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-5</code></td><td>5.00</td><td>25.00</td><td>0.50</td><td>6.25</td><td>10.00</td></tr>
-      <tr><td><code>claude-sonnet-4</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-sonnet-4-5</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-haiku-4-5</code></td><td>1.00</td><td>5.00</td><td>0.10</td><td>1.25</td><td>2.00</td></tr>
-      <tr><td><code>claude-3-5-haiku</code></td><td>0.80</td><td>4.00</td><td>0.08</td><td>1.00</td><td>1.60</td></tr>
-      <tr><td><code>gpt-4o</code></td><td>2.50</td><td>10.00</td><td>1.25</td><td>按输入</td><td>按输入</td></tr>
-      <tr><td><code>gpt-4o-mini</code></td><td>0.15</td><td>0.60</td><td>0.075</td><td>按输入</td><td>按输入</td></tr>
-      <tr><td><code>gpt-4.1</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>按输入</td><td>按输入</td></tr>
-      <tr><td><code>gpt-4.1-mini</code></td><td>0.40</td><td>1.60</td><td>0.10</td><td>按输入</td><td>按输入</td></tr>
-      <tr><td><code>o3</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>按输入</td><td>按输入</td></tr>
-      <tr><td><code>o4-mini</code></td><td>1.10</td><td>4.40</td><td>0.275</td><td>按输入</td><td>按输入</td></tr>
-      <tr><td><code>gemini-2.5-pro</code></td><td>1.25</td><td>10.00</td><td>0.31</td><td>按输入</td><td>按输入</td></tr>
-      <tr><td><code>gemini-2.5-flash</code></td><td>0.30</td><td>2.50</td><td>0.075</td><td>按输入</td><td>按输入</td></tr>
-      <tr><td><code>text-embedding-3-small</code></td><td>0.02</td><td>0.00</td><td>按输入</td><td>按输入</td><td>按输入</td></tr>
-      <tr><td><code>text-embedding-3-large</code></td><td>0.13</td><td>0.00</td><td>按输入</td><td>按输入</td><td>按输入</td></tr>
+      {bookTables.map((t) => (
+        <tr><td><code>{t.name}</code>{t.note && <>：{t.note}</>}</td><td>{t.count}</td></tr>
+      ))}
+    </tbody>
+  </table>
+
+  <table>
+    <thead>
+      <tr><th>供应商</th><th>服务层级</th><th>倍数</th></tr>
+    </thead>
+    <tbody>
+      {multipliers.map((m) => (
+        <tr><td><code>{m.provider}</code></td><td><code>{m.tier}</code></td><td>{m.m}</td></tr>
+      ))}
     </tbody>
   </table>
 
   <p>
-    单位是每百万 token 多少美元，取自这份价目表上一次对着一份第三方模型目录核对时
-    的状态，价目表把那个日期记作它的 <code>as_of</code>。Anthropic 的条目带着两个
-    缓存写入费率，因为守护进程会从一小时的费率退回到五分钟的那个，而一份漏掉较长
-    那个的价目表会不声不响地少计费。OpenAI 写入它的缓存不收费，所以那里的一次缓存
-    写入按输入费率计。<code>gemini-2.5-flash</code> 还带着一个 1.00 的音频输入
-    费率；其余每一个条目都按它的文本费率给音频定价。没有
-    <code>claude-haiku-4</code>：Anthropic 提供的 id 是
-    <code>claude-haiku-4-5</code>，而一个解析不到任何东西的 id 会被留作未定价，
-    不去猜。
+    这些是公布的标价。要看任何一个模型的定价，问二进制本身，它用的是和摄取相同的
+    查找：
   </p>
+
+  <Command class="not-prose my-6" command="mcpd prices show claude-sonnet-4-5 --provider aws.bedrock" />
+
+  <h2>你自己的价目表</h2>
   <p>
-    这些是以美元计的公布标价。每一次部署都用上面的内置价目表定价，这张表没有列出
-    的模型保持未定价。这份价目表故意做得很短，因为一份长的会在更多地方过时。
+    用 <code>--price-book</code>，或者配置文件里的 <code>price_book</code> 键，
+    加载一份你自己的价目表。价目表是 JSON：一个 <code>id</code>、一个 ISO 4217
+    <code>currency</code>，以及 <code>models</code> 和 <code>providers</code>
+    两张表，每张表把模型 id 映射到上面那些费率。带上
+    <code>"extends": "builtin"</code>，它就叠加在内置价目表之上，所以只需要写出你
+    付价不同的那些费率：
   </p>
+
+  <pre><code>{`{
+  "id": "acme-2026-10",
+  "currency": "USD",
+  "extends": "builtin",
+  "providers": {
+    "bedrock": {
+      "anthropic.claude-sonnet-4-5-20250929-v1:0": { "input": 2.7, "output": 13.5 }
+    }
+  },
+  "models": {
+    "our-finetune": { "input": 0.5, "output": 1.5 }
+  }
+}`}</code></pre>
+
   <p>
-    一份价目表由一个 id、一个 ISO 4217 货币和一张从模型 id 到费率的映射构成，
-    它产出的每一个数字都盖上了它的 id，这样两份价目表事后能分辨开。同一个项目里
-    的价格共用一种货币：mcpd 把一次运行的那些 span 按算术相加，并不在货币之间
-    换算。
+    mcpd 在启动时检查价目表，遇到负的费率、顺序错乱的分档，或者不是三个字母代码的
+    货币，就拒绝它，并点出是哪一条。来自你的价目表的数字记下它的 id，所以事后能把
+    它们和按标价算出的估算分辨开。一个项目的运行把各自的 span 按算术相加，所以请让
+    一份价目表里的每个费率都用同一种货币。
+  </p>
+
+  <h2>刷新费率</h2>
+  <p>
+    费率每隔几周就会变。<code>mcpd prices refresh</code> 从一份公开的模型目录写出
+    一份价目表，这样一次部署不用等新版本就能用上新费率：
+  </p>
+
+  <Command class="not-prose my-6" command="mcpd prices refresh --out /etc/mcpd/prices.json" />
+
+  <p>
+    把 <code>--price-book</code> 指向这个文件，然后重启。<code>--out</code> 处的
+    价目表已经定过价、而目录里不再列出的模型会被保留，因为发往一个已下线模型的
+    流量还会继续到来；<code>--prune</code> 会把它去掉。<code>--source</code>
+    读取另一份同样形状的目录，可以是 URL 或文件。内置价目表也是用同一条命令写出来的。
   </p>
 
   <h2>把钱读回来</h2>
