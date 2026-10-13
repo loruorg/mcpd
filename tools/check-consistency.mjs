@@ -472,6 +472,7 @@ const CONFIG_LINE_OF = {
   '--smtp-password': 'signup',
   '--smtp-from': 'signup',
   '--smtp-tls': 'signup',
+  '--skip-email-verification': 'signup',
   '--org-quota-per-minute': 'signup',
   '--org-retention-days': 'signup',
   '--sample': 'sampling',

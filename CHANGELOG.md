@@ -20,6 +20,8 @@ rather than every commit.
 
 ### Added
 
+- **`--skip-email-verification`.** Sign-up opens the account at once, with no
+  confirmation mail, for a daemon without a mail server.
 - **Organisations, roles, single sign-on and SCIM.** An account can create
   organisations, which own projects, invite members by email and give each a
   role (owner, admin, member or viewer, optionally replaced on one project)
