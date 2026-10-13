@@ -1754,6 +1754,69 @@ pub struct RetentionOutcome {
     pub ttl_changed: bool,
 }
 
+/// Which replica runs one background job, as the store records it.
+///
+/// Several daemons can share one store, and some background work must run on
+/// one of them only: a live scoring pass calls a judge that is paid per call,
+/// and a monitor's webhook should fire once, not once per replica. The lease
+/// says which replica that is. Its holder renews it on every pass, and when the
+/// holder stops renewing it, by crashing or by shutting down, it expires and
+/// another replica takes it at its next pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lease {
+    /// The job, such as `live-scoring`.
+    pub job: String,
+    /// The replica that holds it, or held it last.
+    pub holder: String,
+    /// When this holder's current term began. A renewal keeps it; a change of
+    /// holder, or a holder taking back a lease it let expire, resets it.
+    pub since: OffsetDateTime,
+    /// When the lease lapses unless its holder renews it.
+    pub expires_at: OffsetDateTime,
+    /// What the job wrote the last time it renewed, kept across holders, so a
+    /// replica taking over can continue where the previous one stopped rather
+    /// than doing its work again.
+    pub progress: Option<String>,
+}
+
+impl Lease {
+    /// Whether `holder` holds this lease at `now`.
+    #[must_use]
+    pub fn held_by(&self, holder: &str, now: OffsetDateTime) -> bool {
+        self.holder == holder && self.expires_at > now
+    }
+}
+
+/// One replica asking for a lease, or renewing one it holds.
+#[derive(Debug, Clone, Copy)]
+pub struct LeaseClaim<'a> {
+    /// The job.
+    pub job: &'a str,
+    /// The replica asking. Stable for the life of a process and different in
+    /// every process, so a restarted replica is a new holder.
+    pub holder: &'a str,
+    /// The time the claim is made at. Expiry is compared against it.
+    pub now: OffsetDateTime,
+    /// How long the lease lasts from `now` if granted.
+    pub ttl: time::Duration,
+    /// Progress to record when the claim is granted. `None` keeps what is
+    /// recorded.
+    pub progress: Option<&'a str>,
+}
+
+/// Pick the holder among the claims of a backend that has no compare-and-set.
+///
+/// The live claim whose term began first wins, and the holder's name breaks a
+/// tie, so every replica reading the same rows names the same winner. A holder
+/// that keeps renewing keeps its start, so a newcomer never displaces it.
+#[must_use]
+pub fn lease_winner(claims: &[Lease], now: OffsetDateTime) -> Option<&Lease> {
+    claims
+        .iter()
+        .filter(|c| c.expires_at > now)
+        .min_by(|a, b| a.since.cmp(&b.since).then_with(|| a.holder.cmp(&b.holder)))
+}
+
 /// What every storage backend must do.
 #[async_trait::async_trait]
 pub trait Store: Send + Sync + 'static {
@@ -2174,6 +2237,33 @@ pub trait Store: Send + Sync + 'static {
         let _ = q;
         Err(no_theme_analysis(self.name()))
     }
+
+    /// Take a background job's lease, or renew it, and return the lease as it
+    /// stands afterwards.
+    ///
+    /// Granted when nobody holds the lease, when it has expired, or when the
+    /// claimant already holds it. Otherwise nothing changes and the current
+    /// holder's lease comes back, so the caller asks [`Lease::held_by`]
+    /// whether it may run the job.
+    ///
+    /// SQLite and Postgres make the claim one compare-and-set, so two replicas
+    /// claiming at once never both come away holding it. ClickHouse has no
+    /// compare-and-set, so there a claim on a free lease writes a candidacy
+    /// and is not granted. At the next claim every candidate's row is there to
+    /// read, [`lease_winner`] names the same one for every replica, and only
+    /// that one is granted.
+    ///
+    /// # Errors
+    /// A storage error. The caller treats it as not holding the lease.
+    async fn claim_lease(&self, claim: &LeaseClaim<'_>) -> Result<Lease>;
+
+    /// Give a lease up, so another replica can take it at once rather than
+    /// after it expires. Does nothing when `holder` does not hold it. The
+    /// recorded progress stays.
+    ///
+    /// # Errors
+    /// A storage error.
+    async fn release_lease(&self, job: &str, holder: &str, now: OffsetDateTime) -> Result<()>;
 }
 
 /// The refusal every unimplemented analysis method gives, written once.

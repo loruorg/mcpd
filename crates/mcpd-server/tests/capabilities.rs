@@ -242,6 +242,20 @@ impl Store for Bare {
     ) -> mcpd_store::Result<Vec<mcpd_store::DocumentLabel>> {
         self.0.list_document_labels(project, kind, id).await
     }
+    async fn claim_lease(
+        &self,
+        claim: &mcpd_store::LeaseClaim<'_>,
+    ) -> mcpd_store::Result<mcpd_store::Lease> {
+        self.0.claim_lease(claim).await
+    }
+    async fn release_lease(
+        &self,
+        job: &str,
+        holder: &str,
+        now: time::OffsetDateTime,
+    ) -> mcpd_store::Result<()> {
+        self.0.release_lease(job, holder, now).await
+    }
 }
 
 fn keyed() -> ServerConfig {

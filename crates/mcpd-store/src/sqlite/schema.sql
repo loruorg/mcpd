@@ -578,3 +578,15 @@ CREATE INDEX IF NOT EXISTS theme_members_examples ON theme_members
 CREATE INDEX IF NOT EXISTS theme_members_flow ON theme_members
     (snapshot_id, aspect, trace_id);
 CREATE INDEX IF NOT EXISTS theme_members_trace ON theme_members (trace_id);
+
+-- Which replica runs each background job. One row per job, taken and renewed
+-- by a compare-and-set upsert: a claim writes only when the row's holder is
+-- the claimant or its lease has expired. `progress` outlives a change of
+-- holder, so the next one continues from it.
+CREATE TABLE IF NOT EXISTS leases (
+    job        TEXT    PRIMARY KEY,
+    holder     TEXT    NOT NULL,
+    since      INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    progress   TEXT
+) WITHOUT ROWID;

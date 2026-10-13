@@ -35,6 +35,7 @@ use time::OffsetDateTime;
 mod aspects;
 mod convert;
 mod documents;
+mod leases;
 mod queries;
 use aspects::*;
 use convert::*;
@@ -75,7 +76,9 @@ use queries::*;
 ///
 /// 7 adds `documents` and `document_labels`, two new tables and additive in
 /// the sense of 2 to 4.
-const SCHEMA_VERSION: u32 = 7;
+///
+/// 8 adds `leases`, one new table and additive in the same sense.
+const SCHEMA_VERSION: u32 = 8;
 
 /// The columns version 6 adds to `logs`, in the order every log query reads
 /// them after the original fourteen.
@@ -1256,6 +1259,30 @@ impl Store for SqliteStore {
             documents::list_document_labels_sync(conn, &p, kind, i.as_deref())
         })
         .await
+    }
+
+    async fn claim_lease(&self, claim: &crate::LeaseClaim<'_>) -> Result<crate::Lease> {
+        let (job, holder) = (claim.job.to_owned(), claim.holder.to_owned());
+        let progress = claim.progress.map(str::to_owned);
+        let (now, ttl) = (claim.now, claim.ttl);
+        self.with_write(move |conn| {
+            leases::claim_lease_sync(
+                conn,
+                &crate::LeaseClaim {
+                    job: &job,
+                    holder: &holder,
+                    now,
+                    ttl,
+                    progress: progress.as_deref(),
+                },
+            )
+        })
+        .await
+    }
+
+    async fn release_lease(&self, job: &str, holder: &str, now: OffsetDateTime) -> Result<()> {
+        let (job, holder, now) = (job.to_owned(), holder.to_owned(), to_nanos(now));
+        self.with_write(move |conn| leases::release_lease_sync(conn, &job, &holder, now)).await
     }
 
     async fn record_audit(&self, event: &AuditEvent) -> Result<()> {

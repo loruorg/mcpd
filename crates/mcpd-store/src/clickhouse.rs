@@ -99,6 +99,9 @@ pub struct ClickHouseStore {
     /// drop a month. It starts true, which is what a fresh database gets;
     /// `migrate` runs before anything reads and corrects it.
     day_partitioned: std::sync::atomic::AtomicBool,
+    /// The version of the last lease row this process wrote, in nanoseconds.
+    /// See `write_lease`.
+    lease_version: std::sync::atomic::AtomicI64,
 }
 
 impl ClickHouseStore {
@@ -112,7 +115,12 @@ impl ClickHouseStore {
             .timeout(config.timeout)
             .build()
             .map_err(|e| Error::Backend(format!("building the HTTP client: {e}")))?;
-        Ok(Self { config, http, day_partitioned: std::sync::atomic::AtomicBool::new(true) })
+        Ok(Self {
+            config,
+            http,
+            day_partitioned: std::sync::atomic::AtomicBool::new(true),
+            lease_version: std::sync::atomic::AtomicI64::new(0),
+        })
     }
 
     /// Execute a statement that returns nothing.
@@ -180,6 +188,88 @@ impl ClickHouseStore {
 
     fn table(&self, name: &str) -> String {
         format!("{}.{name}", self.config.database)
+    }
+
+    /// Every holder's newest claim on one lease, and the newest progress any
+    /// of them recorded.
+    async fn lease_claims(&self, job: &str) -> Result<(Vec<crate::Lease>, Option<String>)> {
+        #[derive(Deserialize)]
+        struct Row {
+            holder: String,
+            since: String,
+            expires_at: String,
+        }
+        #[derive(Deserialize)]
+        struct Progress {
+            progress: Option<String>,
+        }
+        // The newest row per holder decides, whether or not the parts have
+        // merged yet, the same rule the document labels read by.
+        let rows: Vec<Row> = self
+            .select(&format!(
+                "SELECT holder, toString(argMax(since, updated_at)) AS since,
+                        toString(argMax(expires_at, updated_at)) AS expires_at
+                 FROM {} WHERE job = {} GROUP BY holder",
+                self.table("leases"),
+                quote(job)
+            ))
+            .await?;
+        let progress: Vec<Progress> = self
+            .select(&format!(
+                "SELECT progress FROM {} WHERE job = {} AND progress IS NOT NULL
+                 ORDER BY updated_at DESC LIMIT 1",
+                self.table("leases"),
+                quote(job)
+            ))
+            .await?;
+        let claims = rows
+            .into_iter()
+            .map(|r| crate::Lease {
+                job: job.to_owned(),
+                holder: r.holder,
+                since: parse_ts(&r.since),
+                expires_at: parse_ts(&r.expires_at),
+                progress: None,
+            })
+            .collect();
+        Ok((claims, progress.into_iter().next().and_then(|p| p.progress)))
+    }
+
+    /// Write one holder's claim on a lease.
+    ///
+    /// The version is strictly increasing within this process, which is the
+    /// only writer of this holder's rows, so a release written in the same
+    /// instant as the claim it withdraws still replaces it.
+    async fn write_lease(
+        &self,
+        job: &str,
+        holder: &str,
+        since: OffsetDateTime,
+        expires_at: OffsetDateTime,
+        progress: Option<&str>,
+        now: OffsetDateTime,
+    ) -> Result<()> {
+        let wanted = to_nanos(now.max(OffsetDateTime::now_utc()));
+        let version = self
+            .lease_version
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |last| Some(wanted.max(last.saturating_add(1))),
+            )
+            .map_or(wanted, |last| wanted.max(last.saturating_add(1)));
+        let row = json!({
+            "job": job, "holder": holder,
+            "since": ts_str(since), "expires_at": ts_str(expires_at),
+            "progress": progress,
+            "updated_at": ts_str(from_nanos(version)),
+        });
+        self.post(
+            &format!("INSERT INTO {} FORMAT JSONEachRow", self.table("leases")),
+            Some(row.to_string()),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Count the rows a predicate selects, then delete them.
@@ -494,6 +584,12 @@ fn parse_ts(s: &str) -> OffsetDateTime {
     time::PrimitiveDateTime::parse(s, &fmt)
         .map(|d| d.assume_utc())
         .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+}
+
+/// A holder's claim, with the progress the lease carries across holders.
+fn lease_with(mut lease: crate::Lease, progress: Option<String>) -> crate::Lease {
+    lease.progress = progress;
+    lease
 }
 
 fn json_text(v: &Option<Value>) -> String {
@@ -2808,6 +2904,57 @@ impl Store for ClickHouseStore {
             .into_iter()
             .map(|r| DocumentLabel { id: r.id, label: r.label, version: r.version })
             .collect())
+    }
+
+    async fn claim_lease(&self, c: &crate::LeaseClaim<'_>) -> Result<crate::Lease> {
+        let (claims, progress) = self.lease_claims(c.job).await?;
+        let carried = c.progress.map(str::to_owned).or(progress.clone());
+        let expires = c.now + c.ttl;
+        match crate::lease_winner(&claims, c.now) {
+            // Somebody else holds it, or stands first for it. Nothing is
+            // written, so a replica that is not the holder never adds a live
+            // row for the others to weigh.
+            Some(w) if w.holder != c.holder => Ok(lease_with(w.clone(), progress)),
+            // This replica is first: a renewal, or a candidacy written at an
+            // earlier claim. Either way it keeps its start.
+            Some(w) => {
+                let since = w.since;
+                self.write_lease(c.job, c.holder, since, expires, carried.as_deref(), c.now)
+                    .await?;
+                Ok(crate::Lease {
+                    job: c.job.to_owned(),
+                    holder: c.holder.to_owned(),
+                    since,
+                    expires_at: expires,
+                    progress: carried,
+                })
+            }
+            // Free. With no compare-and-set, a replica that wrote a claim and
+            // read it straight back could miss a rival's claim written in
+            // between, and both would run. So the claim is a candidacy and is
+            // not granted now: by the next claim every candidate's row is
+            // there to read, every replica applies the same rule to the same
+            // rows, and only the first candidate is granted.
+            None => {
+                self.write_lease(c.job, c.holder, c.now, expires, carried.as_deref(), c.now)
+                    .await?;
+                Ok(crate::Lease {
+                    job: c.job.to_owned(),
+                    holder: c.holder.to_owned(),
+                    since: c.now,
+                    expires_at: c.now,
+                    progress: carried,
+                })
+            }
+        }
+    }
+
+    async fn release_lease(&self, job: &str, holder: &str, now: OffsetDateTime) -> Result<()> {
+        let (claims, progress) = self.lease_claims(job).await?;
+        let Some(held) = claims.iter().find(|l| l.holder == holder && l.expires_at > now) else {
+            return Ok(());
+        };
+        self.write_lease(job, holder, held.since, now, progress.as_deref(), now).await
     }
 
     async fn record_audit(&self, event: &AuditEvent) -> Result<()> {
