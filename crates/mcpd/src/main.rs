@@ -569,6 +569,9 @@ enum Command {
     /// Write a price book from a model catalogue, or show what a model is
     /// priced at.
     Prices(prices::Args),
+    /// Compare two experiments on a running daemon. Exits 1 on a regression,
+    /// so a CI job can gate a deploy on it.
+    Eval(eval_cli::Args),
 }
 
 #[tokio::main]
@@ -582,6 +585,11 @@ async fn main() -> Result<()> {
     // tracing events inside the server are no-ops rather than corruption.
     if let Some(Command::Mcp(args)) = &cli.command {
         return mcp::run(args, &cli.project).await;
+    }
+    // A client of a running daemon, like `mcp`: it reads no config and opens
+    // no store, and its output is the comparison, not log lines.
+    if let Some(Command::Eval(args)) = &cli.command {
+        return eval_cli::run(args, &cli.project).await;
     }
 
     let filter = EnvFilter::try_from_env("MCPD_LOG")
@@ -1667,6 +1675,7 @@ async fn shutdown_signal() {
 
 mod demo;
 mod doctor;
+mod eval_cli;
 mod mcp;
 mod prices;
 
