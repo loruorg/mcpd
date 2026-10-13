@@ -14,8 +14,10 @@ use mcpd_core::redact::Redactor;
 use mcpd_core::sampling::Policy;
 use mcpd_core::*;
 use mcpd_server::pipeline::Intake;
+use mcpd_server::AppState;
 use mcpd_store::{Batch, Store};
 use serde_json::json;
+use std::sync::Arc;
 use time::{Duration, OffsetDateTime};
 
 fn corr(project: &str, session: &str) -> Correlation {
@@ -464,6 +466,185 @@ pub async fn seed(
 
     let n = batch.len();
     store.ingest(batch).await?;
+    Ok(n)
+}
+
+/// One theme's sentence, with its weight at the start of the noted window and
+/// at the end of it. The pass groups notes by shared wording, and a writer
+/// prompted the same way tends to repeat itself, so each theme here is one
+/// sentence written about many runs.
+type Mix = &'static [(&'static str, f64, f64)];
+
+/// What the demo customers wanted. Refunds rise through the window, address
+/// changes fall away, and cancellations only start part of the way through.
+const GOALS: Mix = &[
+    ("the customer wants a refund because their parcel arrived late", 0.15, 0.45),
+    ("the customer wants to know where their parcel is and why tracking has not moved", 0.35, 0.25),
+    ("the customer wants to change the delivery address on an open order", 0.4, 0.05),
+    ("the customer wants to cancel their subscription before the next renewal", -0.25, 0.35),
+];
+
+/// The tone of the same messages. Frustration rises with the late parcels.
+const TONES: Mix = &[
+    ("the customer is frustrated and says they have waited too long for an answer", 0.2, 0.5),
+    ("the customer is polite and patient and thanks the agent for the help", 0.5, 0.3),
+    ("the customer is confused about a charge on their card they do not recognise", 0.3, 0.2),
+];
+
+/// What the agent did about it.
+const BEHAVIOURS: Mix = &[
+    ("the agent looked up the order and gave the customer a tracking update", 0.45, 0.3),
+    ("the agent offered a refund to the original payment method and confirmed it", 0.2, 0.4),
+    (
+        "the agent handed the conversation to a human because it could not verify the account",
+        0.35,
+        0.3,
+    ),
+];
+
+/// One-off goals that match nothing else, so a stage has some noise in it, as
+/// real traffic does.
+const ODD_ONES: &[&str] = &[
+    "the customer asked whether the warehouse is open on bank holidays",
+    "the customer wanted a gift card balance quoted in euros",
+    "a question about recycling the packaging",
+    "the customer wanted the invoice reissued to a company name",
+    "the customer asked for a poem about the delivery van",
+    "the customer wanted to know if the jacket comes in a longer fit",
+    "the customer asked how to add a second card to the account",
+    "the customer wanted a parcel held at the depot over the weekend",
+];
+
+/// A small deterministic generator, so every `mcpd demo` seeds the same notes.
+struct Dice(u64);
+
+impl Dice {
+    /// A number in `[0, 1)`.
+    #[allow(clippy::cast_precision_loss)]
+    fn roll(&mut self) -> f64 {
+        // xorshift64*: enough to spread a few hundred picks, with no dependency.
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        (self.0.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// One theme's sentence, weighted by how far through the window `f` is.
+    fn pick(&mut self, mix: Mix, f: f64) -> &'static str {
+        let weights: Vec<f64> = mix.iter().map(|(_, a, b)| (a + (b - a) * f).max(0.0)).collect();
+        let mut left = self.roll() * weights.iter().sum::<f64>();
+        let mut chosen = mix.len() - 1;
+        for (i, w) in weights.iter().enumerate() {
+            if left < *w {
+                chosen = i;
+                break;
+            }
+            left -= w;
+        }
+        mix[chosen].0
+    }
+}
+
+/// How many runs of the support agent carry notes.
+const NOTED_RUNS: usize = 180;
+/// How far back the noted runs reach, in hours.
+const NOTED_HOURS: i64 = 16;
+/// When each clustering pass ran, in hours before now. Four passes give each
+/// theme a short history, and the mix of goals moves between them.
+const PASSES: [i64; 4] = [9, 6, 3, 0];
+
+/// Runs of the support agent with aspect notes about each, then four
+/// clustering passes over them, so the themes screen has snapshots, a history
+/// and a flow to show. Written through the ingest path and the same pass the
+/// daemon's timer runs, so the screen shows what a deployment with notes would
+/// see. Returns how many signals were stored, or zero when the storage backend
+/// holds no theme tables.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+pub async fn seed_aspects(state: &Arc<AppState>, project: &str) -> Result<usize> {
+    if !state.store.capabilities().theme_analysis {
+        return Ok(0);
+    }
+    let now = OffsetDateTime::now_utc();
+    let first = now - Duration::hours(NOTED_HOURS);
+    let step = Duration::hours(NOTED_HOURS) / NOTED_RUNS as f64;
+    let mut dice = Dice(0x6d63_7064_6465_6d6f);
+    let mut odd = 0;
+    let mut batch = Batch::default();
+
+    for i in 0..NOTED_RUNS {
+        let f = i as f64 / NOTED_RUNS as f64;
+        let start = first + step * i as f64;
+        let trace = format!("{:032x}", 0x5eed_0000_u128 + i as u128);
+        let session = format!("sess-noted-{i}");
+        // Each odd one is used once, so it stays noise rather than recurring.
+        let goal = match ODD_ONES.get(odd) {
+            Some(text) if dice.roll() < 0.05 => {
+                odd += 1;
+                *text
+            }
+            _ => dice.pick(GOALS, f),
+        };
+        let tone = dice.pick(TONES, f);
+        let behaviour = dice.pick(BEHAVIOURS, f);
+        let failed = dice.roll() < 0.12;
+
+        let mut root = span(
+            &trace,
+            &format!("{:016x}", 0x5eed_0000_u64 + i as u64),
+            None,
+            "support_agent",
+            SpanKind::AgentRun,
+            start,
+            1400 + (dice.roll() * 3000.0) as i64,
+            project,
+            &session,
+        );
+        root.received_at = start;
+        root.entity_kind = Some(EntityKind::Agent);
+        root.entity_name = Some("support_agent".to_owned());
+        root.input = Some(json!({ "summary": goal }));
+        if failed {
+            root.status = SpanStatus::Error;
+            root.error = Some(SpanError {
+                message: "the courier API timed out after 10 seconds".to_owned(),
+                kind: Some("TimeoutError".to_owned()),
+                stack: None,
+                domain: Some("tool".to_owned()),
+                retryable: Some(true),
+                details: None,
+            });
+        }
+        batch.spans.push(root);
+
+        let written = start + Duration::minutes(2);
+        for (aspect, text) in [("goal", goal), ("sentiment", tone), ("behaviour", behaviour)] {
+            batch.aspect_notes.push(AspectNote {
+                note_id: format!("demo-{aspect}-{i}"),
+                trace_id: trace.clone(),
+                aspect: aspect.to_owned(),
+                text: text.to_owned(),
+                definition_version: 1,
+                model: Some("gpt-4o-mini".to_owned()),
+                created_at: written,
+                correlation: corr(project, &session),
+            });
+        }
+    }
+
+    // The runs first and their notes after, in two writes: a note is filed
+    // under the entity of its run, so the run has to be stored before it.
+    let intake = Intake::new(&state.redactor, &state.price_book, &state.config.sampling);
+    let mut notes =
+        Batch { aspect_notes: std::mem::take(&mut batch.aspect_notes), ..Batch::default() };
+    intake.prepare(&mut batch);
+    intake.prepare(&mut notes);
+    let n = batch.len() + notes.len();
+    state.store.ingest(batch).await?;
+    state.store.ingest(notes).await?;
+
+    for hours in PASSES {
+        mcpd_server::aspects::run_once(state, now - Duration::hours(hours)).await?;
+    }
     Ok(n)
 }
 

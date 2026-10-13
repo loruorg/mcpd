@@ -16,10 +16,12 @@ from __future__ import annotations
 import asyncio
 import atexit
 import dataclasses
+import json
 import logging
 import math
 import os
 import threading
+import urllib.parse
 import weakref
 from enum import Enum
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
@@ -36,6 +38,10 @@ from ._generated import (
     LogListResponse,
     MetricKind,
     MetricSeriesResponse,
+    CreatePromptRequest,
+    Prompt,
+    PromptKind,
+    PromptLabelRequest,
     ScoreListResponse,
     ScoreSource,
     SpanKind,
@@ -57,11 +63,12 @@ from .context import (
     parse_traceparent,
 )
 from .logs import encode_fields, meets_level, parse_log_level
+from .prompts import PromptCache, fallback_prompt
 from .queue import BoundedQueue, Throttle
 from .runs import DefinitionsApi, EventsApi, RunsApi, StepsApi
 from .sinks import Sink, TransportSink
 from .span import Span
-from .transport import Transport, TransportError, decode, encode_params
+from .transport import Transport, TransportError, decode, encode, encode_params
 
 __all__ = ["Mcpd", "Stats"]
 
@@ -287,6 +294,9 @@ class Mcpd:
         self.runs = RunsApi(self._transport, self.project)
         self.events = EventsApi(self._transport, self.project)
         self.steps = StepsApi(self._transport, self.project)
+        #: Prompts fetched by `get_prompt`, per client so two clients for two
+        #: projects never serve each other's copies.
+        self._prompts = PromptCache()
 
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
@@ -951,8 +961,11 @@ class Mcpd:
                     thread_id: Optional[str] = None, user_id: Optional[str] = None,
                     environment: Optional[str] = None, model: Optional[str] = None,
                     from_: Optional[Any] = None, to: Optional[Any] = None,
-                    min_duration_ms: Optional[int] = None, min_cost: Optional[float] = None,
-                    has_score: Optional[str] = None, score_below: Optional[float] = None,
+                    min_duration_ms: Optional[int] = None, max_duration_ms: Optional[int] = None,
+                    min_cost: Optional[float] = None, max_cost: Optional[float] = None,
+                    min_tokens: Optional[int] = None, has_score: Optional[str] = None,
+                    score_below: Optional[float] = None, score_above: Optional[float] = None,
+                    has_feedback: Optional[bool] = None,
                     sort: Optional[str] = None, order: Optional[str] = None,
                     limit: Optional[int] = None, cursor: Optional[str] = None) -> TraceListResponse:
         """A page of runs. `from_`/`to` take a datetime or a shorthand like `-1h`."""
@@ -960,9 +973,12 @@ class Mcpd:
             "project": project or self.project, "q": q, "status": status, "kind": kind,
             "name": name, "tags": tags, "session_id": session_id, "thread_id": thread_id,
             "user_id": user_id, "environment": environment, "model": model, "from_": from_,
-            "to": to, "min_duration_ms": min_duration_ms, "min_cost": min_cost,
-            "has_score": has_score, "score_below": score_below, "sort": sort, "order": order,
-            "limit": limit, "cursor": cursor,
+            "to": to, "min_duration_ms": min_duration_ms, "max_duration_ms": max_duration_ms,
+            "min_cost": min_cost, "max_cost": max_cost, "min_tokens": min_tokens,
+            "has_score": has_score, "score_below": score_below, "score_above": score_above,
+            # A bool, so `_param` writes `true` or `false`, the only values the daemon reads.
+            "has_feedback": None if has_feedback is None else bool(has_feedback),
+            "sort": sort, "order": order, "limit": limit, "cursor": cursor,
         }))
 
     def get_trace(self, trace_id: str, include: Optional[Union[str, Sequence[str]]] = None,
@@ -987,6 +1003,7 @@ class Mcpd:
                    kind: Optional[Union[SpanKind, str]] = None,
                    status: Optional[Union[SpanStatus, str]] = None, name: Optional[str] = None,
                    model: Optional[str] = None, trace_id: Optional[str] = None,
+                   prompt: Optional[str] = None, prompt_version: Optional[int] = None,
                    from_: Optional[Any] = None, to: Optional[Any] = None,
                    min_duration_ms: Optional[int] = None, sort: Optional[str] = None,
                    order: Optional[str] = None, limit: Optional[int] = None,
@@ -994,7 +1011,8 @@ class Mcpd:
         """A page of steps, across runs."""
         return decode(SpanListResponse, self._transport.get("/v1/api/spans", {
             "project": project or self.project, "q": q, "kind": kind, "status": status,
-            "name": name, "model": model, "trace_id": trace_id, "from_": from_, "to": to,
+            "name": name, "model": model, "trace_id": trace_id, "prompt": prompt,
+            "prompt_version": prompt_version, "from_": from_, "to": to,
             "min_duration_ms": min_duration_ms, "sort": sort, "order": order, "limit": limit,
             "cursor": cursor,
         }))
@@ -1068,6 +1086,97 @@ class Mcpd:
             "bucket": bucket,
         }))
 
+    # ------------------------------------------------------------------- prompts
+
+    def get_prompt(self, name: str, *, label: Optional[str] = None,
+                   version: Optional[int] = None, cache_ttl: float = 60.0,
+                   fallback: Optional[Union[str, Sequence[Any]]] = None,
+                   project: Optional[str] = None) -> Prompt:
+        """One version of a prompt: by `label`, by `version`, or `production`.
+
+        With neither selector it asks for the `production` label and, when no
+        version carries it, takes the latest. A copy younger than `cache_ttl`
+        seconds is served with no request. When a fetch fails, an older copy is
+        served however old, then `fallback` (a template or a list of
+        messages), and only then does the fetch error reach the caller.
+        """
+        if label is not None and version is not None:
+            raise ValueError("get_prompt takes a label or a version, not both")
+        if fallback is not None and not isinstance(fallback, (str, list, tuple)):
+            raise TypeError("a prompt fallback is a template string or a list of messages")
+        project = project or self.project
+        selector = (("label", label) if label is not None
+                    else ("version", int(version)) if version is not None  # type: ignore[arg-type]
+                    else ("default",))
+        key = (project, name, selector)
+        cached = self._prompts.get(key)
+        if cached is not None and cache_ttl > 0 and self._prompts.clock() - cached[0] < cache_ttl:
+            return cached[1]
+        try:
+            prompt = self._fetch_prompt(project, name, label, version)
+        except Exception as exc:  # noqa: BLE001 - any failure falls back the same way
+            if cached is not None:
+                if self._prompts.first_failure(key):
+                    log.warning("mcpd: could not refresh prompt %r, serving the copy fetched "
+                                "earlier: %s", name, exc)
+                return cached[1]
+            if fallback is not None:
+                return fallback_prompt(name, project, fallback)
+            raise
+        self._prompts.put(key, prompt)
+        return prompt
+
+    def _fetch_prompt(self, project: str, name: str, label: Optional[str],
+                      version: Optional[int]) -> Prompt:
+        path = f"/v1/api/prompts/{_segment(name)}"
+        if label is None and version is None:
+            # A prompt nobody has labelled yet still has to work, so a missing
+            # `production` falls through to the latest version.
+            try:
+                return decode(Prompt, self._transport.get(
+                    path, {"project": project, "label": "production"}))
+            except TransportError as exc:
+                if exc.status != 404:
+                    raise
+            return decode(Prompt, self._transport.get(path, {"project": project}))
+        return decode(Prompt, self._transport.get(
+            path, {"project": project, "label": label, "version": version}))
+
+    def create_prompt(self, name: str, *, kind: Optional[Union[PromptKind, str]] = None,
+                      template: Optional[str] = None, messages: Optional[Sequence[Any]] = None,
+                      config: Any = None, note: Optional[str] = None,
+                      labels: Optional[Sequence[str]] = None,
+                      project: Optional[str] = None) -> Prompt:
+        """Store a version of a prompt and return it.
+
+        A body identical to the latest version stores nothing and returns that
+        version, so a deploy can post its prompts on every start.
+        """
+        if isinstance(kind, str) and not isinstance(kind, PromptKind):
+            kind = PromptKind(kind)
+        body = CreatePromptRequest(
+            name=name, kind=kind, template=template,
+            messages=list(messages) if messages is not None else None, config=config,
+            note=note, labels=list(labels) if labels is not None else None,
+        )
+        query = encode_params({"project": project or self.project})
+        return decode(Prompt, self._transport.post(f"/v1/api/prompts?{query}", body))
+
+    def set_prompt_label(self, name: str, label: str, version: int, *,
+                         project: Optional[str] = None) -> Prompt:
+        """Point `label` at `version`: moving `production` releases or rolls back.
+
+        The read cache is left alone, so running agents see the move within
+        their `cache_ttl`.
+        """
+        query = encode_params({"project": project or self.project})
+        body = json.dumps(encode(PromptLabelRequest(version=int(version))),
+                          separators=(",", ":")).encode("utf-8")
+        return decode(Prompt, self._transport.request(
+            "PUT", f"/v1/api/prompts/{_segment(name)}/labels/{_segment(label)}?{query}",
+            body=body, headers={"content-type": "application/json"},
+        ))
+
     def health(self) -> HealthStatus:
         """Whether the server is alive, and which spec version it implements."""
         return decode(HealthStatus, self._transport.get("/healthz"))
@@ -1111,6 +1220,11 @@ def _encodable(signal: str, record: Any) -> Any:
             changes["metadata"] = encode_fields(record.metadata)
         return dataclasses.replace(record, **changes)
     return record
+
+
+def _segment(value: str) -> str:
+    # A prompt name may contain `/`, which must stay inside one path segment.
+    return urllib.parse.quote(str(value), safe="")
 
 
 def _metric_filter(filter: Optional[Mapping[str, Any]]) -> Optional[str]:

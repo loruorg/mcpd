@@ -1022,8 +1022,21 @@ async fn a_pass_over_the_floor_writes_a_snapshot_the_routes_can_read() {
     let snapshots = res.json()["snapshots"].as_array().expect("snapshots").clone();
     assert_eq!(snapshots.len(), 1, "one pass writes one snapshot: {}", res.text());
     let snapshot = snapshots[0]["snapshot"].clone();
-    assert_eq!(snapshot["aspects"], json!(["goal"]));
-    assert_eq!(snapshot["note_count"], json!(60));
+    // The pass derives the outcome notes before it clusters, so the same pass
+    // covers them beside the sixty goal notes the fixture wrote.
+    assert_eq!(snapshot["aspects"], json!(["goal", "outcome"]));
+    let res = get(
+        &app,
+        &format!("/v1/api/aspects/progress?project=default&entity_kind=agent&entity_name={AGENT}"),
+    )
+    .await;
+    let outcome_notes = res.json()["aspects"]
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["aspect"] == json!("outcome")).cloned())
+        .and_then(|r| r["note_count"].as_u64())
+        .expect("an outcome row");
+    assert!(outcome_notes > 0, "the pass wrote outcome notes: {}", res.text());
+    assert_eq!(snapshot["note_count"], json!(60 + outcome_notes));
     assert_eq!(snapshot["capped"], json!(false));
     let snapshot_id = snapshot["snapshot_id"].as_str().expect("an id").to_owned();
 
@@ -1190,6 +1203,18 @@ async fn the_daemon_fills_the_outcome_aspect_with_no_model_anywhere() {
     mcpd_server::aspects::run_once(&state, OffsetDateTime::now_utc()).await.expect("a second pass");
     let res = get(&app, &format!("/v1/api/traces/{}/aspects", run_id(1))).await;
     assert_eq!(res.json()["notes"].as_array().map(Vec::len), Some(1), "{}", res.text());
+
+    // And the notes reach a snapshot. A derived note stamped with the pass's
+    // own time sat outside the window that pass reads, and every later pass
+    // moved it again, so the outcome aspect never left `processing`.
+    let res =
+        get(&app, &format!("/v1/api/aspects/progress?entity_kind=agent&entity_name={AGENT}")).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.text());
+    let outcome = res.json()["aspects"]
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["aspect"] == json!("outcome")).cloned())
+        .expect("an outcome row");
+    assert_eq!(outcome["readiness"], json!("ready"), "{}", res.text());
 }
 
 // -------------------------------------------------------------- plumbing ---

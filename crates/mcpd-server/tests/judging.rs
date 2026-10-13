@@ -470,3 +470,223 @@ async fn a_rubric_with_no_judge_configured_is_refused_with_the_fix() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.to_string().contains("judge"), "{body}");
 }
+
+// ----------------------------------------------- scorer runs, definitions ---
+
+async fn get(app: &Router, uri: &str) -> (StatusCode, Value) {
+    let req = Request::builder().method("GET").uri(uri).body(Body::empty()).expect("build");
+    let res = app.clone().oneshot(req).await.expect("the router answered");
+    let status = res.status();
+    let bytes = res.into_body().collect().await.expect("read the body").to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+/// A judged score names the run of its own model call, and that run holds
+/// the prompt, the reply and a link back to the run it scored.
+#[tokio::test]
+async fn a_judged_score_points_at_the_scorer_run_that_produced_it() {
+    let (url, _judge) = judge(&[]).await;
+    let (app, state, ids) = daemon(judge_config(&url, 5), 30, 1).await;
+    let (status, body) = send(&app, "/v1/api/score", &score_request(&ids)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let scored = state
+        .store
+        .list_scores(&ScoreQuery { project: "default".into(), limit: 10, ..Default::default() })
+        .await
+        .expect("scores");
+    let run = scored.items[0].score_trace_id.clone().expect("the score names its scorer run");
+    let detail = state
+        .store
+        .get_trace("default", &run, &mcpd_store::Include::default())
+        .await
+        .expect("the scorer run is stored");
+    let root = &detail.spans[0];
+    assert_eq!(root.kind, mcpd_core::SpanKind::ScorerRun);
+    assert_eq!(root.entity_name.as_deref(), Some("relevance"));
+    assert!(root
+        .input
+        .as_ref()
+        .is_some_and(|i| i["prompt"].as_str().is_some_and(|p| p.contains("where is my order"))));
+    assert!(root.output.as_ref().is_some_and(|o| o["reply"].as_str().is_some()));
+    let link = root.links.as_ref().and_then(|l| l.first()).expect("a link to the scored run");
+    assert_eq!(link.trace_id, ids[0]);
+    assert_eq!(root.model.as_deref(), Some("a-judge"));
+}
+
+/// A judge definition grades with its own prompt, under its own id, and its
+/// version is on the score.
+#[tokio::test]
+async fn a_stored_judge_definition_grades_with_its_own_prompt() {
+    let (url, _judge) = judge(&[]).await;
+    let (app, state, ids) = daemon(judge_config(&url, 5), 30, 1).await;
+    let (status, def) = send(
+        &app,
+        "/v1/api/scorer-definitions",
+        &json!({
+            "id": "ships_soon",
+            "kind": "judge",
+            "description": "The answer gives a shipping date.",
+            "prompt": "The answer says when the order ships."
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{def}");
+    assert_eq!(def["version"], 1);
+
+    let (status, body) =
+        send(&app, "/v1/api/score", &json!({ "trace_ids": ids, "scorers": ["ships_soon"] })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["scores"][0]["scorer_id"], "ships_soon");
+    assert_eq!(body["scores"][0]["scorer_version"], "1:a-judge");
+    let run = body["scores"][0]["score_trace_id"].as_str().expect("a scorer run").to_owned();
+    let detail = state
+        .store
+        .get_trace("default", &run, &mcpd_store::Include::default())
+        .await
+        .expect("stored");
+    let prompt =
+        detail.spans[0].input.as_ref().map(|i| i["prompt"].to_string()).unwrap_or_default();
+    assert!(prompt.contains("says when the order ships"), "{prompt}");
+
+    let (status, _) =
+        send(&app, "/v1/api/score", &json!({ "trace_ids": ids, "scorers": ["ships_soon@2"] }))
+            .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "version 2 does not exist");
+
+    let (_, catalogue) = get(&app, "/v1/api/scorers?project=default").await;
+    let row = catalogue
+        .as_array()
+        .and_then(|a| a.iter().find(|s| s["id"] == "ships_soon"))
+        .cloned()
+        .expect("the definition is in the project's catalogue");
+    assert_eq!(row["kind"], "custom");
+}
+
+/// A code definition runs its code scorer with the settings it was stored
+/// with, and refuses settings that scorer could never use.
+#[tokio::test]
+async fn a_code_definition_runs_with_its_own_settings() {
+    let (url, _judge) = judge(&[]).await;
+    let (app, _state, ids) = daemon(judge_config(&url, 5), 30, 1).await;
+    let (status, body) = send(
+        &app,
+        "/v1/api/scorer-definitions",
+        &json!({
+            "id": "mentions_tomorrow",
+            "kind": "code",
+            "description": "The answer says tomorrow.",
+            "builtin": "keyword_coverage",
+            "config": { "keywords": ["tomorrow"] }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = send(
+        &app,
+        "/v1/api/score",
+        &json!({ "trace_ids": ids, "scorers": ["mentions_tomorrow"], "dry_run": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["scores"][0]["scorer_id"], "mentions_tomorrow");
+    assert_eq!(body["scores"][0]["value"], 1.0);
+    assert_eq!(body["scores"][0]["scorer_version"], "1");
+
+    let (status, _) = send(
+        &app,
+        "/v1/api/scorer-definitions",
+        &json!({ "id": "empty", "kind": "code", "description": "x", "builtin": "keyword_coverage" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a code scorer that needs settings and has none");
+    let (status, _) = send(
+        &app,
+        "/v1/api/scorer-definitions",
+        &json!({ "id": "answered", "kind": "judge", "description": "x", "prompt": "y" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a shipped id cannot be taken");
+}
+
+/// Live scoring scores the finished runs an enabled rule matches, once each.
+#[tokio::test]
+async fn live_scoring_scores_each_matching_finished_run_once() {
+    let (url, _judge) = judge(&[]).await;
+    let (app, state, _) = daemon(judge_config(&url, 5), 30, 0).await;
+    let now = time::OffsetDateTime::now_utc();
+    let fmt = |t: time::OffsetDateTime| {
+        t.format(&time::format_description::well_known::Rfc3339).expect("a timestamp")
+    };
+    let span = |id: u32, name: &str, ended: bool| {
+        let mut s = json!({
+            "trace_id": format!("{id:032x}"),
+            "span_id": format!("{id:016x}"),
+            "name": name,
+            "kind": "agent_run",
+            "status": "ok",
+            "start_time": fmt(now - time::Duration::seconds(60)),
+            "is_root": true,
+            "is_event": false,
+            "input": "where is my order?",
+            "output": "it ships tomorrow",
+            "correlation": { "project": "default" },
+            "received_at": fmt(now)
+        });
+        if ended {
+            s["end_time"] = Value::String(fmt(now - time::Duration::seconds(30)));
+        }
+        s
+    };
+    let (status, body) = send(
+        &app,
+        "/v1/ingest",
+        &json!({ "spans": [span(1, "checkout", true), span(2, "checkout", false), span(3, "refund", true)] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, rule) = send(
+        &app,
+        "/v1/api/evaluation-rules",
+        &json!({ "id": "checkout-quality", "scorers": ["answered", "relevance"], "name": "checkout" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rule}");
+    assert_eq!(rule["enabled"], false, "a rule is stored off unless it says otherwise");
+
+    let memory = mcpd_server::live::memory();
+    let epoch = time::OffsetDateTime::UNIX_EPOCH;
+    let n = mcpd_server::live::pass(&state, &memory, epoch, now).await.expect("a pass");
+    assert_eq!(n, 0, "a disabled rule scores nothing");
+
+    let (status, _) = send(
+        &app,
+        "/v1/api/evaluation-rules",
+        &json!({ "id": "checkout-quality", "scorers": ["answered", "relevance"], "name": "checkout", "enabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let n = mcpd_server::live::pass(&state, &memory, epoch, now).await.expect("a pass");
+    assert_eq!(n, 2, "one finished checkout run, two scorers");
+    let again = mcpd_server::live::pass(&state, &memory, epoch, now).await.expect("a pass");
+    assert_eq!(again, 0, "a run is scored once per rule");
+
+    let scores = state
+        .store
+        .list_scores(&ScoreQuery { project: "default".into(), limit: 10, ..Default::default() })
+        .await
+        .expect("scores");
+    assert!(scores.items.iter().all(|s| s.source == mcpd_core::ScoreSource::Live));
+    assert!(scores
+        .items
+        .iter()
+        .all(|s| s.trace_id.as_deref() == Some(format!("{:032x}", 1).as_str())));
+
+    let (status, _) = send(
+        &app,
+        "/v1/api/evaluation-rules",
+        &json!({ "id": "broken", "scorers": ["no_such_scorer"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a rule that could never run is refused");
+}

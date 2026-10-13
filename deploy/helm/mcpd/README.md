@@ -37,7 +37,7 @@ with the same `--set` flags.
 ## An external store, and the run surface
 
 `externalStore.type` (`postgres` or `clickhouse`) sends the signals to a
-database. The run store is still an embedded SQLite file, so with
+database. The run store is an embedded SQLite file by default, so with
 `runs.enabled` true (the default) the pod keeps the run store on the volume and
 runs as one replica:
 
@@ -48,17 +48,27 @@ helm install mcpd ./deploy/helm/mcpd -n mcpd --create-namespace \
   --set externalStore.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd
 ```
 
-To run several pods, turn the run surface off. Nothing is then kept on disk,
-the chart drops the claim, and the rolling update comes back:
+To run several pods with the run surface, keep the runs in Postgres as well.
+It can be the same database. Nothing is then kept on disk, the chart drops the
+claim, and the rolling update comes back:
+
+```shell
+  --set runs.store=postgres \
+  --set runs.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \
+  --set replicaCount=3
+```
+
+Or turn the run surface off, with the same effect on the pods:
 
 ```shell
   --set runs.enabled=false --set replicaCount=3
 ```
 
 To keep the connection string out of your values, put it in a Secret you
-manage under `postgres-url` (or `clickhouse-url` and `clickhouse-password`),
-beside the keys, and name it in `keys.existingSecret`. Set
-`externalStore.type` all the same: the type, not the URL, selects the backend.
+manage under `postgres-url` (or `clickhouse-url` and `clickhouse-password`,
+and `runs-postgres-url` for the run store), beside the keys, and name it in
+`keys.existingSecret`. Set `externalStore.type` and `runs.store` all the same:
+the type, not the URL, selects the backend.
 
 ## The config file
 
@@ -98,8 +108,11 @@ Stores and replicas:
 - `replicaCount` below 1,
 - `replicaCount` above 1 on the embedded store, because an SQLite file has one
   writer,
-- `replicaCount` above 1 with `runs.enabled`, because each pod would hold its
-  own run store,
+- `replicaCount` above 1 with `runs.enabled` and `runs.store` `sqlite`,
+  because each pod would hold its own run store,
+- a `runs.store` other than `sqlite` or `postgres`, `runs.postgresUrl` set
+  while `runs.store` is `sqlite`, and `runs.store` `postgres` with no URL and
+  no `keys.existingSecret` to carry one,
 - `config.runsPath` outside the directory of `config.dataPath`, the only
   writable mount,
 - `config.listen` with no port number after the last colon.

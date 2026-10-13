@@ -1,7 +1,7 @@
 ---
 title: "Monitors"
 description: "The monitors endpoints of the mcpd HTTP API."
-order: 16
+order: 17
 generated: true
 ---
 

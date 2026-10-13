@@ -228,9 +228,36 @@ correlation and errors;
 sensitive can leave on a flush. A span overrides it for itself with
 `capturePayloads` in its start options, in either direction.
 
+## Streamed model calls
+
+Read the provider's stream through `span.recordStream` and every chunk comes
+through unchanged. When the stream ends, throws or is left with a `break`, the
+span gets the time to first token, the text, the tool calls, the usage, the
+response id and the finish reason, as `recordResponse` would record them:
+
+```ts
+for await (const chunk of span.recordStream(stream)) {
+  process.stdout.write(chunk.choices[0]?.delta.content ?? '')
+}
+```
+
 ## Assert what you recorded
 
-A `RecordingSink` replaces the network with memory, so a test reads back the
+`TestClient` from `@mcpd/sdk/testing` is an `Mcpd` that records into memory.
+Pass it to the code under test and read back what it recorded. Each accessor
+flushes first:
+
+```ts
+import { TestClient } from '@mcpd/sdk/testing'
+
+const mcpd = new TestClient()
+await answerQuestion(mcpd)
+
+expect((await mcpd.span('model_call')).usage?.outputTokens).toBe(37)
+expect((await mcpd.trees())[0]?.span.name).toBe('answer_question')
+```
+
+Underneath it is a `RecordingSink`, which you can also pass yourself. A `RecordingSink` replaces the network with memory, so a test reads back the
 spans, logs, metrics, scores and feedback the code under test produced, with no
 server and no port:
 

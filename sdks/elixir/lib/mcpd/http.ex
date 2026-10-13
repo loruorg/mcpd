@@ -85,12 +85,18 @@ defmodule Mcpd.Http do
   the whole body, so a 409 can be read for its reason.
   """
   @spec post_json(String.t(), term(), keyword()) :: {:ok, term()} | {:error, term()}
-  def post_json(url, body, opts \\ []) do
+  def post_json(url, body, opts \\ []), do: send_json(:post, url, body, opts)
+
+  @doc "PUT a JSON body and decode the answer. Not retried, for the reason `post_json/3` gives."
+  @spec put_json(String.t(), term(), keyword()) :: {:ok, term()} | {:error, term()}
+  def put_json(url, body, opts \\ []), do: send_json(:put, url, body, opts)
+
+  defp send_json(method, url, body, opts) do
     payload = body |> :json.encode() |> IO.iodata_to_binary()
     headers = auth_headers(opts[:api_key]) ++ common_headers()
     request = {to_charlist(url), headers, ~c"application/json", payload}
 
-    case request(:post, request, Keyword.put(opts, :keep_body, true)) do
+    case request(method, request, Keyword.put(opts, :keep_body, true)) do
       {:ok, answer} -> decode(answer)
       other -> other
     end

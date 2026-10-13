@@ -185,6 +185,10 @@ defmodule Mcpd.Worker do
     # a counter rather than a message keeps them off the worker's mailbox.
     shed = :counters.new(2, [:write_concurrency])
     :persistent_term.put({__MODULE__, self()}, {config, shed})
+    # The prompt cache lives as long as the client does. A public table read
+    # and written from callers' processes, so a cached prompt never waits on
+    # this mailbox behind a backlog of spans.
+    :persistent_term.put({Mcpd.Prompts, self()}, Mcpd.Prompts.new_cache())
 
     {:ok,
      %State{
@@ -288,6 +292,7 @@ defmodule Mcpd.Worker do
     # up whatever is stopping it.
     finish(state, state.deadline || deadline_after(@deadline))
     :persistent_term.erase({__MODULE__, self()})
+    :persistent_term.erase({Mcpd.Prompts, self()})
     :ok
   end
 

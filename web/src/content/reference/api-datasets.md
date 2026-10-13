@@ -141,3 +141,65 @@ Registers a run of a dataset so its scores can be compared against another versi
 **Authentication:** an API key with `write` scope.
 
 ---
+
+## Score an experiment's runs
+
+<div class="endpoint"><span class="method method--post">POST</span><code>/v1/api/experiments/{experiment_id}/score</code></div>
+
+Runs scorers over every run recorded under the experiment and stores the scores with source `experiment`. A run that names its dataset case in the `mcpd.dataset_item_id` attribute is scored against that case's expected answer, so `exact_match`, `similarity` and the judged rubrics that read `expected` compare each answer with its own case. This is the step an SDK's experiment runner calls after the target has answered every case.
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `experiment_id` | `string` | The experiment. |
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none. |
+
+**Request body:** `ExperimentScoreRequest`
+
+**Response:** `ScoreRunResult`
+
+**Other responses**
+
+| Status | Body | When |
+| --- | --- | --- |
+| `404` | · | No experiment with that id in the project. |
+
+**Authentication:** an API key with `write` scope.
+
+---
+
+## Read an experiment case by case
+
+<div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/experiments/{experiment_id}/results</code></div>
+
+Every run recorded under the experiment with its case, its answer and its scores, and a summary per scorer.
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `experiment_id` | `string` | The experiment. |
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none. |
+
+**Response:** `ExperimentResults`
+
+**Other responses**
+
+| Status | Body | When |
+| --- | --- | --- |
+| `404` | · | No experiment with that id in the project. |
+
+**Authentication:** an API key with `read` scope.
+
+---

@@ -234,6 +234,10 @@ pub enum Builtin {
     AnswerLength,
     /// The answer is JSON that satisfies `json_schema`.
     JsonSchema,
+    /// The run's trajectory: the tools it called against `expected_tools`, as
+    /// `trajectory_match` says to compare them, its step count against
+    /// `max_steps`, and whether it ended with an answer.
+    Trajectory,
 }
 
 impl Builtin {
@@ -263,6 +267,7 @@ impl Builtin {
             Self::ToolNotCalled => "tool_not_called",
             Self::AnswerLength => "answer_length",
             Self::JsonSchema => "json_schema",
+            Self::Trajectory => "trajectory",
         }
     }
 
@@ -292,6 +297,10 @@ impl Builtin {
             Self::ToolNotCalled => "The run called none of the forbidden tools.",
             Self::AnswerLength => "The answer's length is within bounds.",
             Self::JsonSchema => "The answer is JSON that satisfies the schema.",
+            Self::Trajectory => {
+                "The run took the expected tool path in no more than the allowed steps and \
+                 reached an answer."
+            }
         }
     }
 
@@ -319,6 +328,7 @@ impl Builtin {
         Self::ToolNotCalled,
         Self::AnswerLength,
         Self::JsonSchema,
+        Self::Trajectory,
     ];
 
     /// Parse an identifier.
@@ -349,6 +359,7 @@ impl Builtin {
                 | Self::ToolNotCalled
                 | Self::AnswerLength
                 | Self::JsonSchema
+                | Self::Trajectory
         )
     }
 
@@ -378,6 +389,7 @@ impl Builtin {
             Self::ToolNotCalled => &["forbidden_tools"],
             Self::AnswerLength => &["min_chars", "max_chars"],
             Self::JsonSchema => &["json_schema"],
+            Self::Trajectory => &["expected_tools", "max_steps"],
             Self::Answered
             | Self::NoErrors
             | Self::JsonValid
@@ -407,6 +419,9 @@ impl Builtin {
                 }
                 _ => Ok(()),
             },
+            Self::Trajectory => {
+                crate::trajectory::Match::parse(config.trajectory_match.as_deref()).map(|_| ())
+            }
             Self::AnswerLength => match (config.min_chars, config.max_chars) {
                 (Some(a), Some(b)) if a > b => {
                     Err(format!("config.min_chars ({a}) is larger than config.max_chars ({b})"))
@@ -888,6 +903,52 @@ impl Builtin {
                         )
                     },
                 ))
+            }
+
+            Self::Trajectory => {
+                if config.expected_tools.is_empty() && config.max_steps.is_none() {
+                    return None;
+                }
+                let how =
+                    crate::trajectory::Match::parse(config.trajectory_match.as_deref()).ok()?;
+                let root = target.root().map_or("", |r| r.trace_id.as_str());
+                let t = crate::trajectory::trajectory(root, target.spans);
+                // The mean of the parts that were asked for, and whether the
+                // run got to an answer at all, which every trajectory is
+                // judged on.
+                let mut parts: Vec<(f64, String)> = Vec::new();
+                if !config.expected_tools.is_empty() {
+                    let m = crate::trajectory::tool_match(
+                        &config.expected_tools,
+                        &t.tool_sequence,
+                        how,
+                    );
+                    parts.push((
+                        m,
+                        format!(
+                            "tools {:.0}% of the expected path ({}); called: {}",
+                            m * 100.0,
+                            config.trajectory_match.as_deref().unwrap_or("ordered"),
+                            truncate(&t.tool_sequence.join(", "), 200)
+                        ),
+                    ));
+                }
+                if let Some(max) = config.max_steps {
+                    let steps = t.step_count;
+                    let m = if steps <= max { 1.0 } else { f64::from(max) / f64::from(steps) };
+                    parts.push((m, format!("{steps} steps against at most {max}")));
+                }
+                parts.push((
+                    if t.goal_reached { 1.0 } else { 0.0 },
+                    if t.goal_reached {
+                        "reached an answer".to_owned()
+                    } else {
+                        "did not reach an answer".to_owned()
+                    },
+                ));
+                let value = parts.iter().map(|p| p.0).sum::<f64>() / parts.len() as f64;
+                let reason = parts.into_iter().map(|p| p.1).collect::<Vec<_>>().join("; ");
+                Some(Verdict::graded(value, reason))
             }
         }
     }

@@ -1,7 +1,7 @@
 ---
 title: "Operations"
 description: "The operations endpoints of the mcpd HTTP API."
-order: 11
+order: 12
 generated: true
 ---
 

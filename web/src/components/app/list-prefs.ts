@@ -169,6 +169,22 @@ export const COLUMNS: ColumnDef[] = [
     cell: statusCell,
   },
   {
+    id: 'input_preview',
+    label: 'Input',
+    help: 'The start of the root step’s input as text. For a chat, the last thing the user said.',
+    min: 10,
+    max: 28,
+    cell: (t) => text(t.input_preview ?? undefined, 'The root step recorded no input, or none that reads as text.'),
+  },
+  {
+    id: 'output_preview',
+    label: 'Output',
+    help: 'The start of the root step’s output as text.',
+    min: 10,
+    max: 28,
+    cell: (t) => text(t.output_preview ?? undefined, 'The root step recorded no output, or none that reads as text.'),
+  },
+  {
     id: 'duration',
     label: 'Took',
     help: 'Wall clock across the whole run, from the earliest start to the latest end.',
@@ -396,7 +412,18 @@ export const COLUMN_BY_ID = new Map(COLUMNS.map((c) => [c.id, c]))
 /** Columns a reader sees before touching anything. */
 const DEFAULT_HIDDEN = COLUMNS.filter(
   (c) =>
-    !['created', 'name', 'status', 'duration', 'steps', 'models', 'in', 'out', 'cost'].includes(
+    ![
+      'created',
+      'name',
+      'status',
+      'input_preview',
+      'duration',
+      'steps',
+      'models',
+      'in',
+      'out',
+      'cost',
+    ].includes(
       c.id,
     ),
 ).map((c) => c.id)

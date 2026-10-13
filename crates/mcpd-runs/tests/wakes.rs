@@ -6,12 +6,12 @@
 //! whole of its wait, and woke the outbox drain on every one. These tests pin
 //! down which writes wake the claim long-poll and which wake the readers.
 
+mod common;
+
+use common::TestStore;
 use mcpd_runs::model::DefinitionKind;
-use mcpd_runs::store::{DefinitionDocument, RunConfig, RunStore, StartRun};
-use mcpd_runs::SqliteRunStore;
+use mcpd_runs::store::{DefinitionDocument, RunConfig, StartRun};
 use serde_json::json;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -21,28 +21,8 @@ fn t0() -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("a valid instant")
 }
 
-/// Pid plus a per-process stamp, because a recycled pid alone reopens a
-/// previous run's database.
-fn temp_db() -> PathBuf {
-    static N: AtomicU64 = AtomicU64::new(0);
-    static STAMP: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
-    let stamp = STAMP.get_or_init(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    });
-    let dir = std::env::temp_dir().join(format!(
-        "mcpd-runs-wakes-{}-{stamp}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    dir.join("runs.db")
-}
-
-async fn store() -> SqliteRunStore {
-    let store = SqliteRunStore::open(temp_db(), RunConfig::default()).expect("open");
-    store.migrate().await.expect("migrate");
+async fn store() -> TestStore {
+    let store = TestStore::open(RunConfig::default()).await;
     store
         .put_definition(DefinitionDocument {
             project: "checkout".into(),
@@ -56,7 +36,7 @@ async fn store() -> SqliteRunStore {
     store
 }
 
-async fn start(store: &SqliteRunStore) -> String {
+async fn start(store: &TestStore) -> String {
     store
         .start_run(
             StartRun {
@@ -81,7 +61,7 @@ async fn woke<F: std::future::Future<Output = ()>>(notify: &Arc<Notify>, act: F)
     tokio::time::timeout(Duration::from_millis(50), notified).await.is_ok()
 }
 
-#[tokio::test]
+backend_tests! {
 async fn a_claim_that_leases_nothing_wakes_nobody() {
     let store = store().await;
     let (runnable, changed) = (store.runnable(), store.notify());
@@ -93,8 +73,9 @@ async fn a_claim_that_leases_nothing_wakes_nobody() {
     assert!(!woke(&runnable, idle()).await, "an empty claim woke the claim long-poll");
     assert!(!woke(&changed, idle()).await, "an empty claim woke the readers and the drain");
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn starting_a_run_wakes_a_waiting_worker_and_taking_its_step_does_not() {
     let store = store().await;
     let (runnable, changed) = (store.runnable(), store.notify());
@@ -130,4 +111,5 @@ async fn starting_a_run_wakes_a_waiting_worker_and_taking_its_step_does_not() {
     };
     assert!(!woke(&runnable, beat()).await, "a heartbeat woke the claim long-poll");
     assert!(!woke(&changed, beat()).await, "a heartbeat woke the readers");
+}
 }

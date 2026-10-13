@@ -33,6 +33,8 @@ fn a_trace() -> Trace {
         cost: None,
         model_count: 1,
         tool_count: 2,
+        input_preview: None,
+        output_preview: None,
         tags: Some(vec!["billing".to_owned()]),
         correlation: Correlation {
             project: "shop".to_owned(),

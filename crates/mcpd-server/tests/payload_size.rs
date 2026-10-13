@@ -2,7 +2,8 @@
 //!
 //! mcpd's trace list is light by construction: the stored `Trace` projection
 //! carries no input, no output and no attributes at all, so there is no second
-//! "light" endpoint to add. What there was no answer to is how much that
+//! "light" endpoint to add. Previews are asked for with `preview=true`, which
+//! this does not send. What there was no answer to is how much that
 //! actually saves, and a number copied from another project's documentation is
 //! not an answer about this one.
 //!

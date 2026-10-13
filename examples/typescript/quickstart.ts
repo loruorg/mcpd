@@ -28,6 +28,10 @@ const mcpd = new Mcpd({
 })
 // #endregion init
 
+import { renderPrompt, type McpdSpan } from '@mcpd/sdk'
+import assert from 'node:assert/strict'
+import { TestClient } from '@mcpd/sdk/testing'
+
 // ---------------------------------------------------------------------------
 // The agent
 // ---------------------------------------------------------------------------
@@ -37,6 +41,12 @@ interface Ticket {
   customerId: string
   question: string
 }
+
+/** The answer prompt: stored in mcpd at start, and the fallback if it cannot be read. */
+const ANSWER_MESSAGES = [
+  { role: 'system', content: 'You are a support agent. Be brief and exact.' },
+  { role: 'user', content: '{{question}}\n\nOrder: {{order}}' },
+]
 
 const ORDER_BOOK: Record<string, { status: string; eta: string }> = {
   'A-1042': { status: 'in transit', eta: '2026-09-02' },
@@ -97,50 +107,142 @@ async function lookUpOrder(ticket: Ticket): Promise<{ status: string; eta: strin
   )
 }
 
-/** A model generation: the prompt, the completion, and what it cost. */
+/**
+ * Where a real provider call goes. This is the shape Anthropic answers in.
+ *
+ * The span is passed in so the time to the first token can be marked on it.
+ */
+async function callModel(generation: McpdSpan, order: { status: string; eta: string }) {
+  await pause(40)
+  generation.markFirstToken()
+  mcpd.log('info', 'answered from cache-warm prompt', { cached: true })
+  const answer = `Your order is ${order.status} and should arrive on ${order.eta}.`
+  return {
+    id: 'msg_01',
+    type: 'message',
+    model: 'claude-sonnet-4-5',
+    stop_reason: 'end_turn',
+    content: [{ type: 'text', text: answer }],
+    usage: { input_tokens: 172, cache_read_input_tokens: 640, output_tokens: 37 },
+  }
+}
+
+// #region prompt
+/**
+ * A model generation. Its prompt is stored in mcpd, so a new version ships by
+ * moving the `production` label, with no deploy.
+ */
 async function draftAnswer(
   ticket: Ticket,
   order: { status: string; eta: string },
 ): Promise<string> {
+  // Cached for a minute. When the daemon cannot answer, the last copy is
+  // used, and with no copy the fallback, so an outage never stops an answer.
+  const prompt = await mcpd.getPrompt('support-answer', {
+    label: 'production',
+    fallback: ANSWER_MESSAGES,
+  })
+  const messages = renderPrompt(prompt, {
+    question: ticket.question,
+    order: JSON.stringify(order),
+  })
+
   return await mcpd.withSpan(
     'draft_answer',
     async (generation) => {
-      const prompt = [
-        { role: 'system', content: 'You are a support agent. Be brief and exact.' },
-        { role: 'user', content: `${ticket.question}\n\nOrder: ${JSON.stringify(order)}` },
-      ]
-      generation.setInput(prompt)
-
-      // Where a real provider call goes. This is the shape Anthropic answers in.
-      await pause(40)
-      generation.markFirstToken()
-      const answer = `Your order is ${order.status} and should arrive on ${order.eta}.`
-      const response = {
-        id: 'msg_01',
-        type: 'message',
-        model: 'claude-sonnet-4-5',
-        stop_reason: 'end_turn',
-        content: [{ type: 'text', text: answer }],
-        usage: { input_tokens: 172, cache_read_input_tokens: 640, output_tokens: 37 },
-      }
-
+      // Links the call to its prompt version, so spans can be read per version.
+      generation.setPrompt(prompt)
+      generation.setInput(messages)
+      const response = await callModel(generation, order)
+      const answer = response.content[0]?.text ?? ''
       generation.setOutput(answer)
       // The model, the token counts mcpd prices, the response id and the
       // finish reason, read from the response in one call.
       generation.recordResponse(response)
-
-      mcpd.log('info', 'answered from cache-warm prompt', { cached: true })
       return answer
     },
     { kind: 'model_generation', entityKind: 'model', entityName: 'answer_writer' },
   )
 }
+// #endregion prompt
+
+interface ChatChunk {
+  id: string
+  model: string
+  choices: Array<{ index: number; delta: { content?: string }; finish_reason?: string }>
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+}
+
+/** Stand-in for a provider's stream, in the shape OpenAI streams chat completions. */
+async function* fakeChatStream(text: string): AsyncGenerator<ChatChunk> {
+  const base = { id: 'chatcmpl-01', model: 'gpt-4o-mini' }
+  for (const word of text.split(/(?= )/)) {
+    await pause(5)
+    yield { ...base, choices: [{ index: 0, delta: { content: word } }] }
+  }
+  yield { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }
+  const usage = { prompt_tokens: 24, completion_tokens: 6, total_tokens: 30 }
+  yield { ...base, choices: [], usage }
+}
+
+// #region stream
+/**
+ * A streamed model call. Read the wrapper instead of the provider's stream:
+ * every chunk comes through unchanged, and when the stream ends the span gets
+ * the time to first token, the text, the usage and the finish reason.
+ */
+async function streamAnswer(client: Mcpd, question: string): Promise<string> {
+  return await client.withSpan(
+    'stream_answer',
+    async (generation) => {
+      generation.setInput([{ role: 'user', content: question }])
+      // Where `await openai.chat.completions.create({ ..., stream: true })` goes.
+      const stream = fakeChatStream('Your order is in transit.')
+      let answer = ''
+      for await (const chunk of generation.recordStream(stream)) {
+        answer += chunk.choices[0]?.delta.content ?? ''
+      }
+      return answer
+    },
+    { kind: 'model_generation' },
+  )
+}
+// #endregion stream
+
+// #region testing
+/**
+ * A unit test. Pass a `TestClient` where your code takes an `Mcpd`, then read
+ * back what it recorded: no daemon, no port, no flush.
+ */
+async function testStreamAnswer(): Promise<void> {
+  const test = new TestClient()
+  const answer = await streamAnswer(test, 'Where is my order A-1042?')
+
+  const call = await test.span('stream_answer')
+  assert.equal(call.output, answer)
+  assert.equal(call.model, 'gpt-4o-mini')
+  assert.equal(call.usage?.outputTokens, 6)
+
+  const [run] = await test.trees()
+  assert.equal(run?.span.name, 'stream_answer')
+  await test.shutdown()
+}
+// #endregion testing
 
 // ---------------------------------------------------------------------------
 // Running it
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
+  // Store the prompt the agent reads, and label it `production`. Posting the
+  // same body again stores nothing, so this is safe on every start.
+  await mcpd.createPrompt({
+    name: 'support-answer',
+    messages: ANSWER_MESSAGES,
+    note: 'first version',
+    labels: ['production'],
+  })
+
   // The good path.
   const { answer, traceId } = await handleTicket({
     id: 'tk-1',
@@ -148,6 +250,10 @@ async function main(): Promise<void> {
     question: 'Where is my order A-1042?',
   })
   console.log('answer:', answer)
+
+  // A streamed call, and the unit test that checks what it records.
+  console.log('streamed:', await streamAnswer(mcpd, 'Is A-1042 on its way?'))
+  await testStreamAnswer()
 
   // #region score
   // A machine evaluation of the run. `min` and `max` are required: 0.86 on an

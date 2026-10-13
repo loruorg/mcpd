@@ -8,11 +8,12 @@
 //! stored before the bound existed, and the clamp on the way into a column.
 
 use mcpd_runs::model::{DefinitionKind, RunStatus, StepErrorClass, TimerKind};
-use mcpd_runs::store::{DefinitionDocument, RunConfig, RunStore, StartRun, StepError};
-use mcpd_runs::{Error, SqliteRunStore, MAX_DURATION_MS};
+mod common;
+
+use common::TestStore;
+use mcpd_runs::store::{DefinitionDocument, RunConfig, StartRun, StepError};
+use mcpd_runs::{Error, MAX_DURATION_MS};
 use serde_json::{json, Value};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use time::{Duration, OffsetDateTime};
 
 fn t0() -> OffsetDateTime {
@@ -24,36 +25,13 @@ fn latest() -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp_nanos(i128::from(i64::MAX)).expect("a valid instant")
 }
 
-/// A pid alone is not unique: pids are recycled, and a recycled one reopens a
-/// previous run's database. The stamp is per process start.
-fn temp_db() -> PathBuf {
-    static N: AtomicU64 = AtomicU64::new(0);
-    static STAMP: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
-    let stamp = STAMP.get_or_init(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    });
-    let dir = std::env::temp_dir().join(format!(
-        "mcpd-runs-bounds-{}-{stamp}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    dir.join("runs.db")
-}
-
 struct Harness {
-    store: SqliteRunStore,
-    path: PathBuf,
+    store: TestStore,
 }
 
 impl Harness {
     async fn open() -> Self {
-        let path = temp_db();
-        let store = SqliteRunStore::open(&path, RunConfig::default()).expect("open");
-        store.migrate().await.expect("migrate");
-        Self { store, path }
+        Self { store: TestStore::open(RunConfig::default()).await }
     }
 
     async fn put(&self, id: &str, body: Value) -> Result<(), Error> {
@@ -70,14 +48,14 @@ impl Harness {
 
     /// Write a definition straight into the table, past the validator, the
     /// way a definition stored by an older build would sit there.
-    fn put_unchecked(&self, id: &str, body: &Value) {
-        let conn = rusqlite::Connection::open(&self.path).expect("raw connection");
-        conn.execute(
-            "INSERT INTO definitions (project, id, version, kind, body, body_hash, created_at)
-             VALUES ('checkout', ?1, 1, 'workflow', ?2, ?3, 0)",
-            rusqlite::params![id, body.to_string(), format!("unchecked-{id}")],
-        )
-        .expect("insert a definition past the validator");
+    async fn put_unchecked(&self, id: &str, body: &Value) {
+        self.store
+            .exec(
+                "INSERT INTO definitions (project, id, version, kind, body, body_hash, created_at)
+                 VALUES ('checkout', ?1, 1, 'workflow', ?2, ?3, 0)",
+                &[id, &body.to_string(), &format!("unchecked-{id}")],
+            )
+            .await;
     }
 
     async fn start(&self, id: &str) -> Result<String, Error> {
@@ -104,14 +82,6 @@ impl Harness {
             .find(|t| t.kind == kind)
             .unwrap_or_else(|| panic!("no {} timer on run {run_id}", kind.as_str()))
             .due_at
-    }
-}
-
-impl Drop for Harness {
-    fn drop(&mut self) {
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
     }
 }
 
@@ -153,7 +123,7 @@ fn one_per_field(ms: i64) -> Vec<(&'static str, Value)> {
     ]
 }
 
-#[tokio::test]
+backend_tests! {
 async fn every_duration_past_the_bound_is_refused_naming_the_field_the_bound_and_the_value() {
     let h = Harness::open().await;
     let over = MAX_DURATION_MS + 1;
@@ -184,8 +154,9 @@ async fn every_duration_past_the_bound_is_refused_naming_the_field_the_bound_and
         h.put(&format!("at_{i}"), body).await.unwrap_or_else(|e| panic!("{field}: {e}"));
     }
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_definition_stored_before_the_bound_starts_a_run_instead_of_stopping_the_daemon() {
     let h = Harness::open().await;
     let huge = 400_000_000_000_000_i64;
@@ -193,16 +164,16 @@ async fn a_definition_stored_before_the_bound_starts_a_run_instead_of_stopping_t
         "old_sleep",
         &json!({"limits": {"run_timeout_ms": huge},
                 "steps": [{"kind": "sleep", "id": "nap", "ms": huge}]}),
-    );
+    ).await;
     h.put_unchecked(
         "old_wait",
         &json!({"steps": [{"kind": "wait_event", "id": "approval", "event": "approved",
                            "key": "k", "timeout_ms": huge}]}),
-    );
+    ).await;
     h.put_unchecked(
         "old_task",
         &json!({"steps": [{"kind": "task", "id": "work", "step_timeout_ms": huge}]}),
-    );
+    ).await;
 
     // Each start adds the duration to the clock inside its transaction. The
     // addition panicked there, which a test build reports as a failed task and
@@ -221,8 +192,9 @@ async fn a_definition_stored_before_the_bound_starts_a_run_instead_of_stopping_t
     let report = h.store.run_due_timers(t0() + Duration::days(365)).await.expect("tick");
     assert_eq!(report.fired, 0, "none of those deadlines is due a year later");
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_sleep_until_after_2262_is_not_due_on_the_next_tick() {
     let h = Harness::open().await;
     h.put(
@@ -245,8 +217,9 @@ async fn a_sleep_until_after_2262_is_not_due_on_the_next_tick() {
     assert_eq!(run.status, RunStatus::Running);
     assert_eq!(run.cursor.at.step(), Some("nap"), "the run is still asleep");
 }
+}
 
-#[tokio::test]
+backend_tests! {
 async fn a_retry_floor_past_the_clock_cannot_stop_the_daemon() {
     let h = Harness::open().await;
     h.put(
@@ -275,4 +248,5 @@ async fn a_retry_floor_past_the_clock_cannot_stop_the_daemon() {
         .await
         .expect("a retry floor of i64::MAX is written, not panicked on");
     assert_eq!(h.due(&run_id, TimerKind::Retry).await, latest());
+}
 }

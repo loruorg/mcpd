@@ -81,6 +81,11 @@ from ._generated import (
     OutputTokenDetails,
     Page,
     Project,
+    CreatePromptRequest,
+    Prompt,
+    PromptKind,
+    PromptLabelRequest,
+    PromptVersionsResponse,
     RedactionMode,
     SamplingKind,
     Score,
@@ -121,9 +126,11 @@ from .logs import (
     parse_log_level,
     severity_number,
 )
+from .prompts import PromptRenderError, render_prompt
 from .runs import DefinitionsApi, EventsApi, RunFailedError, RunResult, RunsApi, StepConflictError, StepsApi
 from .sinks import ConsoleSink, RecordingSink, Sink
 from .span import Span
+from .stream import STREAM_MAX_TOOL_CALLS, STREAM_TEXT_BUDGET
 from .transport import McpdError, TransportError
 from .worker import RetryableError, StepContext, StepFailure, StepOutcome, Worker, WorkerStats
 from .workflow import (
@@ -158,6 +165,8 @@ __all__ = [
     "new_trace_id",
     "parse_traceparent",
     "records",
+    "PromptRenderError",
+    "render_prompt",
     # The logging signal: severity numbers both ways, the level floor, and the
     # serialiser that keeps an exception from costing its batch.
     "describe_error",
@@ -172,6 +181,9 @@ __all__ = [
     "response_shape",
     "usage_from_anthropic",
     "usage_from_openai",
+    # Streamed model calls: the budget `Span.record_stream` keeps to (contract 3.2).
+    "STREAM_MAX_TOOL_CALLS",
+    "STREAM_TEXT_BUDGET",
     # The run surface: the builder, the worker, and the client namespaces.
     "BranchBuilder",
     "DefinitionsApi",
@@ -255,6 +267,11 @@ __all__ = [
     "OutputTokenDetails",
     "Page",
     "Project",
+    "CreatePromptRequest",
+    "Prompt",
+    "PromptKind",
+    "PromptLabelRequest",
+    "PromptVersionsResponse",
     "RedactionMode",
     "SamplingKind",
     "Score",

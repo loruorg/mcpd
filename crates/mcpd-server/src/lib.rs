@@ -21,19 +21,23 @@
 pub mod accounts;
 pub mod aspects;
 pub mod auth;
+pub mod definitions;
 pub mod derive;
 pub mod error;
 pub mod eval;
+pub mod experiments;
 pub mod forward;
 pub mod grpc;
 pub mod identity;
 pub mod ingest;
 pub mod judge;
 pub mod layers;
+pub mod live;
 pub mod mail;
 pub mod monitor;
 pub mod orgs;
 pub mod pipeline;
+pub mod prompts;
 pub mod query;
 pub mod relay;
 pub mod runs;
@@ -47,7 +51,7 @@ pub mod ui;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use std::future::Future;
 use std::sync::Arc;
@@ -156,6 +160,7 @@ fn api_router(config: &ServerConfig) -> Router<Arc<AppState>> {
     let routes = Router::new()
         .route("/v1/api/traces", get(query::list_traces))
         .route("/v1/api/traces/{trace_id}", get(query::get_trace))
+        .route("/v1/api/traces/{trace_id}/trajectory", get(query::get_trajectory))
         .route("/v1/api/traces/{trace_id}", delete(query::delete_trace))
         .route("/v1/api/spans", get(query::list_spans))
         .route("/v1/api/logs", get(query::list_logs))
@@ -182,6 +187,15 @@ fn api_router(config: &ServerConfig) -> Router<Arc<AppState>> {
         .route("/v1/api/deltas", get(query::poll_deltas))
         .route("/v1/api/scorers", get(query::list_scorers))
         .route("/v1/api/score", post(query::score_runs))
+        .route("/v1/api/scorer-definitions", get(definitions::list_scorer_definitions))
+        .route("/v1/api/scorer-definitions", post(definitions::create_scorer_definition))
+        .route("/v1/api/scorer-definitions/{id}", get(definitions::get_scorer_definition))
+        .route(
+            "/v1/api/scorer-definitions/{id}/versions",
+            get(definitions::list_scorer_definition_versions),
+        )
+        .route("/v1/api/evaluation-rules", get(definitions::list_evaluation_rules))
+        .route("/v1/api/evaluation-rules", post(definitions::create_evaluation_rule))
         .route("/v1/api/experiments/compare", get(query::compare_experiments))
         .route("/v1/api/datasets", get(query::list_datasets))
         .route("/v1/api/datasets", post(query::create_dataset))
@@ -190,6 +204,14 @@ fn api_router(config: &ServerConfig) -> Router<Arc<AppState>> {
         .route("/v1/api/datasets/{id}/capture", post(query::capture_into_dataset))
         .route("/v1/api/experiments", get(query::list_experiments))
         .route("/v1/api/experiments", post(query::create_experiment))
+        .route("/v1/api/experiments/{id}/score", post(experiments::score_experiment))
+        .route("/v1/api/experiments/{id}/results", get(experiments::get_experiment_results))
+        .route("/v1/api/prompts", get(prompts::list_prompts))
+        .route("/v1/api/prompts", post(prompts::create_prompt))
+        .route("/v1/api/prompts/{name}", get(prompts::get_prompt))
+        .route("/v1/api/prompts/{name}/versions", get(prompts::list_prompt_versions))
+        .route("/v1/api/prompts/{name}/labels/{label}", put(prompts::set_prompt_label))
+        .route("/v1/api/prompts/{name}/labels/{label}", delete(prompts::delete_prompt_label))
         .route("/v1/api/monitors", get(query::list_monitors))
         .route("/v1/api/monitors/{id}/ack", post(query::ack_monitor))
         .route("/v1/api/slos", get(query::list_slos))

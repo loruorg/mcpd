@@ -327,6 +327,12 @@ enum class ScorerKind(val wire: String) {
      * in one call.
      */
     @SerialName("criterion") CRITERION("criterion"),
+    /**
+     * A scorer definition stored in the project through the API: a judge prompt, or a
+     * code scorer with its settings. Versioned, and the version is on every score it
+     * produces.
+     */
+    @SerialName("custom") CUSTOM("custom"),
     ;
 
     override fun toString(): String = wire
@@ -1421,6 +1427,49 @@ enum class SsoProvider(val wire: String) {
     }
 }
 
+/** The shape of a prompt's body. */
+@Serializable
+enum class PromptKind(val wire: String) {
+    /** One template string, for a completion-style call. */
+    @SerialName("text") TEXT("text"),
+    /**
+     * An ordered list of messages, each with a `role` and a `content` template, for a
+     * chat-style call.
+     */
+    @SerialName("chat") CHAT("chat"),
+    ;
+
+    override fun toString(): String = wire
+
+    companion object {
+        /** Parse a wire value, or null when this version of the spec does not define it. */
+        fun fromWire(s: String): PromptKind? = entries.firstOrNull { it.wire == s }
+    }
+}
+
+/** How a stored scorer definition reaches its answer. */
+@Serializable
+enum class ScorerDefinitionKind(val wire: String) {
+    /**
+     * The configured judge model grades the run against the definition's `prompt`, in
+     * one call.
+     */
+    @SerialName("judge") JUDGE("judge"),
+    /**
+     * One of the daemon's code scorers, named in `builtin`, with the settings in
+     * `config` fixed. Free, and gives the same answer twice.
+     */
+    @SerialName("code") CODE("code"),
+    ;
+
+    override fun toString(): String = wire
+
+    companion object {
+        /** Parse a wire value, or null when this version of the spec does not define it. */
+        fun fromWire(s: String): ScorerDefinitionKind? = entries.firstOrNull { it.wire == s }
+    }
+}
+
 /**
  * Input tokens broken down by how the provider billed them. Every field is
  * optional; absent means the provider did not report it, which is different from
@@ -2130,6 +2179,18 @@ data class ScorerConfig(
     @SerialName("tool_name") val toolName: String? = null,
     /** A regular expression the answer must match somewhere, for `matches_pattern`. */
     @SerialName("pattern") val pattern: String? = null,
+    /**
+     * How `trajectory` compares the tools the run called with `expected_tools`:
+     * `strict` for the same calls in the same order and nothing else, `ordered` for
+     * the expected calls in order with others allowed between them, `unordered` for
+     * every expected call in any order. Defaults to `ordered`.
+     */
+    @SerialName("trajectory_match") val trajectoryMatch: String? = null,
+    /**
+     * The most steps a healthy run takes, for `trajectory`. A step is a tool call, a
+     * model generation or a handoff.
+     */
+    @SerialName("max_steps") val maxSteps: Int? = null,
     /** The shortest acceptable answer in characters, for `answer_length`. */
     @SerialName("min_chars") val minChars: Int? = null,
     /** The longest acceptable answer in characters, for `answer_length`. */
@@ -4414,6 +4475,261 @@ data class SsoCallbackRequest(
 }
 
 /**
+ * A new version of a prompt. Posting a body identical to the latest version stores
+ * nothing new and returns that version, so a deploy that posts its prompts on
+ * every start is a no-op when nothing changed.
+ */
+@Serializable
+data class CreatePromptRequest(
+    /** The prompt's name. A new name creates the prompt at version 1. */
+    @SerialName("name") val name: String,
+    /** `text` or `chat`. Defaults to `chat` when `messages` is set, otherwise `text`. */
+    @SerialName("kind") val kind: PromptKind? = null,
+    /** The template, for a `text` prompt. */
+    @SerialName("template") val template: String? = null,
+    /** The messages, for a `chat` prompt. */
+    @SerialName("messages") val messages: JsonElement? = null,
+    /** Model settings to store with it. */
+    @SerialName("config") val config: JsonElement? = null,
+    /** What changed. */
+    @SerialName("note") val note: String? = null,
+    /** Labels to point at the stored version once it is stored, such as `staging`. */
+    @SerialName("labels") val labels: List<String>? = null
+) {
+}
+
+/** Which version a label should point at. */
+@Serializable
+data class PromptLabelRequest(
+    /** The version. It must exist. */
+    @SerialName("version") val version: Int
+) {
+}
+
+/** Every version of one prompt, newest first. */
+@Serializable
+data class PromptVersionsResponse(
+    /** The prompt's name. */
+    @SerialName("name") val name: String,
+    /** Its versions, newest first, each with the labels that point at it. */
+    @SerialName("versions") val versions: List<Prompt>
+) {
+}
+
+/**
+ * A new version of a scorer definition. A body identical to the latest version is
+ * not stored again.
+ */
+@Serializable
+data class CreateScorerDefinitionRequest(
+    /** The definition's id. A new id creates it at version 1. */
+    @SerialName("id") val id: String,
+    /** `judge` or `code`. */
+    @SerialName("kind") val kind: ScorerDefinitionKind,
+    /** What it measures, in a sentence. */
+    @SerialName("description") val description: String,
+    /** Which way is better. Defaults to `higher_is_better`. */
+    @SerialName("direction") val direction: ScoreDirection? = null,
+    /** For `judge`: the criterion. */
+    @SerialName("prompt") val prompt: String? = null,
+    /** For `code`: the code scorer to run. */
+    @SerialName("builtin") val builtin: String? = null,
+    /** For `code`: its settings. */
+    @SerialName("config") val config: ScorerConfig? = null,
+    /** What changed. */
+    @SerialName("note") val note: String? = null
+) {
+}
+
+/** Every version of one scorer definition, newest first. */
+@Serializable
+data class ScorerDefinitionVersions(
+    /** The definition's id. */
+    @SerialName("id") val id: String,
+    /** Its versions, newest first. */
+    @SerialName("versions") val versions: List<ScorerDefinition>
+) {
+}
+
+/**
+ * A new version of a live scoring rule. Posting the same body as the latest
+ * version stores nothing new.
+ */
+@Serializable
+data class CreateEvaluationRuleRequest(
+    /** The rule's id: lower-case letters, digits, `-` and `_`, up to 64. */
+    @SerialName("id") val id: String,
+    /** The scorers to run. At least one. */
+    @SerialName("scorers") val scorers: List<String>,
+    /**
+     * Whether it runs. Defaults to `false`, so a rule is read back and checked before
+     * it spends anything.
+     */
+    @SerialName("enabled") val enabled: Boolean? = null,
+    /** The share of matching runs to score, from 0 to 1. Defaults to 1. */
+    @SerialName("sample_rate") val sampleRate: Double? = null,
+    /** Only runs whose root step has this name. */
+    @SerialName("name") val name: String? = null,
+    /** Only runs whose root step is this kind. */
+    @SerialName("kind") val kind: SpanKind? = null,
+    /** Only runs from this environment. */
+    @SerialName("environment") val environment: String? = null,
+    /** Only runs carrying all of these tags. */
+    @SerialName("tags") val tags: List<String>? = null,
+    /** Only runs with this outcome. */
+    @SerialName("status") val status: SpanStatus? = null,
+    /** Settings for the code scorers that need them. */
+    @SerialName("config") val config: ScorerConfig? = null,
+    /** The most judged scores per minute. Defaults to 30. */
+    @SerialName("max_judged_per_minute") val maxJudgedPerMinute: Int? = null,
+    /** What changed. */
+    @SerialName("note") val note: String? = null
+) {
+}
+
+/**
+ * One action an agent took: a tool call, a model generation or a handoff, in the
+ * order they started.
+ */
+@Serializable
+data class TrajectoryStep(
+    /** Its position in the trajectory, from 0. */
+    @SerialName("index") val index: Int,
+    /** The span it was read from. */
+    @SerialName("span_id") val spanId: String,
+    /** What kind of action. */
+    @SerialName("kind") val kind: SpanKind,
+    /** The tool, model step or agent it names. */
+    @SerialName("name") val name: String,
+    /** How it ended. */
+    @SerialName("status") val status: SpanStatus,
+    /** When it started, in milliseconds after the run started. */
+    @SerialName("start_offset_ms") val startOffsetMs: Double,
+    /** How long it took. Absent while it is still running. */
+    @SerialName("duration_ms") val durationMs: Double? = null,
+    /** The model, for a model generation. */
+    @SerialName("model") val model: String? = null,
+    /** The start of its input as plain text, up to 240 characters. */
+    @SerialName("input_preview") val inputPreview: String? = null,
+    /** The start of its output as plain text, up to 240 characters. */
+    @SerialName("output_preview") val outputPreview: String? = null,
+    /** Input and output tokens together, for a model generation. */
+    @SerialName("tokens") val tokens: Long? = null
+) {
+}
+
+/**
+ * A run read as the sequence of actions its agent took. This is what a trajectory
+ * is scored on: which tools were called, in what order, how many steps it took,
+ * and whether it ended with an answer.
+ */
+@Serializable
+data class Trajectory(
+    /** The run. */
+    @SerialName("trace_id") val traceId: String,
+    /** Every action, in start order. */
+    @SerialName("steps") val steps: List<TrajectoryStep>,
+    /** The names of the tool calls, in order. What `expected_tools` is compared with. */
+    @SerialName("tool_sequence") val toolSequence: List<String>,
+    /** How many steps. */
+    @SerialName("step_count") val stepCount: Int,
+    /** How many of them were tool calls. */
+    @SerialName("tool_count") val toolCount: Int,
+    /** How many of them failed. */
+    @SerialName("error_count") val errorCount: Int,
+    /** True when the run ended `ok` with a non-empty answer. */
+    @SerialName("goal_reached") val goalReached: Boolean,
+    /** The start of the run's answer, from the root step's output. */
+    @SerialName("final_output_preview") val finalOutputPreview: String? = null
+) {
+}
+
+/** Which scorers to run over every run recorded under an experiment. */
+@Serializable
+data class ExperimentScoreRequest(
+    /**
+     * The scorers, as `POST /v1/api/score` takes them. Empty runs the code scorers
+     * that need no settings.
+     */
+    @SerialName("scorers") val scorers: List<String>,
+    /** Store nothing; report what would be stored. */
+    @SerialName("dry_run") val dryRun: Boolean = false,
+    /**
+     * Settings for the code scorers. `expected` is filled per run from the dataset
+     * case the run answered, when the run names one.
+     */
+    @SerialName("config") val config: ScorerConfig? = null
+) {
+}
+
+/**
+ * One case of an experiment: the run that answered it and how each scorer marked
+ * it.
+ */
+@Serializable
+data class ExperimentItemResult(
+    /** The run that answered the case. */
+    @SerialName("trace_id") val traceId: String,
+    /** How the run ended. */
+    @SerialName("status") val status: SpanStatus,
+    /** The mean value per scorer for this run, keyed by scorer id. */
+    @SerialName("scores") val scores: JsonElement,
+    /**
+     * The dataset case, when the run named one in its `mcpd.dataset_item_id`
+     * attribute.
+     */
+    @SerialName("item_id") val itemId: String? = null,
+    /** How long the run took. */
+    @SerialName("duration_ns") val durationNs: Long? = null,
+    /** What the run cost. */
+    @SerialName("cost") val cost: Double? = null,
+    /** The start of the run's input. */
+    @SerialName("input_preview") val inputPreview: String? = null,
+    /** The start of the run's answer. */
+    @SerialName("output_preview") val outputPreview: String? = null,
+    /** The case's expected answer, when it has one. */
+    @SerialName("expected") val expected: JsonElement? = null
+) {
+}
+
+/** One scorer's marks across an experiment. */
+@Serializable
+data class ScorerSummary(
+    /** The scorer. */
+    @SerialName("scorer_id") val scorerId: String,
+    /** How many scores. */
+    @SerialName("n") val n: Long,
+    /** Their mean. */
+    @SerialName("mean") val mean: Double,
+    /** The lowest. */
+    @SerialName("min") val min: Double,
+    /** The highest. */
+    @SerialName("max") val max: Double,
+    /** Which way is better. */
+    @SerialName("direction") val direction: ScoreDirection
+) {
+}
+
+/**
+ * An experiment case by case, with a summary per scorer. Two of these joined on
+ * `item_id` are the per-case comparison of two versions.
+ */
+@Serializable
+data class ExperimentResults(
+    /** The experiment. */
+    @SerialName("experiment_id") val experimentId: String,
+    /** One row per run recorded under the experiment, oldest first. */
+    @SerialName("items") val items: List<ExperimentItemResult>,
+    /** Per scorer, across every run. */
+    @SerialName("scorers") val scorers: List<ScorerSummary>,
+    /** How many runs are recorded under it. */
+    @SerialName("runs") val runs: Int,
+    /** How many of them ended in an error. */
+    @SerialName("failed") val failed: Int
+) {
+}
+
+/**
  * One unit of work. Spans are the backbone of mcpd: logs, metrics, scores and
  * feedback all hang off a span or a trace. Stored in the `spans` table.
  */
@@ -4562,6 +4878,18 @@ data class Trace(
     @SerialName("usage") val usage: TokenUsage? = null,
     /** Cost summed across the trace. This is the number a bill is reconciled against. */
     @SerialName("cost") val cost: Cost? = null,
+    /**
+     * The start of the root step's input as plain text, up to 240 characters, for a
+     * list column. For a chat input it is the last user message. Filled by the trace
+     * list when it is asked with `preview=true`; the full input is on the span.
+     */
+    @SerialName("input_preview") val inputPreview: String? = null,
+    /**
+     * The start of the root step's output as plain text, up to 240 characters. Filled
+     * by the trace list when it is asked with `preview=true`; the full output is on
+     * the span.
+     */
+    @SerialName("output_preview") val outputPreview: String? = null,
     /** Tags from the root span. */
     @SerialName("tags") val tags: List<String>? = null,
     /**
@@ -5396,5 +5724,158 @@ data class Theme(
     companion object {
         /** The storage table this entity lives in. */
         const val TABLE = "themes"
+    }
+}
+
+/**
+ * One version of a named prompt. A version never changes once stored: a new body
+ * is a new version, and labels such as `production` and `staging` point at the
+ * version a caller should use. SDKs fetch a prompt by name and label, render it
+ * with variables, and link the spans that used it, so a trace shows which version
+ * produced an answer. Stored in the `documents` table.
+ */
+@Serializable
+data class Prompt(
+    /** Which project owns it. */
+    @SerialName("project") val project: String,
+    /**
+     * The prompt's name, unique within the project. Letters, digits, `-`, `_`, `.` and
+     * `/`, up to 128 characters.
+     */
+    @SerialName("name") val name: String,
+    /** Its version, from 1, assigned by the daemon in the order versions arrive. */
+    @SerialName("version") val version: Int,
+    /** Whether the body is one template or a list of messages. */
+    @SerialName("kind") val kind: PromptKind,
+    /** Every variable the body names, in order of first use, without duplicates. */
+    @SerialName("variables") val variables: List<String>,
+    /** The labels that point at this version now. */
+    @SerialName("labels") val labels: List<String>,
+    /** When this version was stored. */
+    @SerialName("created_at") val createdAt: Instant,
+    /** The template, for a `text` prompt. Variables are written `{{name}}`. */
+    @SerialName("template") val template: String? = null,
+    /**
+     * The messages, for a `chat` prompt: an array of objects with `role` and
+     * `content`, where `content` is a template.
+     */
+    @SerialName("messages") val messages: JsonElement? = null,
+    /**
+     * Model settings stored with the prompt, such as `model` and `temperature`. The
+     * daemon stores them and does not read them.
+     */
+    @SerialName("config") val config: JsonElement? = null,
+    /** What changed in this version, written by whoever stored it. */
+    @SerialName("note") val note: String? = null,
+    /** Which key or account stored it. */
+    @SerialName("created_by") val createdBy: String? = null
+) {
+    companion object {
+        /** The storage table this entity lives in. */
+        const val TABLE = "documents"
+    }
+}
+
+/**
+ * A scorer the project defined: a judge prompt written for this agent, or a code
+ * scorer with its settings fixed. Stored as numbered versions; a version never
+ * changes. Name it in `scorers` wherever a scorer id is taken, as `id` for the
+ * latest version or `id@3` for version 3. Stored in the `documents` table.
+ */
+@Serializable
+data class ScorerDefinition(
+    /** Which project owns it. */
+    @SerialName("project") val project: String,
+    /**
+     * Its id, unique in the project: lower-case letters, digits and `_`, up to 64. It
+     * cannot be the id of a scorer mcpd ships.
+     */
+    @SerialName("id") val id: String,
+    /** Its version, from 1, assigned by the daemon. */
+    @SerialName("version") val version: Int,
+    /** Judged by the model, or computed by code. */
+    @SerialName("kind") val kind: ScorerDefinitionKind,
+    /** What it measures, in a sentence. Shown in the scorer catalogue. */
+    @SerialName("description") val description: String,
+    /** Which way is better. Comparisons and live alerts read it. */
+    @SerialName("direction") val direction: ScoreDirection,
+    /** When this version was stored. */
+    @SerialName("created_at") val createdAt: Instant,
+    /**
+     * For a `judge` definition: the criterion the model grades against, such as `The
+     * answer cites the refund policy by section number.` The daemon adds the run's
+     * input and output and asks for a value from 0 to 1 with a one-sentence reason.
+     */
+    @SerialName("prompt") val prompt: String? = null,
+    /** For a `code` definition: the code scorer it runs, such as `keyword_coverage`. */
+    @SerialName("builtin") val builtin: String? = null,
+    /** For a `code` definition: the settings the code scorer runs with. */
+    @SerialName("config") val config: ScorerConfig? = null,
+    /** What changed in this version. */
+    @SerialName("note") val note: String? = null,
+    /** Which key or account stored it. */
+    @SerialName("created_by") val createdBy: String? = null
+) {
+    companion object {
+        /** The storage table this entity lives in. */
+        const val TABLE = "documents"
+    }
+}
+
+/**
+ * A rule for live scoring: which finished runs to score, with which scorers, and
+ * how many of them. The daemon reads finished runs as they arrive and scores the
+ * sampled ones in the background, so a quality drop shows up in minutes rather
+ * than at the next offline pass. Scores it writes have source `live`. Stored in
+ * the `documents` table.
+ */
+@Serializable
+data class EvaluationRule(
+    /** Which project it scores. */
+    @SerialName("project") val project: String,
+    /** Its id, unique in the project. */
+    @SerialName("id") val id: String,
+    /** Its version, from 1. Each change is a new version. */
+    @SerialName("version") val version: Int,
+    /** Whether it runs. A rule is stored disabled unless the request says otherwise. */
+    @SerialName("enabled") val enabled: Boolean,
+    /**
+     * The scorers to run: shipped ids, criteria from the config file, or stored
+     * definitions as `id` or `id@version`.
+     */
+    @SerialName("scorers") val scorers: List<String>,
+    /**
+     * The share of matching runs to score, from 0 to 1. Chosen by a hash of the trace
+     * id, so the same run is in or out on every replica and every restart.
+     */
+    @SerialName("sample_rate") val sampleRate: Double,
+    /** Only runs carrying all of these tags. */
+    @SerialName("tags") val tags: List<String>,
+    /**
+     * The most judged scores the rule may produce in one minute, across the daemon.
+     * Each one is a model call, so this caps what the rule can spend. Runs over it are
+     * skipped, not queued.
+     */
+    @SerialName("max_judged_per_minute") val maxJudgedPerMinute: Int,
+    /** When this version was stored. */
+    @SerialName("created_at") val createdAt: Instant,
+    /** Only runs whose root step has this name. */
+    @SerialName("name") val name: String? = null,
+    /** Only runs whose root step is this kind. */
+    @SerialName("kind") val kind: SpanKind? = null,
+    /** Only runs from this environment. */
+    @SerialName("environment") val environment: String? = null,
+    /** Only runs with this outcome. */
+    @SerialName("status") val status: SpanStatus? = null,
+    /** Settings for the code scorers that need them. */
+    @SerialName("config") val config: ScorerConfig? = null,
+    /** What changed in this version. */
+    @SerialName("note") val note: String? = null,
+    /** Which key or account stored it. */
+    @SerialName("created_by") val createdBy: String? = null
+) {
+    companion object {
+        /** The storage table this entity lives in. */
+        const val TABLE = "documents"
     }
 }

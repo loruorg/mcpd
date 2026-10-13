@@ -251,9 +251,16 @@ export interface TraceQuery {
   from?: string
   to?: string
   min_duration_ms?: number
+  max_duration_ms?: number
   min_cost?: number
+  max_cost?: number
+  min_tokens?: number
   has_score?: string
   score_below?: number
+  score_above?: number
+  has_feedback?: string
+  /** `true` to fill each run's input and output previews. Recorded in the audit log. */
+  preview?: string
   sort?: string
   order?: string
   limit?: number

@@ -90,11 +90,17 @@ A project's human judgements, newest first, filtered by run, step, kind, author 
 
 ---
 
-## List the built-in scorers
+## List the scorers
 
 <div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/scorers</code></div>
 
-Every scorer mcpd ships, with what it measures and whether it needs configuration. Scorers are deterministic code, not model calls, so they cost nothing to run and give the same answer twice.
+Every scorer this daemon can run: the code scorers, the judged rubrics, the criteria in the config file, and, with `project`, the definitions that project stored. Code scorers are deterministic, cost nothing and give the same answer twice; judged ones make one model call per run.
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Also list the scorer definitions this project stored, each at its latest version. |
 
 **Response:** `ScorerInfo`
 
@@ -106,11 +112,148 @@ Every scorer mcpd ships, with what it measures and whether it needs configuratio
 
 <div class="endpoint"><span class="method method--post">POST</span><code>/v1/api/score</code></div>
 
-Scores runs that are already stored, and records the results. Naming a scorer that does not exist fails the request before any work happens; a scorer that cannot answer on a given run is reported in `skipped` rather than failing it.
+Scores runs that are already stored, and records the results. Naming a scorer that does not exist fails the request before any work happens; a scorer that cannot answer on a given run is reported in `skipped` rather than failing it. A stored definition is named as `id` or `id@version`. Each judged score is recorded with the trace of its own model call, in `score_trace_id`: a `scorer_run` span holding the prompt, the reply, the tokens and the cost.
 
 **Request body:** `ScoreRunRequest`
 
 **Response:** `ScoreRunResult`
+
+**Authentication:** an API key with `write` scope.
+
+---
+
+## List scorer definitions
+
+<div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/scorer-definitions</code></div>
+
+The latest version of every scorer the project defined, sorted by id.
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none. |
+
+**Response:** `ScorerDefinition`
+
+**Authentication:** an API key with `read` scope.
+
+---
+
+## Store a scorer definition
+
+<div class="endpoint"><span class="method method--post">POST</span><code>/v1/api/scorer-definitions</code></div>
+
+Stores a new version of a scorer definition. A `judge` definition needs `prompt` and a judge in the config file to run; a `code` definition needs `builtin`, and its `config` is checked against that scorer before anything is stored.
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none. |
+
+**Request body:** `CreateScorerDefinitionRequest`
+
+**Response:** `ScorerDefinition`
+
+**Authentication:** an API key with `write` scope.
+
+---
+
+## Get a scorer definition
+
+<div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/scorer-definitions/{id}</code></div>
+
+One version of a definition, the latest when `version` is absent.
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `id` | `string` | The definition's id. |
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none. |
+| `version` | `u32` | · | Which version. Absent means the latest. |
+
+**Response:** `ScorerDefinition`
+
+**Other responses**
+
+| Status | Body | When |
+| --- | --- | --- |
+| `404` | · | No definition with that id, or no such version. |
+
+**Authentication:** an API key with `read` scope.
+
+---
+
+## List a scorer definition's versions
+
+<div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/scorer-definitions/{id}/versions</code></div>
+
+Every version of one definition, newest first.
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `id` | `string` | The definition's id. |
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none. |
+
+**Response:** `ScorerDefinitionVersions`
+
+**Other responses**
+
+| Status | Body | When |
+| --- | --- | --- |
+| `404` | · | No definition with that id. |
+
+**Authentication:** an API key with `read` scope.
+
+---
+
+## List live scoring rules
+
+<div class="endpoint"><span class="method method--get">GET</span><code>/v1/api/evaluation-rules</code></div>
+
+The latest version of every live scoring rule in the project.
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none. |
+
+**Response:** `EvaluationRule`
+
+**Authentication:** an API key with `read` scope.
+
+---
+
+## Store a live scoring rule
+
+<div class="endpoint"><span class="method method--post">POST</span><code>/v1/api/evaluation-rules</code></div>
+
+Stores a new version of a rule; the daemon applies the latest version of each rule from the next run that finishes. Every named scorer is resolved before anything is stored, and a judged scorer is refused when no judge is configured. Turn a rule off by posting it with `enabled: false`.
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | · | Which project. A selector: refused with 403 on a mismatch with the key's grant, filled in for a single-project key, and a 400 when a multi-project key names none. |
+
+**Request body:** `CreateEvaluationRuleRequest`
+
+**Response:** `EvaluationRule`
 
 **Authentication:** an API key with `write` scope.
 

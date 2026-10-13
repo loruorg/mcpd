@@ -327,6 +327,30 @@ CREATE TABLE IF NOT EXISTS experiments (
 
 CREATE INDEX IF NOT EXISTS experiments_project ON experiments (project, started_at DESC);
 
+-- Versioned documents: prompts, scorer definitions and evaluation rules. A
+-- version is written once and never changed; labels point at one.
+CREATE TABLE IF NOT EXISTS documents (
+    project    TEXT    NOT NULL,
+    kind       TEXT    NOT NULL,
+    id         TEXT    NOT NULL,
+    version    INTEGER NOT NULL,
+    body       TEXT    NOT NULL,
+    note       TEXT,
+    created_by TEXT,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (project, kind, id, version)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS document_labels (
+    project    TEXT    NOT NULL,
+    kind       TEXT    NOT NULL,
+    id         TEXT    NOT NULL,
+    label      TEXT    NOT NULL,
+    version    INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (project, kind, id, label)
+) WITHOUT ROWID;
+
 -- What a filter box can offer, kept as data arrives.
 --
 -- The alternative is `SELECT DISTINCT environment FROM spans`, which reads

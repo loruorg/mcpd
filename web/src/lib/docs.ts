@@ -58,6 +58,7 @@ export const DOCS: DocSection[] = [
       { href: '/docs/evaluation', title: 'Scores and feedback', blurb: 'Machine evaluation and human judgement, kept apart on purpose.' },
       { href: '/docs/aspects', title: 'Aspect notes', blurb: 'One sentence about a finished run, written by your model and not by mcpd.' },
       { href: '/docs/themes', title: 'Themes and snapshots', blurb: 'Notes grouped by shared wording, with a floor before anything is reported.' },
+      { href: '/docs/prompts', title: 'Prompts', blurb: 'Versioned prompts with labels, fetched by the SDKs and linked to the steps that ran them.' },
       { href: '/docs/testing', title: 'Regression testing', blurb: 'Capture a failed run as a case, score it, and compare two versions.' },
       { href: '/docs/alerting', title: 'Monitors and alerts', blurb: 'A condition watched on a timer, latched, and reported once.' },
       { href: '/docs/privacy', title: 'Redaction and retention', blurb: 'What never gets stored, what stops being stored, and how to erase one person.' },

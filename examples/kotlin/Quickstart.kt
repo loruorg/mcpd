@@ -15,8 +15,21 @@ import dev.mcpd.LogLevel
 import dev.mcpd.Mcpd
 import dev.mcpd.McpdConfig
 import dev.mcpd.MetricKind
+import dev.mcpd.PromptFallback
 import dev.mcpd.SpanKind
+import dev.mcpd.renderText
+import dev.mcpd.recordStream
+import dev.mcpd.testing.TestClient
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.runBlocking
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.hours
@@ -35,6 +48,33 @@ fun main() = runBlocking {
         )
     )
     // #endregion init
+
+    // A deploy script stores the prompt; posting the same body again stores nothing.
+    mcpd.createPrompt(
+        "support/answer",
+        template = "Answer in a {{ tone }} tone: {{question}}",
+        labels = listOf("production"),
+    )
+
+    // #region prompt
+    // The version labelled production. The client caches it for a minute and
+    // serves its last copy if mcpd is down; the fallback covers a first start
+    // with no daemon at all.
+    val prompt = mcpd.getPrompt(
+        "support/answer",
+        label = "production",
+        fallback = PromptFallback.Template("Answer in a {{ tone }} tone: {{question}}"),
+    )
+    val text = prompt.renderText(mapOf("tone" to "friendly", "question" to "where is order 41?"))
+
+    mcpd.span("draft_reply", SpanKind.MODEL_GENERATION) { generation ->
+        // Links the call to the prompt version, so the trace shows which
+        // version wrote the answer and listSpans(prompt = ...) finds it.
+        generation.setPrompt(prompt)
+        generation.setInput(listOf(mapOf("role" to "user", "content" to text)))
+        generation.setOutput(callModel(text))
+    }
+    // #endregion prompt
 
     // #region trace
     val question = "where is my order 41?"
@@ -67,6 +107,10 @@ fun main() = runBlocking {
         run.traceId
     }
     // #endregion trace
+
+    // A streamed call, and the unit test that checks what it records.
+    println("streamed: ${streamAnswer(mcpd, "Is order 41 on its way?")}")
+    checkStreamAnswer()
 
     // #region score
     // A machine evaluation. `min` and `max` are required: 7 is excellent out of
@@ -174,6 +218,66 @@ private suspend fun estimateDelivery(mcpd: Mcpd, id: Int): String? =
         mcpd.log(LogLevel.WARN, "the shipping service is down, answering without an estimate")
         null
     }
+
+// #region stream
+/**
+ * A streamed model call. Collect the wrapper instead of the provider's flow:
+ * every chunk comes through unchanged, and when the flow ends the span gets
+ * the time to first token, the text, the usage and the finish reason.
+ */
+suspend fun streamAnswer(client: Mcpd, question: String): String =
+    client.span("stream_answer", SpanKind.MODEL_GENERATION) { generation ->
+        generation.setInput(listOf(mapOf("role" to "user", "content" to question)))
+        // Where your provider's streaming call goes.
+        val chunks = fakeChatStream("Your order is in transit.")
+        val answer = StringBuilder()
+        generation.recordStream(chunks).collect { chunk ->
+            answer.append(chunk.deltaText())
+        }
+        answer.toString()
+    }
+// #endregion stream
+
+// #region testing
+/**
+ * A unit test. Pass `test.client` where your code takes an `Mcpd`, then read
+ * back what it recorded: no daemon, no port, no flush.
+ */
+suspend fun checkStreamAnswer() {
+    val test = TestClient()
+    val answer = streamAnswer(test.client, "Where is my order 41?")
+
+    val call = test.span("stream_answer")
+    check(call.output?.jsonPrimitive?.content == answer)
+    check(call.model == "gpt-4o-mini")
+    check(call.usage?.outputTokens == 6L)
+
+    val run = test.trees().single()
+    check(run.span.name == "stream_answer")
+    test.shutdown()
+}
+// #endregion testing
+
+/** Stand-in for a provider's stream, in the shape OpenAI streams chat completions. */
+private fun fakeChatStream(text: String): Flow<JsonObject> = flow {
+    val base = """"id": "chatcmpl-01", "model": "gpt-4o-mini""""
+    for (word in text.split(Regex("(?= )"))) {
+        delay(5)
+        val content = JsonPrimitive(word)
+        emit(chunk("""{$base, "choices": [{"index": 0, "delta": {"content": $content}}]}"""))
+    }
+    emit(chunk("""{$base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}"""))
+    val usage = """{"prompt_tokens": 24, "completion_tokens": 6, "total_tokens": 30}"""
+    emit(chunk("""{$base, "choices": [], "usage": $usage}"""))
+}
+
+private fun chunk(json: String): JsonObject = Json.parseToJsonElement(json).jsonObject
+
+/** The text a chat-completion chunk adds, or nothing. */
+private fun JsonObject.deltaText(): String {
+    val choice = this["choices"]?.jsonArray?.firstOrNull()?.jsonObject
+    return choice?.get("delta")?.jsonObject?.get("content")?.jsonPrimitive?.contentOrNull ?: ""
+}
 
 // ---------------------------------------------------------------------------
 // The fake agent. Stand-ins for a model, a database and a flaky HTTP service.

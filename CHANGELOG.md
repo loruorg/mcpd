@@ -22,6 +22,63 @@ rather than every commit.
 
 - **`--skip-email-verification`.** Sign-up opens the account at once, with no
   confirmation mail, for a daemon without a mail server.
+- **Prompt management.** Store prompts as numbered versions, text or chat
+  messages with `{{variable}}` placeholders and model settings, and point
+  labels such as `production` and `staging` at a version. Releasing or rolling
+  back a prompt is moving a label; no deploy is needed. An identical body is
+  not stored twice. The span list filters on the prompt a step used
+  (`prompt`, `prompt_version`), and the new Prompts screen shows each
+  version, what changed from the one before, its labels, and the steps that
+  ran it. Prompts are stored on SQLite, Postgres and ClickHouse. Wire-contract
+  change: the `Prompt` entity and six `/v1/api/prompts` endpoints.
+- **More trace filters and list previews.** `GET /v1/api/traces` also filters
+  on `max_duration_ms`, `max_cost`, `min_tokens`, `score_above` (with
+  `has_score`, and between two bounds with `score_below`) and `has_feedback`.
+  With `preview=true` each listed trace carries `input_preview` and
+  `output_preview`, the start of the root step's input and output as plain
+  text, and the run list shows them as Input and Output columns. A list read
+  with previews is recorded in the audit log as `list_traces`. Wire-contract
+  change: two `Trace` fields and six query parameters.
+- **Live scoring, scorer definitions and judge runs.** Evaluation rules
+  (`/v1/api/evaluation-rules`) score runs as they finish, in the background,
+  with the scorers they name, on a sampled share of the runs they match, with
+  a cap on model calls a minute; their scores have source `live`. Projects
+  store their own scorers (`/v1/api/scorer-definitions`): judge prompts and
+  code scorers with fixed settings, versioned, named as `id` or `id@3`,
+  with the version on every score. Every judged score now names the run of
+  its own model call in `score_trace_id`, a `scorer_run` span with the
+  prompt, the reply, the tokens and the cost. The Evaluations screen manages
+  rules and definitions. Wire-contract change: two entities, six endpoints,
+  the `custom` scorer kind and a `project` parameter on
+  `GET /v1/api/scorers`.
+- **Trajectories and experiments case by case.** `GET /v1/api/traces/{id}/trajectory`
+  reads a run as the tool calls, model generations and handoffs its agent
+  took, and the `trajectory` scorer marks that path against
+  `expected_tools` (`strict`, `ordered` or `unordered`) and
+  `max_steps`. `POST /v1/api/experiments/{id}/score` scores every run of an
+  experiment against the expected answer of the dataset case it names in
+  `mcpd.dataset_item_id`, and `GET /v1/api/experiments/{id}/results` reads
+  it back case by case with a summary per scorer. The trace list filters on
+  `experiment_id`. Wire-contract change: four types, three endpoints, two
+  `ScorerConfig` fields.
+- **Streamed model calls and a test client in every SDK.** Wrap a provider's
+  OpenAI- or Anthropic-shaped stream with `record_stream` and read the
+  wrapper: every chunk passes through unchanged, and the span gets the time to
+  first token, the text, tool calls, usage, response id and finish reason when
+  the stream ends, fails or is left early. A test client (`TestClient`,
+  `mcpdtest`, `Mcpd.Testing`) records into memory through the same pipeline as
+  a real client, so your unit tests read back spans, trees, logs, scores and
+  feedback with no daemon.
+- **Durable runs in Postgres.** `--runs-data postgres://...` keeps the
+  definitions, the step journal, deadlines and waits in Postgres instead of an
+  embedded file, so several replicas serve runs from one store. It can be the
+  same database as `--postgres-url`, and reads TLS settings the same way. Every
+  run store transaction is serializable, so replicas claiming steps or firing
+  deadlines at once behave as one daemon would. The schema is created on start.
+  `mcpd config` prints the line as `postgres at` the server, without the
+  password. In the Helm chart, set `runs.store=postgres` and
+  `runs.postgresUrl`, and `replicaCount` above 1 is accepted with runs on.
+
 - **Organisations, roles, single sign-on and SCIM.** An account can create
   organisations, which own projects, invite members by email and give each a
   role (owner, admin, member or viewer, optionally replaced on one project)
@@ -46,6 +103,13 @@ rather than every commit.
 - **Per-organisation quotas.** An organisation's projects share one ceiling on
   signals per minute, `--org-quota-per-minute` (60000 with `--signup`), and a
   retention default, `--org-retention-days`. Usage is shown in the interface.
+- **A themes screen in the interface.** Pick an agent, workflow or tool and
+  read how far each aspect has got towards a snapshot, the themes the latest
+  pass found with their share and how each moved over recent snapshots, and the
+  flow of runs across two to four aspects. A theme opens its history and the
+  notes behind it, each linked to its run, and the run panel lists the aspect
+  notes written about that run. `mcpd demo` now seeds notes and four snapshots
+  so the screen has something to show.
 
 ### Changed
 
@@ -141,6 +205,10 @@ rather than every commit.
 
 ### Fixed
 
+- **The derived `outcome` aspect reaches a snapshot.** Its notes were stamped
+  with the time of the pass that wrote them, which put them outside the window
+  that pass reads, and each later pass moved them again. They are now stamped
+  with the time the run ended.
 - **A page of aspect notes or snapshots on ClickHouse could repeat the last
   row of the page before.** The cursor's timestamp went through a float and
   rounded by a few hundred nanoseconds. It is now exact.

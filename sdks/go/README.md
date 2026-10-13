@@ -187,6 +187,49 @@ ids that are not OpenTelemetry-shaped, an empty name or no start time is
 refused: dropped, counted in `Stats().Rejected` and logged, never returned as
 an error.
 
+## Streamed model calls
+
+Read the provider's stream through `mcpd.RecordStream` and every chunk comes
+through unchanged. It takes any stream with `Next`, `Current`, `Err` and
+`Close`, such as the `ssestream.Stream` the official OpenAI and Anthropic Go
+SDKs return. When `Next` returns false, or you call `Close` before the end, the
+span gets the time to first token, the text, the tool calls, the usage, the
+response id and the finish reason, as `RecordResponse` would record them:
+
+```go
+stream := mcpd.RecordStream(span, client.Chat.Completions.NewStreaming(ctx, params), "")
+defer stream.Close()
+for stream.Next() {
+	chunk := stream.Current()
+	if len(chunk.Choices) > 0 {
+		fmt.Print(chunk.Choices[0].Delta.Content)
+	}
+}
+```
+
+## Assert what you recorded
+
+`mcpdtest.New` returns a recorder whose `Client` is a `*mcpd.Client` that
+records into memory. Pass it to the code under test and read back what it
+recorded. Each accessor flushes first:
+
+```go
+import "github.com/mcpd/mcpd/sdks/go/mcpdtest"
+
+func TestAnswer(t *testing.T) {
+	rec := mcpdtest.New()
+	answerQuestion(context.Background(), rec.Client)
+
+	call := rec.MustSpan(t, "model_call")
+	if *call.Usage.OutputTokens != 37 {
+		t.Errorf("output tokens = %d", *call.Usage.OutputTokens)
+	}
+	if root := rec.Trees()[0]; root.Span.Name != "answer_question" {
+		t.Errorf("root = %s", root.Span.Name)
+	}
+}
+```
+
 ## Sinks and stats
 
 The exporter drains the queue into a batch and hands it to the client's sink.

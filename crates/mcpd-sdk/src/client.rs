@@ -37,7 +37,7 @@ pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(10);
 /// ```
 #[derive(Debug, Clone)]
 pub struct Mcpd {
-    inner: Arc<ClientInner>,
+    pub(crate) inner: Arc<ClientInner>,
 }
 
 /// The parts the worker needs to wait on. Kept apart from [`ClientInner`] so
@@ -69,6 +69,9 @@ pub(crate) struct ClientInner {
     rejected: AtomicU64,
     /// Values the configured redactor panicked on, dropped rather than sent.
     redaction_failures: AtomicU64,
+    /// Fetched prompts, and the transport that fetches them even when the
+    /// client is disabled.
+    pub(crate) prompts: crate::prompts::PromptStore,
     /// Rate limiter for the "something is wrong with mcpd" messages. Without it
     /// an unreachable server turns into a second outage in the log pipeline.
     pub(crate) warn: Throttle,
@@ -152,6 +155,7 @@ impl Mcpd {
             failed: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
             redaction_failures: AtomicU64::new(0),
+            prompts: crate::prompts::PromptStore::default(),
             warn: Throttle::new(config.flush_interval),
             send_lock: Arc::new(tokio::sync::Mutex::new(())),
             worker_started: AtomicBool::new(false),
@@ -1104,13 +1108,25 @@ pub struct TraceFilter {
     pub to: Option<OffsetDateTime>,
     /// Only traces at least this slow.
     pub min_duration_ms: Option<u64>,
+    /// Only traces at most this slow.
+    pub max_duration_ms: Option<u64>,
     /// Only traces at least this expensive.
     pub min_cost: Option<f64>,
+    /// Only traces at most this expensive.
+    pub max_cost: Option<f64>,
+    /// Only traces that used at least this many tokens, input and output
+    /// together.
+    pub min_tokens: Option<u64>,
     /// Only traces carrying a score from this scorer.
     pub has_score: Option<String>,
     /// With `has_score`: only traces that scorer marked below this value.
     pub score_below: Option<f64>,
-    /// `start_time`, `duration`, `cost` or `span_count`.
+    /// With `has_score`: only traces that scorer marked above this value.
+    pub score_above: Option<f64>,
+    /// `true` for only traces a person gave feedback on, `false` for only
+    /// traces with none.
+    pub has_feedback: Option<bool>,
+    /// `start_time`, `duration`, `cost`, `span_count`, `tokens` or `score`.
     pub sort: Option<String>,
     /// `asc` or `desc`.
     pub order: Option<String>,
@@ -1138,9 +1154,14 @@ impl TraceFilter {
         put(&mut p, "from", &self.from.map(rfc3339));
         put(&mut p, "to", &self.to.map(rfc3339));
         put(&mut p, "min_duration_ms", &self.min_duration_ms);
+        put(&mut p, "max_duration_ms", &self.max_duration_ms);
         put(&mut p, "min_cost", &self.min_cost);
+        put(&mut p, "max_cost", &self.max_cost);
+        put(&mut p, "min_tokens", &self.min_tokens);
         put(&mut p, "has_score", &self.has_score);
         put(&mut p, "score_below", &self.score_below);
+        put(&mut p, "score_above", &self.score_above);
+        put(&mut p, "has_feedback", &self.has_feedback);
         put(&mut p, "sort", &self.sort);
         put(&mut p, "order", &self.order);
         put(&mut p, "limit", &self.limit);
@@ -1164,12 +1185,18 @@ pub struct SpanFilter {
     pub model: Option<String>,
     /// Restrict to one trace.
     pub trace_id: Option<String>,
+    /// Only spans linked to this prompt by [`Span::set_prompt`].
+    pub prompt: Option<String>,
+    /// With `prompt`: only spans that used this version of it.
+    pub prompt_version: Option<u32>,
     /// Start of the window.
     pub from: Option<OffsetDateTime>,
     /// End of the window.
     pub to: Option<OffsetDateTime>,
     /// Only spans at least this slow.
     pub min_duration_ms: Option<u64>,
+    /// `start_time`, `duration` or `cost`.
+    pub sort: Option<String>,
     /// `asc` or `desc`.
     pub order: Option<String>,
     /// Page size, 1 to 500.
@@ -1187,9 +1214,12 @@ impl SpanFilter {
         put(&mut p, "name", &self.name);
         put(&mut p, "model", &self.model);
         put(&mut p, "trace_id", &self.trace_id);
+        put(&mut p, "prompt", &self.prompt);
+        put(&mut p, "prompt_version", &self.prompt_version);
         put(&mut p, "from", &self.from.map(rfc3339));
         put(&mut p, "to", &self.to.map(rfc3339));
         put(&mut p, "min_duration_ms", &self.min_duration_ms);
+        put(&mut p, "sort", &self.sort);
         put(&mut p, "order", &self.order);
         put(&mut p, "limit", &self.limit);
         put(&mut p, "cursor", &self.cursor);

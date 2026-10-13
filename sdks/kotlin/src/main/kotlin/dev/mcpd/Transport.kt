@@ -169,7 +169,8 @@ internal class Transport(
                 val response = outcome.response
                 if (response.statusCode() !in 200..299) {
                     throw McpdException(
-                        "mcpd answered HTTP ${response.statusCode()} for $path: ${excerpt(response.body())}"
+                        "mcpd answered HTTP ${response.statusCode()} for $path: ${excerpt(response.body())}",
+                        status = response.statusCode(),
                     )
                 }
                 try {
@@ -206,6 +207,23 @@ internal class Transport(
         body: String,
         deserializer: DeserializationStrategy<T>,
         wait: Duration = Duration.ZERO,
+    ): T = sendJson("POST", path, params, body, deserializer, wait)
+
+    /** PUT a JSON body and decode the answer, on the same terms as [postJson]. */
+    suspend fun <T> putJson(
+        path: String,
+        params: List<Pair<String, String?>>,
+        body: String,
+        deserializer: DeserializationStrategy<T>,
+    ): T = sendJson("PUT", path, params, body, deserializer, Duration.ZERO)
+
+    private suspend fun <T> sendJson(
+        method: String,
+        path: String,
+        params: List<Pair<String, String?>>,
+        body: String,
+        deserializer: DeserializationStrategy<T>,
+        wait: Duration,
     ): T {
         val request = HttpRequest.newBuilder(URI.create(url(path, params)))
             .timeout((config.timeout + wait).toJavaDuration())
@@ -213,7 +231,7 @@ internal class Transport(
             .header("content-type", "application/json")
             .header("user-agent", USER_AGENT)
             .also { builder -> config.apiKey?.let { builder.header("authorization", "Bearer $it") } }
-            .POST(HttpRequest.BodyPublishers.ofString(body))
+            .method(method, HttpRequest.BodyPublishers.ofString(body))
             .build()
         val response = try {
             withContext(Dispatchers.IO) { http.send(request, HttpResponse.BodyHandlers.ofString()) }
@@ -232,7 +250,7 @@ internal class Transport(
             if (conflict != null) throw StepConflictException(conflict)
         }
         if (code !in 200..299) {
-            throw McpdException("mcpd answered HTTP $code for $path: ${excerpt(response.body())}")
+            throw McpdException("mcpd answered HTTP $code for $path: ${excerpt(response.body())}", status = code)
         }
         return try {
             json.decodeFromString(deserializer, response.body())

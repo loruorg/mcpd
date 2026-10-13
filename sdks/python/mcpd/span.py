@@ -11,10 +11,12 @@ a user who moves a function from sync to async changes one keyword.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import traceback
 from time import perf_counter_ns
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
+from typing import (Any, AsyncIterator, Callable, Dict, Iterator, List, Mapping, Optional,
+                    Sequence, Union)
 
 from . import _generated as records
 from ._generated import EntityKind, SpanKind, SpanStatus
@@ -27,8 +29,65 @@ from .context import (
     now_ns,
 )
 from .model_call import response_facts
+from .stream import StreamAccumulator
 
 __all__ = ["Span"]
+
+
+def _closer(it: Any, name: str) -> Any:
+    """The iterator's `close` or `aclose`, so stopping early releases the connection."""
+    method = getattr(it, name, None)
+    return method if callable(method) else None
+
+
+def _record_sync(stream: Any, observe: Callable[[Any], None],
+                 finish: Callable[..., None]) -> Iterator[Any]:
+    it = iter(stream)
+    try:
+        for chunk in it:
+            observe(chunk)
+            yield chunk
+    except GeneratorExit:
+        # The caller stopped early: a `break`, `close()` or garbage collection.
+        close = _closer(it, "close")
+        if close is not None:
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - the provider's cleanup is not ours to raise
+                pass
+        raise
+    except Exception as exc:
+        finish(exc)
+        raise
+    finally:
+        finish()
+
+
+async def _record_async(stream: Any, observe: Callable[[Any], None],
+                        finish: Callable[..., None]) -> AsyncIterator[Any]:
+    it = stream.__aiter__()
+    try:
+        while True:
+            try:
+                chunk = await it.__anext__()
+            except StopAsyncIteration:
+                break
+            observe(chunk)
+            yield chunk
+    except (GeneratorExit, asyncio.CancelledError):
+        # The caller stopped early: a `break`, `aclose()`, a cancelled task.
+        close = _closer(it, "aclose")
+        if close is not None:
+            try:
+                await close()
+            except Exception:  # noqa: BLE001 - the provider's cleanup is not ours to raise
+                pass
+        raise
+    except Exception as exc:
+        finish(exc)
+        raise
+    finally:
+        finish()
 
 
 def _guard(method):
@@ -446,6 +505,50 @@ class Span:
         self._attributes = {**attrs, "mcpd.time_to_first_token_ms": ms}
         return self
 
+    def record_stream(self, stream: Any, provider: Optional[str] = None) -> Any:
+        """Read a streamed model call through this span, and record it.
+
+        Pass the provider's stream and read the one this returns in its place:
+        a generator for an iterator, an async generator for an async iterator.
+        Every chunk comes through unchanged. The first chunk with text or a
+        tool-call delta marks the first token. When the stream ends, raises, or
+        you stop reading early, the span records what `record_response` would
+        have read from the whole response, sets the text as its output, and
+        ends. An error from the stream is recorded and reaches you unchanged.
+        """
+        acc = StreamAccumulator()
+        state = {"done": False}
+
+        def observe(chunk: Any) -> None:
+            try:
+                if acc.add(chunk):
+                    self.mark_first_token()
+            except Exception as exc:  # noqa: BLE001 - B1: a chunk never breaks the stream
+                self._client._instrumentation_failed("Span.record_stream", exc)
+
+        def finish(error: Optional[BaseException] = None) -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+            try:
+                response = acc.response()
+                if response is not None:
+                    self.record_response(response, provider)
+                output = acc.output()
+                if output is not None:
+                    self.set_output(output)
+                if acc.truncated:
+                    self.set_attributes({"mcpd.stream.truncated": True})
+                if error is not None:
+                    self.set_error(error)
+            except Exception as exc:  # noqa: BLE001 - B1
+                self._client._instrumentation_failed("Span.record_stream", exc)
+            self.end()
+
+        if hasattr(stream, "__aiter__"):
+            return _record_async(stream, observe, finish)
+        return _record_sync(stream, observe, finish)
+
     @_guard
     def set_guardrail(self, tripped: bool, reason: Optional[str] = None) -> "Span":
         """Record a guardrail's outcome as `mcpd.guardrail.tripped` and `mcpd.guardrail.reason`.
@@ -456,6 +559,30 @@ class Span:
         add: Dict[str, Any] = {"mcpd.guardrail.tripped": bool(tripped)}
         if reason is not None:
             add["mcpd.guardrail.reason"] = str(reason)
+        self._attributes = {**(self._attributes or {}), **add}
+        return self
+
+    @_guard
+    def set_prompt(self, prompt: Any) -> "Span":
+        """Link the prompt this step used, so `list_spans(prompt=...)` finds it.
+
+        Sets `mcpd.prompt.name` and, unless it is a fallback (version 0),
+        `mcpd.prompt.version`. A missing or malformed prompt sets nothing.
+        """
+        if prompt is None:
+            return self
+        if isinstance(prompt, Mapping):
+            name, version = prompt.get("name"), prompt.get("version")
+        else:
+            name, version = getattr(prompt, "name", None), getattr(prompt, "version", None)
+        # `bool` is an `int`, and `True` as a version would be a lie on the span.
+        if not isinstance(name, str) or not name:
+            return self
+        if not isinstance(version, int) or isinstance(version, bool) or version < 0:
+            return self
+        add: Dict[str, Any] = {"mcpd.prompt.name": name}
+        if version > 0:
+            add["mcpd.prompt.version"] = version
         self._attributes = {**(self._attributes or {}), **add}
         return self
 
