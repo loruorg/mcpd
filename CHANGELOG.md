@@ -20,6 +20,16 @@ rather than every commit.
 
 ### Added
 
+- **Durable runs in Postgres.** `--runs-data postgres://...` keeps the
+  definitions, the step journal, deadlines and waits in Postgres instead of an
+  embedded file, so several replicas serve runs from one store. It can be the
+  same database as `--postgres-url`, and reads TLS settings the same way. Every
+  run store transaction is serializable, so replicas claiming steps or firing
+  deadlines at once behave as one daemon would. The schema is created on start.
+  `mcpd config` prints the line as `postgres at` the server, without the
+  password. In the Helm chart, set `runs.store=postgres` and
+  `runs.postgresUrl`, and `replicaCount` above 1 is accepted with runs on.
+
 - **Organisations, roles, single sign-on and SCIM.** An account can create
   organisations, which own projects, invite members by email and give each a
   role (owner, admin, member or viewer, optionally replaced on one project)
