@@ -215,6 +215,20 @@ const scrape = `scrape_configs:
           <td>gauge</td>
           <td>Secondi dall’avvio di questo processo</td>
         </tr>
+        <tr>
+          <td><code>mcpd_model_input_tokens_total</code>, <code>mcpd_model_output_tokens_total</code></td>
+          <td>counter</td>
+          <td>
+            Token sugli span archiviati, con le etichette <code>provider</code> e
+            <code>model</code>. Al massimo 200 serie; gli span oltre quel numero
+            vengono contati sotto <code>other</code>
+          </td>
+        </tr>
+        <tr>
+          <td><code>mcpd_model_cost_total</code></td>
+          <td>counter</td>
+          <td>Costo valorizzato degli span archiviati, per provider, modello e <code>currency</code></td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -700,6 +714,60 @@ const scrape = `scrape_configs:
     valutato allo stesso modo, per lo stesso motivo: qualsiasi indirizzo potrebbe
     allora impostare l’header ed essere registrato come chiunque esso nomini.
   </p>
+
+  <h3>Che cosa gira senza il comando</h3>
+  <p>
+    Per eseguire <code>mcpd doctor</code> devi sapere che esiste, e nessuno
+    degli errori che trova si annuncia da solo, quindi il deploy che ne porta
+    uno di solito è quello su cui nessuno l’ha puntato. Per questo i gruppi che
+    leggono solo la configurazione girano a ogni avvio: <code>keys</code>,
+    <code>identity</code>, <code>limits</code> e <code>judge</code>. Non
+    richiedono nessun giro fino allo storage e nessuna rete, quindi un avvio li
+    paga in microsecondi. Gli altri otto restano nel comando, perché ognuno
+    legge lo storage o contatta le destinazioni di inoltro, e un avvio non deve
+    aspettare né l’uno né le altre.
+  </p>
+  <p>
+    Un guasto trovato all’avvio ferma il daemon; un avvertimento finisce nei
+    log e il daemon prosegue. A separarli è se la configurazione chiede
+    qualcosa che non può funzionare: una voce di chiave vuota o con spazi a
+    un’estremità, un intervallo fidato che contiene tutta internet, un
+    <code>sample</code> di progetto fuori dall’intervallo da 0.0 a 1.0, o un
+    giudice che non può mai rispondere. Ognuno di questi è una funzione che hai
+    acceso e che in silenzio non fa niente, il che è peggio di una che
+    fallisce, perché nessuno va a cercarla. Una chiave corta, una chiave
+    condivisa da due progetti, un tetto più piccolo di un batch: quelli
+    funzionano, e possono essere quello che intendevi, quindi finiscono nei log
+    e non sono mai fatali.
+  </p>
+  <p>
+    L’apertura con cui mcpd viene distribuito è l’eccezione. Un ambito di
+    ingest o di lettura aperto su un indirizzo non di loopback è un guasto per
+    <code>mcpd doctor</code>, che blocca un deploy, e un avvertimento all’avvio,
+    che non lo blocca. Rifiutare lì vorrebbe dire una prima esecuzione che non
+    parte mai.
+  </p>
+  <p>
+    <code>mcpd config</code> e <code>mcpd doctor</code> girano anche su una
+    configurazione che un avvio rifiuterebbe. Sono i due comandi che esistono
+    per spiegarne una sbagliata, quindi nessuno dei due può essere il comando
+    che non parte.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="un giudice che non avrebbe mai potuto produrre un punteggio"
+    lines={[
+      { cmd: 'mcpd --config-file /etc/mcpd/config.json' },
+      { out: 'Error: the configuration cannot do what it says, so mcpd will', tone: 'warn' },
+      { out: 'not start:', tone: 'warn' },
+      { out: '  judge: the judge at https://api.example.com/v1 has no criteria,', tone: 'warn' },
+      { out: '  so every judged scorer declines with `is not a configured', tone: 'warn' },
+      { out: '  criterion` and no judged score is ever produced. Add entries', tone: 'warn' },
+      { out: '  under `judge.criteria` in --config-file.', tone: 'warn' },
+      { out: 'Fix the lines above, or run `mcpd doctor` for the whole report.', tone: 'warn' },
+    ]}
+  />
 
   <h2>Le impostazioni da controllare prima che sia raggiungibile</h2>
   <p>
