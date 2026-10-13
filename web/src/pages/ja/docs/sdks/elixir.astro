@@ -148,7 +148,67 @@ end`}</code></pre>
     <code>capture_payloads: true</code> で別の扱いにできます。
   </p>
 
+  <h2>モデルをどう呼び出したか</h2>
+  <p>
+    <code>model_parameters:</code> は、モデル呼び出しに使った設定を記録します。
+    <code>temperature</code>、<code>top_p</code>、<code>top_k</code>、
+    <code>max_tokens</code>、<code>seed</code>、<code>stop_sequences</code>、
+    <code>has_response_format</code> です。キーワードリストを渡すか、すでに
+    手元にあるなら <code>%Mcpd.ModelParameters&#123;&#125;</code> を渡してください。
+  </p>
+
+  <pre><code class="language-elixir">{`Mcpd.span mcpd, "answer",
+  kind: :model_generation,
+  model_parameters: [temperature: 0.0, seed: 0, max_tokens: 1024] do
+  call_the_model()
+end`}</code></pre>
+
+  <p>
+    これらはペイロードではなく設定なので、<code>capture_payloads: false</code>
+    でも残ります。そして大事なのはまさにその場合です。実行を再現する人が合わせ
+    なければならないのは、これらの値だからです。省いたフィールドは存在せず、
+    渡したフィールドは値が何であれ保たれるので、<code>seed: 0</code> もシード
+    です。<code>has_response_format</code> の背後にあるスキーマは記録されず、
+    それが有効だったかどうかだけが記録されます。これがセッターではなくオプション
+    なのは、Elixir のスパンは開いたときのオプションで記述されるからです。
+    <code>model:</code>、<code>provider:</code>、<code>usage:</code> もすでに
+    そうなっています。
+  </p>
+
+  <h3>ストリーミングの呼び出し</h3>
+  <p>
+    プロバイダーのストリームを <code>Mcpd.ModelCall.record_stream/4</code> に
+    渡し、代わりに返ってきたストリームを読んでください。OpenAI の chat completion
+    のチャンクと Anthropic の message イベントを受け取り、すべてのチャンクは
+    そのまま通ります。スパンは、最初にストリームを読んだときに、あなたの
+    プロセスでアクティブなスパンの下に開き、テキストかツール呼び出しを持つ最初の
+    チャンクが、最初のトークンまでの時間を記録します。ストリームが終わったとき、
+    例外を投げたとき、<code>Enum.take/2</code> や <code>Enum.find/2</code> で
+    途中でやめたときに、スパンは、同じ呼び出しをストリーミングなしで行った場合に
+    <code>Mcpd.ModelCall.options/2</code> が返す内容と、出力としてのテキストを
+    受け取り、終了します。ストリームからのエラーはスパンに記録され、そのまま
+    あなたに届きます。保持するテキストは 32,768 文字までで、上限に達したときは
+    <code>mcpd.stream.truncated</code> が設定されます。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="stream" title="ストリーミングの呼び出し" />
+
   <h2>記録した内容の検証</h2>
+  <p>
+    <code>Mcpd.Testing.start/1</code> は、メモリに記録するクライアントを、
+    テストにリンクして起動します。あなたのコードがクライアントを受け取る場所に
+    <code>testing.client</code> を渡し、記録された内容を読み返してください。
+    名前や種別で引く <code>spans/2</code>、必ず存在するはずの 1 つのスパンを引く
+    <code>span/2</code>、実行ごとのツリーを返す <code>trees/1</code>、そして
+    <code>logs/1</code>、<code>metrics/1</code>、<code>scores/1</code>、
+    <code>recorded_feedback/1</code>、<code>reset/1</code> です。どの読み出しも
+    先にフラッシュします。保持される内容は、デーモンへ向かうときと同じように
+    サンプリング、ペイロードの取り込み、<code>redact</code> を通っており、テストの
+    実行に <code>MCPD_ENABLED=false</code> が設定されていても有効なままです。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="testing" title="ユニットテスト" />
+
   <p>
     シンクは、吐き出されたバッチの行き先です。既定は HTTP トランスポート
     です。<code>Mcpd.Sink.Recorder</code> はすべてのバッチをメモリに保持するので、
