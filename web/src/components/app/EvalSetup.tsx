@@ -65,12 +65,15 @@ export function LiveRules({
   rules,
   scorers,
   onChanged,
+  judgedIds = [],
 }: {
   endpoint: string
   project: string
   rules: EvaluationRule[] | null
   scorers: ScorerInfo[]
   onChanged: () => void
+  /** The project's judge definitions, which make a model call like a rubric does. */
+  judgedIds?: string[]
 }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -131,7 +134,7 @@ export function LiveRules({
         </div>
       )}
       {error && <Failure title="Not stored" error={error} />}
-      <NewRule endpoint={endpoint} project={project} scorers={scorers} onSaved={onChanged} />
+      <NewRule endpoint={endpoint} project={project} scorers={scorers} judgedIds={judgedIds} onSaved={onChanged} />
     </div>
   )
 }
@@ -140,13 +143,16 @@ function NewRule({
   endpoint,
   project,
   scorers,
+  judgedIds,
   onSaved,
 }: {
   endpoint: string
   project: string
   scorers: ScorerInfo[]
+  judgedIds: string[]
   onSaved: () => void
 }) {
+  const isJudged = (s: ScorerInfo) => s.kind === 'judge' || s.kind === 'criterion' || judgedIds.includes(s.id)
   const runnable = scorers.filter((s) => s.available && !s.needs_config)
   const [id, setId] = useState('')
   const [chosen, setChosen] = useState<string[]>([])
@@ -158,7 +164,10 @@ function NewRule({
   const [error, setError] = useState<string | null>(null)
 
   const toggle = (s: string) => setChosen((c) => (c.includes(s) ? c.filter((x) => x !== s) : [...c, s]))
-  const judged = chosen.filter((c) => scorers.find((s) => s.id === c)?.kind !== 'code').length
+  const judged = chosen.filter((c) => {
+    const s = scorers.find((x) => x.id === c)
+    return s ? isJudged(s) : false
+  }).length
 
   const save = () => {
     setBusy(true)
@@ -219,7 +228,7 @@ function NewRule({
           <label key={s.id} className="flex items-center gap-1.5 text-[0.8125rem]" title={s.description}>
             <input type="checkbox" checked={chosen.includes(s.id)} onChange={() => toggle(s.id)} />
             <span className="data">{s.id}</span>
-            {s.kind !== 'code' && <span className="text-ink-3">judged</span>}
+            {isJudged(s) && <span className="text-ink-3">judged</span>}
           </label>
         ))}
       </div>

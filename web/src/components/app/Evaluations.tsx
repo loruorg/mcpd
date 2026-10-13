@@ -114,6 +114,7 @@ export default function Evaluations({ endpoint, onEndpoint, project, onProject, 
               project={project}
               rules={rules}
               scorers={scorers}
+              judgedIds={(definitions ?? []).filter((d) => d.kind === 'judge').map((d) => d.id)}
               onChanged={() => setNonce((n) => n + 1)}
             />
           )}

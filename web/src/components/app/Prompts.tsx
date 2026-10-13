@@ -185,19 +185,6 @@ export default function Prompts({ endpoint, onEndpoint, project, onProject, onOp
           )}
         </Section>
 
-        <Section title="New version">
-          <Compose
-            key={`${open ?? ''}-${current?.version ?? 0}`}
-            endpoint={endpoint}
-            project={project}
-            base={current}
-            onSaved={(p) => {
-              setOpen(p.name)
-              setSelected(p.version)
-              refresh()
-            }}
-          />
-        </Section>
 
         {open && versions && (
           <Section title={`Versions of ${open}`}>
@@ -235,6 +222,20 @@ export default function Prompts({ endpoint, onEndpoint, project, onProject, onOp
             </div>
           </Section>
         )}
+
+        <Section title="New version">
+          <Compose
+            key={`${open ?? ''}-${current?.version ?? 0}`}
+            endpoint={endpoint}
+            project={project}
+            base={current}
+            onSaved={(p) => {
+              setOpen(p.name)
+              setSelected(p.version)
+              refresh()
+            }}
+          />
+        </Section>
       </div>
     </div>
   )

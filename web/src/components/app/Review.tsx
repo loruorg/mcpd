@@ -133,7 +133,7 @@ function Row({
   const [who, setWho] = useState(item.assignee ?? '')
   const tone = item.status === 'pending' ? 'text-amber' : item.status === 'reviewed' ? 'text-olive' : 'text-ink-3'
   return (
-    <tr className="border-t border-scribe align-top">
+    <tr className="border-t border-scribe align-middle">
       <td className="data px-3 py-1.5 whitespace-nowrap" title={`changed ${when(item.updated_at)}`}>
         {when(item.created_at)}
       </td>
