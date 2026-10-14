@@ -47,6 +47,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
+import { mcpdBinary } from './languages.mjs'
+
 const ROOT = path.resolve(import.meta.dirname, '..', '..')
 const PROJECT = 'judge-e2e'
 
@@ -93,9 +95,7 @@ if (!UPSTREAM || !TOKEN) {
   process.exit(0)
 }
 
-const bin = ['target/debug/mcpd', 'target/release/mcpd']
-  .map((p) => path.join(ROOT, p))
-  .find(existsSync)
+const bin = mcpdBinary()
 
 if (!bin) {
   console.error('judge e2e: no mcpd binary. Run `cargo build -p mcpd` first.')

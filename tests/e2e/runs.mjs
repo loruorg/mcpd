@@ -23,16 +23,16 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
-import { ROOT, RUN_PROBES, freePort, languageFilter } from './languages.mjs'
+import { ROOT, RUN_PROBES, freePort, languageFilter, mcpdBinary } from './languages.mjs'
 
 const CANONICAL = JSON.parse(readFileSync(path.join(ROOT, 'tests/e2e/probes/runs/canonical.json'), 'utf8'))
 
-const bin = ['target/debug/mcpd', 'target/release/mcpd'].map((p) => path.join(ROOT, p)).find(existsSync)
+const bin = mcpdBinary()
 if (!bin) {
   console.error('No mcpd binary. Run `cargo build -p mcpd` first.')
   process.exit(2)

@@ -28,6 +28,9 @@ quietly. `MCPD_REQUIRE_ALL_LANGUAGES=1` turns a skip into a failure.
 the languages it leaves out are reported as skips, so the same flag cannot be
 used to make a suite green by doing less.
 
+The suites run the daemon `cargo build -p mcpd` wrote, under `CARGO_TARGET_DIR`
+when it is set and `target/` when not. `MCPD_BIN` names another binary.
+
 ## Cross-language conformance
 
 Every SDK is unit-tested on its own. That proves each one does what its authors

@@ -40,20 +40,18 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
-import { LANGUAGES, ROOT, freePort, languageFilter } from './languages.mjs'
+import { LANGUAGES, ROOT, freePort, languageFilter, mcpdBinary } from './languages.mjs'
 
 const PROJECT = 'errors-e2e'
 const INGEST_KEY = 'ingest-errors-e2e'
 
-const bin = ['target/debug/mcpd', 'target/release/mcpd']
-  .map((p) => path.join(ROOT, p))
-  .find(existsSync)
+const bin = mcpdBinary()
 
 if (!bin) {
   console.error('No mcpd binary. Run `cargo build -p mcpd` first.')

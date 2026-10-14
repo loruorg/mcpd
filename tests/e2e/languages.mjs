@@ -17,6 +17,19 @@ export const ROOT = path.resolve(import.meta.dirname, '..', '..')
 export const PROBES = path.join(ROOT, 'tests/e2e/probes')
 
 /**
+ * The mcpd binary the suites run: `MCPD_BIN` when set, else the one
+ * `cargo build -p mcpd` just wrote. That is under `CARGO_TARGET_DIR` when it
+ * is set, so a build there is never passed over for an older one in `target/`.
+ */
+export function mcpdBinary() {
+  if (process.env.MCPD_BIN) return existsSync(process.env.MCPD_BIN) ? process.env.MCPD_BIN : undefined
+  const dirs = [process.env.CARGO_TARGET_DIR, path.join(ROOT, 'target')].filter(Boolean)
+  return dirs
+    .flatMap((dir) => ['debug', 'release'].map((profile) => path.resolve(ROOT, dir, profile, 'mcpd')))
+    .find(existsSync)
+}
+
+/**
  * A port the operating system says is free.
  *
  * Never a fixed number. A hardcoded port picks up whatever else is listening on

@@ -23,11 +23,13 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
+
+import { mcpdBinary } from './languages.mjs'
 
 const ROOT = path.resolve(import.meta.dirname, '..', '..')
 
@@ -59,9 +61,7 @@ const READ_KEY = 'read-mcp-e2e'
 const INGEST_KEY = 'ingest-mcp-e2e'
 const OTHER_INGEST_KEY = 'ingest-other-team'
 
-const bin = ['target/debug/mcpd', 'target/release/mcpd']
-  .map((p) => path.join(ROOT, p))
-  .find(existsSync)
+const bin = mcpdBinary()
 
 if (!bin) {
   console.error('No mcpd binary. Run `cargo build -p mcpd` first.')
