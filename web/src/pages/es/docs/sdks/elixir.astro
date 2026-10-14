@@ -144,14 +144,78 @@ end`}</code></pre>
     <code>capture_payloads: false</code>, o
     <code>MCPD_CAPTURE_PAYLOADS=false</code>, mantiene los prompts y las
     completions donde están. Los spans siguen saliendo con sus tiempos, su
-    estado, su uso, su modelo, su correlación y sus errores;
+    estado, su uso, su modelo, los parámetros del modelo, su correlación y sus
+    errores;
     <code>input:</code>, <code>output:</code> y el valor capturado de un bloque
     se descartan antes de llegar a la cola, así que no se encola nada sensible y
     nada sensible sale en un flush. Un span puede decir lo contrario para sí
     mismo con <code>capture_payloads: true</code>.
   </p>
 
+  <h2>Cómo se llamó al modelo</h2>
+  <p>
+    <code>model_parameters:</code> registra los ajustes con los que se hizo una
+    llamada al modelo: <code>temperature</code>, <code>top_p</code>,
+    <code>top_k</code>, <code>max_tokens</code>, <code>seed</code>,
+    <code>stop_sequences</code> y <code>has_response_format</code>. Pásale una
+    lista de palabras clave, o un
+    <code>%Mcpd.ModelParameters&#123;&#125;</code> si ya tienes uno.
+  </p>
+
+  <pre><code class="language-elixir">{`Mcpd.span mcpd, "answer",
+  kind: :model_generation,
+  model_parameters: [temperature: 0.0, seed: 0, max_tokens: 1024] do
+  call_the_model()
+end`}</code></pre>
+
+  <p>
+    Son ajustes y no payload, así que sobreviven a
+    <code>capture_payloads: false</code>, que es el caso que importa: son lo
+    que tiene que igualar quien reproduzca la ejecución. Un campo que omites
+    está ausente y uno que das se guarda sea cual sea, así que
+    <code>seed: 0</code> es una semilla. El esquema que hay detrás de
+    <code>has_response_format</code> no se registra, solo si había uno en
+    vigor. Es una opción y no un setter porque un span de Elixir se describe
+    por las opciones con las que se abrió, igual que ya pasa con
+    <code>model:</code>, <code>provider:</code> y <code>usage:</code>.
+  </p>
+
+  <h3>Llamadas en streaming</h3>
+  <p>
+    Pasa el stream del proveedor a <code>Mcpd.ModelCall.record_stream/4</code>
+    y lee en su lugar el stream que devuelve. Acepta fragmentos de chat
+    completion de OpenAI y eventos de mensaje de Anthropic, y cada fragmento
+    pasa sin cambios. El span se abre cuando lees el stream por primera vez,
+    bajo el span activo en tu proceso, y el primer fragmento con texto o con
+    una llamada a herramienta marca el tiempo hasta el primer token. Cuando el
+    stream termina, lanza una excepción o paras antes con
+    <code>Enum.take/2</code> o <code>Enum.find/2</code>, el span recibe lo que
+    <code>Mcpd.ModelCall.options/2</code> daría para la misma llamada sin
+    streaming, con el texto como su salida, y termina. Un error del stream
+    marca el span y te llega sin cambios. El texto que se guarda tiene un tope
+    de 32,768 caracteres, y <code>mcpd.stream.truncated</code> se fija cuando
+    se llegó al tope.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="stream" title="una llamada en streaming" />
+
   <h2>Comprobar lo que registraste</h2>
+  <p>
+    <code>Mcpd.Testing.start/1</code> arranca un cliente que registra en
+    memoria, enlazado a tu prueba. Pasa <code>testing.client</code> allí donde
+    tu código acepte un cliente, y luego vuelve a leer lo que registró:
+    <code>spans/2</code> por nombre o por tipo, <code>span/2</code> para el
+    único span que tiene que existir, <code>trees/1</code> para cada ejecución
+    como un árbol, <code>logs/1</code>, <code>metrics/1</code>,
+    <code>scores/1</code>, <code>recorded_feedback/1</code> y
+    <code>reset/1</code>. Cada lector hace flush primero. Lo que guarda pasó
+    por el muestreo, la captura de payloads y <code>redact</code> igual que de
+    camino a un daemon, y sigue activo cuando se fija
+    <code>MCPD_ENABLED=false</code> para la ejecución de las pruebas.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="testing" title="una prueba unitaria" />
+
   <p>
     Un sink es adonde va un lote vaciado. El transporte HTTP es el valor por
     defecto; <code>Mcpd.Sink.Recorder</code> guarda cada lote en memoria, así
