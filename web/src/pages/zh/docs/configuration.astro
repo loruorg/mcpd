@@ -863,7 +863,11 @@ volumes:
   <p>
     在部署任何东西之前，先读那六行 auth。<code>open</code> 意味着对任何能连到
     这个端口的人开放。括号里的一行写明这个作用域正在继承的那份更宽的列表，
-    从旧版本升级上来的部署，一开始就处在这个状态。
+    从旧版本升级上来的部署，一开始就处在这个状态。每一个参数和配置文件里的每一个
+    键在这里都有一行，显示的是守护进程实际运行的值，而不是写下的值：低于下限的
+    间隔会显示为提高之后的值，并带上原来的数字。不会打印任何秘密。密钥只计数、
+    从不列出，密码显示为 <code>set</code> 或 <code>unset</code>，转发请求头只
+    打印名称，URL 和连接字符串打印时去掉其中的凭据。
   </p>
 
   <h2>一份配好的部署</h2>
@@ -934,9 +938,12 @@ volumes:
 
   <h3>--config-file</h3>
   <p>
-    一个 JSON 文件，装着命令行放不下的那些设置：监视器、服务水平目标、评估它们
-    的间隔、转发、裁判模型、运行存储的各项时长、两道请求限制，以及下面的按项目
-    配置块。选 JSON 而不是 YAML 或 TOML，是因为 mcpd 本来就为其他一切解析 JSON，
+    一个 JSON 文件，装着命令行放不下的那些设置。它接受十一个键：
+    <code>monitors</code>、<code>slos</code>、
+    <code>monitor_interval_seconds</code>、<code>forward</code>、
+    <code>judge</code>、<code>projects</code>、<code>runs</code>、
+    <code>max_body_bytes</code>、<code>max_batch_signals</code>、
+    <code>derived_metrics</code> 和 <code>aspects</code>。每一个都可以省略。选 JSON 而不是 YAML 或 TOML，是因为 mcpd 本来就为其他一切解析 JSON，
     所以这个文件不引入新依赖，也不引入第二套要学的语法。它可以原样作为
     Kubernetes ConfigMap 挂载。
   </p>
@@ -944,6 +951,10 @@ volumes:
     <code>max_body_bytes</code> 和 <code>max_batch_signals</code> 除了命令行之外
     也在这里，这样一个集群就能把它们和一起部署的那些监视器放在同一处。参数压过
     文件，一个实例要用不同的上限，就不必为所有人改动那份共享文件。
+  </p>
+  <p>
+    <code>monitor_interval_seconds</code> 是评估监视器和目标的间隔。默认 60，小于
+    5 的值会被提高到 5。
   </p>
   <p>
     未知的键会让启动失败，而不是被忽略，因为一个拼错的键悄悄什么都不监视，是
@@ -1028,7 +1039,9 @@ volumes:
     <code>read_keys</code>、<code>write_keys</code>、<code>admin_keys</code>、
     <code>execute_keys</code> 和 <code>worker_keys</code>，
     它们的回退方式也一样：没有 <code>write_keys</code> 的项目接受它自己的摄取
-    密钥，没有 <code>admin_keys</code> 的项目接受它自己的读取密钥。上面的
+    密钥，没有 <code>admin_keys</code> 的项目接受它自己的读取密钥，而
+    <code>execute_keys</code> 和 <code>worker_keys</code> 没设置时接受项目的写入
+    密钥。上面的
     <code>support</code> 块两个都没设，所以它的行为和这两个作用域出现之前
     一模一样。
   </p>
@@ -1040,6 +1053,17 @@ volumes:
     项目没有设置 <code>retention_days</code> 和 <code>sample</code> 时，它们回退
     到全局参数。两者按项目设置的理由和密钥一样：一个团队九十天的要求，不该逼着
     其他所有人的数据也留那么久；一个团队的流量，也不该决定另一个团队怎么被采样。
+  </p>
+  <p>
+    <code>tail_sampling</code> 按一个项目已结束的运行里发生了什么来留下它们，并
+    删除其余的。它接受 <code>rate</code>，也就是普通运行留下的比例，并留下每一次
+    符合 <code>keep_errors</code>（默认开启）、<code>keep_slower_than_ms</code>、
+    <code>keep_cost_above</code>、<code>keep_score_below</code> 或
+    <code>keep_feedback</code>（默认开启）的运行。一次运行在结束
+    <code>decide_after_seconds</code> 之后才被判定，默认 120，这样实时评分已经
+    到了。<code>mcpd config</code> 把每条规则打印在它的
+    <code>tail sampling</code> 那一行上。见
+    <a href={to('/docs/sampling')}>采样</a>。
   </p>
   <p>
     一个批次里可以出现好几个项目。一把有作用域的摄取密钥会写下它够得到的那些
@@ -1072,13 +1096,12 @@ volumes:
   }
 }`}</code></pre>
 
-  <p>
-    <code>monitor_interval_seconds</code> 是监视器和目标的评估间隔。默认是 60，小于 5 的值会被提高到 5。
-  </p>
-
   <h3>derived_metrics</h3>
   <p>
-    守护进程从它存下的 span 派生哪些指标。没有这个块时两半都开着。<code>durations</code> 为每个结束的智能体、工具、工作流、模型生成或处理器 span 写一个时长点。<code>tokens</code> 为每个报告了用量的模型生成 span 写最多十三个 token 计数器。把任何一个设为 <code>false</code> 就不再写它；省略的字段保持开启。这没有对应的参数。派生的点在按项目的上限之后才加入，也不计入摄取响应里的 <code>accepted</code> 数。
+    守护进程从它存下的 span 派生哪些指标。没有这个块时两半都开着。<code>durations</code> 为每个结束的智能体、工具、工作流、模型生成或处理器 span 写一个时长点。<code>tokens</code> 为每个报告了用量的模型生成 span 写最多十三个 token 计数器。把任何一个设为 <code>false</code> 就不再写它；省略的字段保持开启，所以 <code>{'{'}"tokens": false{'}'}</code> 会保留时长。这没有对应的参数。
+  </p>
+  <p>
+    派生的点在按项目的上限之后才加入，所以它们绝不会让发送方的信号被挤掉，也不计入摄取响应里的 <code>accepted</code> 数。
   </p>
 
   <pre><code class="language-json">{`{
@@ -1087,7 +1110,7 @@ volumes:
 
   <h3>aspects</h3>
   <p>
-    守护进程是否把方面注释聚类成主题，以及在什么界限下聚类。没有这个块时是关闭的。<code>enabled</code> 打开这一轮处理，不需要模型也不需要凭据，因为 <code>outcome</code> 方面由守护进程自己写。<code>interval_seconds</code> 是一轮处理的间隔，默认 300，小于 30 的值会被提高到 30。<code>window_seconds</code> 是一轮处理往回读笔记的范围，默认 86400。<code>disabled</code> 列出不参与聚类的方面；已经记录在其下的笔记仍然可读。
+    守护进程是否把方面注释聚类成主题，以及在什么界限下聚类。没有这个块时是关闭的：没人配置过的守护进程不会启动分析定时器，也不会写任何分析表。<code>enabled</code> 打开这一轮处理，不需要模型也不需要凭据，因为 <code>outcome</code> 方面由守护进程根据它已经掌握的事实自己写。<code>interval_seconds</code> 是一轮处理的间隔，默认 300，小于 30 的值会被提高到 30。<code>window_seconds</code> 是一轮处理往回读笔记的范围，默认 86400。<code>disabled</code> 列出不参与聚类的方面；已经记录在其下的笔记仍然可读。不存放分析表的存储后端会在启动时记一条警告，什么都不聚类。见 <a href={to('/docs/themes')} class="link">主题与快照</a>。
   </p>
 
   <pre><code class="language-json">{`{
