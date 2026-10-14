@@ -229,6 +229,19 @@ Mcpd(McpdConfig(project = "batch")).use { mcpd ->
     message est toujours présent : « quelque chose a échoué » ne dit pas quoi
     faire.
   </p>
+  <p>
+    <code>setModelParameters</code> enregistre les réglages avec lesquels
+    l’appel a été fait : <code>temperature</code>, <code>topP</code>,
+    <code>topK</code>, <code>maxTokens</code>, <code>seed</code>,
+    <code>stopSequences</code> et <code>hasResponseFormat</code>. Ce sont des
+    réglages et non du payload, ils survivent donc à
+    <code>capturePayloads = false</code>, et c’est le cas qui compte : ce sont
+    eux que doit reproduire quiconque rejoue l’exécution. Un argument que vous
+    omettez est absent et un argument que vous passez est gardé quelle que soit
+    sa valeur, donc <code>seed = 0</code> est une graine. Le schéma derrière
+    <code>hasResponseFormat</code> n’est pas enregistré, seulement le fait
+    qu’un schéma était en vigueur.
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -248,6 +261,25 @@ Mcpd(McpdConfig(project = "batch")).use { mcpd ->
     corrélation et jamais utilisé comme parent dans l’arbre propre à mcpd.
   </p>
 
+  <h3>Appels en streaming</h3>
+  <p>
+    Passez le <code>Flow</code> du fournisseur à <code>span.recordStream</code>
+    et collectez à sa place le flow qu’il renvoie. Il accepte les fragments
+    chat-completion d’OpenAI et les événements de message d’Anthropic, sous
+    forme de <code>JsonElement</code> ou de <code>Map</code>, et chaque
+    fragment passe sans changement. Le premier fragment qui porte du texte ou
+    un appel d’outil marque le délai jusqu’au premier token. Quand le flow se
+    termine, lève une exception ou que vous vous arrêtez plus tôt avec
+    <code>take</code>, <code>first</code> ou une annulation, le span reçoit ce
+    que <code>recordResponse</code> aurait enregistré pour le même appel sans
+    streaming, avec le texte comme sortie, puis se termine. Une exception du
+    flow marque le span et vous parvient sans changement. Le texte conservé est
+    plafonné à 32 768 caractères, et <code>mcpd.stream.truncated</code> est
+    posé quand le plafond a été atteint.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="stream" title="un appel en streaming" />
+
   <h2>Payloads, sinks et spans terminés</h2>
   <p>
     <code>capturePayloads = false</code> garde <code>input</code> et
@@ -266,6 +298,22 @@ Mcpd(McpdConfig(project = "batch")).use { mcpd ->
     title="capturer, enregistrer, vérifier"
     samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: surface }]}
   />
+
+  <p>
+    <code>dev.mcpd.testing.TestClient</code> enregistre en mémoire, et son
+    <code>client</code> est un <code>Mcpd</code>. Passez-le partout où votre
+    code prend un client, puis relisez ce qu’il a enregistré :
+    <code>spans()</code> par nom ou par type, <code>span(name)</code> pour le
+    span qui doit exister, <code>trees()</code> pour chaque exécution sous
+    forme d’arbre, <code>logs()</code>, <code>metrics()</code>,
+    <code>scores()</code>, <code>recordedFeedback()</code> et
+    <code>reset()</code>. Chaque accesseur fait d’abord un flush. Ce qu’il
+    détient est passé par l’échantillonnage, la capture des payloads et
+    <code>redact</code> comme en route vers un daemon, et il reste actif quand
+    <code>MCPD_ENABLED=false</code> est posé pour l’exécution des tests.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="testing" title="un test unitaire" />
 
   <h2>Exécutions durables</h2>
   <p>
