@@ -2819,7 +2819,13 @@ async fn observe_leases(store: &dyn Store, job: String) -> Answers {
                 let raced = raced.clone();
                 async move {
                     let lease = store
-                        .claim_lease(&LeaseClaim { job: &raced, holder: h, now, ttl, progress: None })
+                        .claim_lease(&LeaseClaim {
+                            job: &raced,
+                            holder: h,
+                            now,
+                            ttl,
+                            progress: None,
+                        })
                         .await
                         .expect("claim in a race");
                     (lease.held_by(h, now), lease.holder)

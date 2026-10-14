@@ -44,7 +44,12 @@ pub(super) fn claim_lease_sync(conn: &Connection, c: &LeaseClaim<'_>) -> Result<
     .map_err(be)
 }
 
-pub(super) fn release_lease_sync(conn: &Connection, job: &str, holder: &str, now: i64) -> Result<()> {
+pub(super) fn release_lease_sync(
+    conn: &Connection,
+    job: &str,
+    holder: &str,
+    now: i64,
+) -> Result<()> {
     conn.execute(
         "UPDATE leases SET expires_at = ?3 WHERE job = ?1 AND holder = ?2 AND expires_at > ?3",
         rusqlite::params![job, holder, now],
