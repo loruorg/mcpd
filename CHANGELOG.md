@@ -20,6 +20,13 @@ rather than every commit.
 
 ### Added
 
+- **One replica per background job.** Replicas that share a store take turns
+  through a lease in it, on SQLite, Postgres and ClickHouse alike. Live
+  scoring and tail sampling run on one replica at a time, so each judged call
+  is made and paid for once, and only one replica posts a monitor or
+  objective webhook. The holder renews the lease on every pass and gives it up
+  on shutdown; if it stops, another replica takes over within three passes and
+  continues live scoring from where the last holder stopped.
 - **`--skip-email-verification`.** Sign-up opens the account at once, with no
   confirmation mail, for a daemon without a mail server.
 - **Prompt management.** Store prompts as numbered versions, text or chat
