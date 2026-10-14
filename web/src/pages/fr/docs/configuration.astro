@@ -1422,6 +1422,135 @@ volumes:
     enregistré. C’est le défaut.
   </p>
 
+  <h2 id="signup">Inscription ouverte</h2>
+  <p>
+    <code>--signup</code> permet à n’importe qui de créer un compte, depuis
+    l’interface ou avec <code>POST /v1/api/account/signup</code>. C’est ainsi que
+    tourne le mcpd hébergé. L’inscription répond de la même façon que l’adresse
+    soit déjà utilisée ou non, et envoie un lien par e-mail ; l’ouvrir confirme
+    l’adresse et ouvre la session. Chaque compte reçoit sa propre organisation
+    avec un projet au nom aléatoire, et crée ses propres clés d’API, une portée
+    par clé. Une session peut faire ce que le rôle du compte permet sur chaque
+    projet de ses organisations ; une clé peut faire ce que dit sa portée sur
+    son unique projet. Aucune n’atteint un projet d’une organisation à laquelle
+    le compte n’appartient pas, et un span qu’envoie une clé de compte est
+    stocké dans le projet de la clé, quel que soit le projet que nomme le span.
+    Voir <a href="/docs/accounts">comptes et organisations</a>.
+  </p>
+  <p>
+    L’activer change une règle pour tout le monde : une requête sans clé est
+    refusée, même là où aucune clé n’est configurée. Seuls <code>/healthz</code>,
+    <code>/readyz</code>, <code>/metrics</code>, l’inscription et la connexion
+    restent ouverts. Les clés que vous configurez gardent leur portée, et sont
+    essayées en premier.
+  </p>
+  <p>
+    Les comptes vivent dans leur propre fichier SQLite, défini par
+    <code>--accounts-data</code>, quel que soit le stockage des signaux. Le
+    fichier contient des empreintes argon2id des mots de passe et des
+    empreintes SHA-256 des jetons et des clés, jamais les secrets. Sauvegardez-le
+    avec le reste du volume.
+  </p>
+  <p>
+    L’inscription est limitée à 5 par heure et la connexion à 20 tentatives par
+    15 minutes pour chaque adresse de client, et les connexions échouées à 10
+    par 15 minutes pour chaque e-mail. Derrière un proxy, chaque connexion vient
+    du proxy : nommez donc l’en-tête dans lequel il met l’adresse du client, et
+    les adresses depuis lesquelles le proxy se connecte :
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="inscription ouverte derrière Cloudflare et un proxy sur un réseau privé"
+    command={`mcpd serve --signup \\
+  --client-ip-header cf-connecting-ip \\
+  --trusted-proxy-cidr 172.16.0.0/12 \\
+  --cors-origin https://mcpd.sh`}
+  />
+
+  <p>
+    L’en-tête n’est lu que depuis une adresse de
+    <code>--trusted-proxy-cidr</code>. Depuis un proxy de confiance qui ne l’a
+    pas posé, la première adresse de <code>X-Forwarded-For</code> est utilisée.
+    Depuis toute autre adresse, l’adresse du pair est le client, quoi que disent
+    les en-têtes. Assurez-vous que seul votre proxy peut joindre le daemon : un
+    client qui le joint depuis une plage de confiance peut nommer l’adresse de
+    son choix. <code>--cors-origin</code> est nécessaire quand l’interface est
+    servie depuis une autre origine que le daemon.
+  </p>
+
+
+  <h2 id="accounts">Des comptes sans inscription</h2>
+  <p>
+    <code>--accounts</code> active les mêmes comptes, organisations, rôles,
+    authentification unique et SCIM sans inscription publique, pour un
+    déploiement sur votre propre cluster. Les personnes arrivent par
+    invitation, par authentification unique ou par SCIM, et les clés
+    configurées continuent de fonctionner à côté. Comme avec
+    <code>--signup</code>, une requête sans identifiant est refusée.
+  </p>
+  <p>
+    Les e-mails passent par <code>--smtp-host</code>, avec
+    <code>--smtp-from</code>, <code>--smtp-port</code>,
+    <code>--smtp-user</code>, <code>--smtp-password</code> et
+    <code>--smtp-tls</code>. Sans serveur SMTP, les liens sont écrits dans le
+    log au niveau info, sauf avec <code>--signup</code> sur une adresse
+    publique, où l’inscription, la réinitialisation du mot de passe, les
+    changements d’adresse et les invitations répondent 503 et le daemon
+    avertit au démarrage. Les liens et la redirection d’authentification unique
+    commencent à <code>--public-url</code>.
+  </p>
+  <p>
+    <code>--org-quota-per-minute</code> est le plafond de signaux par minute
+    qu’une organisation partage entre ses projets, et le maximum qu’elle peut
+    se fixer. <code>--org-retention-days</code> est la durée pendant laquelle
+    ses projets gardent les données, et la plus longue qu’elle peut choisir.
+  </p>
+  <p>
+    Le bloc <code>accounts</code> du fichier de configuration contient
+    <code>allow_org_creation</code>, <code>allow_private_issuers</code> et
+    <code>orgs</code>. Chaque entrée de <code>orgs</code> déclare une
+    organisation par son <code>slug</code>, avec un <code>name</code>, ses
+    <code>owners</code> par e-mail, les <code>projects</code> existants qu’elle
+    possède, <code>quota_per_minute</code>, <code>retention_days</code>,
+    <code>group_roles</code>, <code>scim_token_env</code> et
+    <code>sso</code>. Le bloc <code>sso</code> prend <code>provider</code>
+    (<code>oidc</code> ou <code>github</code>), <code>issuer</code>,
+    <code>client_id</code>, <code>client_secret_env</code>,
+    <code>domains</code>, <code>enforce</code>, <code>default_role</code> et
+    <code>groups_claim</code>. Les secrets sont lus dans les variables
+    d’environnement que nomme le fichier, jamais dans le fichier.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="authentification unique et rôles sur votre propre cluster"
+    command={`mcpd serve --accounts --config-file mcpd.json \\
+  --public-url https://mcpd.example.com \\
+  --smtp-host smtp.example.com --smtp-from no-reply@example.com`}
+  />
+
+  <pre><code class="language-json">{`{
+  "accounts": {
+    "orgs": [{
+      "slug": "acme",
+      "name": "Acme",
+      "owners": ["ana@acme.com"],
+      "projects": ["default"],
+      "sso": {
+        "issuer": "https://login.microsoftonline.com/TENANT/v2.0",
+        "client_id": "CLIENT_ID",
+        "client_secret_env": "MCPD_OIDC_CLIENT_SECRET",
+        "domains": ["acme.com"],
+        "enforce": true,
+        "default_role": "member",
+        "groups_claim": "groups"
+      },
+      "group_roles": { "mcpd-admins": "admin", "mcpd-viewers": "viewer" },
+      "scim_token_env": "MCPD_SCIM_TOKEN"
+    }]
+  }
+}`}</code></pre>
 
   <h2>Un projet ne peut pas dépenser tout le daemon</h2>
   <p>
