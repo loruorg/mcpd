@@ -47,6 +47,14 @@ generation.set_usage(TokenUsage {
 // Or, when the breakdown does not matter:
 generation.set_tokens(412, 96);
 
+// How the model was called. Settings, not payload: kept with capture off.
+generation.set_model_parameters(ModelParameters {
+    temperature: Some(0.0),
+    seed: Some(0),
+    max_tokens: Some(1024),
+    ..ModelParameters::default()
+});
+
 // A message is required. "Something failed" is not actionable.
 tool.set_error("sms gateway timed out after 5s");
 
@@ -185,6 +193,19 @@ async fn main() {
     movimiento, así que los dos nunca pueden discrepar, y el mensaje es un
     argumento obligatorio y no una opción.
   </p>
+  <p>
+    <code>set_model_parameters</code> registra los ajustes con los que se hizo
+    la llamada: <code>temperature</code>, <code>top_p</code>,
+    <code>top_k</code>, <code>max_tokens</code>, <code>seed</code>,
+    <code>stop_sequences</code> y <code>has_response_format</code>. Son
+    ajustes y no payload, así que sobreviven a
+    <code>with_capture_payloads(false)</code>, que es el caso que importa: son
+    lo que tiene que igualar quien reproduzca la ejecución. <code>None</code>
+    está ausente y <code>Some(0)</code> es un valor, así que una semilla a cero
+    es una semilla. El esquema que hay detrás de
+    <code>has_response_format</code> no se registra, solo si había uno en
+    vigor.
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -201,11 +222,31 @@ async fn main() {
     un span se puede rellenar desde cualquier sitio donde esté prestado.
   </p>
 
+  <h3>Llamadas en streaming</h3>
+  <p>
+    Pasa el stream del proveedor a <code>span.record_stream</code> y lee en su
+    lugar el stream que te devuelve. Sus elementos son <code>Result</code>, y
+    los fragmentos pueden ser fragmentos de chat completion de OpenAI o eventos
+    de mensaje de Anthropic, cada uno un <code>serde_json::Value</code> o
+    cualquier tipo que se serialice a uno. Cada elemento pasa sin cambios. El
+    primer fragmento con texto o con una llamada a herramienta marca el tiempo
+    hasta el primer token. El envoltorio es dueño del span: cuando el stream
+    termina, produce un <code>Err</code> o se suelta antes de tiempo, el span
+    recibe lo que <code>record_response</code> habría registrado para la misma
+    llamada sin streaming, con el texto como su salida, y termina. Un
+    <code>Err</code> marca el span con su texto <code>Display</code> y aun así
+    te llega. El texto que se guarda tiene un tope de 32,768 caracteres, y
+    <code>mcpd.stream.truncated</code> se fija cuando se llegó al tope.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="stream" title="una llamada en streaming" />
+
   <h2>Payloads, sinks y spans ya terminados</h2>
   <p>
     <code>Config::with_capture_payloads(false)</code> mantiene los prompts y las
     completions dentro del proceso: los spans siguen llevando sus tiempos, su
-    estado, su uso, su modelo, su correlación y sus errores, y
+    estado, su uso, su modelo, los parámetros del modelo, su correlación y sus
+    errores, y
     <code>input</code> y <code>output</code> se descartan antes de llegar a la
     cola. Un span anula al cliente para sí mismo con
     <code>span.capture_payloads(..)</code>, en cualquiera de los dos sentidos.
@@ -221,6 +262,21 @@ async fn main() {
     <code>dropped</code>, <code>capacity</code>, <code>exported</code>,
     <code>failed</code> y <code>rejected</code>.
   </p>
+  <p>
+    <code>mcpd_sdk::testing::TestClient</code> envuelve un cliente que
+    registra en memoria. Pasa <code>test.client()</code> allí donde tu código
+    acepte un <code>&amp;Mcpd</code>, y luego vuelve a leer lo que registró:
+    <code>spans(name, kind)</code>, <code>span(name)</code> para el único span
+    que tiene que existir, <code>trees()</code> para cada ejecución como un
+    árbol, <code>logs()</code>, <code>metrics()</code>, <code>scores()</code>,
+    <code>recorded_feedback()</code> y <code>reset()</code>. Cada accesor hace
+    flush primero. Lo que guarda pasó por el muestreo, la captura de payloads y
+    <code>redact</code> igual que de camino a un daemon, y
+    <code>TestClient::new()</code> sigue activo cuando se fija
+    <code>MCPD_ENABLED=false</code> para la ejecución de las pruebas.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="testing" title="una prueba unitaria" />
   <p>
     <code>mcpd.record(span)</code> encola un span que ya terminó, con sus ids,
     su padre, su inicio y su fin, tal como los tiene un adaptador o una

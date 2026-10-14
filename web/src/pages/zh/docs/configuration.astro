@@ -124,6 +124,76 @@ volumes:
           <td>无：任何地址都不得设置那个头</td>
         </tr>
         <tr>
+          <td><code>--client-ip-header</code></td>
+          <td><code>MCPD_CLIENT_IP_HEADER</code></td>
+          <td>无：对端地址就是客户端</td>
+        </tr>
+        <tr>
+          <td><code>--signup</code></td>
+          <td><code>MCPD_SIGNUP</code></td>
+          <td>关：没有账户</td>
+        </tr>
+        <tr>
+          <td><code>--accounts-data</code></td>
+          <td><code>MCPD_ACCOUNTS_DATA</code></td>
+          <td>在 <code>--data</code> 的路径的扩展名前加上 <code>.accounts</code></td>
+        </tr>
+        <tr>
+          <td><code>--accounts</code></td>
+          <td><code>MCPD_ACCOUNTS</code></td>
+          <td>关：只有配合 <code>--signup</code> 才有账户</td>
+        </tr>
+        <tr>
+          <td><code>--public-url</code></td>
+          <td><code>MCPD_PUBLIC_URL</code></td>
+          <td><code>http://localhost:4317</code></td>
+        </tr>
+        <tr>
+          <td><code>--smtp-host</code></td>
+          <td><code>MCPD_SMTP_HOST</code></td>
+          <td>无：链接写进日志</td>
+        </tr>
+        <tr>
+          <td><code>--smtp-port</code></td>
+          <td><code>MCPD_SMTP_PORT</code></td>
+          <td>587、465 或 25，取决于 <code>--smtp-tls</code></td>
+        </tr>
+        <tr>
+          <td><code>--smtp-user</code></td>
+          <td><code>MCPD_SMTP_USER</code></td>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td><code>--smtp-password</code></td>
+          <td><code>MCPD_SMTP_PASSWORD</code></td>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td><code>--smtp-from</code></td>
+          <td><code>MCPD_SMTP_FROM</code></td>
+          <td>无；设置 <code>--smtp-host</code> 时必填</td>
+        </tr>
+        <tr>
+          <td><code>--smtp-tls</code></td>
+          <td><code>MCPD_SMTP_TLS</code></td>
+          <td><code>starttls</code></td>
+        </tr>
+        <tr>
+          <td><code>--skip-email-verification</code></td>
+          <td><code>MCPD_SKIP_EMAIL_VERIFICATION</code></td>
+          <td>关：注册时会发送一封确认链接邮件</td>
+        </tr>
+        <tr>
+          <td><code>--org-quota-per-minute</code></td>
+          <td><code>MCPD_ORG_QUOTA_PER_MINUTE</code></td>
+          <td>配合 <code>--signup</code> 时为 60000，否则无</td>
+        </tr>
+        <tr>
+          <td><code>--org-retention-days</code></td>
+          <td><code>MCPD_ORG_RETENTION_DAYS</code></td>
+          <td><code>--retention-days</code></td>
+        </tr>
+        <tr>
           <td><code>--sample</code></td>
           <td><code>MCPD_SAMPLE</code></td>
           <td>不设置：保留每一条 trace</td>
@@ -154,6 +224,11 @@ volumes:
           <td>128 KiB</td>
         </tr>
         <tr>
+          <td><code>--price-book</code></td>
+          <td><code>MCPD_PRICE_BOOK</code></td>
+          <td>无：使用内置价目表</td>
+        </tr>
+        <tr>
           <td><code>--cors-origin</code></td>
           <td><code>MCPD_CORS_ORIGINS</code></td>
           <td>无：只允许同源</td>
@@ -172,6 +247,11 @@ volumes:
           <td><code>--max-batch-signals</code></td>
           <td><code>MCPD_MAX_BATCH_SIGNALS</code></td>
           <td><code>10000</code></td>
+        </tr>
+        <tr>
+          <td><code>--price-book</code></td>
+          <td><code>MCPD_PRICE_BOOK</code></td>
+          <td>关：使用内置价目表</td>
         </tr>
         <tr>
           <td><code>--log-format</code></td>
@@ -377,6 +457,15 @@ volumes:
     模型提供方凭据的那个进程，所以它打开的是租约协议，以及任何读不到已存提示词
     的东西。在你设置这两个参数之前，两者都接受写入密钥，而管理员密钥永远被接受。
   </p>
+  <p>
+    如果连 <code>--write-key</code> 也没有设置，写入密钥就是摄取密钥，于是每一个
+    发出 span 的容器里的那把密钥，也能启动运行、领取步骤，而一个被领取的步骤带着
+    它渲染好的输入。只配置了摄取密钥和读取密钥的部署，就是这个样子。mcpd 会在
+    启动时的一条警告里和 <code>mcpd doctor</code> 里说明这一点，而
+    <code>mcpd config</code> 会在这两行上都打印
+    <code>key required (ingest keys)</code>。设置 <code>--execute-key</code> 和
+    <code>--worker-key</code> 就能把它关上。
+  </p>
 
   <h4>升级不用停机</h4>
   <p>
@@ -400,25 +489,37 @@ volumes:
     完全正确的密钥里找拼写错误。
   </p>
   <p>
+    和真实密钥放在一起的空条目，会在任何东西读取列表之前被丢弃，所以结尾多一个
+    逗号什么也不会添加。设置了却一个密钥都没有的列表，例如
+    <code>MCPD_EXECUTE_KEYS=</code> 或 Kubernetes Secret 里的空值，会让守护进程在
+    启动时停下，拒绝信息写明参数和变量。想让这个作用域保持未设置，就不要设置这个
+    变量。发送空密钥头的请求等于没有出示密钥。
+  </p>
+  <p>
+    仍然是 <code>deploy/</code> 里某个示例文件占位符的密钥，也就是以
+    <code>REPLACE_WITH</code> 或 <code>replace-me</code> 开头的任何值（不分大小写），
+    会让守护进程无法启动。拒绝信息写明它所在的参数或项目列表，从不写出值本身。
+    <code>--redact-key</code> 也一样。每把密钥都用
+    <code>openssl rand -hex 32</code> 生成。
+  </p>
+  <p>
     完全不配置密钥时，每一个作用域都是开放的。这是有意的，因为第一次运行不该
     要求任何凭据，这也是那条启动警告存在的原因。
   </p>
   <p>
     <code>/healthz</code>、<code>/readyz</code>、<code>/metrics</code> 和界面本身
-    都不需要密钥就能访问。
-    如果这对你要紧，请把它们放到你自己的入口网关后面。
-  </p>
-
-  <p>
-    空的条目会在任何东西读取列表之前被丢弃。设置了却一个密钥都没有的列表，例如 <code>MCPD_EXECUTE_KEYS=</code> 或 Kubernetes Secret 里的空值，会让守护进程拒绝启动，拒绝信息写明参数和变量；想让这个作用域保持未设置，就不要设置这个变量；发送空密钥头的请求等于没有出示密钥。仍然是 <code>deploy/</code> 里示例文件占位符的密钥，也就是以 <code>REPLACE_WITH</code> 或 <code>replace-me</code> 开头的任何值（不分大小写），会让守护进程拒绝启动；拒绝信息写明参数或项目列表，从不写出值本身。<code>--redact-key</code> 也一样。每把密钥都用 <code>openssl rand -hex 32</code> 生成。没有设置 <code>--write-key</code>、<code>--execute-key</code> 和 <code>--worker-key</code> 时，摄取密钥还能启动运行、认领步骤，mcpd 会在启动时和 <code>mcpd doctor</code> 里对此发出警告。
+    都不需要密钥就能访问。如果这对你要紧，请把它们放到你自己的入口网关后面。
   </p>
 
   <h4>审计日志</h4>
   <p>
     那些会把载荷交回去的处理函数会记下谁读了什么：
     <code>{`GET /v1/api/traces/{id}`}</code>、span 和日志的搜索、反馈、数据集
-    条目、采集和删除。每一行都带着时间、动作那把密钥的短摘要、动作、项目、
-    资源，以及授权是否放行。密钥本身永远不会被写下来。
+    条目、采集、一条 trace 的方面注释、一个主题及其示例、删除和擦除。
+    <a href={to('/docs/security')} class="link">安全</a>列出了全部十一种动作。
+    以 <code>400</code> 作答的请求不留下任何一行，因为什么都没有被读。每一行都
+    带着时间、执行动作的那把密钥的短摘要、动作、项目、资源，以及授权是否放行。
+    密钥本身永远不会被写下来。
   </p>
   <p>
     用 <code>GET /v1/api/audit</code> 读这份日志，它需要 admin 作用域。它不受
@@ -431,7 +532,8 @@ volumes:
   <h3>--sample</h3>
   <p>
     一个 0.0 到 1.0 之间的分数。超出这个范围的值是启动错误，而不是悄悄地截断：
-    <code>--sample must be between 0.0 and 1.0, got 2</code>。
+    <code>--sample must be between 0.0 and 1.0, got
+    2</code>。
   </p>
   <p>
     这个决定是对 trace id 做哈希得出的，所以负载均衡器后面的一群 mcpd 实例，
@@ -534,14 +636,25 @@ volumes:
 
   <h3>--runs-data</h3>
   <p>
-    运行存储放在哪里：定义、步骤尝试的流水、每一个截止时间和每一次等待。无论
-    信号存储是什么，它都是一个内嵌文件，所以在 Postgres 或 ClickHouse 上，运行
-    仍然待在守护进程旁边的一个文件里，运行接口也由一个副本提供。默认是在
+    运行存储放在哪里：定义、步骤尝试的流水、每一个截止时间和每一次等待。一个
+    文件路径会把它们放进一个内嵌的 SQLite 文件，无论信号存储是什么。默认是在
     <code>--data</code> 的路径的扩展名前加上 <code>.runs</code>，对默认值来说
     就是 <code>./mcpd.runs.db</code>；当 <code>--data</code> 是
     <code>:memory:</code> 时它也是。<code>--runs-data off</code> 完全不提供
     运行：每一个运行端点都回答 <code>503</code> 并指出这个参数，守护进程的其余
     部分不变。
+  </p>
+  <p>
+    一个 Postgres 连接字符串则会把运行放进 Postgres，例如
+    <code>--runs-data postgres://mcpd:secret@db:5432/mcpd</code>。这个字符串以
+    <code>postgres://</code> 或 <code>postgresql://</code> 开头，读取 TLS 设置的
+    方式和 <code>--postgres-url</code> 一样。它可以指向和
+    <code>--postgres-url</code> 同一个数据库：运行相关的表有自己的名字，schema
+    在启动时于一把 advisory lock 之下创建。多个副本可以共享同一个运行存储。每一个
+    运行存储事务都是 <code>SERIALIZABLE</code>，所以两个副本同时领取、完成或触发
+    截止时间，结果和一个守护进程依次去做相同，而输给并发事务的那个事务会重新运行。
+    <code>mcpd config</code> 把这一行打印为 <code>postgres at</code> 那台服务器，
+    密码已去掉。
   </p>
   <p>
     这个存储的各项时长在配置文件的 <code>runs</code> 下，单位是整毫秒：
@@ -550,6 +663,13 @@ volumes:
     <code>park_ttl_ms</code> 和 <code>max_depth</code>。默认值是 30 秒的租约和
     30 秒的回收窗口，对一台机器上的一个守护进程来说是对的，也是 worker 注册时
     读回来的那些值。
+  </p>
+  <p>
+    同一个块里还有 <code>max_step_repeats</code>，它是一个次数而不是时长：同一个
+    步骤键可以用完全相同的渲染输入失败多少次，之后这次运行就会作为重复而被结束。
+    默认是 16，设为零则关闭。它存在，是因为有两条重试路径不消耗重试预算，所以
+    <code>retry.max_attempts</code> 管不住它们；见
+    <a href={to('/docs/runs')} class="link">运行</a>。
   </p>
 
   <h3>--cors-origin</h3>
@@ -603,6 +723,16 @@ volumes:
     <code>max_batch_signals</code>，两处都设置时参数胜出。两者都不能关掉，
     零在启动时会被拒绝，而不是被读成“无限制”：请求体上限为零会拒绝每一个请求，
     所以那个看起来更宽松的解释，才是会让摄取彻底停摆的那一个。
+  </p>
+
+  <h3>--price-book</h3>
+  <p>
+    一份用来给模型调用计算成本的 JSON 价目表，取代内置的那份。带上
+    <code>"extends": "builtin"</code>，它就叠加在内置价目表之上，只需要写出不同的
+    费率。它也是配置文件的键 <code>price_book</code>，两处都设置时参数胜出。一份
+    带有负费率、顺序错乱的分档，或者货币不是 ISO 4217 代码的价目表，会让守护进程
+    在启动时停下，并点出是哪一条。<code>mcpd prices refresh</code> 从一份公开的
+    模型目录写出一份价目表。见<a href={to('/docs/cost')} class="link">成本核算</a>。
   </p>
 
   <h3>--log-format 和 MCPD_LOG</h3>

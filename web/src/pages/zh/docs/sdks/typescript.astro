@@ -52,6 +52,9 @@ generation.setUsage({
   inputDetails: { cacheRead: 640 },
 })
 
+// How the model was called. Settings, not payload: kept with capture off.
+generation.setModelParameters({ temperature: 0, seed: 0, maxTokens: 1024 })
+
 // A failure you caught and handled yourself.
 generation.setError('the provider timed out', {
   kind: 'TimeoutError',
@@ -160,7 +163,7 @@ const serverless = `export default async function handler(request: Request): Pro
   </p>
   <p>
     <code>capturePayloads: false</code> 把提示词和补全留在进程里。span 照样记录，
-    带着它的时间、状态、用量、模型、关联信息和错误；<code>input</code> 和
+    带着它的时间、状态、用量、模型、模型参数、关联信息和错误；<code>input</code> 和
     <code>output</code> 在进入队列之前就被丢掉，所以一次刷出不可能带走任何敏感
     内容。单个 span 可以在自己的启动选项里用 <code>capturePayloads</code> 覆盖
     这个设置，两个方向都可以。
@@ -221,12 +224,35 @@ const serverless = `export default async function handler(request: Request): Pro
     而设置错误的同时会把这个 span 的状态设成 <code>error</code>，所以这两者不
     可能对不上。
   </p>
+  <p>
+    <code>setModelParameters</code> 记录这次调用所用的设置：
+    <code>temperature</code>、<code>topP</code>、<code>topK</code>、
+    <code>maxTokens</code>、<code>seed</code>、<code>stopSequences</code> 和
+    <code>hasResponseFormat</code>。它们是设置而不是载荷，所以在
+    <code>capturePayloads: false</code> 下也会保留，而这正是要紧的情况：想重现
+    这次运行的人必须对上它们。你没传的字段表示没有，你传了的字段不论是什么值都会
+    保留，所以 <code>seed: 0</code> 也是一个种子。<code>hasResponseFormat</code>
+    背后的 schema 不会被记录，只记录当时是否有一个在生效。
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
     title="一个 span 带着什么"
     samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: payload }]}
   />
+
+  <h3>流式调用</h3>
+  <p>
+    把供应商的流交给 <code>span.recordStream</code>，然后改读这个包装。它接受
+    OpenAI 的 chat-completion 分片和 Anthropic 的 message 事件，每一个分片都原样
+    通过。第一个带文本或工具调用的分片标记首个 token 的时间。当流结束、抛出异常，
+    或者被 <code>break</code> 提前离开时，span 会得到 <code>recordResponse</code>
+    对同一次非流式调用会记录的内容，以文本作为输出，然后结束。来自流的错误会标记
+    到 span 上，并原样交给你。保留的文本上限是 32,768 个字符，达到上限时会设置
+    <code>mcpd.stream.truncated</code>。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="stream" title="一次流式调用" />
 
   <h2>持久化运行</h2>
   <p>
@@ -303,6 +329,20 @@ const serverless = `export default async function handler(request: Request): Pro
   </p>
 
   <h2>断言你记下了什么</h2>
+  <p>
+    <code>@mcpd/sdk/testing</code> 里的 <code>TestClient</code> 是一个记录到内存
+    里的 <code>Mcpd</code>。把它传给你的代码里任何接收客户端的地方，然后把它记下
+    的东西读回来：<code>spans()</code> 按名称或类型读，<code>span(name)</code>
+    读那个必须存在的 span，<code>trees()</code> 把每次运行读成一棵树，还有
+    <code>logs()</code>、<code>metrics()</code>、<code>scores()</code>、
+    <code>recordedFeedback()</code> 和 <code>reset()</code>。每个访问方法都会先
+    刷出。它持有的内容，像发往守护进程时一样经过了采样、载荷采集和
+    <code>redact</code>；测试运行时设置了 <code>MCPD_ENABLED=false</code>，它也
+    照样开着。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="testing" title="一个单元测试" />
+
   <p>
     <code>RecordingSink</code> 用内存替掉网络，于是一个测试可以把被测代码产生的
     span、日志、指标、评分和反馈读回来，不需要服务器，也不需要端口。

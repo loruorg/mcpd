@@ -128,6 +128,76 @@ volumes:
           <td>nenhum: nenhum endereço pode definir esse cabeçalho</td>
         </tr>
         <tr>
+          <td><code>--client-ip-header</code></td>
+          <td><code>MCPD_CLIENT_IP_HEADER</code></td>
+          <td>nenhum: o endereço do par é o cliente</td>
+        </tr>
+        <tr>
+          <td><code>--signup</code></td>
+          <td><code>MCPD_SIGNUP</code></td>
+          <td>desligado: sem contas</td>
+        </tr>
+        <tr>
+          <td><code>--accounts-data</code></td>
+          <td><code>MCPD_ACCOUNTS_DATA</code></td>
+          <td>o caminho de <code>--data</code> com <code>.accounts</code> antes da extensão</td>
+        </tr>
+        <tr>
+          <td><code>--accounts</code></td>
+          <td><code>MCPD_ACCOUNTS</code></td>
+          <td>desligado: contas só com <code>--signup</code></td>
+        </tr>
+        <tr>
+          <td><code>--public-url</code></td>
+          <td><code>MCPD_PUBLIC_URL</code></td>
+          <td><code>http://localhost:4317</code></td>
+        </tr>
+        <tr>
+          <td><code>--smtp-host</code></td>
+          <td><code>MCPD_SMTP_HOST</code></td>
+          <td>nenhum: os links vão para o log</td>
+        </tr>
+        <tr>
+          <td><code>--smtp-port</code></td>
+          <td><code>MCPD_SMTP_PORT</code></td>
+          <td>587, 465 ou 25, conforme <code>--smtp-tls</code></td>
+        </tr>
+        <tr>
+          <td><code>--smtp-user</code></td>
+          <td><code>MCPD_SMTP_USER</code></td>
+          <td>nenhum</td>
+        </tr>
+        <tr>
+          <td><code>--smtp-password</code></td>
+          <td><code>MCPD_SMTP_PASSWORD</code></td>
+          <td>nenhuma</td>
+        </tr>
+        <tr>
+          <td><code>--smtp-from</code></td>
+          <td><code>MCPD_SMTP_FROM</code></td>
+          <td>nenhum; obrigatório com <code>--smtp-host</code></td>
+        </tr>
+        <tr>
+          <td><code>--smtp-tls</code></td>
+          <td><code>MCPD_SMTP_TLS</code></td>
+          <td><code>starttls</code></td>
+        </tr>
+        <tr>
+          <td><code>--skip-email-verification</code></td>
+          <td><code>MCPD_SKIP_EMAIL_VERIFICATION</code></td>
+          <td>desligado: o cadastro envia um link de confirmação por e-mail</td>
+        </tr>
+        <tr>
+          <td><code>--org-quota-per-minute</code></td>
+          <td><code>MCPD_ORG_QUOTA_PER_MINUTE</code></td>
+          <td>60000 com <code>--signup</code>, senão nenhum</td>
+        </tr>
+        <tr>
+          <td><code>--org-retention-days</code></td>
+          <td><code>MCPD_ORG_RETENTION_DAYS</code></td>
+          <td><code>--retention-days</code></td>
+        </tr>
+        <tr>
           <td><code>--sample</code></td>
           <td><code>MCPD_SAMPLE</code></td>
           <td>não definido: guarda todo trace</td>
@@ -158,6 +228,11 @@ volumes:
           <td>128 KiB</td>
         </tr>
         <tr>
+          <td><code>--price-book</code></td>
+          <td><code>MCPD_PRICE_BOOK</code></td>
+          <td>nenhuma: a tabela embutida</td>
+        </tr>
+        <tr>
           <td><code>--cors-origin</code></td>
           <td><code>MCPD_CORS_ORIGINS</code></td>
           <td>nenhuma: apenas a mesma origem</td>
@@ -176,6 +251,11 @@ volumes:
           <td><code>--max-batch-signals</code></td>
           <td><code>MCPD_MAX_BATCH_SIGNALS</code></td>
           <td><code>10000</code></td>
+        </tr>
+        <tr>
+          <td><code>--price-book</code></td>
+          <td><code>MCPD_PRICE_BOOK</code></td>
+          <td>desligado: a tabela embutida é usada</td>
         </tr>
         <tr>
           <td><code>--log-format</code></td>
@@ -398,6 +478,17 @@ volumes:
     definir as duas opções, as chaves de escrita são aceitas para ambos, e uma
     chave de admin sempre é.
   </p>
+  <p>
+    Sem <code>--write-key</code> também, as chaves de escrita são as chaves de
+    ingest, então a chave que está em todo contêiner que emite um span também
+    consegue iniciar execuções e reivindicar etapas, e uma etapa reivindicada
+    carrega a sua entrada renderizada. É esse o formato de uma implantação
+    configurada só com uma chave de ingest e uma chave de leitura. O mcpd diz
+    isso em um aviso na partida e no <code>mcpd doctor</code>, e
+    <code>mcpd config</code> imprime <code>key required (ingest keys)</code> nas
+    duas linhas. Defina <code>--execute-key</code> e <code>--worker-key</code>
+    para fechar isso.
+  </p>
 
   <h4>Atualizar sem parada</h4>
   <p>
@@ -425,26 +516,42 @@ volumes:
     erro de digitação em uma chave que está perfeitamente correta.
   </p>
   <p>
+    Uma entrada vazia ao lado de uma chave de verdade é descartada antes que
+    qualquer coisa leia a lista, então uma vírgula sobrando no fim não acrescenta
+    nada. Uma lista definida que não contém chave nenhuma, como
+    <code>MCPD_EXECUTE_KEYS=</code> ou um valor vazio em um Secret do
+    Kubernetes, impede o daemon de iniciar, e a recusa nomeia a opção e a
+    variável. Omita a variável para deixar o escopo não definido. Uma requisição
+    que envia um cabeçalho de chave vazio não apresenta chave nenhuma.
+  </p>
+  <p>
+    Uma chave que ainda é um marcador de um dos arquivos de exemplo em
+    <code>deploy/</code>, qualquer valor que comece com <code>REPLACE_WITH</code>
+    ou <code>replace-me</code>, em maiúsculas ou minúsculas, impede o daemon de
+    iniciar. A recusa nomeia a opção ou a lista do projeto em que ela está, e
+    nunca o valor. O mesmo vale para <code>--redact-key</code>. Gere cada chave
+    com <code>openssl rand -hex 32</code>.
+  </p>
+  <p>
     Sem chave nenhuma configurada, todo escopo fica aberto. Isso é de propósito,
     porque a primeira execução não pode exigir uma credencial, e é por isso que
     o aviso de partida existe.
   </p>
   <p>
     <code>/healthz</code>, <code>/readyz</code>, <code>/metrics</code> e a
-    própria interface são servidos sem chave. Ponha-os atrás do seu próprio ingress se
-    isso importa para você.
-  </p>
-
-  <p>
-    Uma entrada vazia é descartada antes que qualquer coisa leia a lista. Uma lista definida que não contém nenhuma chave, como <code>MCPD_EXECUTE_KEYS=</code> ou um valor vazio em um Secret do Kubernetes, impede o daemon de iniciar, e a recusa nomeia a opção e a variável; omita a variável para deixar o escopo não definido, e uma requisição que envia um cabeçalho de chave vazio não apresenta chave nenhuma. Uma chave que ainda é um marcador dos arquivos de exemplo em <code>deploy/</code>, qualquer valor que comece com <code>REPLACE_WITH</code> ou <code>replace-me</code> em maiúsculas ou minúsculas, impede o daemon de iniciar; a recusa nomeia a opção ou a lista do projeto e nunca o valor. O mesmo vale para <code>--redact-key</code>. Gere cada chave com <code>openssl rand -hex 32</code>. Sem <code>--write-key</code>, <code>--execute-key</code> nem <code>--worker-key</code>, as chaves de ingest também iniciam execuções e reivindicam passos, e o mcpd avisa disso ao iniciar e no <code>mcpd doctor</code>.
+    própria interface são servidos sem chave. Ponha-os atrás do seu próprio
+    ingress se isso importa para você.
   </p>
 
   <h4>O log de auditoria</h4>
   <p>
     Os handlers que devolvem payloads registram quem leu o quê:
     <code>{`GET /v1/api/traces/{id}`}</code>, as buscas de span e de log, o
-    feedback, os itens de dataset, a captura e o apagamento. Cada
-    linha carrega a hora, um resumo curto da chave que agiu, a ação, o projeto,
+    feedback, os itens de dataset, a captura, as notas de aspecto de um trace,
+    um tema e os seus exemplos, o apagamento e a eliminação.
+    <a href={href('/docs/security')} class="link">Segurança</a> nomeia as onze
+    ações. Uma requisição respondida com <code>400</code> não deixa linha,
+    porque nada foi lido. Cada linha carrega a hora, um resumo curto da chave que agiu, a ação, o projeto,
     o recurso e se a autorização permitiu. A chave em si nunca é anotada.
   </p>
   <p>
@@ -581,15 +688,29 @@ volumes:
   <h3>--runs-data</h3>
   <p>
     Onde mora o armazenamento das execuções: as definições, o diário das
-    tentativas de cada etapa, cada prazo e cada espera. É um arquivo embutido,
-    seja qual for o armazenamento de sinais, então em Postgres ou ClickHouse as
-    execuções continuam em um arquivo ao lado do daemon, e a superfície de
-    execução é servida por uma réplica. Por padrão, é o caminho de
+    tentativas de cada etapa, cada prazo e cada espera. Um caminho de arquivo
+    as mantém em um arquivo SQLite embutido, seja qual for o armazenamento de
+    sinais. Por padrão, é o caminho de
     <code>--data</code> com <code>.runs</code> antes da extensão,
     <code>./mcpd.runs.db</code> no caso do padrão, e <code>:memory:</code>
     quando <code>--data</code> é. <code>--runs-data off</code> não serve execução
     nenhuma: todo endpoint de execução responde <code>503</code> nomeando esta
     opção, e o resto do daemon fica igual.
+  </p>
+  <p>
+    Uma string de conexão do Postgres mantém as execuções no Postgres, como
+    <code>--runs-data postgres://mcpd:secret@db:5432/mcpd</code>. A string
+    começa com <code>postgres://</code> ou <code>postgresql://</code>, e lê as
+    configurações de TLS do mesmo jeito que <code>--postgres-url</code>. Ela
+    pode apontar para o mesmo banco que <code>--postgres-url</code>: as tabelas
+    de execução têm nomes próprios, e o esquema é criado na partida sob um
+    advisory lock. Várias réplicas podem compartilhar um armazenamento de
+    execuções. Toda transação do armazenamento de execuções é
+    <code>SERIALIZABLE</code>, então duas réplicas reivindicando, concluindo ou
+    disparando prazos ao mesmo tempo dão o mesmo resultado que um daemon fazendo
+    isso em sequência, e uma transação que perde para uma concorrente é rodada
+    de novo. <code>mcpd config</code> imprime a linha como <code>postgres at</code>
+    o servidor, sem a senha.
   </p>
   <p>
     Os tempos do armazenamento ficam no arquivo de configuração, sob
@@ -599,6 +720,15 @@ volumes:
     <code>max_depth</code>. Os padrões, um lease de 30 segundos e uma
     janela de recuperação de 30 segundos, são certos para um daemon em uma
     máquina e são o que um worker lê de volta quando se registra.
+  </p>
+  <p>
+    O mesmo bloco guarda <code>max_step_repeats</code>, que é uma contagem e não
+    uma duração: quantas vezes uma chave de etapa pode falhar com uma entrada
+    renderizada idêntica antes de a execução ser encerrada como repetição. O
+    padrão é 16, e zero desliga. Ele existe porque dois caminhos de nova
+    tentativa não gastam orçamento de tentativas, então
+    <code>retry.max_attempts</code> não os limita; veja
+    <a href={href('/docs/runs')} class="link">Execuções</a>.
   </p>
 
   <h3>--cors-origin</h3>
@@ -664,6 +794,19 @@ volumes:
     é recusado na partida em vez de ser lido como "sem limite": um limite de
     corpo igual a zero recusa toda requisição, então a leitura que parece
     generosa é a que derruba a ingestão.
+  </p>
+
+  <h3>--price-book</h3>
+  <p>
+    Uma tabela de preços em JSON para precificar chamadas de modelo, no lugar
+    da embutida. Com <code>"extends": "builtin"</code>, ela é sobreposta à
+    tabela embutida e só precisa das tarifas que diferem. Ela também é a chave
+    <code>price_book</code> do arquivo de configuração, e a opção vence onde as
+    duas estiverem definidas. Uma tabela com tarifa negativa, níveis fora de
+    ordem ou uma moeda que não seja um código ISO 4217 impede o daemon de
+    iniciar, nomeando a entrada. <code>mcpd prices refresh</code> escreve uma a
+    partir de um catálogo público de modelos. Veja
+    <a href={href('/docs/cost')} class="link">Custo</a>.
   </p>
 
   <h3>--log-format e MCPD_LOG</h3>
@@ -876,10 +1019,13 @@ volumes:
 
   <h3>--config-file</h3>
   <p>
-    Um arquivo JSON com os ajustes que não cabem em uma linha de comando:
-    monitores, objetivos de nível de serviço, o intervalo em que são avaliados,
-    o encaminhamento, o juiz, os tempos do armazenamento de execuções, os dois
-    limites de requisição e o bloco por projeto que vem abaixo. JSON, e não YAML
+    Um arquivo JSON com os ajustes que não cabem em uma linha de comando. Ele
+    aceita onze chaves: <code>monitors</code>, <code>slos</code>,
+    <code>monitor_interval_seconds</code>, <code>forward</code>,
+    <code>judge</code>, <code>projects</code>, <code>runs</code>,
+    <code>max_body_bytes</code>, <code>max_batch_signals</code>,
+    <code>derived_metrics</code> e <code>aspects</code>. Todas são opcionais.
+    JSON, e não YAML
     ou TOML, porque o mcpd já interpreta JSON para todo o resto, então o arquivo
     não acrescenta dependência nem uma segunda sintaxe a aprender. Ele monta como
     um ConfigMap do Kubernetes sem mudança nenhuma.
@@ -890,6 +1036,11 @@ volumes:
     que são implantados. Uma opção vence o arquivo, que é como uma instância
     assume um limite diferente sem que o arquivo compartilhado seja editado para
     todo mundo.
+  </p>
+  <p>
+    <code>monitor_interval_seconds</code> é de quanto em quanto tempo os
+    monitores e os objetivos são avaliados. O padrão é 60, e um valor abaixo de
+    5 é elevado a 5.
   </p>
   <p>
     Uma chave desconhecida faz a partida falhar em vez de ser ignorada, porque um
@@ -979,8 +1130,10 @@ volumes:
     <code>read_keys</code>, <code>write_keys</code>, <code>admin_keys</code>,
     <code>execute_keys</code> e <code>worker_keys</code>, e
     recuam do mesmo jeito: um projeto sem <code>write_keys</code> aceita as
-    próprias chaves de ingest, e um sem <code>admin_keys</code> aceita as
-    próprias chaves de leitura. O bloco <code>support</code> acima não define
+    próprias chaves de ingest, um sem <code>admin_keys</code> aceita as
+    próprias chaves de leitura, e <code>execute_keys</code> e
+    <code>worker_keys</code> aceitam as chaves de escrita do projeto quando não
+    estão definidas. O bloco <code>support</code> acima não define
     nenhuma das duas, então se comporta exatamente como se comportava antes de
     os dois escopos existirem.
   </p>
@@ -996,6 +1149,18 @@ volumes:
     razão que as chaves são: a exigência de noventa dias de um time não deveria
     obrigar todo mundo a guardar os dados, e o tráfego de um time não deveria
     decidir como outro time é amostrado.
+  </p>
+  <p>
+    <code>tail_sampling</code> guarda as execuções terminadas de um projeto pelo
+    que aconteceu nelas e apaga o resto. Ele aceita <code>rate</code>, a fração
+    de execuções comuns a guardar, e guarda toda execução que corresponde a
+    <code>keep_errors</code> (ligado por padrão), <code>keep_slower_than_ms</code>,
+    <code>keep_cost_above</code>, <code>keep_score_below</code> ou
+    <code>keep_feedback</code> (ligado por padrão). Uma execução é decidida
+    <code>decide_after_seconds</code> depois de terminar, 120 por padrão, para
+    que as notas ao vivo já tenham chegado. <code>mcpd config</code> imprime
+    cada regra na sua linha <code>tail sampling</code>. Veja
+    <a href={href('/docs/sampling')}>Amostragem</a>.
   </p>
   <p>
     Um lote pode nomear vários projetos. Uma chave de ingest com escopo escreve
@@ -1031,13 +1196,22 @@ volumes:
   }
 }`}</code></pre>
 
-  <p>
-    <code>monitor_interval_seconds</code> é de quanto em quanto tempo os monitores e os objetivos são avaliados. O padrão é 60, e um valor abaixo de 5 é elevado a 5.
-  </p>
-
   <h3>derived_metrics</h3>
   <p>
-    Quais métricas o daemon deriva dos spans que guarda. As duas metades ficam ligadas quando o bloco não existe. <code>durations</code> grava um ponto de duração para cada span terminado de agente, ferramenta, workflow, geração de modelo ou processador. <code>tokens</code> grava até treze contadores de tokens para cada span de geração de modelo que informou o uso. Defina qualquer uma das duas como <code>false</code> para parar de gravá-la; um campo omitido continua ligado. Não há opção de linha de comando para isso. Os pontos derivados entram depois do teto por projeto e não contam no número <code>accepted</code> de uma resposta de ingestão.
+    Quais métricas o daemon deriva dos spans que guarda. As duas metades ficam
+    ligadas quando o bloco não existe. <code>durations</code> grava um ponto de
+    duração para cada span terminado de agente, ferramenta, workflow, geração de
+    modelo ou processador. <code>tokens</code> grava até treze contadores de
+    tokens para cada span de geração de modelo que informou o uso, e só as
+    linhas que o provedor informou. Defina qualquer uma das duas como
+    <code>false</code> para parar de gravá-la; um campo omitido continua ligado,
+    então <code>{'{'}"tokens": false{'}'}</code> mantém as durações. Não há
+    opção de linha de comando para isso.
+  </p>
+  <p>
+    Os pontos derivados entram depois do teto por projeto, então nunca custam a
+    um remetente um sinal que ele enviou, e não contam no número
+    <code>accepted</code> que uma resposta de ingestão informa.
   </p>
 
   <pre><code class="language-json">{`{
@@ -1046,7 +1220,19 @@ volumes:
 
   <h3>aspects</h3>
   <p>
-    Se o daemon agrupa as notas de aspecto em temas, e sob quais limites. Desligado quando o bloco não existe. <code>enabled</code> liga a passada e não precisa de modelo nem de credencial, porque o próprio daemon grava o aspecto <code>outcome</code>. <code>interval_seconds</code> é de quanto em quanto tempo uma passada roda, 300 por padrão, e um valor abaixo de 30 é elevado a 30. <code>window_seconds</code> é até onde uma passada lê notas, 86400 por padrão. <code>disabled</code> nomeia aspectos que nenhuma passada agrupa; as notas já gravadas sob um deles continuam legíveis.
+    Se o daemon agrupa as notas de aspecto em temas, e sob quais limites.
+    Desligado quando o bloco não existe: um daemon que ninguém configurou não
+    inicia temporizador de análise nenhum e não grava nenhuma das tabelas de
+    análise. <code>enabled</code> liga a passada e não precisa de modelo nem de
+    credencial, porque o próprio daemon grava o aspecto <code>outcome</code> a
+    partir de fatos que já tem. <code>interval_seconds</code> é de quanto em
+    quanto tempo uma passada roda, 300 por padrão, e um valor abaixo de 30 é
+    elevado a 30. <code>window_seconds</code> é até onde uma passada lê notas,
+    86400 por padrão. <code>disabled</code> nomeia aspectos que nenhuma passada
+    agrupa; as notas já gravadas sob um deles continuam legíveis. Um backend de
+    armazenamento que não tem as tabelas de análise registra um aviso na
+    partida e não agrupa nada. Veja
+    <a href={href('/docs/themes')} class="link">Temas e snapshots</a>.
   </p>
 
   <pre><code class="language-json">{`{
@@ -1172,7 +1358,7 @@ volumes:
     Para TLS, acrescente <code>sslmode=require</code> à string de conexão. O
     mcpd então cifra a conexão e sempre verifica o certificado do servidor. Ele o
     confere com as autoridades certificadoras públicas, ou com a de
-    <code>sslrootcert=/caminho/para/ca.pem</code>, que é o que um serviço
+    <code>sslrootcert=/path/to/ca.pem</code>, que é o que um serviço
     gerenciado com autoridade própria exige. <code>verify-ca</code> e
     <code>verify-full</code> são lidos como <code>require</code>. Com
     <code>prefer</code>, o padrão, ou com <code>disable</code>, a conexão não é

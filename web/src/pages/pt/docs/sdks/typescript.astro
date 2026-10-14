@@ -56,6 +56,9 @@ generation.setUsage({
   inputDetails: { cacheRead: 640 },
 })
 
+// How the model was called. Settings, not payload: kept with capture off.
+generation.setModelParameters({ temperature: 0, seed: 0, maxTokens: 1024 })
+
 // A failure you caught and handled yourself.
 generation.setError('the provider timed out', {
   kind: 'TimeoutError',
@@ -237,12 +240,39 @@ const serverless = `export default async function handler(request: Request): Pro
     uma mensagem, e definir uma coloca o status do span em <code>error</code> no
     mesmo movimento, então os dois nunca podem discordar.
   </p>
+  <p>
+    <code>setModelParameters</code> registra os ajustes com que a chamada foi
+    feita: <code>temperature</code>, <code>topP</code>, <code>topK</code>,
+    <code>maxTokens</code>, <code>seed</code>, <code>stopSequences</code> e
+    <code>hasResponseFormat</code>. São ajustes, e não payload, então eles
+    sobrevivem a <code>capturePayloads: false</code>, que é o caso que importa:
+    são eles que alguém reproduzindo a execução precisa igualar. Um campo que
+    você omite fica ausente e um campo que você passa é mantido seja qual for o
+    valor, então <code>seed: 0</code> é uma seed. O schema por trás de
+    <code>hasResponseFormat</code> não é registrado, só se havia um em vigor.
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
     title="o que um span carrega"
     samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: payload }]}
   />
+
+  <h3>Chamadas em streaming</h3>
+  <p>
+    Passe o stream do provedor para <code>span.recordStream</code> e leia o
+    wrapper no lugar dele. Ele aceita chunks de chat completion da OpenAI e
+    eventos de mensagem da Anthropic, e todo chunk passa sem alteração. O
+    primeiro chunk com texto ou com uma chamada de ferramenta marca o tempo até
+    o primeiro token. Quando o stream termina, lança uma exceção ou é deixado
+    com um <code>break</code>, o span recebe o que <code>recordResponse</code>
+    teria registrado para a mesma chamada sem streaming, o texto como saída, e
+    termina. Um erro do stream marca o span e chega até você sem alteração. O
+    texto guardado tem um teto de 32.768 caracteres, e
+    <code>mcpd.stream.truncated</code> é definido quando o teto foi atingido.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="stream" title="uma chamada em streaming" />
 
   <h2>Execuções duráveis</h2>
   <p>
@@ -325,6 +355,22 @@ const serverless = `export default async function handler(request: Request): Pro
   </p>
 
   <h2>Verifique o que você registrou</h2>
+  <p>
+    <code>TestClient</code>, de <code>@mcpd/sdk/testing</code>, é um
+    <code>Mcpd</code> que grava em memória. Passe-o onde quer que o seu código
+    receba um cliente e leia de volta o que ele gravou: <code>spans()</code>
+    por nome ou tipo, <code>span(name)</code> para o span que tem de existir,
+    <code>trees()</code> para cada execução como uma árvore,
+    <code>logs()</code>, <code>metrics()</code>, <code>scores()</code>,
+    <code>recordedFeedback()</code> e <code>reset()</code>. Cada acessor faz
+    flush antes. O que ele guarda passou pela amostragem, pela captura de
+    payload e pelo <code>redact</code> como passaria a caminho de um daemon, e
+    ele continua ligado quando <code>MCPD_ENABLED=false</code> está definido
+    para a rodada de testes.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="testing" title="um teste de unidade" />
+
   <p>
     Um <code>RecordingSink</code> troca a rede por memória, então um teste lê de
     volta os spans, logs, métricas, notas e feedback que o código sob teste
