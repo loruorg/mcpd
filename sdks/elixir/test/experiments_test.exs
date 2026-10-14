@@ -276,6 +276,27 @@ defmodule Mcpd.ExperimentsTest do
     assert {:ok, _, 0} = DateTime.from_iso8601(finished["finished_at"])
   end
 
+  test "a null in a case input is recorded as null, not as a string" do
+    items = ~s([{"item_id":"c1","dataset_id":"ds-1","input":{"q":"hi","note":null,"l":[null]}},) <>
+              ~s({"item_id":"c2","dataset_id":"ds-1","input":null}])
+    daemon = start_daemon(route(items))
+    {:ok, testing} = Mcpd.Testing.start(endpoint: daemon.endpoint, project: "shop")
+    on_exit(fn -> Mcpd.Testing.stop(testing) end)
+
+    assert {:ok, _} = Mcpd.run_experiment(testing.client, "ds-1", fn input -> input end)
+
+    by_case =
+      testing
+      |> Mcpd.Testing.spans(name: "answers-v2")
+      |> Map.new(&{&1["attributes"]["mcpd.dataset_item_id"], &1})
+
+    wire = fn value -> value |> :json.encode() |> IO.iodata_to_binary() |> :json.decode() end
+    nested = %{"q" => "hi", "note" => :null, "l" => [:null]}
+    assert wire.(by_case["c1"]["input"]) == nested
+    assert wire.(by_case["c1"]["output"]) == nested
+    assert Map.get(by_case["c2"], "input", :null) == :null
+  end
+
   test "no more than concurrency targets are in flight" do
     daemon = start_daemon(route(items_json(12)))
     {:ok, testing} = Mcpd.Testing.start(endpoint: daemon.endpoint, project: "shop")

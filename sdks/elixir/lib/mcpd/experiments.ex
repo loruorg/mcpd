@@ -372,8 +372,12 @@ defmodule Mcpd.Experiments do
         do: Map.put(correlation, "project", project),
         else: correlation
 
+    # The daemon requires both. An id left out is a new experiment, as an
+    # empty one is, and a new experiment has attempted no cases yet.
     fields
     |> Mcpd.Runs.wire()
+    |> Map.put_new("experiment_id", "")
+    |> Map.put_new("item_count", 0)
     |> Map.put("correlation", correlation)
     |> put_raw("metadata", metadata)
     |> put_raw("summary", summary)

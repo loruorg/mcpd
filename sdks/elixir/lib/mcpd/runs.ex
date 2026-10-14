@@ -373,7 +373,11 @@ defmodule Mcpd.Runs do
     |> Map.new(fn {k, v} -> {to_string(k), wire(v)} end)
   end
 
-  def wire(list) when is_list(list), do: Enum.map(list, &wire/1)
+  # A list keeps its length, so a nil in it is a null, not a dropped item.
+  def wire(list) when is_list(list), do: Enum.map(list, &(if &1 == nil, do: :null, else: wire(&1)))
+  # A JSON null as `:json` decodes it. Written as an atom it would go out as
+  # the string "null".
+  def wire(:null), do: :null
   def wire(atom) when is_atom(atom) and not is_boolean(atom) and atom != nil, do: Atom.to_string(atom)
   def wire(other), do: other
 end

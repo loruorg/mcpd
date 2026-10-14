@@ -146,6 +146,16 @@ defmodule Mcpd.LoggingTest do
       assert %{failed: 0} = Mcpd.stats(c)
     end
 
+    test "nil and a decoded JSON null both go out as null" do
+      encoded =
+        %{"a" => nil, "b" => :null, "c" => [nil, :null], "d" => :ok}
+        |> Logs.encode_fields()
+        |> :json.encode()
+        |> IO.iodata_to_binary()
+
+      assert :json.decode(encoded) == %{"a" => :null, "b" => :null, "c" => [:null, :null], "d" => "ok"}
+    end
+
     test "describe_error answers only for an exception" do
       assert Logs.describe_error(%RuntimeError{message: "boom"}) ==
                %{"type" => "RuntimeError", "message" => "boom"}

@@ -230,6 +230,10 @@ rather than every commit.
 
 ### Fixed
 
+- **Elixir records a JSON null as null.** A null inside a dataset case's
+  input, a span payload or a run's input was sent as the string `"null"`, and
+  a `nil` inside one as `"nil"`. `create_experiment` with no `experiment_id`
+  or `item_count` now creates a new experiment instead of getting a 422.
 - **The derived `outcome` aspect reaches a snapshot.** Its notes were stamped
   with the time of the pass that wrote them, which put them outside the window
   that pass reads, and each later pass moved them again. They are now stamped
