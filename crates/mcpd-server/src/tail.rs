@@ -129,6 +129,9 @@ pub fn sampled(trace_id: &str, rate: f64) -> bool {
     crate::live::sampled("tail", trace_id, rate)
 }
 
+/// The name of tail sampling's lease.
+pub const JOB: &str = "tail-sampling";
+
 /// Run tail sampling on a timer, for every project that has a rule.
 pub fn spawn(state: Arc<AppState>) {
     let rules: Vec<(String, TailPolicy)> = state
@@ -143,16 +146,25 @@ pub fn spawn(state: Arc<AppState>) {
     tracing::info!(projects = rules.len(), "tail sampling finished runs");
     let decided = Arc::new(Mutex::new(HashMap::<(String, String), OffsetDateTime>::new()));
     let looped = Arc::clone(&state);
-    crate::spawn_loop(
+    // One replica decides at a time, the holder of this lease. Two deciding
+    // the same runs would agree, since the decision is a pure function of the
+    // run, but each would read every project's window and delete the same
+    // runs twice. A replica taking over decides again what the last holder
+    // kept, and keeps it again.
+    let duty = Arc::new(crate::lease::Duty::new(JOB, crate::lease::ttl_for(INTERVAL)));
+    crate::lease::spawn_leased(
         &state,
-        "tail sampling",
+        duty,
         INTERVAL,
         crate::FirstPass::AfterInterval,
-        move || {
+        move |granted| {
             let state = Arc::clone(&looped);
             let rules = rules.clone();
             let decided = Arc::clone(&decided);
             async move {
+                if granted.is_none() {
+                    return;
+                }
                 for (project, rule) in &rules {
                     match pass(&state, project, rule, &decided, OffsetDateTime::now_utc()).await {
                         Ok(n) if n > 0 => tracing::info!(project, dropped = n, "tail sampling"),

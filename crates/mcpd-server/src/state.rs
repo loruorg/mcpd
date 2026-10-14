@@ -1225,6 +1225,10 @@ pub struct AppState {
     pub account_guards: crate::accounts::AccountGuards,
     /// The mailer and the single sign-on provider cache.
     pub account_runtime: crate::accounts::AccountRuntime,
+    /// This process's name as a lease holder: the host, the pid and a random
+    /// suffix, so a restarted replica is a new holder and two replicas never
+    /// share a name. See [`crate::lease`].
+    pub replica: String,
 }
 
 impl ServerConfig {
@@ -1319,6 +1323,7 @@ impl AppState {
             accounts: None,
             account_guards: crate::accounts::AccountGuards::default(),
             account_runtime,
+            replica: crate::lease::replica_name(),
         }
     }
 

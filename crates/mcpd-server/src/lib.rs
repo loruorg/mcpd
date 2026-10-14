@@ -33,6 +33,7 @@ pub mod identity;
 pub mod ingest;
 pub mod judge;
 pub mod layers;
+pub mod lease;
 pub mod live;
 pub mod mail;
 pub mod monitor;

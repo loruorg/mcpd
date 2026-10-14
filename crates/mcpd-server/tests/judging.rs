@@ -670,6 +670,14 @@ async fn live_scoring_scores_each_matching_finished_run_once() {
     assert_eq!(n, 2, "one finished checkout run, two scorers");
     let again = mcpd_server::live::pass(&state, &memory, epoch, now).await.expect("a pass");
     assert_eq!(again, 0, "a run is scored once per rule");
+    // A replica taking the lease over has no memory of what was scored, and
+    // continues from the point the previous holder recorded instead.
+    let taken_over = mcpd_server::live::memory();
+    let reached = Some(now - time::Duration::seconds(20));
+    let n = mcpd_server::live::pass_after(&state, &taken_over, epoch, reached, now)
+        .await
+        .expect("a pass");
+    assert_eq!(n, 0, "a run that finished before the recorded point is not scored again");
 
     let scores = state
         .store
