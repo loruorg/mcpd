@@ -57,6 +57,9 @@ mcpd.span("checkout", traceparent = headers["traceparent"]) { span ->
 const payload = `generation.setModel("gpt-4o", provider = "openai")
 generation.setUsage(inputTokens = 1_180, outputTokens = 96)
 
+// Come è stato chiamato il modello. Impostazioni, non payload: restano anche con la cattura spenta.
+generation.setModelParameters(temperature = 0.0, seed = 0, maxTokens = 1_024)
+
 // setError prende il throwable che hai già in mano, così il messaggio, la
 // classe e lo stack vengono tutti da lì.
 tool.setError(e, retryable = true)
@@ -65,7 +68,7 @@ tool.setError(e, retryable = true)
 tool.setError("the shipping service returned 503")`
 
 const surface = `// Tieni i prompt e le completion dentro il processo: lo span porta comunque
-// i suoi tempi, lo stato, il consumo, il modello, la correlazione e gli errori.
+// i suoi tempi, lo stato, il consumo, il modello, i parametri del modello, la correlazione e gli errori.
 val quiet = Mcpd(McpdConfig(capturePayloads = false))
 quiet.span("draft_answer", input = question, capturePayloads = true) { }  // questo invece si tiene
 
@@ -230,6 +233,20 @@ Mcpd(McpdConfig(project = "batch")).use { mcpd ->
     a nessuno che cosa fare.
   </p>
 
+  <p>
+    <code>setModelParameters</code> registra le impostazioni con cui è stata
+    fatta la chiamata: <code>temperature</code>, <code>topP</code>,
+    <code>topK</code>, <code>maxTokens</code>, <code>seed</code>,
+    <code>stopSequences</code> e <code>hasResponseFormat</code>. Sono
+    impostazioni e non payload, quindi sopravvivono a
+    <code>capturePayloads = false</code>, che è il caso che conta: sono quello
+    che deve riprodurre chi rifà l’esecuzione. Un argomento che ometti è
+    assente e uno che passi viene tenuto qualunque sia il valore, quindi
+    <code>seed = 0</code> è un seed. Lo schema dietro
+    <code>hasResponseFormat</code> non viene registrato, solo se ce n’era uno
+    in vigore.
+  </p>
+
   <CodeSwitcher
     class="not-prose my-6"
     title="che cosa porta uno span"
@@ -247,6 +264,25 @@ Mcpd(McpdConfig(project = "batch")).use { mcpd ->
     nomina con <code>externalParentSpanId</code>, portato per la correlazione e
     mai usato come padre dentro l’albero di mcpd.
   </p>
+
+  <h3>Chiamate in streaming</h3>
+  <p>
+    Passa il <code>Flow</code> del provider a <code>span.recordStream</code> e
+    raccogli invece il flow che restituisce. Prende i chunk di chat completion
+    di OpenAI e gli eventi dei messaggi di Anthropic, come
+    <code>JsonElement</code> o come <code>Map</code>, e ogni chunk passa
+    invariato. Il primo chunk con testo o con una chiamata a uno strumento
+    segna il tempo fino al primo token. Quando il flow si completa, lancia
+    un’eccezione o ti fermi prima con <code>take</code>, <code>first</code> o
+    una cancellazione, lo span riceve quello che <code>recordResponse</code>
+    avrebbe registrato per la stessa chiamata senza streaming, con il testo
+    come output, e si chiude. Un’eccezione dal flow segna lo span e ti arriva
+    invariata. Il testo tenuto ha un tetto di 32.768 caratteri, e
+    <code>mcpd.stream.truncated</code> viene impostato quando il tetto è stato
+    raggiunto.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="stream" title="una chiamata in streaming" />
 
   <h2>Payload, sink e span già conclusi</h2>
   <p>
@@ -266,6 +302,21 @@ Mcpd(McpdConfig(project = "batch")).use { mcpd ->
     title="catturare, registrare, verificare"
     samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: surface }]}
   />
+
+  <p>
+    <code>dev.mcpd.testing.TestClient</code> registra in memoria, e il suo
+    <code>client</code> è un <code>Mcpd</code>. Passalo ovunque il tuo codice
+    prenda un client, poi rileggi quello che ha registrato: <code>spans()</code>
+    per nome o per tipo, <code>span(name)</code> per l’unico span che deve
+    esistere, <code>trees()</code> per ogni esecuzione come albero,
+    <code>logs()</code>, <code>metrics()</code>, <code>scores()</code>,
+    <code>recordedFeedback()</code> e <code>reset()</code>. Ogni accessor fa
+    prima un flush. Quello che tiene è passato per campionamento, cattura dei
+    payload e <code>redact</code> come farebbe sulla strada verso un daemon, e
+    resta acceso quando per i test è impostato <code>MCPD_ENABLED=false</code>.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="testing" title="uno unit test" />
 
   <h2>Esecuzioni durevoli</h2>
   <p>
