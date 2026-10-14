@@ -1329,6 +1329,133 @@ volumes:
   </p>
 
 
+  <h2 id="signup">オープンなサインアップ</h2>
+  <p>
+    <code>--signup</code> を付けると、誰でもインターフェースから、または
+    <code>POST /v1/api/account/signup</code> でアカウントを作れます。ホスト版の
+    mcpd はこの形で動いています。サインアップは、アドレスが使われていても
+    いなくても同じ答えを返し、リンクをメールで送ります。リンクを開くとアドレスが
+    確認され、ログインします。各アカウントは自分専用の組織と、ランダムな名前の
+    プロジェクトを 1 つ得て、自分の API キーを作ります。キーごとにスコープは 1 つ
+    です。セッションは、アカウントが属する組織の各プロジェクトで、アカウントの
+    ロールが許すことができます。キーは、その 1 つのプロジェクトで、スコープが示す
+    ことができます。どちらも、アカウントが属していない組織のプロジェクトには
+    届きません。アカウントのキーが送ったスパンは、スパンがどのプロジェクトを
+    指定していても、そのキーのプロジェクトに保存されます。
+    <a href={to('/docs/accounts')}>アカウントと組織</a>を参照してください。
+  </p>
+  <p>
+    これを有効にすると、すべての人に対して 1 つの規則が変わります。キーのない
+    リクエストは、キーを 1 つも設定していない場合でも拒否されます。開いたままなのは
+    <code>/healthz</code>、<code>/readyz</code>、<code>/metrics</code>、
+    サインアップ、ログインだけです。設定したキーは今までの範囲を保ち、最初に
+    試されます。
+  </p>
+  <p>
+    アカウントは、シグナルを何に保存していても、<code>--accounts-data</code> で
+    指定する自分の SQLite ファイルに入ります。このファイルが持つのは argon2id の
+    パスワードハッシュと、トークンとキーの SHA-256 ダイジェストで、秘密そのものは
+    持ちません。ボリュームの残りと一緒にバックアップしてください。
+  </p>
+  <p>
+    クライアントのアドレスごとに、サインアップは 1 時間に 5 回、ログインは 15 分に
+    20 回までです。失敗したログインは、メールアドレスごとに 15 分に 10 回までです。
+    プロキシの後ろでは、すべての接続がプロキシから来ます。そこで、プロキシが
+    クライアントのアドレスを入れるヘッダーと、プロキシの接続元アドレスを指定して
+    ください。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="Cloudflare とプライベートネットワーク上のプロキシの後ろでサインアップを開く"
+    command={`mcpd serve --signup \\
+  --client-ip-header cf-connecting-ip \\
+  --trusted-proxy-cidr 172.16.0.0/12 \\
+  --cors-origin https://mcpd.sh`}
+  />
+
+  <p>
+    ヘッダーは、<code>--trusted-proxy-cidr</code> にあるアドレスからしか読みません。
+    ヘッダーを設定しなかった信頼済みのプロキシからは、
+    <code>X-Forwarded-For</code> の最初のアドレスを使います。それ以外のアドレス
+    からは、ヘッダーに何が書かれていても、接続元のアドレスがクライアントです。
+    デーモンに届くのが自分のプロキシだけであることを確かめてください。信頼する範囲の
+    内側から届くクライアントは、好きなアドレスを名乗れます。インターフェースを
+    デーモンとは別のオリジンから配信するときは <code>--cors-origin</code> が必要
+    です。
+  </p>
+
+
+  <h2 id="accounts">サインアップなしのアカウント</h2>
+  <p>
+    <code>--accounts</code> を付けると、同じアカウント、組織、ロール、シングル
+    サインオン、SCIM が、公開のサインアップなしで有効になります。自分のクラスターでの
+    デプロイ向けです。人は招待、シングルサインオン、SCIM のいずれかで加わり、
+    設定したキーもその横で動き続けます。<code>--signup</code> と同じく、資格情報の
+    ないリクエストは拒否されます。
+  </p>
+  <p>
+    メールは <code>--smtp-host</code> を通り、<code>--smtp-from</code>、
+    <code>--smtp-port</code>、<code>--smtp-user</code>、
+    <code>--smtp-password</code>、<code>--smtp-tls</code> を使います。SMTP
+    サーバーがなければ、リンクは info レベルでログに書かれます。例外は公開アドレスで
+    <code>--signup</code> を使う場合で、そのときはサインアップ、パスワードの
+    リセット、アドレスの変更、招待が 503 を返し、デーモンは起動時に警告します。
+    リンクとシングルサインオンのリダイレクトは <code>--public-url</code> から
+    始まります。
+  </p>
+  <p>
+    <code>--org-quota-per-minute</code> は、組織がそのプロジェクト全体で共有する
+    1 分あたりのシグナルの上限で、組織が自分に設定できる最大値でもあります。
+    <code>--org-retention-days</code> は、組織のプロジェクトがデータを保持する
+    期間で、組織が選べる最長の期間でもあります。
+  </p>
+  <p>
+    設定ファイルの <code>accounts</code> ブロックは
+    <code>allow_org_creation</code>、<code>allow_private_issuers</code>、
+    <code>orgs</code> を持ちます。<code>orgs</code> の各項目は、組織を
+    <code>slug</code> で宣言し、<code>name</code>、メールで指定する
+    <code>owners</code>、組織が所有する既存の <code>projects</code>、
+    <code>quota_per_minute</code>、<code>retention_days</code>、
+    <code>group_roles</code>、<code>scim_token_env</code>、
+    <code>sso</code> を持ちます。<code>sso</code> ブロックは
+    <code>provider</code>（<code>oidc</code> か <code>github</code>）、
+    <code>issuer</code>、<code>client_id</code>、<code>client_secret_env</code>、
+    <code>domains</code>、<code>enforce</code>、<code>default_role</code>、
+    <code>groups_claim</code> を受け取ります。秘密は、ファイルが名指しする環境変数
+    から読み、ファイルからは決して読みません。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="自分のクラスターでのシングルサインオンとロール"
+    command={`mcpd serve --accounts --config-file mcpd.json \\
+  --public-url https://mcpd.example.com \\
+  --smtp-host smtp.example.com --smtp-from no-reply@example.com`}
+  />
+
+  <pre><code class="language-json">{`{
+  "accounts": {
+    "orgs": [{
+      "slug": "acme",
+      "name": "Acme",
+      "owners": ["ana@acme.com"],
+      "projects": ["default"],
+      "sso": {
+        "issuer": "https://login.microsoftonline.com/TENANT/v2.0",
+        "client_id": "CLIENT_ID",
+        "client_secret_env": "MCPD_OIDC_CLIENT_SECRET",
+        "domains": ["acme.com"],
+        "enforce": true,
+        "default_role": "member",
+        "groups_claim": "groups"
+      },
+      "group_roles": { "mcpd-admins": "admin", "mcpd-viewers": "viewer" },
+      "scim_token_env": "MCPD_SCIM_TOKEN"
+    }]
+  }
+}`}</code></pre>
+
   <h2>デーモン全体を 1 つのプロジェクトが使い切らないための上限</h2>
   <p>
     mcpd にあふれるほど送るプロジェクトは、同じデーモンの他のすべての
