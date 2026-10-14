@@ -87,11 +87,11 @@ export const LANGUAGES = [
   {
     id: 'elixir',
     detect: () =>
-      Boolean(elixir().run) && existsSync(path.join(ROOT, 'sdks/elixir/_build/Elixir.Mcpd.beam')),
+      Boolean(elixir().run) && Boolean(elixirEbin('Elixir.Mcpd.beam')),
     why: 'elixir is not on PATH, or sdks/elixir/_build holds no compiled SDK',
     run: (env, opts) => {
       const { run, bin: elixirBin } = elixir()
-      return exec(run, ['-pa', 'sdks/elixir/_build', 'tests/e2e/probes/probe.exs'], {
+      return exec(run, ['-pa', elixirEbin('Elixir.Mcpd.beam'), 'tests/e2e/probes/probe.exs'], {
         env: { ...env, PATH: elixirBin ? `${elixirBin}:${env.PATH}` : env.PATH },
         ...opts,
       })
@@ -160,6 +160,21 @@ function elixir() {
     return { run: `${local}/elixir`, bin: '/tmp/edl/root/usr/lib/erlang/bin' }
   }
   return {}
+}
+
+/**
+ * The directory holding the compiled Elixir SDK, if one does. `mix compile`
+ * writes `_build/<env>/lib/mcpd/ebin`; `elixirc -o _build` writes `_build`.
+ */
+function elixirEbin(beam) {
+  return [
+    'sdks/elixir/_build/dev/lib/mcpd/ebin',
+    'sdks/elixir/_build/test/lib/mcpd/ebin',
+    'sdks/elixir/_build/prod/lib/mcpd/ebin',
+    'sdks/elixir/_build',
+  ]
+    .map((dir) => path.join(ROOT, dir))
+    .find((dir) => existsSync(path.join(dir, beam)))
 }
 
 /** The kotlinc launcher, from PATH first and the fixed download second. */
@@ -231,11 +246,11 @@ export const RUN_PROBES = [
   {
     id: 'elixir',
     detect: () =>
-      Boolean(elixir().run) && existsSync(path.join(ROOT, 'sdks/elixir/_build/Elixir.Mcpd.StepWorker.beam')),
+      Boolean(elixir().run) && Boolean(elixirEbin('Elixir.Mcpd.StepWorker.beam')),
     why: 'elixir is not on PATH, or sdks/elixir/_build holds no compiled worker (Elixir.Mcpd.StepWorker.beam)',
     run: (env, opts) => {
       const { run, bin: elixirBin } = elixir()
-      return exec(run, ['-pa', 'sdks/elixir/_build', 'tests/e2e/probes/runs/probe.exs'], {
+      return exec(run, ['-pa', elixirEbin('Elixir.Mcpd.beam'), 'tests/e2e/probes/runs/probe.exs'], {
         env: { ...env, PATH: elixirBin ? `${elixirBin}:${env.PATH}` : env.PATH },
         ...opts,
       })
