@@ -141,7 +141,8 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
   <p>
     <code>WithCapturePayloads(false)</code> mantém prompts e respostas dentro do
     processo: os spans continuam carregando o seu tempo, o seu status, o seu
-    uso, o seu modelo, a sua correlação e os seus erros, e <code>input</code> e
+    uso, o seu modelo, os parâmetros do modelo, a sua correlação e os seus
+    erros, e <code>input</code> e
     <code>output</code> são descartados antes de chegar à fila. Um span pode
     dizer o contrário para si mesmo com
     <code>WithSpanCapturePayloads</code>, nos dois sentidos.
@@ -158,6 +159,24 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     devolvido como erro. <code>WithExternalParent</code> carrega o pai de outro
     sistema de tracing, só para correlação.
   </p>
+
+  <p>
+    Para os seus próprios testes de unidade, <code>mcpdtest.New</code> recebe
+    as opções que <code>mcpd.New</code> recebe e devolve um gravador cujo campo
+    <code>Client</code> é um <code>*mcpd.Client</code> que grava em memória.
+    Passe esse cliente onde quer que o seu código receba um e leia de volta o
+    que ele gravou: <code>Spans</code> por nome ou tipo, <code>Span(name)</code>
+    para o span que tem de existir (<code>MustSpan(t, name)</code> faz o teste
+    falhar por você), <code>Trees</code> para cada execução como uma árvore,
+    <code>Logs</code>, <code>Metrics</code>, <code>Scores</code>,
+    <code>RecordedFeedback</code> e <code>Reset</code>. Cada acessor faz flush
+    antes. O que ele guarda passou pela amostragem, pela captura de payload e
+    pelo <code>WithRedact</code> como passaria a caminho de um daemon, e ele
+    continua ligado quando <code>MCPD_ENABLED=false</code> está definido para a
+    rodada de testes.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="testing" title="um teste de unidade" />
 
   <h2>Registrar uma execução</h2>
   <p>
@@ -216,6 +235,18 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     <code>error</code> como status, e não <code>ok</code>.
   </p>
 
+  <p>
+    <code>SetModelParameters</code> registra os ajustes com que a chamada foi
+    feita: <code>Temperature</code>, <code>TopP</code>, <code>TopK</code>,
+    <code>MaxTokens</code>, <code>Seed</code>, <code>StopSequences</code> e
+    <code>HasResponseFormat</code>. São ajustes, e não payload, então eles
+    sobrevivem a <code>WithCapturePayloads(false)</code>, que é o caso que
+    importa: são eles que alguém reproduzindo a execução precisa igualar. Um
+    campo nil fica ausente e um ponteiro para zero é um valor, então um
+    <code>Seed</code> zero é uma seed. O schema por trás de
+    <code>HasResponseFormat</code> não é registrado, só se havia um em vigor.
+  </p>
+
   <CodeSwitcher
     class="not-prose my-6"
     title="o que um span carrega"
@@ -230,6 +261,26 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     <code>Event</code> e <code>EndWithStatus</code>. Os mesmos campos podem ser
     definidos quando o span começa, através das opções <code>With...</code>.
   </p>
+
+  <h3>Chamadas em streaming</h3>
+  <p>
+    Passe o span e o stream do provedor para <code>mcpd.RecordStream</code> e
+    leia no lugar dele o stream que ele devolve. Ele tem os mesmos métodos
+    <code>Next</code>, <code>Current</code>, <code>Err</code> e
+    <code>Close</code> do <code>ssestream.Stream</code> que os SDKs oficiais de
+    Go da OpenAI e da Anthropic devolvem, aceita chunks de chat completion da
+    OpenAI e eventos de mensagem da Anthropic, e todo chunk passa sem
+    alteração. O primeiro chunk com texto ou com uma chamada de ferramenta
+    marca o tempo até o primeiro token. Quando <code>Next</code> devolve false,
+    ou você chama <code>Close</code> antes do fim, o span recebe o que
+    <code>RecordResponse</code> teria registrado para a mesma chamada sem
+    streaming, o texto como saída, e termina. Um erro do stream marca o span e
+    chega até você sem alteração por meio de <code>Err</code>. O texto guardado
+    tem um teto de 32.768 caracteres, e <code>mcpd.stream.truncated</code> é
+    definido quando o teto foi atingido.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="stream" title="uma chamada em streaming" />
 
   <h2>Execuções duráveis</h2>
   <p>

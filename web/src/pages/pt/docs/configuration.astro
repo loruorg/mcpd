@@ -942,7 +942,13 @@ volumes:
     <code>open</code> quer dizer aberto a quem alcançar a porta. Uma linha entre
     parênteses nomeia a lista mais ampla de que aquele escopo está herdando, que
     é o estado em que começa uma implantação atualizada a partir de uma versão
-    mais antiga.
+    mais antiga. Toda opção e toda chave do arquivo de configuração tem uma
+    linha aqui, com o valor com que o daemon roda e não o que foi escrito: um
+    intervalo abaixo do seu mínimo aparece elevado, com o número de onde foi
+    elevado. Nada secreto é impresso. As chaves são contadas, nunca listadas,
+    uma senha aparece como <code>set</code> ou <code>unset</code>, um cabeçalho
+    de encaminhamento aparece pelo nome, e uma URL ou uma string de conexão
+    aparece sem as credenciais.
   </p>
 
   <h2>Uma implantação configurada</h2>
@@ -1399,6 +1405,132 @@ volumes:
     registrado. Esse é o padrão.
   </p>
 
+  <h2 id="signup">Cadastro aberto</h2>
+  <p>
+    <code>--signup</code> deixa qualquer pessoa criar uma conta, pela interface
+    ou com <code>POST /v1/api/account/signup</code>. É assim que roda a versão
+    hospedada do mcpd. O cadastro responde do mesmo jeito esteja o endereço em
+    uso ou não, e envia um link por e-mail; abri-lo confirma o endereço e faz o
+    login. Cada conta ganha uma organização própria com um projeto de nome
+    aleatório, e cria as próprias chaves de API, um escopo por chave. Uma
+    sessão pode fazer o que o papel da conta permite em cada projeto das suas
+    organizações; uma chave pode fazer o que o seu escopo diz no seu único
+    projeto. Nenhuma das duas alcança um projeto de uma organização à qual a
+    conta não pertence, e um span que uma chave de conta envia é armazenado no
+    projeto da chave, seja qual for o projeto que o span nomeia. Veja
+    <a href={href('/docs/accounts')} class="link">contas e organizações</a>.
+  </p>
+  <p>
+    Ligá-lo muda uma regra para todo mundo: uma requisição sem chave é
+    recusada, mesmo onde nenhuma chave está configurada. Só <code>/healthz</code>,
+    <code>/readyz</code>, <code>/metrics</code>, o cadastro e o login continuam
+    abertos. As chaves que você configura mantêm o alcance que têm, e são
+    tentadas primeiro.
+  </p>
+  <p>
+    As contas ficam em um arquivo SQLite próprio, definido com
+    <code>--accounts-data</code>, seja o que for que armazena os sinais. O
+    arquivo guarda hashes argon2id das senhas e digests SHA-256 de tokens e
+    chaves, nunca os segredos. Faça backup dele junto com o resto do volume.
+  </p>
+  <p>
+    O cadastro é limitado a 5 por hora e o login a 20 tentativas a cada 15
+    minutos para cada endereço de cliente, e os logins com falha a 10 a cada 15
+    minutos para cada e-mail. Atrás de um proxy, toda conexão vem do proxy,
+    então nomeie o cabeçalho em que ele coloca o endereço do cliente, e os
+    endereços de onde o proxy se conecta:
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="cadastro aberto atrás do Cloudflare e de um proxy em uma rede privada"
+    command={`mcpd serve --signup \\
+  --client-ip-header cf-connecting-ip \\
+  --trusted-proxy-cidr 172.16.0.0/12 \\
+  --cors-origin https://mcpd.sh`}
+  />
+
+  <p>
+    O cabeçalho só é lido de um endereço em <code>--trusted-proxy-cidr</code>.
+    De um proxy confiável que não o definiu, vale o primeiro endereço de
+    <code>X-Forwarded-For</code>. De qualquer outro endereço, o cliente é o
+    endereço do par, digam o que disserem os cabeçalhos. Garanta que só o seu
+    proxy alcance o daemon: um cliente que o alcança de dentro de uma faixa
+    confiável pode nomear o endereço que quiser. <code>--cors-origin</code> é
+    necessário quando a interface é servida de outra origem que não a do
+    daemon.
+  </p>
+
+
+  <h2 id="accounts">Contas sem cadastro</h2>
+  <p>
+    <code>--accounts</code> liga as mesmas contas, organizações, papéis, login
+    único e SCIM sem cadastro público, para uma implantação no seu próprio
+    cluster. As pessoas chegam por convite, por login único ou por SCIM, e as
+    chaves configuradas continuam funcionando ao lado delas. Como com
+    <code>--signup</code>, uma requisição sem credencial é recusada.
+  </p>
+  <p>
+    O e-mail passa por <code>--smtp-host</code>, com <code>--smtp-from</code>,
+    <code>--smtp-port</code>, <code>--smtp-user</code>,
+    <code>--smtp-password</code> e <code>--smtp-tls</code>. Sem servidor SMTP,
+    os links são escritos no log em nível info, exceto com
+    <code>--signup</code> em um endereço público, onde o cadastro, a
+    redefinição de senha, as mudanças de endereço e os convites respondem 503 e
+    o daemon avisa na partida. Os links e o redirecionamento do login único
+    começam em <code>--public-url</code>.
+  </p>
+  <p>
+    <code>--org-quota-per-minute</code> é o teto de sinais por minuto que uma
+    organização divide entre os seus projetos, e o máximo que ela pode definir
+    para si. <code>--org-retention-days</code> é por quanto tempo os seus
+    projetos guardam dados, e o mais longo que ela pode escolher.
+  </p>
+  <p>
+    O bloco <code>accounts</code> do arquivo de configuração tem
+    <code>allow_org_creation</code>, <code>allow_private_issuers</code> e
+    <code>orgs</code>. Cada entrada de <code>orgs</code> declara uma
+    organização por <code>slug</code>, com um <code>name</code>, os seus
+    <code>owners</code> por e-mail, os <code>projects</code> existentes que ela
+    possui, <code>quota_per_minute</code>, <code>retention_days</code>,
+    <code>group_roles</code>, <code>scim_token_env</code> e
+    <code>sso</code>. O bloco <code>sso</code> aceita <code>provider</code>
+    (<code>oidc</code> ou <code>github</code>), <code>issuer</code>,
+    <code>client_id</code>, <code>client_secret_env</code>,
+    <code>domains</code>, <code>enforce</code>, <code>default_role</code> e
+    <code>groups_claim</code>. Os segredos são lidos das variáveis de ambiente
+    que o arquivo nomeia, nunca do arquivo.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="login único e papéis no seu próprio cluster"
+    command={`mcpd serve --accounts --config-file mcpd.json \\
+  --public-url https://mcpd.example.com \\
+  --smtp-host smtp.example.com --smtp-from no-reply@example.com`}
+  />
+
+  <pre><code class="language-json">{`{
+  "accounts": {
+    "orgs": [{
+      "slug": "acme",
+      "name": "Acme",
+      "owners": ["ana@acme.com"],
+      "projects": ["default"],
+      "sso": {
+        "issuer": "https://login.microsoftonline.com/TENANT/v2.0",
+        "client_id": "CLIENT_ID",
+        "client_secret_env": "MCPD_OIDC_CLIENT_SECRET",
+        "domains": ["acme.com"],
+        "enforce": true,
+        "default_role": "member",
+        "groups_claim": "groups"
+      },
+      "group_roles": { "mcpd-admins": "admin", "mcpd-viewers": "viewer" },
+      "scim_token_env": "MCPD_SCIM_TOKEN"
+    }]
+  }
+}`}</code></pre>
 
   <h2>Um projeto não pode gastar o daemon inteiro</h2>
   <p>
