@@ -189,6 +189,18 @@ async fn main() {
     되므로 둘이 어긋날 수 없고, 메시지는 선택이 아니라 반드시 넘겨야 하는 인자입니다.
   </p>
 
+  <p>
+    <code>set_model_parameters</code>는 호출에 쓴 설정을 기록합니다.
+    <code>temperature</code>, <code>top_p</code>, <code>top_k</code>,
+    <code>max_tokens</code>, <code>seed</code>, <code>stop_sequences</code>,
+    <code>has_response_format</code>입니다. 이것들은 페이로드가 아니라 설정이므로
+    <code>with_capture_payloads(false)</code>에서도 남습니다. 중요한 것이 바로 이
+    경우입니다. 실행을 재현하려는 사람이 맞춰야 하는 값이 이것들이기 때문입니다.
+    <code>None</code>은 없는 것이고 <code>Some(0)</code>은 값이므로, 0인 시드도
+    시드입니다. <code>has_response_format</code> 뒤의 스키마는 기록하지 않고,
+    스키마가 적용되었는지만 기록합니다.
+  </p>
+
   <CodeSwitcher
     class="not-prose my-6"
     title="스팬이 싣는 것"
@@ -203,6 +215,24 @@ async fn main() {
     <code>set_error_detail</code>입니다. 모두 <code>&amp;self</code>를 받으므로, 스팬은
     그것을 빌려 간 곳 어디에서든 채울 수 있습니다.
   </p>
+
+  <h3>스트리밍 호출</h3>
+  <p>
+    제공업체의 스트림을 <code>span.record_stream</code>에 넘기고, 대신 그것이
+    돌려주는 스트림을 읽으십시오. 항목은 <code>Result</code>이고, 청크는 OpenAI
+    chat-completion 청크나 Anthropic 메시지 이벤트일 수 있으며, 각각
+    <code>serde_json::Value</code>이거나 그것으로 직렬화되는 어떤 타입이어도 됩니다.
+    모든 항목은 바뀌지 않은 채 지나갑니다. 텍스트나 도구 호출이 담긴 첫 청크가 첫
+    토큰까지의 시간을 표시합니다. 래퍼가 스팬을 소유합니다. 스트림이 끝나거나,
+    <code>Err</code>를 내거나, 일찍 드롭되면 스팬은 같은 호출을 스트리밍 없이 했을 때
+    <code>record_response</code>가 기록했을 내용과 출력으로서의 텍스트를 받고
+    끝납니다. <code>Err</code>는 그 <code>Display</code> 텍스트로 스팬에 표시되고,
+    여전히 여러분에게 전달됩니다.
+    보관하는 텍스트는 32,768자에서 잘리며, 그 한도에 이르면
+    <code>mcpd.stream.truncated</code>가 설정됩니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="stream" title="스트리밍 호출" />
 
   <h2>페이로드, 싱크, 끝난 스팬</h2>
   <p>
@@ -222,6 +252,22 @@ async fn main() {
     <code>dropped</code>, <code>capacity</code>, <code>exported</code>,
     <code>failed</code>, <code>rejected</code>를 답합니다.
   </p>
+  <p>
+    <code>mcpd_sdk::testing::TestClient</code>는 메모리에 기록하는 클라이언트를
+    감쌉니다. 코드가 <code>&amp;Mcpd</code>를 받는 곳 어디에든
+    <code>test.client()</code>를 넘긴 다음, 기록된 것을 다시 읽으십시오.
+    <code>spans(name, kind)</code>, 반드시 있어야 하는 스팬 하나를 찾는
+    <code>span(name)</code>, 실행마다 트리로 돌려주는 <code>trees()</code>,
+    <code>logs()</code>, <code>metrics()</code>, <code>scores()</code>,
+    <code>recorded_feedback()</code>, <code>reset()</code>이 있습니다.
+    각 접근자는 먼저 플러시합니다. 담긴 것은 데몬으로 갈 때와 똑같이
+    샘플링, 페이로드 수집, <code>redact</code>를 거쳤고,
+    <code>TestClient::new()</code>는 테스트 실행에 <code>MCPD_ENABLED=false</code>를
+    설정해도 켜진 채로 남습니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="testing" title="단위 테스트" />
+
   <p>
     <code>mcpd.record(span)</code>은 이미 끝난 스팬을, 어댑터나 가져오기가 들고 있는
     그대로 id와 부모와 시작과 끝까지 함께 큐에 넣습니다. 부모가 다시 매겨지지도, 시각이
