@@ -77,11 +77,6 @@ let checks = 0
  * the same reason: one open gap must not be able to hide the next one.
  */
 const KNOWN_GAPS = {
-  'elixir:the SDK keeps its diagnostics off the agent\'s stdout':
-    'warn_once in sdks/elixir/lib/mcpd/worker.ex calls Logger.warning, and Elixir\'s default '
-    + 'console backend writes to stdout rather than stderr. Every other SDK writes its '
-    + 'diagnostic to stderr. The line can arrive after the program\'s own output, so a run '
-    + 'whose result is read from stdout gets telemetry in the middle of it.',
 }
 
 /** Every `<language>:<check>` this run evaluated, and the ones named in
