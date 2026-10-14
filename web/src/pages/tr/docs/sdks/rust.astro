@@ -48,6 +48,14 @@ generation.set_usage(TokenUsage {
 // Ya da döküm önemli değilse:
 generation.set_tokens(412, 96);
 
+// Modelin nasıl çağrıldığı. Payload değil ayardır: yakalama kapalıyken de tutulur.
+generation.set_model_parameters(ModelParameters {
+    temperature: Some(0.0),
+    seed: Some(0),
+    max_tokens: Some(1024),
+    ..ModelParameters::default()
+});
+
 // Mesaj zorunludur. "Bir şey başarısız oldu" ile bir şey yapılamaz.
 tool.set_error("sms gateway timed out after 5s");
 
@@ -190,6 +198,15 @@ async fn main() {
     çelişemez; mesaj da seçime bağlı değil, zorunlu bir argümandır.
   </p>
 
+  <p>
+    <code>set_model_parameters</code>, çağrının yapıldığı ayarları kaydeder:
+    <code>temperature</code>, <code>top_p</code>, <code>top_k</code>, <code>max_tokens</code>, <code>seed</code>, <code>stop_sequences</code> ve <code>has_response_format</code>. Bunlar payload değil ayardır, bu yüzden
+    <code>with_capture_payloads(false)</code> olduğunda da korunurlar. Önemli olan da tam bu
+    durumdur: çalıştırmayı yeniden üretmeye çalışan birinin eşleştirmesi gereken
+    değerler bunlardır. <code>None</code> yoktur, <code>Some(0)</code> ise bir değerdir; yani sıfır bir seed de bir seed'dir. <code>has_response_format</code> arkasındaki şema
+    kaydedilmez, yalnızca bir şemanın geçerli olup olmadığı kaydedilir.
+  </p>
+
   <CodeSwitcher
     class="not-prose my-6"
     title="bir span neler taşır"
@@ -204,6 +221,25 @@ async fn main() {
     <code>set_error_detail</code>. Hepsi <code>&amp;self</code> alır, yani bir
     span ödünç alındığı her yerden doldurulabilir.
   </p>
+
+  <h3>Akışlı çağrılar</h3>
+  <p>
+    Sağlayıcının akışını <code>span.record_stream</code> işlevine verin ve onun
+    yerine geri verdiği akışı okuyun. Öğeleri <code>Result</code> türündedir;
+    parçalar OpenAI chat-completion parçaları ya da Anthropic mesaj olayları
+    olabilir, her biri bir <code>serde_json::Value</code> ya da ona
+    serileştirilen herhangi bir tür. Her öğe değişmeden geçer.
+    Metin ya da araç çağrısı taşıyan ilk parça, ilk token'a kadar geçen süreyi
+    işaretler. Span sarmalayıcıya aittir: akış bittiğinde, bir
+    <code>Err</code> verdiğinde ya da erken bırakıldığında span, aynı çağrı
+    akışsız yapılsaydı <code>record_response</code> neyi kaydedecek idiyse onu
+    ve çıktı olarak metni alır ve biter. Bir <code>Err</code>, span'i
+    <code>Display</code> metniyle işaretler ve yine size ulaşır.
+    Tutulan metin 32,768 karakterle sınırlıdır ve sınıra ulaşıldığında
+    <code>mcpd.stream.truncated</code> ayarlanır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="stream" title="akışlı bir çağrı" />
 
   <h2>Payload'lar, sink'ler ve bitmiş span'ler</h2>
   <p>
@@ -225,6 +261,23 @@ async fn main() {
     <code>dropped</code>, <code>capacity</code>, <code>exported</code>,
     <code>failed</code> ve <code>rejected</code>.
   </p>
+  <p>
+    <code>mcpd_sdk::testing::TestClient</code>, belleğe kaydeden bir istemciyi
+    sarar. Kodunuz bir <code>&amp;Mcpd</code> aldığı her yerde
+    <code>test.client()</code> verin, sonra kaydettiğini geri okuyun:
+    <code>spans(name, kind)</code>, var olması gereken tek span için
+    <code>span(name)</code>, her çalıştırma bir ağaç olarak
+    <code>trees()</code>, <code>logs()</code>, <code>metrics()</code>,
+    <code>scores()</code>, <code>recorded_feedback()</code> ve
+    <code>reset()</code>. Her erişimci önce flush eder. Tuttuğu şey, bir
+    daemon'a giderken olacağı gibi örneklemeden, payload yakalamadan ve
+    <code>redact</code> adımından geçmiştir ve <code>TestClient::new()</code>,
+    test çalıştırması için <code>MCPD_ENABLED=false</code> ayarlandığında da
+    açık kalır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="testing" title="bir birim testi" />
+
   <p>
     <code>mcpd.record(span)</code>, çoktan bitmiş bir span'i kimlikleri, üstü,
     başlangıcı ve bitişiyle birlikte, bir adaptörün ya da bir içe aktarmanın

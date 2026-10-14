@@ -144,14 +144,78 @@ end`}</code></pre>
     <code>capture_payloads: false</code> ya da
     <code>MCPD_CAPTURE_PAYLOADS=false</code>, prompt'ları ve tamamlamaları
     bulundukları yerde tutar. Span'ler yine zamanlaması, durumu, token
-    kullanımı, modeli, ilişkilendirmesi ve hatalarıyla çıkar;
+    kullanımı, modeli, model parametreleri,
+    ilişkilendirmesi ve hatalarıyla çıkar;
     <code>input:</code>, <code>output:</code> ve bir bloğun yakalanan değeri
     kuyruğa varmadan atılır, böylece hassas hiçbir şey kuyruğa girmez ve bir
     flush sırasında hassas hiçbir şey dışarı çıkmaz. Tek bir span,
     <code>capture_payloads: true</code> ile kendisi için tersini söyleyebilir.
   </p>
 
+  <h2>Model nasıl çağrıldı</h2>
+  <p>
+    <code>model_parameters:</code>, bir model çağrısının yapıldığı ayarları
+    kaydeder: <code>temperature</code>, <code>top_p</code>, <code>top_k</code>,
+    <code>max_tokens</code>, <code>seed</code>, <code>stop_sequences</code> ve
+    <code>has_response_format</code>. Ona bir anahtar sözcük listesi verin ya da
+    elinizde zaten varsa bir <code>%Mcpd.ModelParameters&#123;&#125;</code>.
+  </p>
+
+  <pre><code class="language-elixir">{`Mcpd.span mcpd, "answer",
+  kind: :model_generation,
+  model_parameters: [temperature: 0.0, seed: 0, max_tokens: 1024] do
+  call_the_model()
+end`}</code></pre>
+
+  <p>
+    Bunlar payload değil ayardır, bu yüzden <code>capture_payloads: false</code>
+    olduğunda da korunurlar. Önemli olan da tam bu durumdur: çalıştırmayı
+    yeniden üretmeye çalışan birinin eşleştirmesi gereken değerler bunlardır.
+    Vermediğiniz bir alan yoktur, verdiğiniz bir alan ise ne olursa olsun
+    tutulur; yani <code>seed: 0</code> da bir seed'dir.
+    <code>has_response_format</code> arkasındaki şema kaydedilmez, yalnızca bir
+    şemanın geçerli olup olmadığı kaydedilir. Bir ayarlayıcı değil bir
+    seçenektir, çünkü bir Elixir span'i açıldığı seçeneklerle tanımlanır;
+    <code>model:</code>, <code>provider:</code> ve <code>usage:</code> da zaten
+    böyledir.
+  </p>
+
+  <h3>Akışlı çağrılar</h3>
+  <p>
+    Sağlayıcının akışını <code>Mcpd.ModelCall.record_stream/4</code> işlevine
+    verin ve onun yerine döndürdüğü akışı okuyun. OpenAI chat-completion
+    parçalarını ve Anthropic mesaj olaylarını alır, her parça değişmeden geçer.
+    Span, akışı ilk okuduğunuzda sürecinizde etkin olan span'in altında açılır
+    ve metin ya da araç çağrısı taşıyan ilk parça, ilk token'a kadar geçen
+    süreyi işaretler. Akış bittiğinde, hata fırlattığında ya da
+    <code>Enum.take/2</code> veya <code>Enum.find/2</code> ile erken
+    durduğunuzda span, aynı çağrı akışsız yapılsaydı
+    <code>Mcpd.ModelCall.options/2</code> neyi verecek idiyse onu ve çıktı
+    olarak metni alır ve biter. Akıştan gelen bir hata span'i işaretler ve size
+    değişmeden ulaşır.
+    Tutulan metin 32,768 karakterle sınırlıdır ve sınıra ulaşıldığında
+    <code>mcpd.stream.truncated</code> ayarlanır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="stream" title="akışlı bir çağrı" />
+
   <h2>Kaydettiğinizi doğrulama</h2>
+  <p>
+    <code>Mcpd.Testing.start/1</code>, belleğe kaydeden ve testinize bağlı bir
+    istemci başlatır. Kodunuz bir istemci aldığı her yerde
+    <code>testing.client</code> verin, sonra kaydettiğini geri okuyun: ada ya
+    da türe göre <code>spans/2</code>, var olması gereken tek span için
+    <code>span/2</code>, her çalıştırma bir ağaç olarak <code>trees/1</code>,
+    <code>logs/1</code>, <code>metrics/1</code>, <code>scores/1</code>,
+    <code>recorded_feedback/1</code> ve <code>reset/1</code>.
+    Her okuyucu önce flush eder. Tuttuğu şey, bir daemon'a giderken olacağı
+    gibi örneklemeden, payload yakalamadan ve <code>redact</code> adımından
+    geçmiştir ve test çalıştırması için <code>MCPD_ENABLED=false</code>
+    ayarlandığında da açık kalır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="testing" title="bir birim testi" />
+
   <p>
     Sink, boşaltılan bir yığının gittiği yerdir. Varsayılan olan HTTP
     taşıyıcısıdır; <code>Mcpd.Sink.Recorder</code> her yığını bellekte tutar,
