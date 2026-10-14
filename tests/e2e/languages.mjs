@@ -17,6 +17,19 @@ export const ROOT = path.resolve(import.meta.dirname, '..', '..')
 export const PROBES = path.join(ROOT, 'tests/e2e/probes')
 
 /**
+ * The mcpd binary the suites run: `MCPD_BIN` when set, else the one
+ * `cargo build -p mcpd` just wrote. That is under `CARGO_TARGET_DIR` when it
+ * is set, so a build there is never passed over for an older one in `target/`.
+ */
+export function mcpdBinary() {
+  if (process.env.MCPD_BIN) return existsSync(process.env.MCPD_BIN) ? process.env.MCPD_BIN : undefined
+  const dirs = [process.env.CARGO_TARGET_DIR, path.join(ROOT, 'target')].filter(Boolean)
+  return dirs
+    .flatMap((dir) => ['debug', 'release'].map((profile) => path.resolve(ROOT, dir, profile, 'mcpd')))
+    .find(existsSync)
+}
+
+/**
  * A port the operating system says is free.
  *
  * Never a fixed number. A hardcoded port picks up whatever else is listening on
@@ -74,11 +87,11 @@ export const LANGUAGES = [
   {
     id: 'elixir',
     detect: () =>
-      Boolean(elixir().run) && existsSync(path.join(ROOT, 'sdks/elixir/_build/Elixir.Mcpd.beam')),
+      Boolean(elixir().run) && Boolean(elixirEbin('Elixir.Mcpd.beam')),
     why: 'elixir is not on PATH, or sdks/elixir/_build holds no compiled SDK',
     run: (env, opts) => {
       const { run, bin: elixirBin } = elixir()
-      return exec(run, ['-pa', 'sdks/elixir/_build', 'tests/e2e/probes/probe.exs'], {
+      return exec(run, ['-pa', elixirEbin('Elixir.Mcpd.beam'), 'tests/e2e/probes/probe.exs'], {
         env: { ...env, PATH: elixirBin ? `${elixirBin}:${env.PATH}` : env.PATH },
         ...opts,
       })
@@ -147,6 +160,21 @@ function elixir() {
     return { run: `${local}/elixir`, bin: '/tmp/edl/root/usr/lib/erlang/bin' }
   }
   return {}
+}
+
+/**
+ * The directory holding the compiled Elixir SDK, if one does. `mix compile`
+ * writes `_build/<env>/lib/mcpd/ebin`; `elixirc -o _build` writes `_build`.
+ */
+function elixirEbin(beam) {
+  return [
+    'sdks/elixir/_build/dev/lib/mcpd/ebin',
+    'sdks/elixir/_build/test/lib/mcpd/ebin',
+    'sdks/elixir/_build/prod/lib/mcpd/ebin',
+    'sdks/elixir/_build',
+  ]
+    .map((dir) => path.join(ROOT, dir))
+    .find((dir) => existsSync(path.join(dir, beam)))
 }
 
 /** The kotlinc launcher, from PATH first and the fixed download second. */
@@ -218,11 +246,11 @@ export const RUN_PROBES = [
   {
     id: 'elixir',
     detect: () =>
-      Boolean(elixir().run) && existsSync(path.join(ROOT, 'sdks/elixir/_build/Elixir.Mcpd.StepWorker.beam')),
+      Boolean(elixir().run) && Boolean(elixirEbin('Elixir.Mcpd.StepWorker.beam')),
     why: 'elixir is not on PATH, or sdks/elixir/_build holds no compiled worker (Elixir.Mcpd.StepWorker.beam)',
     run: (env, opts) => {
       const { run, bin: elixirBin } = elixir()
-      return exec(run, ['-pa', 'sdks/elixir/_build', 'tests/e2e/probes/runs/probe.exs'], {
+      return exec(run, ['-pa', elixirEbin('Elixir.Mcpd.beam'), 'tests/e2e/probes/runs/probe.exs'], {
         env: { ...env, PATH: elixirBin ? `${elixirBin}:${env.PATH}` : env.PATH },
         ...opts,
       })

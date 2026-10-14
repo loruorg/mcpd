@@ -52,6 +52,14 @@ generation.set_usage(TokenUsage {
 // Or, when the breakdown does not matter:
 generation.set_tokens(412, 96);
 
+// How the model was called. Settings, not payload: kept with capture off.
+generation.set_model_parameters(ModelParameters {
+    temperature: Some(0.0),
+    seed: Some(0),
+    max_tokens: Some(1024),
+    ..ModelParameters::default()
+});
+
 // A message is required. "Something failed" is not actionable.
 tool.set_error("sms gateway timed out after 5s");
 
@@ -190,6 +198,18 @@ async fn main() {
     podem discordar, e a mensagem é um argumento obrigatório, não uma opção.
   </p>
 
+  <p>
+    <code>set_model_parameters</code> registra os ajustes com que a chamada foi
+    feita: <code>temperature</code>, <code>top_p</code>, <code>top_k</code>,
+    <code>max_tokens</code>, <code>seed</code>, <code>stop_sequences</code> e
+    <code>has_response_format</code>. São ajustes, e não payload, então eles
+    sobrevivem a <code>with_capture_payloads(false)</code>, que é o caso que
+    importa: são eles que alguém reproduzindo a execução precisa igualar.
+    <code>None</code> é ausente e <code>Some(0)</code> é um valor, então uma
+    seed zero é uma seed. O schema por trás de <code>has_response_format</code>
+    não é registrado, só se havia um em vigor.
+  </p>
+
   <CodeSwitcher
     class="not-prose my-6"
     title="o que um span carrega"
@@ -205,11 +225,31 @@ async fn main() {
     um span pode ser preenchido de qualquer lugar em que esteja emprestado.
   </p>
 
+  <h3>Chamadas em streaming</h3>
+  <p>
+    Passe o stream do provedor para <code>span.record_stream</code> e leia no
+    lugar dele o stream que ele devolve. Os itens são <code>Result</code>s, e
+    os chunks podem ser chunks de chat completion da OpenAI ou eventos de
+    mensagem da Anthropic, cada um um <code>serde_json::Value</code> ou
+    qualquer tipo que se serialize em um. Todo item passa sem alteração. O
+    primeiro chunk com texto ou com uma chamada de ferramenta marca o tempo até
+    o primeiro token. O wrapper é dono do span: quando o stream termina, produz
+    um <code>Err</code> ou é descartado antes, o span recebe o que
+    <code>record_response</code> teria registrado para a mesma chamada sem
+    streaming, o texto como saída, e termina. Um <code>Err</code> marca o span
+    com o seu texto de <code>Display</code> e ainda chega até você. O texto
+    guardado tem um teto de 32.768 caracteres, e
+    <code>mcpd.stream.truncated</code> é definido quando o teto foi atingido.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="stream" title="uma chamada em streaming" />
+
   <h2>Payloads, sinks e spans já concluídos</h2>
   <p>
     <code>Config::with_capture_payloads(false)</code> mantém prompts e respostas
     dentro do processo: os spans continuam carregando o seu tempo, o seu status,
-    o seu uso, o seu modelo, a sua correlação e os seus erros, e
+    o seu uso, o seu modelo, os parâmetros do modelo, a sua correlação e os
+    seus erros, e
     <code>input</code> e <code>output</code> são descartados antes de chegar à
     fila. Um span sobrescreve o cliente para si mesmo com
     <code>span.capture_payloads(..)</code>, nos dois sentidos.
@@ -225,6 +265,21 @@ async fn main() {
     <code>queued</code>, <code>dropped</code>, <code>capacity</code>,
     <code>exported</code>, <code>failed</code> e <code>rejected</code>.
   </p>
+  <p>
+    <code>mcpd_sdk::testing::TestClient</code> envolve um cliente que grava em
+    memória. Passe <code>test.client()</code> onde quer que o seu código receba
+    um <code>&amp;Mcpd</code> e leia de volta o que ele gravou:
+    <code>spans(name, kind)</code>, <code>span(name)</code> para o span que tem
+    de existir, <code>trees()</code> para cada execução como uma árvore,
+    <code>logs()</code>, <code>metrics()</code>, <code>scores()</code>,
+    <code>recorded_feedback()</code> e <code>reset()</code>. Cada acessor faz
+    flush antes. O que ele guarda passou pela amostragem, pela captura de
+    payload e pelo <code>redact</code> como passaria a caminho de um daemon, e
+    <code>TestClient::new()</code> continua ligado quando
+    <code>MCPD_ENABLED=false</code> está definido para a rodada de testes.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="testing" title="um teste de unidade" />
   <p>
     <code>mcpd.record(span)</code> enfileira um span que já terminou, com ids,
     pai, início e fim incluídos, do jeito que um adaptador ou uma importação o

@@ -15,7 +15,7 @@ const url = (route: string) =>
 
 <Doc
   title="Sicurezza"
-  description="Che cosa archivia un mcpd in esercizio, che cosa esce dalla macchina e con quale impostazione, come funzionano chiavi, ambiti e progetti, che cosa copre l’oscuramento e i controlli attorno."
+  description="Che cosa archivia mcpd, che cosa esce dalla macchina e con quale impostazione, come funzionano chiavi, ambiti e progetti, che cosa copre l’oscuramento e quali controlli aggiungere."
   lede="Una pagina sola per rispondere a una revisione. Che cosa viene conservato, che cosa viene mandato altrove, chi lo può leggere, e i controlli da mettere intorno a mcpd."
   og="docs"
 >
@@ -175,8 +175,10 @@ const url = (route: string) =>
 
   <h2>Chiavi e ambiti</h2>
   <p>
-    L’autenticazione è a chiavi API. Non c’è un account, non c’è una sessione e
-    non c’è un login. Una chiave si presenta come
+    L’autenticazione è a chiavi API. Se non dici altro non c’è un account, non
+    c’è una sessione e non c’è un login; <code>--signup</code> e
+    <code>--accounts</code> li aggiungono, come descritto più sotto. Una chiave
+    si presenta come
     <code>Authorization: Bearer …</code> oppure nell’header
     <code>X-Mcpd-Key</code>, e i due lati vengono entrambi sottoposti a hash
     SHA-256 prima del confronto, così né la lunghezza della chiave configurata
@@ -227,6 +229,60 @@ const url = (route: string) =>
       class="link">API HTTP</a
     >, così alla domanda «che cosa chiede questo endpoint» c’è una risposta
     sola, invece di una per documento.
+  </p>
+
+  <h3>Account, con --signup o --accounts</h3>
+  <p>
+    Con <code>--signup</code>, chiunque può creare un account con un’email e
+    una password; con <code>--accounts</code>, le persone arrivano su invito,
+    con il single sign-on o via SCIM. Ogni progetto di un account appartiene a
+    un’organizzazione, e il ruolo di un membro lì (owner, admin, member o
+    viewer, eventualmente sostituito su un singolo progetto) corrisponde ai sei
+    ambiti. Una sessione porta gli ambiti che il ruolo permette su ogni
+    progetto delle organizzazioni dell’account; una chiave porta un ambito su
+    un progetto, e solo finché il ruolo di chi l’ha creata lo permette ancora.
+    Niente raggiunge un progetto di un’organizzazione a cui l’account non
+    appartiene. Un segnale mandato con la chiave di un account viene archiviato
+    nel progetto della chiave, qualunque progetto nomini, e una chiave di
+    idempotenza è tenuta per progetto, così un account non può far sembrare il
+    batch di un altro una ripetizione. Solo una sessione può elencare, creare o
+    revocare chiavi, così una chiave trapelata non può crearne altre.
+  </p>
+  <p>
+    Le password sono sottoposte a hash con argon2id. Token, chiavi, link
+    mandati per email, token di invito, codici di recupero e token SCIM sono
+    valori casuali, mostrati una volta sola, e archiviati solo come digest
+    SHA-256. Registrazione, login e reset della password danno la stessa
+    risposta che un indirizzo abbia un account o no, e dicono il resto in una
+    email a quell’indirizzo. Un indirizzo viene confermato con un link prima
+    che l’account possa fare login. Il login in due passaggi usa codici basati
+    sul tempo, rifiuta un codice già usato, e dà dieci codici di recupero
+    monouso. Ogni porta delle credenziali è limitata per indirizzo del client,
+    e i login falliti per email. Le sessioni con password durano 30 giorni e
+    quelle con single sign-on 24 ore; un account può elencare e chiudere le
+    sue sessioni, e cambiare o reimpostare la password chiude le altre.
+  </p>
+  <p>
+    Il single sign-on è OpenID Connect con PKCE, uno state monouso e un nonce,
+    più un segreto tenuto dal browser che ha avviato il login, così un link di
+    login non si può passare a qualcun altro. Vengono controllati la firma,
+    l’emittente, il destinatario, la scadenza e il nonce dell’ID token, e gli
+    algoritmi simmetrici vengono rifiutati. Una persona viene
+    trovata dalla sua identità presso il provider; un nuovo account viene
+    creato solo per un indirizzo in un dominio che l’organizzazione rivendica,
+    un account esistente non viene mai preso in carico da altri, e la sessione
+    raggiunge solo i progetti di quell’organizzazione. SCIM fa il provisioning
+    degli utenti e dei gruppi di un’organizzazione con un token che non
+    raggiunge nient’altro; il deprovisioning chiude l’appartenenza, le sue
+    chiavi e le sue sessioni. Vedi
+    <a href={url('/docs/accounts')} class="link">account e organizzazioni</a>.
+  </p>
+  <p>
+    La modalità spegne anche la regola per cui un ambito senza chiavi è aperto:
+    una richiesta senza credenziale viene rifiutata ovunque tranne le sonde, la
+    registrazione e il login. Le chiavi configurate vengono provate per prime e
+    mantengono la portata che hanno. Per le opzioni, vedi
+    <a href={`${url('/docs/configuration')}#signup`} class="link">Registrazione aperta</a>.
   </p>
 
   <h3>Il ripiego, e che cosa significa per una chiave che hai già</h3>
@@ -370,8 +426,10 @@ const url = (route: string) =>
     prende l’ambito <code>admin</code>.
   </p>
   <p>
-    Le azioni registrate sono diciotto: <code>get_trace</code>,
-    <code>list_spans</code>, <code>list_logs</code>,
+    Le azioni registrate sono quarantaquattro. Venti sono letture e
+    cancellazioni di dati: <code>get_trace</code>,
+    <code>get_trajectory</code>, <code>list_traces</code> quando gli si
+    chiedono le anteprime, <code>list_spans</code>, <code>list_logs</code>,
     <code>list_feedback</code>, <code>list_dataset_items</code>,
     <code>capture_into_dataset</code>,
     <code>read_trace_aspect_notes</code>, <code>get_theme</code>, <code>get_theme_flow</code>, <code>list_theme_history</code>, <code>list_theme_examples</code>, <code>delete_trace</code>,
@@ -382,10 +440,32 @@ const url = (route: string) =>
     Elencare le tracce restituisce una proiezione di nomi, tempi, conteggi di
     token e costo, che non contiene nessun prompt e nessuna completion, quindi
     non viene registrato; aprire una di quelle tracce sì, perché è lì che sta
-    il testo. Elencare le esecuzioni durevoli viene registrato, perché ogni
-    esecuzione nella lista porta il suo input, il suo output e il suo stato
-    così come sono stati mandati. Una lettura rifiutata di un’esecuzione viene
-    registrata sotto il progetto a cui appartiene l’esecuzione.
+    il testo. Anche un elenco con le anteprime di input e output viene
+    registrato, per lo stesso motivo. Elencare le esecuzioni durevoli viene
+    registrato, perché ogni esecuzione nella lista porta il suo input, il suo
+    output e il suo stato così come sono stati mandati. Una lettura rifiutata
+    di un’esecuzione viene registrata sotto il progetto a cui appartiene
+    l’esecuzione.
+  </p>
+  <p>
+    Le altre ventiquattro sono modifiche a chi può raggiungere che cosa, su un
+    daemon con gli account. Vengono scritte sull’id dell’organizzazione invece
+    che su un progetto, portano come subject l’email dell’account che agisce,
+    e si leggono con <code>GET /v1/api/orgs/{'{org_id}'}/audit</code> da un
+    admin o da un owner:
+    <code>org_create</code>, <code>org_update</code>, <code>org_delete</code>,
+    <code>member_invite</code>, <code>invite_revoke</code>,
+    <code>invite_accept</code>, <code>member_role</code>,
+    <code>member_project_role</code>, <code>member_remove</code>,
+    <code>project_create</code>, <code>project_delete</code>,
+    <code>org_key_revoke</code>, <code>group_roles_update</code>,
+    <code>sso_update</code>, <code>sso_delete</code>, <code>sso_login</code>,
+    <code>scim_token_rotate</code>, <code>scim_token_revoke</code>,
+    <code>scim_user_create</code>, <code>scim_user_update</code>,
+    <code>scim_user_delete</code>, <code>scim_group_create</code>,
+    <code>scim_group_update</code> e <code>scim_group_delete</code>. Una
+    modifica via SCIM porta <code>scim</code> come subject e il digest del
+    token SCIM come principal.
   </p>
   <p>
     Le chiamate del worker non vengono registrate: prendere in carico un
@@ -408,8 +488,10 @@ const url = (route: string) =>
       un daemon aperto viene registrata come <code>anonymous</code>.
     </li>
     <li>
-      <strong>La persona arriva dal tuo ingress.</strong> Da sola una riga
-      attribuisce un’azione a una chiave. Il campo <code>subject</code> porta
+      <strong>La persona arriva da una sessione o dal tuo ingress.</strong> Una
+      riga per una modifica a un’organizzazione porta l’email dell’account che
+      agisce. Per una chiave, una riga attribuisce un’azione alla chiave e non a
+      una persona. Il campo <code>subject</code> porta
       un’identità quando <code>--trusted-identity-header</code> e
       <code>--trusted-proxy-cidr</code> sono impostati entrambi, ed è vuoto
       altrimenti, che è il comportamento predefinito. mcpd non stabilisce mai
@@ -428,8 +510,8 @@ const url = (route: string) =>
       <strong>Registra quale chiave, e se vuoi anche chi.</strong> La chiave è
       archiviata come digest troncato, mai la chiave stessa, quindi il registro
       non è un posto dove si accumulano credenziali. Questo risponde a «una
-      chiave admin ha cancellato questo». Per rispondere a «quale persona lo ha
-      fatto», dagli l’header che il tuo ingress imposta già e gli
+      chiave admin ha cancellato questo». Una sessione nomina anche la persona
+      per le modifiche a un’organizzazione. Per le chiavi, dagli l’header che il tuo ingress imposta già e gli
       indirizzi autorizzati a impostarlo:
       <code>--trusted-identity-header x-forwarded-user</code> con
       <code>--trusted-proxy-cidr 10.42.0.0/16</code>. Servono tutte e due le
@@ -463,7 +545,8 @@ const url = (route: string) =>
       <strong>L’interfaccia.</strong> Il markup su <code>/</code> viene servito
       a chiunque raggiunga la porta. I dati che ci stanno dietro no: ogni
       richiesta che fa passa dall’API di query e incontra le stesse chiavi. Nel
-      daemon non c’è nessuna schermata di login.
+      daemon non c’è nessuna schermata di login, a meno che non sia attivo
+      <code>--signup</code> o <code>--accounts</code>.
     </li>
     <li>
       <strong>Le sonde e <code>/metrics</code>.</strong> Non autenticate di
@@ -506,27 +589,29 @@ const url = (route: string) =>
     <a href={url('/docs/privacy')} class="link">Oscuramento e conservazione</a>.
   </p>
   <p>
-    <strong>Le regole corrispondono a nomi di campo, non alla forma di un
-    valore.</strong> Un valore che arriva sotto un campo chiamato
-    <code>content</code> o <code>question</code> viene archiviato così come è
-    stato mandato, quindi nomina i campi che portano credenziali e
-    identificatori.
+    Le regole corrispondono a nomi di campo. Una credenziale incollata in mezzo
+    a una frase arriva sotto un campo chiamato <code>content</code> o
+    <code>question</code>, quindi in ogni valore stringa si cercano anche le
+    forme che prendono le credenziali: blocchi di chiave privata, JSON Web
+    Token, id di chiavi di accesso AWS, chiavi di provider che iniziano con
+    <code>sk-</code>, token GitHub, Slack e Google, token bearer e password
+    negli URL. Ogni corrispondenza viene sostituita sul posto e il resto della
+    frase resta. La tabella sta su
+    <a href={url('/docs/privacy')} class="link">Oscuramento e conservazione</a>.
   </p>
-  <p>L’oscuramento copre un ambito preciso:</p>
+  <p>Che cosa copre l’oscuramento:</p>
   <ul>
-    <li>Ferma la cattura strutturata di credenziali e identificatori, dove una credenziale arriva in un campo che porta il nome di quello che è.</li>
-    <li>Lavora sui nomi dei campi. Il testo libero sotto un nome di campo qualunque viene archiviato così come è stato mandato.</li>
+    <li>Maschera credenziali e identificatori che arrivano in un campo che porta il nome di quello che sono, e le credenziali delle forme qui sopra ovunque compaiano in una stringa.</li>
+    <li>Un segreto senza prefisso fisso, come una password scritta dentro una frase, viene mascherato in base al campo in cui arriva.</li>
     <li>Lascia così come sono stati mandati il nome di uno span e il messaggio di un record di log. Quelli sono identificatori che servono a raggruppare, non payload, e riscriverli romperebbe il raggruppamento. Non costruire il nome di uno span con l’indirizzo email di un cliente.</li>
     <li>Lascia lo storage delle esecuzioni così come è stato mandato. I payload di un’esecuzione durevole sono il suo stato di lavoro; vengono oscurati solo gli span che un’esecuzione scrive nello storage delle tracce.</li>
   </ul>
   <p>
-    Un controllo lavora sulla forma, come rilevamento a cose fatte: lo scorer
-    integrato <code>no_leaked_secret</code> abbassa il voto a un’esecuzione la
-    cui <em>risposta</em> porta un token che sembra una credenziale, per
-    prefisso noto o per una lunga sequenza alfanumerica con maiuscole e
-    minuscole. Dà un punteggio alla risposta di un’esecuzione che è già
-    archiviata, non toglie niente, e gira solo quando glielo chiedi. Usalo per
-    scoprire che questo è successo, non come una seconda linea di oscuramento.
+    Lo scorer integrato <code>no_leaked_secret</code> aggiunge un rilevamento a
+    cose fatte: abbassa il voto a un’esecuzione la cui <em>risposta</em> porta
+    un token che sembra una credenziale, per prefisso noto o per una lunga
+    sequenza alfanumerica con maiuscole e minuscole. Dà un punteggio a
+    un’esecuzione che è già archiviata e gira solo quando glielo chiedi.
   </p>
   <p>
     Due limiti valgono che una regola abbia corrisposto o no. Qualunque singola
@@ -592,19 +677,7 @@ const url = (route: string) =>
         <td>Termina il TLS sul tuo ingress o nella tua mesh, e tieni la porta del daemon fuori da qualunque rete non fidata.</td>
       </tr>
       <tr>
-        <td><strong>Single sign-on.</strong> L’identità di una persona arriva dal proxy davanti a mcpd.</td>
-        <td>Metti l’interfaccia dietro il proxy di identità che già gestisci. L’identità di una persona è quella che quel proxy stabilisce.</td>
-      </tr>
-      <tr>
-        <td><strong>Provisioning.</strong> Dentro mcpd l’unità è una chiave.</td>
-        <td>Fai il provisioning sul proxy. Dentro mcpd, aggiungi una chiave a un elenco o toglila.</td>
-      </tr>
-      <tr>
-        <td><strong>Ruoli.</strong> L’autorizzazione è uno dei sei ambiti e un elenco di progetti.</td>
-        <td>Separa per chiave e per progetto. Se una distinzione conta, falla diventare un progetto.</td>
-      </tr>
-      <tr>
-        <td><strong>Chi è una persona.</strong> Il registro di audit registra il subject che il tuo ingress ha affermato, e solo da un indirizzo che hai nominato tu.</td>
+        <td><strong>Chi è una persona, per le chiavi.</strong> Le sessioni nominano l’account. Per una chiave, il registro di audit registra il subject che il tuo ingress ha affermato, da un indirizzo che hai nominato tu.</td>
         <td>Imposta <code>--trusted-identity-header</code> e <code>--trusted-proxy-cidr</code>, così l’header che il tuo proxy imposta già arriva nella riga di audit. Senza di loro una riga attribuisce un’azione a una chiave, ed emettere una chiave per team restringe il campo del digest.</td>
       </tr>
       <tr>

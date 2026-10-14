@@ -41,6 +41,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 const payload = `span.SetModel("gpt-4o-mini", "openai")
 span.SetTokens(812, 96)
 
+// How the model was called. Settings, not payload: kept with capture off.
+span.SetModelParameters(mcpd.ModelParameters{
+    Temperature: ptr(0.0),
+    Seed:        ptr(int64(0)),
+    MaxTokens:   ptr(uint64(1024)),
+})
+
 // Or the full breakdown, so a cached prompt is priced as a cached prompt.
 span.SetUsage(mcpd.TokenUsage{
     InputTokens:  ptr(uint64(812)),
@@ -147,6 +154,24 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     sistema de trazas solo para correlacionar.
   </p>
 
+  <p>
+    Para tus propias pruebas unitarias, <code>mcpdtest.New</code> acepta las
+    opciones que acepta <code>mcpd.New</code> y devuelve un grabador cuyo campo
+    <code>Client</code> es un <code>*mcpd.Client</code> que registra en
+    memoria. Pasa ese cliente allí donde tu código acepte uno, y luego vuelve a
+    leer lo que registró: <code>Spans</code> por nombre o por tipo,
+    <code>Span(name)</code> para el único span que tiene que existir
+    (<code>MustSpan(t, name)</code> hace fallar la prueba por ti),
+    <code>Trees</code> para cada ejecución como un árbol, <code>Logs</code>,
+    <code>Metrics</code>, <code>Scores</code>, <code>RecordedFeedback</code> y
+    <code>Reset</code>. Cada accesor hace flush primero. Lo que guarda pasó por
+    el muestreo, la captura de payloads y <code>WithRedact</code> igual que de
+    camino a un daemon, y sigue activo cuando se fija
+    <code>MCPD_ENABLED=false</code> para la ejecución de las pruebas.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="testing" title="una prueba unitaria" />
+
   <h2>Registrar una ejecución</h2>
   <p>
     <code>Start</code> devuelve un contexto nuevo y un span, y
@@ -203,6 +228,17 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     <code>End</code> registra <code>error</code> como estado en lugar de
     <code>ok</code>.
   </p>
+  <p>
+    <code>SetModelParameters</code> registra los ajustes con los que se hizo la
+    llamada: <code>Temperature</code>, <code>TopP</code>, <code>TopK</code>,
+    <code>MaxTokens</code>, <code>Seed</code>, <code>StopSequences</code> y
+    <code>HasResponseFormat</code>. Son ajustes y no payload, así que
+    sobreviven a <code>WithCapturePayloads(false)</code>, que es el caso que
+    importa: son lo que tiene que igualar quien reproduzca la ejecución. Un
+    campo nil está ausente y un puntero a cero es un valor, así que un
+    <code>Seed</code> a cero es una semilla. El esquema que hay detrás de
+    <code>HasResponseFormat</code> no se registra, solo si había uno en vigor.
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -219,6 +255,27 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     asignar cuando el span empieza, a través de las opciones
     <code>With...</code>.
   </p>
+
+  <h3>Llamadas en streaming</h3>
+  <p>
+    Pasa el span y el stream del proveedor a <code>mcpd.RecordStream</code> y
+    lee en su lugar el stream que devuelve. Tiene los mismos métodos
+    <code>Next</code>, <code>Current</code>, <code>Err</code> y
+    <code>Close</code> que el <code>ssestream.Stream</code> que devuelven los
+    SDK oficiales de OpenAI y Anthropic para Go, acepta fragmentos de chat
+    completion de OpenAI y eventos de mensaje de Anthropic, y cada fragmento
+    pasa sin cambios. El primer fragmento con texto o con una llamada a
+    herramienta marca el tiempo hasta el primer token. Cuando
+    <code>Next</code> devuelve false, o llamas a <code>Close</code> antes del
+    final, el span recibe lo que <code>RecordResponse</code> habría registrado
+    para la misma llamada sin streaming, con el texto como su salida, y
+    termina. Un error del stream marca el span y te llega sin cambios a través
+    de <code>Err</code>. El texto que se guarda tiene un tope de 32,768
+    caracteres, y <code>mcpd.stream.truncated</code> se fija cuando se llegó al
+    tope.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="stream" title="una llamada en streaming" />
 
   <h2>Ejecuciones duraderas</h2>
   <p>

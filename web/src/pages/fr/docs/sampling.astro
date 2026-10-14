@@ -134,7 +134,7 @@ const code = localeOf(Astro.url.pathname)
   <h2>Dans les SDK, une décision prise en amont l’emporte</h2>
   <p>
     Quand un SDK continue une trace à partir d’un <code>traceparent</code> W3C
-    entrant, il reprend l’indicateur <code>sampled</code> avec les identifiants
+    entrant, il reprend l’indicateur sampled avec les identifiants
     et n’applique pas son propre taux. Cela vaut dans les deux sens :
     l’indicateur posé garde la trace quel que soit le taux local, et
     l’indicateur à zéro la jette quel que soit le taux local.
@@ -175,10 +175,31 @@ const code = localeOf(Astro.url.pathname)
     plus longtemps qu’un seuil, et applique sinon le même hachage déterministe.
   </p>
   <p>
-    Le coût d’une décision en queue, c’est la mise en tampon : elle doit garder
-    en mémoire chaque trace inachevée jusqu’à pouvoir décider. Le chemin
-    d’ingestion du daemon prend la décision en tête, et ne retient donc aucune
-    trace.
+    Le chemin d’ingestion du daemon prend la décision en tête, et ne retient
+    donc aucune trace. L’échantillonnage en queue s’exécute après le stockage
+    de l’exécution : une fois qu’une exécution est terminée depuis
+    <code>decide_after_seconds</code>, une passe en arrière-plan la garde si
+    une étape a échoué, si elle a été lente, si elle a coûté trop cher, si un
+    scorer l’a mal notée ou si une personne a donné un retour dessus, garde le
+    reste au taux <code>rate</code> par un hachage de l’identifiant de trace,
+    et supprime ce qu’elle écarte. Rien n’attend en mémoire, chaque réplique
+    fait le même choix, une seule réplique à la fois exécute la passe, et les
+    métriques dérivées à l’ingestion comptent
+    toujours chaque exécution. Activez-le par projet dans le fichier de
+    configuration :
+  </p>
+
+  <pre class="not-prose my-6"><code>{`projects:
+  checkout:
+    tail_sampling:
+      rate: 0.1
+      keep_slower_than_ms: 5000
+      keep_cost_above: 0.05
+      keep_score_below: 0.5
+      decide_after_seconds: 300`}</code></pre>
+
+  <p>
+    Chaque exécution écartée est comptée dans <code>mcpd_traces_sampled_out_total</code>.
   </p>
 
   <h2>Savoir ce qui a été jeté</h2>

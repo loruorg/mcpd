@@ -144,7 +144,23 @@ const code = localeOf(Astro.url.pathname)
     <code>score_trace_id</code> es la otra mitad de la misma idea. Traza la
     propia ejecución de puntuación y su identificador queda en la puntuación,
     así que un juez que empezó a bajarlo todo se puede abrir, leer y demostrar
-    que está roto.
+    que está roto. El juez del propio daemon lo hace en cada puntuación que
+    produce.
+  </p>
+
+  <h2>La cola de revisión</h2>
+  <p>
+    Las ejecuciones que una persona debe mirar van a la cola de revisión:
+    <code>POST /v1/api/review-queue</code> con el id de traza y, si quieres, el
+    paso, el feedback que lo motivó, una persona asignada y una nota. Un
+    elemento empieza en <code>pending</code>;
+    <code>PATCH /v1/api/review-queue/{'{id}'}</code> lo asigna, o lo marca como
+    <code>reviewed</code> o <code>dismissed</code> con lo que encontró quien
+    revisó. Cada cambio es una versión nueva del elemento, así que queda
+    guardado quién decidió qué, y cuándo. <code>GET /v1/api/review-queue</code>
+    filtra por estado y por persona asignada y cuenta lo que sigue pendiente. La
+    pantalla Revisión de la aplicación trabaja sobre ella, y una ejecución se
+    puede encolar desde el panel de la ejecución.
   </p>
 
   <h2>Feedback humano</h2>
@@ -210,6 +226,130 @@ mcpd.feedback({
     guarda tal como lo envías, así que envía un identificador seudónimo en lugar
     de una dirección de correo. Consulta
     <a href={urlFor('/docs/privacy', code)} class="link">Ocultación y retención</a>.
+  </p>
+
+  <h2>Puntuar lo que hizo la ejecución, no lo que dijo</h2>
+  <p>
+    La mayoría de los evaluadores leen la respuesta de una ejecución. Un agente
+    que termina con <em>He ejecutado todas las pruebas y no hay regresiones</em>
+    los satisface a todos, y satisface también a un modelo juez, porque la frase
+    está bien formada y dice lo correcto. La frase es el relato que el agente
+    hace de su propio trabajo, y un relato no es una prueba. Si el comando de
+    pruebas no llegó a ejecutarse, ningún evaluador que lea la respuesta te lo
+    puede decir.
+  </p>
+  <p>
+    Dos evaluadores integrados leen la traza en su lugar. Ignoran por completo
+    la respuesta y preguntan qué registró la ejecución.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Evaluador</th><th>Puntúa 1 cuando</th><th>Se configura con</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>span_present</code></td>
+        <td>La ejecución registró al menos un span del tipo o el nombre exigido.</td>
+        <td><code>span_kind</code>, <code>span_name</code>, o los dos juntos. Si fijas los dos, se tienen que cumplir los dos.</td>
+      </tr>
+      <tr>
+        <td><code>tool_succeeded</code></td>
+        <td>Se ejecutó un span de herramienta con ese nombre, y al menos una llamada terminó en <code>ok</code>.</td>
+        <td><code>tool_name</code>.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Los dos necesitan configuración, así que ninguno se ejecuta en el conjunto
+    por defecto. Un evaluador que aprobara porque nadie le dijo qué buscar
+    informaría de que cada ejecución hizo un trabajo que nadie comprobó, que es
+    justo el fallo que existe para detectar. Nómbralos y dales sus ajustes:
+  </p>
+
+  <pre><code class="language-json">{`{
+  "trace_ids": ["4bf92f3577b34da6a3ce929d0e0e4736"],
+  "scorers": ["tool_succeeded", "span_present"],
+  "config": {
+    "tool_name": "run_tests",
+    "span_kind": "tool_call",
+    "span_name": "run_tests"
+  }
+}`}</code></pre>
+
+  <p>
+    <code>span_name</code> y <code>tool_name</code> se comparan exactamente, y
+    <code>case_sensitive</code> no los relaja. Un nombre de span es un
+    identificador que eligió tu código, no prosa, y una comparación laxa dejaría
+    que <code>run_tests_dry</code> satisficiera una afirmación sobre
+    <code>run_tests</code>, justo en la ejecución para la que se escribió la
+    comprobación. <code>tool_succeeded</code> acepta cualquiera de los cuatro
+    tipos de span de herramienta, <code>tool_call</code>,
+    <code>client_tool_call</code>, <code>provider_tool_call</code> y
+    <code>mcp_tool_call</code>, porque cuál registra una ejecución dice dónde
+    vive la herramienta, no si se ejecutó.
+  </p>
+
+  <h3>Dos maneras de puntuar cero, y son fallos distintos</h3>
+  <p>
+    Una herramienta que nunca se ejecutó y una que se ejecutó y falló son las dos
+    un cero, y arreglarlas son trabajos opuestos: una es un paso que el agente
+    se saltó, la otra un paso que se rompió. El <code>reason</code> las separa,
+    y lleva el error registrado para que la puntuación sirva sin abrir la
+    ejecución.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Qué pasó</th><th><code>reason</code></th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>La herramienta nunca se ejecutó.</td>
+        <td><code>"run_tests" never ran; the run records 2 tool call(s), named: lookup_order, send_email</code></td>
+      </tr>
+      <tr>
+        <td>Se ejecutó y falló.</td>
+        <td><code>"run_tests" ran 1 time(s) and none ended ok; the last ended error: pytest exited 1: 3 failed</code></td>
+      </tr>
+      <tr>
+        <td>Falló, se reintentó y funcionó.</td>
+        <td><code>"run_tests" ran 2 time(s), 1 ended ok and 1 did not</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>span_present</code> hace lo mismo con su propio cero: nombra lo que
+    buscó y después lo que la ejecución contiene de verdad, porque un nombre
+    equivocado y una instrumentación ausente no se distinguen con un simple
+    <em>no encontrado</em> y no tienen nada en común como arreglos.
+  </p>
+
+  <h3>Qué demuestran estos evaluadores, y qué no</h3>
+  <p>
+    Demuestran que una acción quedó <strong>registrada</strong>. No demuestran
+    que fuera correcta. Un span <code>run_tests</code> que terminó en
+    <code>ok</code> dice que la herramienta volvió sin lanzar un error, no que
+    ejecutara la suite correcta, ni que ejecutara la suite entera, ni que algo
+    leyera el resultado. Tomar un <code>tool_succeeded</code> en verde como
+    prueba de que el código funciona es el mismo error que fiarse de la frase,
+    un paso más allá.
+  </p>
+  <p>
+    También miden la traza y no el mundo. Un span existe porque tu proceso
+    registró uno. El trabajo que ocurrió dentro de un paso que nunca
+    instrumentaste es invisible aquí, y se lee exactamente igual que un trabajo
+    que nunca ocurrió, que es la única forma en que estos evaluadores informan
+    de un fallo que no lo es. Cuando uno de ellos puntúe cero, revisa la
+    instrumentación antes de concluir que el agente mintió.
+  </p>
+  <p>
+    Los dos funcionan aunque la captura de contenido esté desactivada. Ninguno
+    lee una entrada, una salida ni una respuesta del modelo: leen el tipo, el
+    nombre y el estado del span, que el daemon conserva sean cuales sean tus
+    ajustes de captura.
   </p>
 
   <h2>La consulta que encuentra respuestas malas</h2>

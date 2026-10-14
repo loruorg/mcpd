@@ -30,22 +30,20 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import zlib from 'node:zlib'
 
-import { LANGUAGES, PROBES, ROOT, freePort, languageFilter } from './languages.mjs'
+import { LANGUAGES, PROBES, ROOT, freePort, languageFilter, mcpdBinary } from './languages.mjs'
 
 /** The run every probe writes. One copy, read by the harness and by a reader. */
 const CANONICAL = JSON.parse(readFileSync(path.join(PROBES, 'canonical.json'), 'utf8'))
 const PROJECT = CANONICAL.project
 
-const bin = ['target/debug/mcpd', 'target/release/mcpd']
-  .map((p) => path.join(ROOT, p))
-  .find(existsSync)
+const bin = mcpdBinary()
 
 if (!bin) {
   console.error('No mcpd binary. Run `cargo build -p mcpd` first.')

@@ -46,6 +46,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 const payload = `span.SetModel("gpt-4o-mini", "openai")
 span.SetTokens(812, 96)
 
+// Come è stato chiamato il modello. Impostazioni, non payload: restano con la cattura spenta.
+span.SetModelParameters(mcpd.ModelParameters{
+    Temperature: ptr(0.0),
+    Seed:        ptr(int64(0)),
+    MaxTokens:   ptr(uint64(1024)),
+})
+
 // Oppure il dettaglio completo, così un prompt in cache è valorizzato come tale.
 span.SetUsage(mcpd.TokenUsage{
     InputTokens:  ptr(uint64(812)),
@@ -137,8 +144,9 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
   <p>
     <code>WithCapturePayloads(false)</code> tiene i prompt e le completion dentro
     il processo: gli span portano lo stesso i loro tempi, lo stato, il consumo,
-    il modello, la correlazione e gli errori, e <code>input</code> e
-    <code>output</code> vengono scartati prima di arrivare alla coda. Un singolo
+    il modello, i parametri del modello, la correlazione e gli errori, e
+    <code>input</code> e <code>output</code> vengono scartati prima di arrivare
+    alla coda. Un singolo
     span può dire il contrario per sé con
     <code>WithSpanCapturePayloads</code>, in tutte e due le direzioni.
   </p>
@@ -155,6 +163,24 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     <code>WithExternalParent</code> porta il padre che viene da un altro sistema
     di tracing solo per la correlazione.
   </p>
+
+  <p>
+    Per i tuoi unit test, <code>mcpdtest.New</code> prende le opzioni che
+    prende <code>mcpd.New</code> e restituisce un registratore il cui campo
+    <code>Client</code> è un <code>*mcpd.Client</code> che registra in memoria.
+    Passa quel client ovunque il tuo codice ne prenda uno, poi rileggi quello
+    che ha registrato: <code>Spans</code> per nome o per tipo,
+    <code>Span(name)</code> per l’unico span che deve esistere
+    (<code>MustSpan(t, name)</code> fa fallire il test per te),
+    <code>Trees</code> per ogni esecuzione come albero, <code>Logs</code>,
+    <code>Metrics</code>, <code>Scores</code>, <code>RecordedFeedback</code> e
+    <code>Reset</code>. Ogni accessor fa prima un flush. Quello che tiene è
+    passato per campionamento, cattura dei payload e <code>WithRedact</code>
+    come farebbe sulla strada verso un daemon, e resta acceso quando per i test
+    è impostato <code>MCPD_ENABLED=false</code>.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="testing" title="uno unit test" />
 
   <h2>Registrare un’esecuzione</h2>
   <p>
@@ -213,6 +239,18 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     con sé. <code>End</code> registra poi <code>error</code> come stato anziché
     <code>ok</code>.
   </p>
+  <p>
+    <code>SetModelParameters</code> registra le impostazioni con cui è stata
+    fatta la chiamata: <code>Temperature</code>, <code>TopP</code>,
+    <code>TopK</code>, <code>MaxTokens</code>, <code>Seed</code>,
+    <code>StopSequences</code> e <code>HasResponseFormat</code>. Sono
+    impostazioni e non payload, quindi sopravvivono a
+    <code>WithCapturePayloads(false)</code>, che è il caso che conta: sono
+    quello che deve riprodurre chi rifà l’esecuzione. Un campo nil è assente e
+    un puntatore a zero è un valore, quindi un <code>Seed</code> zero è un
+    seed. Lo schema dietro <code>HasResponseFormat</code> non viene
+    registrato, solo se ce n’era uno in vigore.
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -228,6 +266,27 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     <code>Event</code> ed <code>EndWithStatus</code>. Gli stessi campi si possono
     impostare quando lo span parte, con le opzioni <code>With...</code>.
   </p>
+
+  <h3>Chiamate in streaming</h3>
+  <p>
+    Passa lo span e lo stream del provider a <code>mcpd.RecordStream</code> e
+    leggi invece lo stream che restituisce. Ha gli stessi metodi
+    <code>Next</code>, <code>Current</code>, <code>Err</code> e
+    <code>Close</code> dello <code>ssestream.Stream</code> che restituiscono
+    gli SDK Go ufficiali di OpenAI e Anthropic, prende i chunk di chat
+    completion di OpenAI e gli eventi dei messaggi di Anthropic, e ogni chunk
+    passa invariato. Il primo chunk con testo o con una chiamata a uno
+    strumento segna il tempo fino al primo token. Quando <code>Next</code>
+    restituisce false, o chiami <code>Close</code> prima della fine, lo span
+    riceve quello che <code>RecordResponse</code> avrebbe registrato per la
+    stessa chiamata senza streaming, con il testo come output, e si chiude. Un
+    errore dello stream segna lo span e ti arriva invariato attraverso
+    <code>Err</code>. Il testo tenuto ha un tetto di 32.768 caratteri, e
+    <code>mcpd.stream.truncated</code> viene impostato quando il tetto è stato
+    raggiunto.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="stream" title="una chiamata in streaming" />
 
   <h2>Esecuzioni durevoli</h2>
   <p>

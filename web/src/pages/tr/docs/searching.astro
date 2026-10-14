@@ -2,6 +2,7 @@
 import Doc from '@/layouts/Doc.astro'
 import SearchDemo from '@/components/SearchDemo.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const loc = localeOf(Astro.url.pathname)
@@ -325,8 +326,8 @@ while True:
         <td>Pencere; çalıştırmanın başlangıç zamanına göre ölçülür.</td>
       </tr>
       <tr>
-        <td><code>min_duration_ms</code></td>
-        <td>En az bu kadar yavaş olan çalıştırmalar, milisaniye olarak.</td>
+        <td><code>min_duration_ms</code>, <code>max_duration_ms</code></td>
+        <td>En az ya da en çok bu kadar yavaş olan çalıştırmalar, milisaniye olarak.</td>
       </tr>
       <tr>
         <td><code>min_cost</code></td>
@@ -336,12 +337,43 @@ while True:
         </td>
       </tr>
       <tr>
+        <td><code>max_cost</code></td>
+        <td>En çok bu kadar tutan çalıştırmalar.</td>
+      </tr>
+      <tr>
+        <td><code>min_tokens</code></td>
+        <td>Girdi ve çıktı birlikte, en az bu kadar token kullanan çalıştırmalar.</td>
+      </tr>
+      <tr>
         <td><code>has_score</code></td>
         <td>Bu puanlayıcı kimliğinden bir puan taşıyan çalıştırmalar.</td>
       </tr>
       <tr>
         <td><code>score_below</code></td>
         <td><code>has_score</code> ile: o puanlayıcının bu değerin altına koyduğu çalıştırmalar.</td>
+      </tr>
+      <tr>
+        <td><code>score_above</code></td>
+        <td>
+          <code>has_score</code> ile: o puanlayıcının bu değerin üstüne koyduğu
+          çalıştırmalar. <code>score_below</code> da verilirse tek bir puanın
+          ikisinin arasında olması gerekir.
+        </td>
+      </tr>
+      <tr>
+        <td><code>preview</code></td>
+        <td>
+          Her çalıştırmanın <code>input_preview</code> ve
+          <code>output_preview</code> alanlarını doldurmak için
+          <code>true</code>. Denetim günlüğüne kaydedilir.
+        </td>
+      </tr>
+      <tr>
+        <td><code>has_feedback</code></td>
+        <td>
+          Bir insanın geri bildirim verdiği çalıştırmalar için <code>true</code>,
+          hiç geri bildirimi olmayanlar için <code>false</code>.
+        </td>
       </tr>
       <tr>
         <td><code>sort</code></td>
@@ -386,8 +418,14 @@ while True:
   <p>
     İkinci, daha hafif bir çalıştırma listesi yoktur, çünkü ilki zaten hafiftir.
     Saklanan trace izdüşümü hiç girdi, çıktı ve öznitelik taşımaz: adlar,
-    sayılar, zamanlar, maliyet, etiketler ve ilişkilendirme vardır, modelin
-    söylediği hiçbir şey yoktur. Payload'ı getiren şey bir çalıştırmayı açmaktır.
+    sayılar, zamanlar, maliyet, etiketler ve ilişkilendirme.
+    <code>preview=true</code> ile isterseniz her satıra
+    <code>input_preview</code> ve <code>output_preview</code> eklenir: kök
+    adımın girdisinin ve çıktısının başı, düz metin olarak, her biri en çok 240
+    karakter; bir sohbet girdisinde önizleme son kullanıcı mesajıdır.
+    Önizlemeli bir liste okuması bir modelin gördüğü metni taşır, bu yüzden
+    denetim günlüğüne kaydedilir. Payload'ın tamamını getiren şey bir
+    çalıştırmayı açmaktır.
   </p>
   <p>
     Gerçekçi tek bir çalıştırma üzerinde ölçüldü: üç politika belgesi getiren,
@@ -441,10 +479,19 @@ while True:
     <code>GET /v1/api/spans</code>, <code>/v1/api/logs</code>,
     <code>/v1/api/scores</code>, <code>/v1/api/metrics</code> ve
     <code>/v1/api/feedback</code>, her biri kendi sözlüğünü aynı şekilde uygular.
-    Karşılaşmadan önce bilmeye değer iki tanesi: puan listesi <code>order</code>
-    almaz, çünkü en yenisi baştadır ve imleci tek yönde karşılaştırır; geri
-    bildirim listesi ise bir <code>trace_id</code> ister, çünkü geri bildirim her
-    seferinde tek bir çalıştırma için okunur.
+    Puan listesi <code>order</code> almaz, çünkü en yenisi baştadır ve imleci
+    tek yönde karşılaştırır. Geri bildirim listesi bütün bir projeyi en yenisi
+    başta olacak şekilde okur; <code>trace_id</code>, <code>span_id</code>,
+    <code>kind</code>, <code>author_kind</code> ve bir <code>from</code> ile
+    <code>to</code> penceresiyle daraltılır ve sonraki sayfa için bir imleç
+    taşır. Log listesi bir satırın ilişkilendirmesine göre filtreler:
+    <code>environment</code>, <code>service_name</code>,
+    <code>service_version</code>, <code>session_id</code>,
+    <code>thread_id</code>, <code>user_id</code>, <code>run_id</code>,
+    <code>request_id</code>, <code>experiment_id</code> ve
+    <code>release</code>, her biri birebir eşleşir. Bir kullanıcı kimliğini
+    bildiğiniz hâliyle gönderin; saklanan kimlik nasıl özetlendiyse o da öyle
+    özetlenir.
   </p>
 
   <h2 id="filling-a-filter-box">Bir filtre kutusunu doldurmak</h2>
@@ -513,6 +560,22 @@ while True:
     sonsuza kadar tekrarlar. <code>signal=scores</code>, boş bir sayfayla
     yanıtlanmak yerine reddedilir.
   </p>
+
+  <h3>Canlı izleme</h3>
+  <p>
+    Aynı isteği <code>Accept: text/event-stream</code> ile gönderin, bağlantı
+    açık kalır. Daemon her saniye yoklar ve satır getiren her yığını,
+    yukarıdaki yanıtı taşıyan tek bir <code>delta</code> olayı olarak, ardından
+    gelen imleci olay kimliği yaparak gönderir. Bağlantısı kopan bir istemci o
+    imleçle yeniden bağlanır ve hiçbir şeyi kaçırmaz. Bir izleme otuz dakika
+    sonra kapanır ve istemci aynı biçimde yeniden bağlanır.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="yeni çalıştırmaları geldikçe izleyin"
+    command="curl -N -H 'accept: text/event-stream' 'localhost:4317/v1/api/deltas?signal=traces'"
+  />
 
   <h2>Bu dağıtım neler yapabilir</h2>
   <p>
@@ -594,7 +657,8 @@ while True:
   </p>
   <p>
     <code>q</code>, <code>kind</code>, <code>status</code>, <code>name</code>,
-    <code>model</code>, <code>trace_id</code>, <code>from</code>,
+    <code>model</code>, <code>trace_id</code>, <code>prompt</code>,
+    <code>prompt_version</code>, <code>from</code>,
     <code>to</code>, <code>min_duration_ms</code>, <code>sort</code>,
     <code>order</code>, <code>limit</code> ve <code>cursor</code> alır; aynı
     anlamlar ve aynı varsayılanlarla. Burada <code>tags</code>,

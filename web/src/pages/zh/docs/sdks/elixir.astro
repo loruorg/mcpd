@@ -135,13 +135,67 @@ end`}</code></pre>
   <p>
     <code>capture_payloads: false</code>，或者
     <code>MCPD_CAPTURE_PAYLOADS=false</code>，把提示词和补全留在原地。span
-    照样发出去，带着它的时间、状态、用量、模型、关联信息和错误；
+    照样发出去，带着它的时间、状态、用量、模型、模型参数、关联信息和错误；
     <code>input:</code>、<code>output:</code> 以及一个块捕获到的值，会在进入
     队列之前就被丢掉，所以没有敏感内容会排进队列，一次刷出也带不走任何敏感
     内容。单个 span 可以用 <code>capture_payloads: true</code> 说自己不一样。
   </p>
 
+  <h2>模型是怎么被调用的</h2>
+  <p>
+    <code>model_parameters:</code> 记录一次模型调用所用的设置：
+    <code>temperature</code>、<code>top_p</code>、<code>top_k</code>、
+    <code>max_tokens</code>、<code>seed</code>、<code>stop_sequences</code> 和
+    <code>has_response_format</code>。传一个关键字列表，或者在你手上已经有一个
+    时，传一个 <code>%Mcpd.ModelParameters&#123;&#125;</code>。
+  </p>
+
+  <pre><code class="language-elixir">{`Mcpd.span mcpd, "answer",
+  kind: :model_generation,
+  model_parameters: [temperature: 0.0, seed: 0, max_tokens: 1024] do
+  call_the_model()
+end`}</code></pre>
+
+  <p>
+    它们是设置而不是载荷，所以在 <code>capture_payloads: false</code> 下也会
+    保留，而这正是要紧的情况：想重现这次运行的人必须对上它们。你没传的字段表示
+    没有，你传了的字段不论是什么值都会保留，所以 <code>seed: 0</code> 也是一个
+    种子。<code>has_response_format</code> 背后的 schema 不会被记录，只记录当时
+    是否有一个在生效。它是一个选项而不是一个 setter，因为一个 Elixir span 由它
+    打开时的选项来描述，<code>model:</code>、<code>provider:</code> 和
+    <code>usage:</code> 也已经是这样。
+  </p>
+
+  <h3>流式调用</h3>
+  <p>
+    把供应商的流交给 <code>Mcpd.ModelCall.record_stream/4</code>，然后改读它
+    返回的流。它接受 OpenAI 的 chat-completion 分片和 Anthropic 的 message
+    事件，每一个分片都原样通过。span 在你第一次读这个流时打开，挂在你进程里当前
+    活动的 span 下面，第一个带文本或工具调用的分片标记首个 token 的时间。当流
+    结束、抛出异常，或者你用 <code>Enum.take/2</code> 或
+    <code>Enum.find/2</code> 提前停下时，span 会得到
+    <code>Mcpd.ModelCall.options/2</code> 对同一次非流式调用会给出的内容，以
+    文本作为输出，然后结束。来自流的错误会标记到 span 上，并原样交给你。保留的
+    文本上限是 32,768 个字符，达到上限时会设置 <code>mcpd.stream.truncated</code>。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="stream" title="一次流式调用" />
+
   <h2>断言你记下了什么</h2>
+  <p>
+    <code>Mcpd.Testing.start/1</code> 启动一个记录到内存里的客户端，并链接到你的
+    测试上。把 <code>testing.client</code> 传给你的代码里任何接收客户端的地方，
+    然后把它记下的东西读回来：<code>spans/2</code> 按名称或类型读，
+    <code>span/2</code> 读那个必须存在的 span，<code>trees/1</code> 把每次运行
+    读成一棵树，还有 <code>logs/1</code>、<code>metrics/1</code>、
+    <code>scores/1</code>、<code>recorded_feedback/1</code> 和
+    <code>reset/1</code>。每个读取函数都会先刷出。它持有的内容，像发往守护进程时
+    一样经过了采样、载荷采集和 <code>redact</code>；测试运行时设置了
+    <code>MCPD_ENABLED=false</code>，它也照样开着。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="testing" title="一个单元测试" />
+
   <p>
     sink 就是一个批次被排空之后去的地方。默认是 HTTP 传输层；
     <code>Mcpd.Sink.Recorder</code> 把每个批次留在内存里，于是一个测试不需要

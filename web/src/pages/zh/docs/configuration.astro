@@ -124,6 +124,76 @@ volumes:
           <td>无：任何地址都不得设置那个头</td>
         </tr>
         <tr>
+          <td><code>--client-ip-header</code></td>
+          <td><code>MCPD_CLIENT_IP_HEADER</code></td>
+          <td>无：对端地址就是客户端</td>
+        </tr>
+        <tr>
+          <td><code>--signup</code></td>
+          <td><code>MCPD_SIGNUP</code></td>
+          <td>关：没有账户</td>
+        </tr>
+        <tr>
+          <td><code>--accounts-data</code></td>
+          <td><code>MCPD_ACCOUNTS_DATA</code></td>
+          <td>在 <code>--data</code> 的路径的扩展名前加上 <code>.accounts</code></td>
+        </tr>
+        <tr>
+          <td><code>--accounts</code></td>
+          <td><code>MCPD_ACCOUNTS</code></td>
+          <td>关：只有配合 <code>--signup</code> 才有账户</td>
+        </tr>
+        <tr>
+          <td><code>--public-url</code></td>
+          <td><code>MCPD_PUBLIC_URL</code></td>
+          <td><code>http://localhost:4317</code></td>
+        </tr>
+        <tr>
+          <td><code>--smtp-host</code></td>
+          <td><code>MCPD_SMTP_HOST</code></td>
+          <td>无：链接写进日志</td>
+        </tr>
+        <tr>
+          <td><code>--smtp-port</code></td>
+          <td><code>MCPD_SMTP_PORT</code></td>
+          <td>587、465 或 25，取决于 <code>--smtp-tls</code></td>
+        </tr>
+        <tr>
+          <td><code>--smtp-user</code></td>
+          <td><code>MCPD_SMTP_USER</code></td>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td><code>--smtp-password</code></td>
+          <td><code>MCPD_SMTP_PASSWORD</code></td>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td><code>--smtp-from</code></td>
+          <td><code>MCPD_SMTP_FROM</code></td>
+          <td>无；设置 <code>--smtp-host</code> 时必填</td>
+        </tr>
+        <tr>
+          <td><code>--smtp-tls</code></td>
+          <td><code>MCPD_SMTP_TLS</code></td>
+          <td><code>starttls</code></td>
+        </tr>
+        <tr>
+          <td><code>--skip-email-verification</code></td>
+          <td><code>MCPD_SKIP_EMAIL_VERIFICATION</code></td>
+          <td>关：注册时会发送一封确认链接邮件</td>
+        </tr>
+        <tr>
+          <td><code>--org-quota-per-minute</code></td>
+          <td><code>MCPD_ORG_QUOTA_PER_MINUTE</code></td>
+          <td>配合 <code>--signup</code> 时为 60000，否则无</td>
+        </tr>
+        <tr>
+          <td><code>--org-retention-days</code></td>
+          <td><code>MCPD_ORG_RETENTION_DAYS</code></td>
+          <td><code>--retention-days</code></td>
+        </tr>
+        <tr>
           <td><code>--sample</code></td>
           <td><code>MCPD_SAMPLE</code></td>
           <td>不设置：保留每一条 trace</td>
@@ -154,6 +224,11 @@ volumes:
           <td>128 KiB</td>
         </tr>
         <tr>
+          <td><code>--price-book</code></td>
+          <td><code>MCPD_PRICE_BOOK</code></td>
+          <td>无：使用内置价目表</td>
+        </tr>
+        <tr>
           <td><code>--cors-origin</code></td>
           <td><code>MCPD_CORS_ORIGINS</code></td>
           <td>无：只允许同源</td>
@@ -172,6 +247,11 @@ volumes:
           <td><code>--max-batch-signals</code></td>
           <td><code>MCPD_MAX_BATCH_SIGNALS</code></td>
           <td><code>10000</code></td>
+        </tr>
+        <tr>
+          <td><code>--price-book</code></td>
+          <td><code>MCPD_PRICE_BOOK</code></td>
+          <td>关：使用内置价目表</td>
         </tr>
         <tr>
           <td><code>--log-format</code></td>
@@ -377,6 +457,15 @@ volumes:
     模型提供方凭据的那个进程，所以它打开的是租约协议，以及任何读不到已存提示词
     的东西。在你设置这两个参数之前，两者都接受写入密钥，而管理员密钥永远被接受。
   </p>
+  <p>
+    如果连 <code>--write-key</code> 也没有设置，写入密钥就是摄取密钥，于是每一个
+    发出 span 的容器里的那把密钥，也能启动运行、领取步骤，而一个被领取的步骤带着
+    它渲染好的输入。只配置了摄取密钥和读取密钥的部署，就是这个样子。mcpd 会在
+    启动时的一条警告里和 <code>mcpd doctor</code> 里说明这一点，而
+    <code>mcpd config</code> 会在这两行上都打印
+    <code>key required (ingest keys)</code>。设置 <code>--execute-key</code> 和
+    <code>--worker-key</code> 就能把它关上。
+  </p>
 
   <h4>升级不用停机</h4>
   <p>
@@ -400,25 +489,37 @@ volumes:
     完全正确的密钥里找拼写错误。
   </p>
   <p>
+    和真实密钥放在一起的空条目，会在任何东西读取列表之前被丢弃，所以结尾多一个
+    逗号什么也不会添加。设置了却一个密钥都没有的列表，例如
+    <code>MCPD_EXECUTE_KEYS=</code> 或 Kubernetes Secret 里的空值，会让守护进程在
+    启动时停下，拒绝信息写明参数和变量。想让这个作用域保持未设置，就不要设置这个
+    变量。发送空密钥头的请求等于没有出示密钥。
+  </p>
+  <p>
+    仍然是 <code>deploy/</code> 里某个示例文件占位符的密钥，也就是以
+    <code>REPLACE_WITH</code> 或 <code>replace-me</code> 开头的任何值（不分大小写），
+    会让守护进程无法启动。拒绝信息写明它所在的参数或项目列表，从不写出值本身。
+    <code>--redact-key</code> 也一样。每把密钥都用
+    <code>openssl rand -hex 32</code> 生成。
+  </p>
+  <p>
     完全不配置密钥时，每一个作用域都是开放的。这是有意的，因为第一次运行不该
     要求任何凭据，这也是那条启动警告存在的原因。
   </p>
   <p>
     <code>/healthz</code>、<code>/readyz</code>、<code>/metrics</code> 和界面本身
-    都不需要密钥就能访问。
-    如果这对你要紧，请把它们放到你自己的入口网关后面。
-  </p>
-
-  <p>
-    空的条目会在任何东西读取列表之前被丢弃。设置了却一个密钥都没有的列表，例如 <code>MCPD_EXECUTE_KEYS=</code> 或 Kubernetes Secret 里的空值，会让守护进程拒绝启动，拒绝信息写明参数和变量；想让这个作用域保持未设置，就不要设置这个变量；发送空密钥头的请求等于没有出示密钥。仍然是 <code>deploy/</code> 里示例文件占位符的密钥，也就是以 <code>REPLACE_WITH</code> 或 <code>replace-me</code> 开头的任何值（不分大小写），会让守护进程拒绝启动；拒绝信息写明参数或项目列表，从不写出值本身。<code>--redact-key</code> 也一样。每把密钥都用 <code>openssl rand -hex 32</code> 生成。没有设置 <code>--write-key</code>、<code>--execute-key</code> 和 <code>--worker-key</code> 时，摄取密钥还能启动运行、认领步骤，mcpd 会在启动时和 <code>mcpd doctor</code> 里对此发出警告。
+    都不需要密钥就能访问。如果这对你要紧，请把它们放到你自己的入口网关后面。
   </p>
 
   <h4>审计日志</h4>
   <p>
     那些会把载荷交回去的处理函数会记下谁读了什么：
     <code>{`GET /v1/api/traces/{id}`}</code>、span 和日志的搜索、反馈、数据集
-    条目、采集和删除。每一行都带着时间、动作那把密钥的短摘要、动作、项目、
-    资源，以及授权是否放行。密钥本身永远不会被写下来。
+    条目、采集、一条 trace 的方面注释、一个主题及其示例、删除和擦除。
+    <a href={to('/docs/security')} class="link">安全</a>列出了全部十一种动作。
+    以 <code>400</code> 作答的请求不留下任何一行，因为什么都没有被读。每一行都
+    带着时间、执行动作的那把密钥的短摘要、动作、项目、资源，以及授权是否放行。
+    密钥本身永远不会被写下来。
   </p>
   <p>
     用 <code>GET /v1/api/audit</code> 读这份日志，它需要 admin 作用域。它不受
@@ -431,7 +532,8 @@ volumes:
   <h3>--sample</h3>
   <p>
     一个 0.0 到 1.0 之间的分数。超出这个范围的值是启动错误，而不是悄悄地截断：
-    <code>--sample must be between 0.0 and 1.0, got 2</code>。
+    <code>--sample must be between 0.0 and 1.0, got
+    2</code>。
   </p>
   <p>
     这个决定是对 trace id 做哈希得出的，所以负载均衡器后面的一群 mcpd 实例，
@@ -534,14 +636,25 @@ volumes:
 
   <h3>--runs-data</h3>
   <p>
-    运行存储放在哪里：定义、步骤尝试的流水、每一个截止时间和每一次等待。无论
-    信号存储是什么，它都是一个内嵌文件，所以在 Postgres 或 ClickHouse 上，运行
-    仍然待在守护进程旁边的一个文件里，运行接口也由一个副本提供。默认是在
+    运行存储放在哪里：定义、步骤尝试的流水、每一个截止时间和每一次等待。一个
+    文件路径会把它们放进一个内嵌的 SQLite 文件，无论信号存储是什么。默认是在
     <code>--data</code> 的路径的扩展名前加上 <code>.runs</code>，对默认值来说
     就是 <code>./mcpd.runs.db</code>；当 <code>--data</code> 是
     <code>:memory:</code> 时它也是。<code>--runs-data off</code> 完全不提供
     运行：每一个运行端点都回答 <code>503</code> 并指出这个参数，守护进程的其余
     部分不变。
+  </p>
+  <p>
+    一个 Postgres 连接字符串则会把运行放进 Postgres，例如
+    <code>--runs-data postgres://mcpd:secret@db:5432/mcpd</code>。这个字符串以
+    <code>postgres://</code> 或 <code>postgresql://</code> 开头，读取 TLS 设置的
+    方式和 <code>--postgres-url</code> 一样。它可以指向和
+    <code>--postgres-url</code> 同一个数据库：运行相关的表有自己的名字，schema
+    在启动时于一把 advisory lock 之下创建。多个副本可以共享同一个运行存储。每一个
+    运行存储事务都是 <code>SERIALIZABLE</code>，所以两个副本同时领取、完成或触发
+    截止时间，结果和一个守护进程依次去做相同，而输给并发事务的那个事务会重新运行。
+    <code>mcpd config</code> 把这一行打印为 <code>postgres at</code> 那台服务器，
+    密码已去掉。
   </p>
   <p>
     这个存储的各项时长在配置文件的 <code>runs</code> 下，单位是整毫秒：
@@ -550,6 +663,13 @@ volumes:
     <code>park_ttl_ms</code> 和 <code>max_depth</code>。默认值是 30 秒的租约和
     30 秒的回收窗口，对一台机器上的一个守护进程来说是对的，也是 worker 注册时
     读回来的那些值。
+  </p>
+  <p>
+    同一个块里还有 <code>max_step_repeats</code>，它是一个次数而不是时长：同一个
+    步骤键可以用完全相同的渲染输入失败多少次，之后这次运行就会作为重复而被结束。
+    默认是 16，设为零则关闭。它存在，是因为有两条重试路径不消耗重试预算，所以
+    <code>retry.max_attempts</code> 管不住它们；见
+    <a href={to('/docs/runs')} class="link">运行</a>。
   </p>
 
   <h3>--cors-origin</h3>
@@ -603,6 +723,16 @@ volumes:
     <code>max_batch_signals</code>，两处都设置时参数胜出。两者都不能关掉，
     零在启动时会被拒绝，而不是被读成“无限制”：请求体上限为零会拒绝每一个请求，
     所以那个看起来更宽松的解释，才是会让摄取彻底停摆的那一个。
+  </p>
+
+  <h3>--price-book</h3>
+  <p>
+    一份用来给模型调用计算成本的 JSON 价目表，取代内置的那份。带上
+    <code>"extends": "builtin"</code>，它就叠加在内置价目表之上，只需要写出不同的
+    费率。它也是配置文件的键 <code>price_book</code>，两处都设置时参数胜出。一份
+    带有负费率、顺序错乱的分档，或者货币不是 ISO 4217 代码的价目表，会让守护进程
+    在启动时停下，并点出是哪一条。<code>mcpd prices refresh</code> 从一份公开的
+    模型目录写出一份价目表。见<a href={to('/docs/cost')} class="link">成本核算</a>。
   </p>
 
   <h3>--log-format 和 MCPD_LOG</h3>
@@ -733,7 +863,11 @@ volumes:
   <p>
     在部署任何东西之前，先读那六行 auth。<code>open</code> 意味着对任何能连到
     这个端口的人开放。括号里的一行写明这个作用域正在继承的那份更宽的列表，
-    从旧版本升级上来的部署，一开始就处在这个状态。
+    从旧版本升级上来的部署，一开始就处在这个状态。每一个参数和配置文件里的每一个
+    键在这里都有一行，显示的是守护进程实际运行的值，而不是写下的值：低于下限的
+    间隔会显示为提高之后的值，并带上原来的数字。不会打印任何秘密。密钥只计数、
+    从不列出，密码显示为 <code>set</code> 或 <code>unset</code>，转发请求头只
+    打印名称，URL 和连接字符串打印时去掉其中的凭据。
   </p>
 
   <h2>一份配好的部署</h2>
@@ -804,9 +938,12 @@ volumes:
 
   <h3>--config-file</h3>
   <p>
-    一个 JSON 文件，装着命令行放不下的那些设置：监视器、服务水平目标、评估它们
-    的间隔、转发、裁判模型、运行存储的各项时长、两道请求限制，以及下面的按项目
-    配置块。选 JSON 而不是 YAML 或 TOML，是因为 mcpd 本来就为其他一切解析 JSON，
+    一个 JSON 文件，装着命令行放不下的那些设置。它接受十一个键：
+    <code>monitors</code>、<code>slos</code>、
+    <code>monitor_interval_seconds</code>、<code>forward</code>、
+    <code>judge</code>、<code>projects</code>、<code>runs</code>、
+    <code>max_body_bytes</code>、<code>max_batch_signals</code>、
+    <code>derived_metrics</code> 和 <code>aspects</code>。每一个都可以省略。选 JSON 而不是 YAML 或 TOML，是因为 mcpd 本来就为其他一切解析 JSON，
     所以这个文件不引入新依赖，也不引入第二套要学的语法。它可以原样作为
     Kubernetes ConfigMap 挂载。
   </p>
@@ -814,6 +951,10 @@ volumes:
     <code>max_body_bytes</code> 和 <code>max_batch_signals</code> 除了命令行之外
     也在这里，这样一个集群就能把它们和一起部署的那些监视器放在同一处。参数压过
     文件，一个实例要用不同的上限，就不必为所有人改动那份共享文件。
+  </p>
+  <p>
+    <code>monitor_interval_seconds</code> 是评估监视器和目标的间隔。默认 60，小于
+    5 的值会被提高到 5。
   </p>
   <p>
     未知的键会让启动失败，而不是被忽略，因为一个拼错的键悄悄什么都不监视，是
@@ -898,7 +1039,9 @@ volumes:
     <code>read_keys</code>、<code>write_keys</code>、<code>admin_keys</code>、
     <code>execute_keys</code> 和 <code>worker_keys</code>，
     它们的回退方式也一样：没有 <code>write_keys</code> 的项目接受它自己的摄取
-    密钥，没有 <code>admin_keys</code> 的项目接受它自己的读取密钥。上面的
+    密钥，没有 <code>admin_keys</code> 的项目接受它自己的读取密钥，而
+    <code>execute_keys</code> 和 <code>worker_keys</code> 没设置时接受项目的写入
+    密钥。上面的
     <code>support</code> 块两个都没设，所以它的行为和这两个作用域出现之前
     一模一样。
   </p>
@@ -910,6 +1053,17 @@ volumes:
     项目没有设置 <code>retention_days</code> 和 <code>sample</code> 时，它们回退
     到全局参数。两者按项目设置的理由和密钥一样：一个团队九十天的要求，不该逼着
     其他所有人的数据也留那么久；一个团队的流量，也不该决定另一个团队怎么被采样。
+  </p>
+  <p>
+    <code>tail_sampling</code> 按一个项目已结束的运行里发生了什么来留下它们，并
+    删除其余的。它接受 <code>rate</code>，也就是普通运行留下的比例，并留下每一次
+    符合 <code>keep_errors</code>（默认开启）、<code>keep_slower_than_ms</code>、
+    <code>keep_cost_above</code>、<code>keep_score_below</code> 或
+    <code>keep_feedback</code>（默认开启）的运行。一次运行在结束
+    <code>decide_after_seconds</code> 之后才被判定，默认 120，这样实时评分已经
+    到了。<code>mcpd config</code> 把每条规则打印在它的
+    <code>tail sampling</code> 那一行上。见
+    <a href={to('/docs/sampling')}>采样</a>。
   </p>
   <p>
     一个批次里可以出现好几个项目。一把有作用域的摄取密钥会写下它够得到的那些
@@ -942,13 +1096,12 @@ volumes:
   }
 }`}</code></pre>
 
-  <p>
-    <code>monitor_interval_seconds</code> 是监视器和目标的评估间隔。默认是 60，小于 5 的值会被提高到 5。
-  </p>
-
   <h3>derived_metrics</h3>
   <p>
-    守护进程从它存下的 span 派生哪些指标。没有这个块时两半都开着。<code>durations</code> 为每个结束的智能体、工具、工作流、模型生成或处理器 span 写一个时长点。<code>tokens</code> 为每个报告了用量的模型生成 span 写最多十三个 token 计数器。把任何一个设为 <code>false</code> 就不再写它；省略的字段保持开启。这没有对应的参数。派生的点在按项目的上限之后才加入，也不计入摄取响应里的 <code>accepted</code> 数。
+    守护进程从它存下的 span 派生哪些指标。没有这个块时两半都开着。<code>durations</code> 为每个结束的智能体、工具、工作流、模型生成或处理器 span 写一个时长点。<code>tokens</code> 为每个报告了用量的模型生成 span 写最多十三个 token 计数器。把任何一个设为 <code>false</code> 就不再写它；省略的字段保持开启，所以 <code>{'{'}"tokens": false{'}'}</code> 会保留时长。这没有对应的参数。
+  </p>
+  <p>
+    派生的点在按项目的上限之后才加入，所以它们绝不会让发送方的信号被挤掉，也不计入摄取响应里的 <code>accepted</code> 数。
   </p>
 
   <pre><code class="language-json">{`{
@@ -957,7 +1110,7 @@ volumes:
 
   <h3>aspects</h3>
   <p>
-    守护进程是否把方面注释聚类成主题，以及在什么界限下聚类。没有这个块时是关闭的。<code>enabled</code> 打开这一轮处理，不需要模型也不需要凭据，因为 <code>outcome</code> 方面由守护进程自己写。<code>interval_seconds</code> 是一轮处理的间隔，默认 300，小于 30 的值会被提高到 30。<code>window_seconds</code> 是一轮处理往回读笔记的范围，默认 86400。<code>disabled</code> 列出不参与聚类的方面；已经记录在其下的笔记仍然可读。
+    守护进程是否把方面注释聚类成主题，以及在什么界限下聚类。没有这个块时是关闭的：没人配置过的守护进程不会启动分析定时器，也不会写任何分析表。<code>enabled</code> 打开这一轮处理，不需要模型也不需要凭据，因为 <code>outcome</code> 方面由守护进程根据它已经掌握的事实自己写。<code>interval_seconds</code> 是一轮处理的间隔，默认 300，小于 30 的值会被提高到 30。<code>window_seconds</code> 是一轮处理往回读笔记的范围，默认 86400。<code>disabled</code> 列出不参与聚类的方面；已经记录在其下的笔记仍然可读。不存放分析表的存储后端会在启动时记一条警告，什么都不聚类。见 <a href={to('/docs/themes')} class="link">主题与快照</a>。
   </p>
 
   <pre><code class="language-json">{`{
@@ -1096,6 +1249,118 @@ volumes:
     两个参数都不设置时，什么都不变，也永远不会记录任何主体。那是默认行为。
   </p>
 
+
+  <h2 id="signup">开放注册</h2>
+  <p>
+    <code>--signup</code> 让任何人都能创建账户，可以在界面里，也可以用
+    <code>POST /v1/api/account/signup</code>。托管的 mcpd 就是这样运行的。无论
+    这个地址有没有被用过，注册给出的答复都一样，并会发出一封带链接的邮件；打开
+    链接就确认了地址并登录。每个账户都会得到一个自己的组织，里面有一个随机名称
+    的项目，并自己创建 API 密钥，每把密钥一个作用域。一个会话能在它所属各组织的
+    每个项目上做账户角色允许的事；一把密钥能在它的那一个项目上做它的作用域允许
+    的事。两者都触及不到账户不属于的组织的项目，而账户密钥发来的 span 存进这把
+    密钥的项目，无论 span 里写的是哪个项目。见
+    <a href={to('/docs/accounts')}>账户与组织</a>。
+  </p>
+  <p>
+    开启它会对所有人改变一条规则：没有密钥的请求会被拒绝，即使没有配置任何密钥
+    也一样。只有 <code>/healthz</code>、<code>/readyz</code>、
+    <code>/metrics</code>、注册和登录保持开放。你配置的密钥保留原有的范围，并且
+    最先被尝试。
+  </p>
+  <p>
+    无论信号存在哪里，账户都放在它自己的 SQLite 文件里，用
+    <code>--accounts-data</code> 设置。这个文件存的是 argon2id 密码哈希，以及
+    token 和密钥的 SHA-256 摘要，从不存秘密本身。请把它和卷里的其余内容一起
+    备份。
+  </p>
+  <p>
+    每个客户端地址，注册限每小时 5 次，登录限每 15 分钟 20 次；每个邮箱，失败的
+    登录限每 15 分钟 10 次。在代理后面，每个连接都来自代理，所以请指明代理把
+    客户端地址放进的那个请求头，以及代理连接时所用的地址：
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="在 Cloudflare 和私有网络上的代理后面开放注册"
+    command={`mcpd serve --signup \\
+  --client-ip-header cf-connecting-ip \\
+  --trusted-proxy-cidr 172.16.0.0/12 \\
+  --cors-origin https://mcpd.sh`}
+  />
+
+  <p>
+    这个请求头只从 <code>--trusted-proxy-cidr</code> 里的地址读取。来自没有设置
+    它的可信代理时，使用 <code>X-Forwarded-For</code> 里的第一个地址。来自其他
+    任何地址时，无论请求头写了什么，对端地址就是客户端。请确保只有你的代理能
+    访问守护进程：从可信范围内部访问它的客户端，可以自称任何地址。界面从与守护
+    进程不同的源提供时，需要 <code>--cors-origin</code>。
+  </p>
+
+
+  <h2 id="accounts">不开放注册的账户</h2>
+  <p>
+    <code>--accounts</code> 打开同样的账户、组织、角色、单点登录和 SCIM，但没有
+    公开注册，用于部署在你自己集群上的情况。人们通过邀请、单点登录或 SCIM 加入，
+    配置的密钥在旁边照样可用。和 <code>--signup</code> 一样，没有凭据的请求会被
+    拒绝。
+  </p>
+  <p>
+    邮件经由 <code>--smtp-host</code> 发出，配合 <code>--smtp-from</code>、
+    <code>--smtp-port</code>、<code>--smtp-user</code>、
+    <code>--smtp-password</code> 和 <code>--smtp-tls</code>。没有 SMTP 服务器时，
+    链接以 info 级别写进日志；例外是在公开地址上使用 <code>--signup</code>，这时
+    注册、重置密码、修改地址和邀请都会回答 503，守护进程在启动时发出警告。链接和
+    单点登录的重定向以 <code>--public-url</code> 开头。
+  </p>
+  <p>
+    <code>--org-quota-per-minute</code> 是一个组织在它所有项目之间共享的每分钟
+    信号上限，也是它能给自己设定的最大值。<code>--org-retention-days</code> 是
+    它的项目保留数据的时长，也是它能选的最长时长。
+  </p>
+  <p>
+    配置文件的 <code>accounts</code> 块包含 <code>allow_org_creation</code>、
+    <code>allow_private_issuers</code> 和 <code>orgs</code>。<code>orgs</code>
+    的每一项按 <code>slug</code> 声明一个组织，带 <code>name</code>、按邮箱
+    列出的 <code>owners</code>、它拥有的现有 <code>projects</code>、
+    <code>quota_per_minute</code>、<code>retention_days</code>、
+    <code>group_roles</code>、<code>scim_token_env</code> 和
+    <code>sso</code>。<code>sso</code> 块接受 <code>provider</code>
+    （<code>oidc</code> 或 <code>github</code>）、<code>issuer</code>、
+    <code>client_id</code>、<code>client_secret_env</code>、
+    <code>domains</code>、<code>enforce</code>、<code>default_role</code> 和
+    <code>groups_claim</code>。秘密从文件里指明的环境变量读取，从不从文件里读。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="在你自己的集群上使用单点登录和角色"
+    command={`mcpd serve --accounts --config-file mcpd.json \\
+  --public-url https://mcpd.example.com \\
+  --smtp-host smtp.example.com --smtp-from no-reply@example.com`}
+  />
+
+  <pre><code class="language-json">{`{
+  "accounts": {
+    "orgs": [{
+      "slug": "acme",
+      "name": "Acme",
+      "owners": ["ana@acme.com"],
+      "projects": ["default"],
+      "sso": {
+        "issuer": "https://login.microsoftonline.com/TENANT/v2.0",
+        "client_id": "CLIENT_ID",
+        "client_secret_env": "MCPD_OIDC_CLIENT_SECRET",
+        "domains": ["acme.com"],
+        "enforce": true,
+        "default_role": "member",
+        "groups_claim": "groups"
+      },
+      "group_roles": { "mcpd-admins": "admin", "mcpd-viewers": "viewer" },
+      "scim_token_env": "MCPD_SCIM_TOKEN"
+    }]
+  }
+}`}</code></pre>
 
   <h2>一个项目不能把整个守护进程花光</h2>
   <p>

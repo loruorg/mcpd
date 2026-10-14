@@ -2,7 +2,11 @@
 import Doc from '@/layouts/Doc.astro'
 import Command from '@/components/Command.astro'
 import Waterfall from '@/components/Waterfall.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { exampleLanguages } from '@/lib/snippets'
 import { DEFAULT_LOCALE, localeOf, localesWithPage, urlFor } from '@/lib/i18n'
+
+const experimentLangs = exampleLanguages('experiment')
 
 /* I link interni restano scritti come route inglesi e vengono localizzati qui.
    Una route la cui pagina italiana non è ancora scritta porta alla pagina
@@ -14,7 +18,7 @@ const url = (route: string) =>
 
 <Doc
   title="Test di regressione"
-  description="Trasforma un’esecuzione di produzione andata male in un caso di test permanente, passa gli scorer integrati sulle esecuzioni archiviate e confronta due versioni di un agente."
+  description="Trasforma un’esecuzione di produzione andata male in un caso di test, passa gli scorer di mcpd sulle esecuzioni archiviate e confronta due versioni di un agente con i campioni."
   lede="L’esecuzione che si è rotta martedì diventa il caso che ogni versione successiva deve superare."
   og="docs"
 >
@@ -53,6 +57,17 @@ const url = (route: string) =>
 
   <Waterfall class="not-prose my-8" />
 
+  <h2>Congelare un dataset</h2>
+  <p>
+    Un dataset cresce man mano che ci catturi esecuzioni. Per confrontare due
+    versioni di un agente sugli stessi casi, congelalo prima:
+    <code>POST /v1/api/datasets/{'{id}'}/versions</code> copia i casi attuali
+    in una versione numerata che non cambia mai, e congelare di nuovo gli
+    stessi casi conferma quella versione invece di farne una copia. Leggi i
+    casi di una versione con <code>GET /v1/api/datasets/{'{id}'}/items?version=2</code>,
+    ed elenca le versioni con <code>GET /v1/api/datasets/{'{id}'}/versions</code>.
+  </p>
+
   <h2>La risposta dell’esecuzione non è la risposta attesa</h2>
   <p>
     <code>use_output_as_expected</code> è spento per impostazione predefinita,
@@ -70,7 +85,7 @@ const url = (route: string) =>
 
   <h2>Gli scorer integrati</h2>
   <p>
-    mcpd porta tredici scorer deterministici: codice normale che legge
+    mcpd porta ventidue scorer deterministici: codice normale che legge
     un’esecuzione archiviata e restituisce un numero. Non costano niente, non
     chiamano mai un modello, e danno due volte la stessa risposta, che è la
     proprietà di cui un test di regressione ha bisogno e che un modello giudice
@@ -94,13 +109,37 @@ const url = (route: string) =>
       <tr><td><code>no_leaked_secret</code></td><td>Nella risposta non compare nessuna chiave, nessun token e nessuna credenziale.</td></tr>
       <tr><td><code>span_present</code></td><td>L’esecuzione ha registrato uno span del tipo o del nome richiesto.</td></tr>
       <tr><td><code>tool_succeeded</code></td><td>Lo strumento richiesto è stato eseguito e almeno una chiamata si è conclusa bene.</td></tr>
+      <tr><td><code>excludes</code></td><td>La risposta non contiene nessuna delle frasi in <code>forbidden</code>.</td></tr>
+      <tr><td><code>keyword_coverage</code></td><td>Graduato: la quota di <code>keywords</code> che la risposta menziona.</td></tr>
+      <tr><td><code>similarity</code></td><td>Graduato: uno meno la distanza di modifica da <code>expected</code> divisa per la lunghezza maggiore.</td></tr>
+      <tr><td><code>matches_pattern</code></td><td>La risposta corrisponde all’espressione regolare <code>pattern</code>.</td></tr>
+      <tr><td><code>tool_call_accuracy</code></td><td>Graduato: la quota di <code>expected_tools</code> che l’esecuzione ha chiamato.</td></tr>
+      <tr><td><code>tool_order</code></td><td>L’esecuzione ha chiamato <code>expected_tools</code> in quell’ordine, con altre chiamate ammesse in mezzo.</td></tr>
+      <tr><td><code>tool_not_called</code></td><td>L’esecuzione non ha chiamato nessuno strumento di <code>forbidden_tools</code>.</td></tr>
+      <tr><td><code>answer_length</code></td><td>La risposta ha fra <code>min_chars</code> e <code>max_chars</code> caratteri.</td></tr>
+      <tr><td><code>json_schema</code></td><td>La risposta è un JSON, delimitato o nudo, che soddisfa <code>json_schema</code>.</td></tr>
+      <tr><td><code>trajectory</code></td><td>Il percorso dell’esecuzione: gli strumenti chiamati rispetto a <code>expected_tools</code>, confrontati come dice <code>trajectory_match</code> (<code>strict</code>, <code>ordered</code> o <code>unordered</code>, con credito parziale), i suoi passi rispetto a <code>max_steps</code>, e se è arrivata a una risposta. La media delle parti richieste. <code>GET /v1/api/traces/{'{id}'}/trajectory</code> mostra il percorso che legge.</td></tr>
     </tbody>
   </table>
   <p>
-    <code>GET /v1/api/scorers</code> restituisce lo stesso elenco con un flag
-    <code>needs_config</code>. Uno scorer che ha bisogno di una risposta attesa
-    e non la riceve si astiene invece di indovinare, e l’astensione viene
-    riferita.
+    I confronti di testo ignorano maiuscole e minuscole se non imposti
+    <code>case_sensitive</code>. I nomi degli strumenti si confrontano
+    esattamente con i nomi degli span di chiamata a strumento di uno qualsiasi
+    dei quattro tipi di strumento. <code>json_schema</code> controlla
+    <code>type</code>, <code>properties</code>, <code>required</code>,
+    <code>items</code>, <code>enum</code>, <code>minimum</code>,
+    <code>maximum</code>, <code>minLength</code>, <code>maxLength</code> e
+    <code>additionalProperties: false</code>, e nomina fino a cinque violazioni
+    nella ragione. Un pattern che non compila, o uno schema che non è un
+    oggetto, viene rifiutato con un 400 prima di leggere qualsiasi esecuzione.
+  </p>
+  <p>
+    <code>GET /v1/api/scorers</code> restituisce ogni scorer che questo daemon
+    conosce, con il suo <code>kind</code> (<code>code</code>, <code>judge</code>
+    o <code>criterion</code>), la sua <code>direction</code>, le
+    <code>config_keys</code> che legge, e se è <code>available</code>. Uno
+    scorer che ha bisogno di un’impostazione e non la riceve si astiene invece
+    di indovinare, e l’astensione nomina l’impostazione.
   </p>
 
   <h2>Quando è un modello a dare il voto</h2>
@@ -149,12 +188,51 @@ const url = (route: string) =>
     fidare.
   </p>
   <p>
-    I criteri configurati non compaiono in <code>GET /v1/api/scorers</code>.
-    Quell’endpoint elenca i tredici scorer integrati e nient’altro, quindi un
-    client che costruisce da lì il proprio menu di scorer non offrirà i tuoi
-    criteri. L’unico posto in cui il daemon te li nomina è l’errore che ricevi
-    per un id di scorer sconosciuto, che elenca insieme gli integrati e i
-    criteri configurati.
+    I criteri configurati compaiono in <code>GET /v1/api/scorers</code> con il
+    tipo <code>criterion</code>. Un criterio con l’id di una rubrica integrata
+    sostituisce quella rubrica su questo daemon.
+  </p>
+
+  <h3>Le rubriche integrate</h3>
+  <p>
+    Con un blocco <code>judge</code> configurato, nove rubriche sono pronte da
+    nominare senza scrivere nessun criterio. Ognuna gira in quattro passi.
+    <strong>Preprocess</strong>, in codice, raccoglie la domanda dall’input
+    dello span radice, la risposta, la risposta <code>expected</code> dalla
+    configurazione dello scorer, e il contesto: ogni passaggio nell’output degli
+    span <code>retrieval</code> e <code>rag_vector_operation</code>
+    dell’esecuzione, oppure la lista <code>context</code> nella configurazione.
+    <strong>Analyze</strong> è l’unica chiamata al modello: il giudice scompone
+    la risposta, la risposta attesa o il contesto in voci e dà a ognuna un
+    verdetto sì, no o incerto. <strong>Score</strong>, in codice, conta i
+    verdetti, quindi il numero è aritmetica su giudizi voce per voce e mai un
+    numero scelto dal modello. <strong>Reason</strong>, in codice, nomina le
+    voci che sono costate punteggio.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Rubrica</th><th>Legge</th><th>Valore</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>faithfulness</code></td><td>risposta, contesto</td><td>Quota delle affermazioni della risposta che il contesto sostiene.</td></tr>
+      <tr><td><code>hallucination</code></td><td>risposta, contesto</td><td>Quota delle affermazioni della risposta che il contesto contraddice. Più basso è meglio.</td></tr>
+      <tr><td><code>answer_relevance</code></td><td>domanda, risposta</td><td>Quota delle frasi della risposta che affrontano la domanda.</td></tr>
+      <tr><td><code>answer_correctness</code></td><td>domanda, risposta, attesa</td><td>Quota dei fatti della risposta attesa che la risposta riporta.</td></tr>
+      <tr><td><code>context_precision</code></td><td>domanda, contesto</td><td>Precisione media dei passaggi utili sulle loro posizioni.</td></tr>
+      <tr><td><code>context_recall</code></td><td>attesa, contesto</td><td>Quota delle frasi della risposta attesa che il contesto copre.</td></tr>
+      <tr><td><code>context_relevance</code></td><td>domanda, contesto</td><td>Quota dei passaggi che riguardano la domanda.</td></tr>
+      <tr><td><code>toxicity</code></td><td>risposta</td><td>Quota delle frasi della risposta che sono tossiche. Più basso è meglio.</td></tr>
+      <tr><td><code>bias</code></td><td>risposta</td><td>Quota delle opinioni della risposta che sono di parte. Più basso è meglio.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Un verdetto incerto conta metà. Una risposta senza niente da giudicare
+    prende 0 sulle tre rubriche in cui più basso è meglio e si astiene sulle
+    altre. Ogni punteggio tiene i verdetti voce per voce in
+    <code>metadata.steps</code>, il modello, i tentativi e i conteggi di token
+    in <code>metadata.judge</code>, e il costo della chiamata, prezzato con il
+    listino prezzi del daemon, in <code>cost</code>. Il suo
+    <code>scorer_version</code> nomina la versione della rubrica e il modello.
   </p>
 
   <Command
@@ -212,7 +290,11 @@ const url = (route: string) =>
       </tr>
       <tr>
         <td>Il modello non è stato raggiungibile</td>
-        <td>Si astiene, con lo stato e il corpo. Un rate limit è una ragione, non uno zero.</td>
+        <td>Riprova altre due volte, con una breve pausa, quando l’endpoint ha risposto 429, 502, 503 o 504 o la connessione è fallita, e solo finché la scadenza lascia spazio. Poi si astiene, con lo stato e il corpo. Un rate limit è una ragione, non uno zero.</td>
+      </tr>
+      <tr>
+        <td>Un passo della rubrica non è riuscito a finire</td>
+        <td>Si astiene, nominando il passo: <code>preprocess</code> quando all’esecuzione manca un pezzo che la rubrica legge, <code>analyze</code> quando la risposta non è una lista di verdetti sì, no e incerto, <code>score</code> quando non c’era niente da contare.</td>
       </tr>
       <tr>
         <td>La risposta superava 1 MiB</td>
@@ -220,7 +302,7 @@ const url = (route: string) =>
       </tr>
       <tr>
         <td>La scadenza della richiesta non lasciava tempo per la chiamata</td>
-        <td>Rifiuta senza chiamare il modello. La passata risponde con i punteggi che ha finito, entro la scadenza, invece che con un 503.</td>
+        <td>Si astiene senza chiamare il modello. La passata risponde con i punteggi che ha finito, entro la scadenza, invece che con un 503.</td>
       </tr>
     </tbody>
   </table>
@@ -228,6 +310,74 @@ const url = (route: string) =>
     Ogni punteggio giudicato registra il modello come proprio
     <code>scorer_version</code>. Due punteggi di due giudici diversi non sono
     confrontabili, e quel campo è quello che lo dice sul record.
+  </p>
+  <p>
+    Ogni punteggio giudicato nomina anche l’esecuzione della propria chiamata
+    al modello in <code>score_trace_id</code>. Quell’esecuzione è un solo span
+    <code>scorer_run</code> che contiene il prompt mandato al giudice, la
+    risposta che ha scritto, i suoi token e il suo costo, con un link
+    all’esecuzione a cui ha dato il punteggio. Un punteggio che sembra
+    sbagliato si apre e si legge come qualsiasi altra chiamata a un modello;
+    nell’app lo apre il link <em>chiamata del giudice</em> accanto al
+    punteggio.
+  </p>
+
+  <h2>Scorer che definisci tu</h2>
+  <p>
+    Un progetto archivia i propri scorer con <code>POST /v1/api/scorer-definitions</code>.
+    Una definizione <code>judge</code> è un criterio scritto per il tuo agente,
+    come <q>La risposta nomina la sezione della politica di rimborso su cui si
+    basa</q>, valutato da 0 a 1 dal giudice configurato. Una definizione
+    <code>code</code> è uno degli scorer qui sopra con le impostazioni fissate,
+    come <code>keyword_coverage</code> con le parole chiave che le tue risposte
+    devono menzionare.
+  </p>
+  <p>
+    Ogni salvataggio è una nuova versione, e un corpo identico non viene
+    archiviato di nuovo. Nomina una definizione ovunque si accetti un id di
+    scorer: <code>cites_policy</code> esegue l’ultima versione e
+    <code>cites_policy@2</code> esegue la versione 2. La versione va su ogni
+    punteggio, quindi cambiare un prompt non cambia mai che cosa significava un
+    punteggio vecchio. Una definizione non può prendere l’id di uno scorer
+    integrato in mcpd o di un criterio nel file di configurazione.
+    <code>GET /v1/api/scorers?project=</code> elenca le definizioni di un
+    progetto accanto agli scorer integrati, con tipo <code>custom</code>. La
+    schermata Valutazioni dell’app le crea e le modifica.
+  </p>
+
+  <h2>Punteggio dal vivo</h2>
+  <p>
+    Una regola di valutazione dà un punteggio alle esecuzioni man mano che
+    finiscono, in background, e scrive punteggi con origine <code>live</code>.
+    Nomina gli scorer da eseguire, la quota di esecuzioni a cui dare un
+    punteggio, e a quali esecuzioni si applica: un nome di passo radice, un
+    tipo, un ambiente, un esito, dei tag. Archiviane una con
+    <code>POST /v1/api/evaluation-rules</code>.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="dare un punteggio a un decimo delle esecuzioni di checkout appena finiscono"
+    command={`curl -X POST 'localhost:4317/v1/api/evaluation-rules?project=support-desk' \\
+  -H 'content-type: application/json' \\
+  -d '{"id": "checkout-quality", "enabled": true, "scorers": ["answered", "cites_policy"],
+       "sample_rate": 0.1, "name": "checkout"}'`}
+  />
+
+  <p>
+    Una regola viene archiviata spenta se la richiesta non la accende, e ogni
+    scorer che nomina viene risolto quando viene archiviata. Quali esecuzioni
+    finiscono nel campione lo decide un hash dell’id della regola e dell’id di
+    traccia, quindi la stessa esecuzione è dentro o fuori su ogni replica e
+    dopo ogni riavvio, e due regole al 10% danno un punteggio a decimi diversi.
+    Ogni esecuzione riceve un punteggio da una regola una sola volta. Più
+    repliche sullo stesso storage fanno a turno, una alla volta, così ogni
+    chiamata di valutazione viene fatta una volta sola.
+    <code>max_judged_per_minute</code>, 30 per impostazione predefinita, limita
+    le chiamate al modello che una regola fa; un’esecuzione oltre il tetto
+    viene saltata, non messa in coda. Una modifica a una regola è una nuova
+    versione e vale dalla passata successiva, ogni 15 secondi. Manda la regola
+    con <code>"enabled": false</code> per fermarla.
   </p>
 
   <h2>Il punteggio arriva dopo</h2>
@@ -272,6 +422,38 @@ const url = (route: string) =>
     quello che è successo da un deploy in poi senza elencare id.
   </p>
 
+  <h2>Eseguire un esperimento dal codice</h2>
+  <p>
+    Ogni SDK ha un esecutore di esperimenti. Dagli un dataset e una tua
+    funzione: registra un esperimento, chiama la funzione una volta per caso
+    dentro un’esecuzione che nomina l’esperimento e il caso, dà un punteggio a
+    ogni risposta rispetto alla risposta attesa di quel caso, e restituisce i
+    risultati caso per caso con una media per scorer.
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    example="experiment"
+    region="experiment"
+    only={experimentLangs}
+    title="far passare un dataset nel tuo codice"
+  />
+
+  <p>
+    Girano quattro casi alla volta, se non passi un altro valore di
+    <code>concurrency</code>. Un caso la cui funzione solleva un’eccezione
+    viene registrato come esecuzione fallita con il suo errore, e i casi dopo
+    girano comunque. Lo span radice di ogni esecuzione porta
+    <code>correlation.experiment_id</code> e l’attributo
+    <code>mcpd.dataset_item_id</code>, e gli span che apre la tua funzione si
+    annidano sotto di esso, quindi un caso fallito si apre nel waterfall come
+    qualsiasi altra esecuzione. Quando l’esecutore stesso non riesce a finire,
+    l’esperimento viene segnato <code>failed</code> con la ragione. Rileggi i
+    risultati più tardi con <code>GET /v1/api/experiments/{'{id}'}/results</code>,
+    e il percorso di un’esecuzione con
+    <code>GET /v1/api/traces/{'{id}'}/trajectory</code>.
+  </p>
+
   <h2>Confrontare due versioni</h2>
   <p>
     Registra un esperimento per ogni versione che vuoi confrontare, marca i suoi
@@ -286,15 +468,41 @@ const url = (route: string) =>
 
   <p>
     La risposta è un delta per scorer con la dimensione del campione da ogni
-    lato, e un flag <code>decidable</code>. Sotto le venti osservazioni mcpd
-    dice che il confronto non si può decidere, invece di riferire un movimento.
+    lato, un intervallo di confidenza al 95% sul delta (<code>ci_low</code>,
+    <code>ci_high</code>) e un <code>p_value</code> bilaterale, tutti e due dal
+    test t di Welch, che non presume che le due versioni varino allo stesso
+    modo. Sotto le venti osservazioni per lato, <code>decidable</code> è falso
+    e niente viene chiamato regressione.
   </p>
   <p>
-    È una regola volutamente grossolana e non è un test di significatività. Il
-    fallimento che previene è quello di sempre: una media che si è mossa su
-    quattro esecuzioni, stampata senza il suo conteggio, letta come un risultato
-    e mandata in produzione. Stampare i conteggi accanto al delta è quello che
-    impedisce di scambiare il rumore per una scoperta.
+    Uno scorer è <code>regressed</code> quando è decidibile e l’intero
+    intervallo sta dal lato peggiore dello zero. Il peggio segue la
+    <code>direction</code> dello scorer: un calo di <code>faithfulness</code> è
+    una regressione e un calo di <code>toxicity</code> è un miglioramento. Una
+    media che si è mossa dentro il proprio rumore viene riportata con il suo
+    intervallo e non come una scoperta.
+  </p>
+
+  <h3>Bloccare un deploy in base al confronto</h3>
+  <p>
+    <code>mcpd eval</code> chiede lo stesso confronto a un daemon in
+    esecuzione e lo trasforma in un codice di uscita: 0 quando nessuno scorer
+    è regredito, 1 quando uno lo è, 2 quando il confronto non si è potuto
+    fare. Mettilo nel job di CI che fa girare il tuo candidato sul dataset,
+    dopo che i punteggi sono stati archiviati.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="far fallire la build su una regressione"
+    command="mcpd eval --baseline v3 --candidate v4 --endpoint https://mcpd.internal"
+  />
+
+  <p>
+    Legge <code>MCPD_ENDPOINT</code> e <code>MCPD_API_KEY</code> come gli
+    SDK, stampa una tabella di ogni scorer con il suo intervallo, o JSON con
+    <code>--json</code>, e con <code>--require-decidable</code> fallisce anche
+    quando uno scorer ha meno di venti osservazioni per lato.
   </p>
 
   <h2>Dove gira tutto questo</h2>

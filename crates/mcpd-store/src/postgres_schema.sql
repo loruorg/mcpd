@@ -571,3 +571,13 @@ CREATE INDEX IF NOT EXISTS logs_thread ON logs (project, thread_id, timestamp)
     WHERE thread_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS logs_run ON logs (project, run_id, timestamp)
     WHERE run_id IS NOT NULL;
+
+-- Version 8: which replica runs each background job. One row per job, taken
+-- and renewed by a compare-and-set upsert, see `claim_lease`.
+CREATE TABLE IF NOT EXISTS leases (
+    job        TEXT   PRIMARY KEY,
+    holder     TEXT   NOT NULL,
+    since      BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    progress   TEXT
+);

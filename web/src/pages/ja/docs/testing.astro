@@ -2,9 +2,12 @@
 import Doc from '@/layouts/Doc.astro'
 import Command from '@/components/Command.astro'
 import Waterfall from '@/components/Waterfall.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { exampleLanguages } from '@/lib/snippets'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const locale = localeOf(Astro.url.pathname)
+const experimentLangs = exampleLanguages('experiment')
 ---
 
 <Doc
@@ -45,6 +48,16 @@ const locale = localeOf(Astro.url.pathname)
 
   <Waterfall class="not-prose my-8" />
 
+  <h2>データセットを固定する</h2>
+  <p>
+    データセットは、実行を取り込むたびに増えます。エージェントの 2 つの版を同じケースで
+    比べるには、まず固定してください。<code>POST /v1/api/datasets/{'{id}'}/versions</code>
+    は現在のケースを、二度と変わらない番号付きのバージョンにコピーします。同じケースを
+    もう一度固定しても、コピーは作らず、そのバージョンを確認します。バージョンのケースは
+    <code>GET /v1/api/datasets/{'{id}'}/items?version=2</code> で読み、バージョンの一覧は
+    <code>GET /v1/api/datasets/{'{id}'}/versions</code> で取得します。
+  </p>
+
   <h2>実行自身の回答は、期待される回答ではありません</h2>
   <p>
     <code>use_output_as_expected</code> は既定でオフであり、その既定こそが大事な部分です。
@@ -59,7 +72,7 @@ const locale = localeOf(Astro.url.pathname)
 
   <h2>組み込みのスコアラー</h2>
   <p>
-    mcpd には決定的なスコアラーが 13 種類付属します。保存済みの実行を読んで数値を返す、
+    mcpd には決定的なスコアラーが 22 種類付属します。保存済みの実行を読んで数値を返す、
     ふつうのコードです。費用はかからず、モデルを呼ぶこともなく、二度実行すれば同じ答えを返します。
     これは回帰テストが必要とする性質であり、ジャッジモデルが持たない性質です。
   </p>
@@ -79,14 +92,35 @@ const locale = localeOf(Astro.url.pathname)
       <tr><td><code>tool_efficiency</code></td><td>実行がツール呼び出し回数の上限内に収まっていること。</td></tr>
       <tr><td><code>not_a_refusal</code></td><td>回答が拒否でも謝罪でもないこと。</td></tr>
       <tr><td><code>no_leaked_secret</code></td><td>鍵、トークン、資格情報のいずれも回答に現れないこと。</td></tr>
-      <tr><td><code>span_present</code></td><td>実行が、求められた種類または名前のスパンを記録した。</td></tr>
-      <tr><td><code>tool_succeeded</code></td><td>求められたツールが動き、少なくとも一度の呼び出しが正常に終わった。</td></tr>
+      <tr><td><code>span_present</code></td><td>実行が、求められた種類または名前のスパンを記録していること。</td></tr>
+      <tr><td><code>tool_succeeded</code></td><td>求められたツールが動き、少なくとも一度の呼び出しが ok で終わっていること。</td></tr>
+      <tr><td><code>excludes</code></td><td>回答が <code>forbidden</code> の語句をどれも含まないこと。</td></tr>
+      <tr><td><code>keyword_coverage</code></td><td>段階評価。<code>keywords</code> のうち回答が触れている割合。</td></tr>
+      <tr><td><code>similarity</code></td><td>段階評価。1 から、<code>expected</code> との編集距離を長いほうの長さで割った値を引いたもの。</td></tr>
+      <tr><td><code>matches_pattern</code></td><td>回答が正規表現 <code>pattern</code> に一致すること。</td></tr>
+      <tr><td><code>tool_call_accuracy</code></td><td>段階評価。<code>expected_tools</code> のうち実行が呼んだ割合。</td></tr>
+      <tr><td><code>tool_order</code></td><td>実行が <code>expected_tools</code> をその順に呼んでいること。間に他の呼び出しがあってもかまいません。</td></tr>
+      <tr><td><code>tool_not_called</code></td><td>実行が <code>forbidden_tools</code> のどれも呼んでいないこと。</td></tr>
+      <tr><td><code>answer_length</code></td><td>回答の文字数が <code>min_chars</code> から <code>max_chars</code> の間にあること。</td></tr>
+      <tr><td><code>json_schema</code></td><td>回答が、フェンス付きでも裸でも、<code>json_schema</code> を満たす JSON であること。</td></tr>
+      <tr><td><code>trajectory</code></td><td>実行の経路。呼んだツールを <code>expected_tools</code> と、<code>trajectory_match</code> の指定（<code>strict</code>、<code>ordered</code>、<code>unordered</code>、部分点あり）で比べ、ステップ数を <code>max_steps</code> と比べ、回答にたどり着いたかを見ます。値は求めた部分の平均です。読む経路は <code>GET /v1/api/traces/{'{id}'}/trajectory</code> で見られます。</td></tr>
     </tbody>
   </table>
   <p>
-    <code>GET /v1/api/scorers</code> は同じ一覧を <code>needs_config</code> フラグ付きで返します。
-    期待される回答を必要とするスコアラーにそれが渡されなかった場合、推測せずに見送り、
-    見送ったことが報告されます。
+    テキストの比較は、<code>case_sensitive</code> を設定しない限り大文字と小文字を区別しません。
+    ツール名は、4 つのツール種別のどれかのツール呼び出しスパンの名前と完全一致で比べます。
+    <code>json_schema</code> は <code>type</code>、<code>properties</code>、
+    <code>required</code>、<code>items</code>、<code>enum</code>、<code>minimum</code>、
+    <code>maximum</code>、<code>minLength</code>、<code>maxLength</code>、
+    <code>additionalProperties: false</code> を確かめ、違反を最大 5 件まで理由に挙げます。
+    コンパイルできないパターンや、オブジェクトでないスキーマは、実行を読む前に 400 で拒否されます。
+  </p>
+  <p>
+    <code>GET /v1/api/scorers</code> は、このデーモンが知っているすべてのスコアラーを、
+    <code>kind</code>（<code>code</code>、<code>judge</code>、<code>criterion</code>）、
+    <code>direction</code>、読み取る <code>config_keys</code>、そして
+    <code>available</code> かどうかとともに返します。設定が必要なスコアラーにそれが渡されなかった場合、
+    推測せずに見送り、見送りの理由にはその設定の名前が入ります。
   </p>
 
   <h2>モデルが採点する場合</h2>
@@ -128,10 +162,45 @@ const locale = localeOf(Astro.url.pathname)
     誰も信用できない列ができあがります。
   </p>
   <p>
-    設定した基準は <code>GET /v1/api/scorers</code> には現れません。このエンドポイントが並べるのは
-    組み込みの 13 種類だけなので、そこからスコアラーの選択肢を組み立てるクライアントは
-    あなたの基準を出しません。デーモンが基準の名前を返してくる唯一の場所は、
-    未知のスコアラー id に対するエラーです。そこには組み込みと設定済みの基準が一緒に並びます。
+    設定した基準は、種別 <code>criterion</code> として <code>GET /v1/api/scorers</code>
+    に現れます。付属のルーブリックと同じ id を持つ基準は、このデーモンではそのルーブリックを置き換えます。
+  </p>
+
+  <h3>付属のルーブリック</h3>
+  <p>
+    <code>judge</code> ブロックを設定すれば、基準を 1 つも書かずに名前で指定できるルーブリックが
+    9 つ用意されています。どれも 4 つのステップで動きます。<strong>Preprocess</strong>
+    はコードで、ルートスパンの入力から問い、回答、スコアラー設定の <code>expected</code>
+    の回答、そしてコンテキストを集めます。コンテキストは、実行の <code>retrieval</code> スパンと
+    <code>rag_vector_operation</code> スパンの出力にあるすべての文章、または設定の
+    <code>context</code> リストです。<strong>Analyze</strong> は唯一のモデル呼び出しです。
+    ジャッジが回答、期待される回答、またはコンテキストを項目に分け、それぞれに yes、no、unsure の
+    判定を付けます。<strong>Score</strong> はコードで判定を数えるので、数値は項目ごとの判断に対する
+    算術であり、モデルが選んだ数値になることはありません。<strong>Reason</strong> はコードで、
+    スコアを下げた項目を挙げます。
+  </p>
+  <table>
+    <thead>
+      <tr><th>ルーブリック</th><th>読むもの</th><th>値</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>faithfulness</code></td><td>回答、コンテキスト</td><td>回答の主張のうち、コンテキストが裏付ける割合。</td></tr>
+      <tr><td><code>hallucination</code></td><td>回答、コンテキスト</td><td>回答の主張のうち、コンテキストと矛盾する割合。低いほど良い。</td></tr>
+      <tr><td><code>answer_relevance</code></td><td>問い、回答</td><td>回答の文のうち、問いに応えている割合。</td></tr>
+      <tr><td><code>answer_correctness</code></td><td>問い、回答、期待される回答</td><td>期待される回答の事実のうち、回答が伝えている割合。</td></tr>
+      <tr><td><code>context_precision</code></td><td>問い、コンテキスト</td><td>役に立つ文章の、順位にわたる平均適合率。</td></tr>
+      <tr><td><code>context_recall</code></td><td>期待される回答、コンテキスト</td><td>期待される回答の文のうち、コンテキストが覆う割合。</td></tr>
+      <tr><td><code>context_relevance</code></td><td>問い、コンテキスト</td><td>文章のうち、問いに関わる割合。</td></tr>
+      <tr><td><code>toxicity</code></td><td>回答</td><td>回答の文のうち、有害なものの割合。低いほど良い。</td></tr>
+      <tr><td><code>bias</code></td><td>回答</td><td>回答の意見のうち、偏っているものの割合。低いほど良い。</td></tr>
+    </tbody>
+  </table>
+  <p>
+    unsure の判定は半分として数えます。判定する対象がない回答は、低いほど良い 3 つのルーブリックでは
+    0 になり、その他では見送られます。各スコアは、項目ごとの判定を <code>metadata.steps</code> に、
+    モデル、試行、トークン数を <code>metadata.judge</code> に、デーモンの価格表で値付けした
+    呼び出しの費用を <code>cost</code> に保持します。<code>scorer_version</code> は
+    ルーブリックのバージョンとモデルを示します。
   </p>
 
   <Command
@@ -183,7 +252,11 @@ const locale = localeOf(Astro.url.pathname)
       </tr>
       <tr>
         <td>モデルに到達できなかった</td>
-        <td>ステータスと本文を添えて見送ります。レート制限は理由であって、ゼロではありません。</td>
+        <td>エンドポイントが 429、502、503、504 を返したか接続に失敗したときは、期限に余裕がある間だけ、短い間を置いてさらに 2 回試します。それでもだめなら、ステータスと本文を添えて見送ります。レート制限は理由であって、ゼロではありません。</td>
+      </tr>
+      <tr>
+        <td>ルーブリックのステップを終えられなかった</td>
+        <td>ステップの名前を挙げて見送ります。ルーブリックが読む部分が実行にないときは <code>preprocess</code>、返答が yes、no、unsure の判定のリストでないときは <code>analyze</code>、数えるものがなかったときは <code>score</code> です。</td>
       </tr>
       <tr>
         <td>応答が 1 MiB を超えた</td>
@@ -191,13 +264,67 @@ const locale = localeOf(Astro.url.pathname)
       </tr>
       <tr>
         <td>リクエストの期限に呼び出しの時間が残っていなかった</td>
-        <td>モデルを呼ばずに辞退します。採点の一回分は、503 ではなく、期限内に終えたスコアで答えます。</td>
+        <td>モデルを呼ばずに見送ります。採点の一回分は、503 ではなく、期限内に終えたスコアで答えます。</td>
       </tr>
     </tbody>
   </table>
   <p>
     ジャッジ型のスコアはいずれもモデルを <code>scorer_version</code> として記録します。
     別々のジャッジから出た 2 つのスコアは比較できず、そのことをレコード上で述べているのがこのフィールドです。
+  </p>
+  <p>
+    ジャッジ型のスコアはいずれも、自分のモデル呼び出しの実行を <code>score_trace_id</code> に
+    記録します。その実行は 1 つの <code>scorer_run</code> スパンで、ジャッジに送ったプロンプト、
+    ジャッジが書いた返答、トークン、費用を持ち、採点した実行へのリンクが付きます。おかしく見える
+    スコアは、他のモデル呼び出しと同じように開いて読めます。アプリでは、スコアの横の
+    <em>judge call</em> リンクで開きます。
+  </p>
+
+  <h2>自分で定義するスコアラー</h2>
+  <p>
+    プロジェクトは <code>POST /v1/api/scorer-definitions</code> で自分のスコアラーを保存します。
+    <code>judge</code> の定義は、あなたのエージェントのために書いた基準です。たとえば
+    <q>回答が、根拠にした返金ポリシーの節を挙げている</q>のようなもので、設定したジャッジが
+    0 から 1 で採点します。<code>code</code> の定義は、上のスコアラーの 1 つを設定を固定して
+    使うものです。たとえば、回答が触れるべきキーワードを決めた <code>keyword_coverage</code> です。
+  </p>
+  <p>
+    保存のたびに新しいバージョンになり、同一の本体は二度保存されません。スコアラー id を受け取る
+    場所ならどこでも定義を名前で指定できます。<code>cites_policy</code> は最新のバージョンを、
+    <code>cites_policy@2</code> はバージョン 2 を動かします。バージョンはすべてのスコアに載るので、
+    プロンプトを変えても、古いスコアの意味が変わることはありません。定義は、mcpd が付属させる
+    スコアラーや設定ファイルの基準の id を使えません。<code>GET /v1/api/scorers?project=</code>
+    は、プロジェクトの定義を付属のスコアラーと並べて、種別 <code>custom</code> として一覧します。
+    アプリの Evaluations 画面で作成、編集できます。
+  </p>
+
+  <h2>ライブ採点</h2>
+  <p>
+    評価ルールは、実行が終わるたびにバックグラウンドで採点し、source <code>live</code>
+    のスコアを書きます。ルールは、動かすスコアラー、採点する実行の割合、そして対象の実行を
+    指定します。対象はルートステップの名前、種別、環境、結果、タグで決めます。
+    <code>POST /v1/api/evaluation-rules</code> で保存します。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="終わった checkout の実行の 10 分の 1 を採点する"
+    command={`curl -X POST 'localhost:4317/v1/api/evaluation-rules?project=support-desk' \\
+  -H 'content-type: application/json' \\
+  -d '{"id": "checkout-quality", "enabled": true, "scorers": ["answered", "cites_policy"],
+       "sample_rate": 0.1, "name": "checkout"}'`}
+  />
+
+  <p>
+    リクエストで有効にしない限り、ルールは無効の状態で保存され、指定したスコアラーはすべて保存時に
+    解決されます。どの実行を標本にするかはルール id とトレース id のハッシュで決まるので、同じ実行は
+    どのレプリカでも、再起動の後でも同じく選ばれるか外れ、10% のルールが 2 つあれば別々の 10 分の 1
+    を採点します。各実行は 1 つのルールにつき 1 回だけ採点されます。1 つのストアにある
+    複数のレプリカは一度に 1 つずつ交代で動くので、各判定の呼び出しは 1 回だけ行われます。
+    <code>max_judged_per_minute</code>
+    （既定は 30）は、ルールが行うモデル呼び出しの上限です。上限を超えた実行はキューに入らず、
+    飛ばされます。ルールの変更は新しいバージョンになり、15 秒ごとの次の処理から適用されます。
+    止めるには、<code>"enabled": false</code> を付けてルールを送ってください。
   </p>
 
   <h2>採点は事後に行われます</h2>
@@ -234,6 +361,32 @@ const locale = localeOf(Astro.url.pathname)
     その時刻以降に始まった実行だけを読みます。デプロイ以降のすべてを id を並べずに採点する方法がこれです。
   </p>
 
+  <h2>コードから実験を動かす</h2>
+  <p>
+    どの SDK にも実験ランナーがあります。データセットと自分の関数を渡すと、実験を記録し、
+    実験とケースを名指しする実行の中でケースごとに 1 回関数を呼び、各回答をそのケースの期待される
+    回答に照らして採点し、ケースごとの結果をスコアラーごとの平均とともに返します。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    example="experiment"
+    region="experiment"
+    only={experimentLangs}
+    title="データセットを自分のコードに通す"
+  />
+
+  <p>
+    別の <code>concurrency</code> を渡さない限り、4 つのケースを同時に動かします。関数が例外を
+    投げたケースはエラーとともに失敗した実行として記録され、その後のケースも動き続けます。
+    各実行のルートスパンは <code>correlation.experiment_id</code> と属性
+    <code>mcpd.dataset_item_id</code> を持ち、関数が開いたスパンはその下に入れ子になるので、
+    失敗したケースも他の実行と同じようにウォーターフォールで開けます。ランナー自体が終われない
+    ときは、実験が理由とともに <code>failed</code> になります。結果は後から
+    <code>GET /v1/api/experiments/{'{id}'}/results</code> で読み直せ、実行の経路は
+    <code>GET /v1/api/traces/{'{id}'}/trajectory</code> で読めます。
+  </p>
+
   <h2>2 つの版を比べる</h2>
   <p>
     比べたい版ごとに実験を登録し、そのスコアに実験の id を付け、mcpd に差を尋ねます。
@@ -246,13 +399,37 @@ const locale = localeOf(Astro.url.pathname)
   />
 
   <p>
-    返るのはスコアラーごとの差分で、両側のサンプル数と <code>decidable</code> フラグが付きます。
-    観測が 20 件に満たない場合、mcpd は動きを報告するのではなく、この比較は判断できないと述べます。
+    返るのはスコアラーごとの差分で、両側のサンプル数、差分の 95% 信頼区間
+    （<code>ci_low</code>、<code>ci_high</code>）、両側の <code>p_value</code> が付きます。
+    どちらも Welch の t 検定によるもので、2 つの版のばらつきが同じだとは仮定しません。
+    観測が片側 20 件に満たない場合、<code>decidable</code> は false になり、何も回帰とは
+    呼ばれません。
   </p>
   <p>
-    これは意図的に大雑把な規則であって、有意差検定ではありません。防ぎたいのはよくある失敗です。
-    4 件の実行で動いた平均が、件数を伏せたまま印字され、結果として読まれ、そのまま出荷されることです。
-    差分の横に件数を並べることが、ノイズを発見と取り違えさせない歯止めになります。
+    スコアラーが <code>regressed</code> になるのは、判断可能で、区間全体がゼロより悪い側にある
+    ときです。悪い側はスコアラーの <code>direction</code> に従います。<code>faithfulness</code>
+    の低下は回帰で、<code>toxicity</code> の低下は改善です。自分のノイズの中で動いた平均は、
+    区間とともに報告され、発見としては扱われません。
+  </p>
+
+  <h3>デプロイの関門にする</h3>
+  <p>
+    <code>mcpd eval</code> は動いているデーモンに同じ比較を求め、それを終了コードに変えます。
+    回帰したスコアラーがなければ 0、あれば 1、比較できなければ 2 です。候補をデータセットに
+    対して動かす CI ジョブの中で、スコアが保存された後に置いてください。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="回帰があればビルドを失敗させる"
+    command="mcpd eval --baseline v3 --candidate v4 --endpoint https://mcpd.internal"
+  />
+
+  <p>
+    SDK と同じく <code>MCPD_ENDPOINT</code> と <code>MCPD_API_KEY</code> を読み、
+    すべてのスコアラーを区間とともに表で出力します。<code>--json</code> なら JSON です。
+    <code>--require-decidable</code> を付けると、片側の観測が 20 件に満たないスコアラーが
+    あるときも失敗します。
   </p>
 
   <h2>これが動く場所</h2>

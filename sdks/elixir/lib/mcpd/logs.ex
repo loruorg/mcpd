@@ -80,7 +80,11 @@ defmodule Mcpd.Logs do
     if String.valid?(value), do: value, else: inspect(value)
   end
 
-  defp encode(value, _depth) when is_number(value) or is_boolean(value) or is_nil(value), do: value
+  # `:json` decodes a JSON null as `:null` and writes only `:null` as null:
+  # `nil` would go out as the string "nil", and `:null` turned into a string
+  # by the atom clause below would go out as "null".
+  defp encode(value, _depth) when is_nil(value) or value == :null, do: :null
+  defp encode(value, _depth) when is_number(value) or is_boolean(value), do: value
   defp encode(value, _depth) when is_atom(value), do: Atom.to_string(value)
 
   defp encode(%Date{} = value, _depth), do: Date.to_iso8601(value)

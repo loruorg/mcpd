@@ -3,9 +3,26 @@ import Doc from '@/layouts/Doc.astro'
 import Waterfall from '@/components/Waterfall.astro'
 import Command from '@/components/Command.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import fs from 'node:fs'
+import path from 'node:path'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const locale = localeOf(Astro.url.pathname)
+
+/* The built-in book, read at build time from the file the daemon embeds, so
+   the counts and dates below cannot drift from what the binary prices with. */
+const book = JSON.parse(
+  fs.readFileSync(path.resolve(process.cwd(), '..', 'crates/mcpd-core/prices/builtin.json'), 'utf8'),
+)
+const bookTables = [
+  { name: 'models', note: 'precios de lista del propio fabricante, usados cuando no se aplica ninguna tabla de proveedor', count: Object.keys(book.models).length },
+  ...Object.entries(book.providers as Record<string, Record<string, unknown>>)
+    .map(([name, t]) => ({ name: `providers.${name}`, note: '', count: Object.keys(t).length }))
+    .sort((a, b) => b.count - a.count),
+]
+const tiered = Object.values(book.models as Record<string, { tiers?: unknown[] }>).filter((m) => m.tiers?.length).length
+const multipliers = Object.entries(book.service_tier_multipliers as Record<string, Record<string, number>>)
+  .flatMap(([p, t]) => Object.entries(t).map(([tier, m]) => ({ provider: p, tier, m })))
 
 /* Written here rather than read from an example program: these are queries a
    reader runs against their own daemon, not code CI can execute. */
@@ -99,7 +116,7 @@ const response = [
 
 <Doc
   title="Contabilidad de costos"
-  description="Cómo mcpd convierte los recuentos de tokens en una cifra de costo: se tarifa en la ingesta, los tokens en caché se cobran aparte y un modelo desconocido queda sin tarifar, no gratis."
+  description="Cómo mcpd convierte los tokens en costo: se tarifa en la ingesta para que el historial no cambie, los tokens en caché se cobran aparte y un modelo desconocido queda sin tarifar."
   lede="Una cifra de costo solo vale si puedes decir de dónde salió. Aquí está cada paso entre un recuento de tokens y un número en la pantalla."
   og="docs"
 >
@@ -209,6 +226,11 @@ const response = [
         <td>Se cobran a <code>output</code>.</td>
       </tr>
       <tr>
+        <td><code>image_input</code>, <code>image_output</code></td>
+        <td>Tokens de imagen, donde un proveedor los tarifa aparte del texto.</td>
+        <td>Se cobran a <code>input</code> o a <code>output</code>.</td>
+      </tr>
+      <tr>
         <td><code>reasoning</code></td>
         <td>Tokens de razonamiento oculto, donde un proveedor los factura aparte.</td>
         <td>
@@ -220,6 +242,32 @@ const response = [
       </tr>
     </tbody>
   </table>
+
+  <h2>Prompts largos y niveles de servicio</h2>
+  <p>
+    Varios proveedores cobran más por cada token de un prompt largo. Una entrada
+    de modelo puede llevar <code>tiers</code>, cada uno con un umbral
+    <code>above_input_tokens</code> y sus propias tarifas. El prompt se mide con
+    sus tokens en caché, y cuando pasa un umbral toda la llamada se tarifa a ese
+    nivel: un prompt de 300,000 tokens a <code>gemini-2.5-pro</code> paga la
+    tarifa de contexto largo por los 300,000. Un medidor que el nivel omite
+    conserva la tarifa base.
+  </p>
+  <p>
+    Una llamada en un nivel de servicio más barato, como una solicitud por
+    lotes, se tarifa con el descuento del proveedor. mcpd lee el nivel de
+    <code>gen_ai.response.service_tier</code>, y luego de
+    <code>gen_ai.openai.response.service_tier</code>,
+    <code>mcpd.service_tier</code>, <code>llm.service_tier</code> y los
+    atributos de solicitud equivalentes. <code>default</code>,
+    <code>standard</code> y <code>auto</code> se leen como el nivel estándar. Un
+    modelo puede llevar sus propias tarifas para un nivel en
+    <code>service_tiers</code>; si no, se aplican los
+    <code>service_tier_multipliers</code> del libro para ese proveedor. La cifra
+    anota el nivel, así que una llamada por lotes guarda
+    <code>builtin+batch</code> como su libro y se lee como de mitad de precio
+    por un motivo.
+  </p>
 
   <h2>Un token en caché se cobra una vez</h2>
   <p>
@@ -248,13 +296,10 @@ const response = [
     reportado menos todos los campos medidos.
   </p>
   <p>
-    Una regla cubre los medidores sin tarifa. Un medidor para el que el libro no
-    tiene tarifa se cobra solo como parte del resto, así que cuando el proveedor
-    envió además un recuento <code>text</code> no se cobra en absoluto. Los
-    tokens de razonamiento caen ahí siempre que tu libro no les dé una tarifa
-    propia, y declarar una lo arregla. Los tokens de imagen caen ahí siempre,
-    porque un libro no tiene ninguna tarifa de imagen que dar, así que en una
-    carga muy multimodal lee la cifra como baja y no como exacta.
+    Un medidor para el que el libro no tiene tarifa se cobra como parte del
+    resto. Da a los tokens de razonamiento o de imagen una tarifa propia cuando
+    tu proveedor los factura aparte y reporta además un recuento
+    <code>text</code> separado.
   </p>
 
   <h2>Un modelo desconocido no tiene costo, no un costo de cero</h2>
@@ -263,8 +308,8 @@ const response = [
     campo de costo. No guarda un cero.
   </p>
   <p>
-    Cero es una afirmación: esta llamada fue gratis. Ausente dice que el libro
-    no tiene precio para esta llamada. Llevan a decisiones distintas, y una
+    Cero es una afirmación: esta llamada fue gratis. Ausente es una admisión: no
+    sabemos lo que costó esta llamada. Llevan a decisiones distintas, y una
     herramienta que reporta la segunda como la primera está mintiendo sobre una
     factura. La misma regla recorre la ruta de lectura, donde una ejecución
     cuyos spans no suman nada se devuelve sin cifra de costo en lugar de con un
@@ -284,9 +329,10 @@ const response = [
   <p>
     El id de un span es el que envió tu cliente, y los clientes lo decoran. Una
     pasarela le antepone su proveedor, una nube le antepone su región, un
-    proveedor le fija una fecha de publicación. Un libro se indexa por nombres
-    de modelo desnudos, así que la búsqueda prueba cuatro cosas en orden y para
-    en el primer acierto.
+    proveedor le fija una fecha de publicación. Cuando el span nombra un
+    proveedor, primero se busca en la tabla de ese proveedor en el libro y
+    después en la tabla <code>models</code> del propio fabricante. En cada
+    tabla, la búsqueda prueba estos pasos en orden y para en el primer acierto.
   </p>
 
   <table>
@@ -320,73 +366,111 @@ const response = [
 
   <p>
     Se reconocen los sufijos <code>-YYYY-MM-DD</code> y
-    <code>-YYYYMMDD</code>. Fallar los cuatro pasos es un desenlace normal y no
-    un error: significa sin costo, como arriba.
+    <code>-YYYYMMDD</code>. Cuando ninguno de los cuatro encuentra el modelo,
+    se vuelven a ejecutar sobre el id sin la etiqueta de versión de la nube, así
+    que <code>claude-sonnet-4-5@20250929</code> en Vertex AI y
+    <code>anthropic.claude-sonnet-4-5-20250929-v1:0</code> en Bedrock resuelven,
+    y después con los puntos entre dígitos escritos como guiones, así que
+    <code>claude-sonnet-4.5</code> encuentra <code>claude-sonnet-4-5</code>. Si
+    no hay ninguna coincidencia, no hay costo, como arriba.
+  </p>
+  <p>
+    Un proveedor se busca con la misma tolerancia: el nombre tal cual, un alias
+    que lista el libro (<code>azure</code> para <code>az.ai.openai</code>), y el
+    nombre sin su primer segmento de fabricante, así que
+    <code>aws.bedrock</code> encuentra la tabla <code>bedrock</code>.
   </p>
 
   <h2>El libro que se incluye</h2>
   <p>
-    mcpd lleva un pequeño libro integrado para que <code>docker run</code>
-    produzca cifras reales sin ninguna configuración. Se llama
-    <code>builtin</code>, tarifa en USD, y todos los costos que produce anotan
-    ese nombre.
+    mcpd lleva un libro integrado para que <code>docker run</code> produzca
+    cifras reales sin ninguna configuración. Se llama <code>builtin</code>,
+    tarifa en USD, y todos los costos que produce anotan ese nombre. Contiene
+    los precios de lista de todos los grandes fabricantes de modelos y de las
+    nubes y pasarelas que revenden sus modelos, tal como estaban el
+    {book.as_of}. {tiered} de sus modelos del propio fabricante llevan niveles
+    de contexto largo.
   </p>
 
-  {/* Transcribed from `builtin_book` in crates/mcpd-core/src/cost.rs. When a
-      rate moves there, it moves here. */}
   <table>
     <thead>
-      <tr>
-        <th>Modelo</th><th>Input</th><th>Output</th><th>Lectura de caché</th><th>Escritura en caché, 5 min</th><th>Escritura en caché, 1 hora</th>
-      </tr>
+      <tr><th>Tabla</th><th>Modelos</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>claude-opus-4</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-1</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-5</code></td><td>5.00</td><td>25.00</td><td>0.50</td><td>6.25</td><td>10.00</td></tr>
-      <tr><td><code>claude-sonnet-4</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-sonnet-4-5</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-haiku-4-5</code></td><td>1.00</td><td>5.00</td><td>0.10</td><td>1.25</td><td>2.00</td></tr>
-      <tr><td><code>claude-3-5-haiku</code></td><td>0.80</td><td>4.00</td><td>0.08</td><td>1.00</td><td>1.60</td></tr>
-      <tr><td><code>gpt-4o</code></td><td>2.50</td><td>10.00</td><td>1.25</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>gpt-4o-mini</code></td><td>0.15</td><td>0.60</td><td>0.075</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>gpt-4.1</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>gpt-4.1-mini</code></td><td>0.40</td><td>1.60</td><td>0.10</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>o3</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>o4-mini</code></td><td>1.10</td><td>4.40</td><td>0.275</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>gemini-2.5-pro</code></td><td>1.25</td><td>10.00</td><td>0.31</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>gemini-2.5-flash</code></td><td>0.30</td><td>2.50</td><td>0.075</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>text-embedding-3-small</code></td><td>0.02</td><td>0.00</td><td>a input</td><td>a input</td><td>a input</td></tr>
-      <tr><td><code>text-embedding-3-large</code></td><td>0.13</td><td>0.00</td><td>a input</td><td>a input</td><td>a input</td></tr>
+      {bookTables.map((t) => (
+        <tr><td><code>{t.name}</code>{t.note && <>: {t.note}</>}</td><td>{t.count}</td></tr>
+      ))}
+    </tbody>
+  </table>
+
+  <table>
+    <thead>
+      <tr><th>Proveedor</th><th>Nivel de servicio</th><th>Multiplicador</th></tr>
+    </thead>
+    <tbody>
+      {multipliers.map((m) => (
+        <tr><td><code>{m.provider}</code></td><td><code>{m.tier}</code></td><td>{m.m}</td></tr>
+      ))}
     </tbody>
   </table>
 
   <p>
-    USD por millón de tokens, tal como estaba el libro la última vez que se
-    contrastó con un catálogo de modelos de terceros, fecha que el libro anota
-    como su <code>as_of</code>. Las entradas de Anthropic llevan las dos tarifas
-    de escritura en caché porque el daemon recae de la tarifa de una hora en la
-    de cinco minutos, y un libro que omitiera la larga cobraría de menos en
-    silencio. OpenAI no cobra nada por escribir en su caché, así que allí una
-    escritura en caché se factura a la tarifa de entrada.
-    <code>gemini-2.5-flash</code> lleva además una tarifa de audio de entrada de
-    1.00; el resto de las entradas tarifan el audio a su tarifa de texto. No
-    existe <code>claude-haiku-4</code>: el id que sirve Anthropic es
-    <code>claude-haiku-4-5</code>, y un id que no resuelve a nada se queda sin
-    tarifar en lugar de adivinado.
+    Estos son precios de lista publicados. Para ver la tarifa de cualquier
+    modelo, pregunta al binario, que usa la misma búsqueda que la ingesta:
   </p>
+
+  <Command class="not-prose my-6" command="mcpd prices show claude-sonnet-4-5 --provider aws.bedrock" />
+
+  <h2>Tu propio libro</h2>
   <p>
-    Estos son precios de lista publicados en dólares estadounidenses. Todos los
-    despliegues tarifan con la tabla integrada de arriba, y un modelo que esa
-    tabla no nombra se queda sin tarifar. El libro es corto a propósito, porque
-    uno largo se quedaría desactualizado en más sitios.
+    Carga un libro propio con <code>--price-book</code>, o con la clave
+    <code>price_book</code> del archivo de configuración. Un libro es JSON: un
+    <code>id</code>, una <code>currency</code> ISO 4217, y las tablas
+    <code>models</code> y <code>providers</code>, cada una de las cuales asocia
+    un id de modelo con las tarifas de arriba. Con
+    <code>"extends": "builtin"</code> se superpone al libro integrado, así que
+    solo necesita las tarifas que pagas de otra manera:
   </p>
+
+  <pre><code>{`{
+  "id": "acme-2026-10",
+  "currency": "USD",
+  "extends": "builtin",
+  "providers": {
+    "bedrock": {
+      "anthropic.claude-sonnet-4-5-20250929-v1:0": { "input": 2.7, "output": 13.5 }
+    }
+  },
+  "models": {
+    "our-finetune": { "input": 0.5, "output": 1.5 }
+  }
+}`}</code></pre>
+
   <p>
-    Un libro es un id, una moneda ISO 4217 y un mapa de id de modelo a tarifas.
-    Cada cifra lleva estampado el id del libro que la produjo, para poder
-    distinguir dos libros después, y los precios de un proyecto comparten una
-    moneda: mcpd suma los spans de una ejecución aritméticamente y no convierte
-    entre monedas.
+    mcpd comprueba el libro al arrancar y rechaza uno con una tarifa negativa,
+    niveles desordenados o una moneda que no sea un código de tres letras, y
+    nombra la entrada. Las cifras de tu libro anotan su id, así que después se
+    pueden distinguir de las estimaciones a precio de lista. Las ejecuciones de
+    un proyecto suman sus spans aritméticamente, así que mantén todas las
+    tarifas de un libro en una sola moneda.
+  </p>
+
+  <h2>Actualizar las tarifas</h2>
+  <p>
+    Las tarifas cambian cada pocas semanas. <code>mcpd prices refresh</code>
+    escribe un libro a partir de un catálogo público de modelos, así que un
+    despliegue puede tomar tarifas nuevas sin una versión nueva:
+  </p>
+
+  <Command class="not-prose my-6" command="mcpd prices refresh --out /etc/mcpd/prices.json" />
+
+  <p>
+    Apunta <code>--price-book</code> al archivo y reinicia. Un modelo que el
+    libro de <code>--out</code> ya tarifa y que el catálogo ya no lista se
+    conserva, porque el tráfico hacia un modelo retirado sigue llegando;
+    <code>--prune</code> lo elimina. <code>--source</code> lee otro catálogo,
+    una URL o un archivo, con la misma forma. El libro integrado se escribe con
+    el mismo comando.
   </p>
 
   <h2>Leer el dinero de vuelta</h2>

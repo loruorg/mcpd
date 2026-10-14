@@ -52,6 +52,9 @@ generation.setUsage({
   inputDetails: { cacheRead: 640 },
 })
 
+// Modelin nasıl çağrıldığı. Payload değil ayardır: yakalama kapalıyken de tutulur.
+generation.setModelParameters({ temperature: 0, seed: 0, maxTokens: 1024 })
+
 // Kendiniz yakalayıp kendiniz işlediğiniz bir hata.
 generation.setError('the provider timed out', {
   kind: 'TimeoutError',
@@ -234,11 +237,37 @@ const serverless = `export default async function handler(request: Request): Pro
     yapar, böylece ikisi hiçbir zaman çelişemez.
   </p>
 
+  <p>
+    <code>setModelParameters</code>, çağrının yapıldığı ayarları kaydeder:
+    <code>temperature</code>, <code>topP</code>, <code>topK</code>, <code>maxTokens</code>, <code>seed</code>, <code>stopSequences</code> ve <code>hasResponseFormat</code>. Bunlar payload değil ayardır, bu yüzden
+    <code>capturePayloads: false</code> olduğunda da korunurlar. Önemli olan da tam bu
+    durumdur: çalıştırmayı yeniden üretmeye çalışan birinin eşleştirmesi gereken
+    değerler bunlardır. Vermediğiniz bir alan yoktur, verdiğiniz bir alan ise ne olursa olsun tutulur; yani <code>seed: 0</code> da bir seed'dir. <code>hasResponseFormat</code> arkasındaki şema
+    kaydedilmez, yalnızca bir şemanın geçerli olup olmadığı kaydedilir.
+  </p>
+
   <CodeSwitcher
     class="not-prose my-6"
     title="bir span neler taşır"
     samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: payload }]}
   />
+
+  <h3>Akışlı çağrılar</h3>
+  <p>
+    Sağlayıcının akışını <code>span.recordStream</code> işlevine verin ve onun
+    yerine sarmalayıcıyı okuyun. OpenAI chat-completion parçalarını ve
+    Anthropic mesaj olaylarını alır, her parça değişmeden geçer.
+    Metin ya da araç çağrısı taşıyan ilk parça, ilk token'a kadar geçen süreyi
+    işaretler. Akış bittiğinde, hata fırlattığında ya da bir
+    <code>break</code> ile bırakıldığında span, aynı çağrı akışsız yapılsaydı
+    <code>recordResponse</code> neyi kaydedecek idiyse onu ve çıktı olarak
+    metni alır ve biter. Akıştan gelen bir hata span'i işaretler ve size
+    değişmeden ulaşır.
+    Tutulan metin 32,768 karakterle sınırlıdır ve sınıra ulaşıldığında
+    <code>mcpd.stream.truncated</code> ayarlanır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="stream" title="akışlı bir çağrı" />
 
   <h2>Kalıcı çalıştırmalar</h2>
   <p>
@@ -320,6 +349,23 @@ const serverless = `export default async function handler(request: Request): Pro
   </p>
 
   <h2>Kaydettiğinizi doğrulama</h2>
+  <p>
+    <code>@mcpd/sdk/testing</code> içindeki <code>TestClient</code>, belleğe
+    kaydeden bir <code>Mcpd</code>'dir. Kodunuz bir istemci aldığı her yerde
+    onu verin, sonra kaydettiğini geri okuyun: ada ya da türe göre
+    <code>spans()</code>, var olması gereken tek span için
+    <code>span(name)</code>, her çalıştırma bir ağaç olarak
+    <code>trees()</code>, <code>logs()</code>, <code>metrics()</code>,
+    <code>scores()</code>, <code>recordedFeedback()</code> ve
+    <code>reset()</code>.
+    Her erişimci önce flush eder. Tuttuğu şey, bir daemon'a giderken olacağı
+    gibi örneklemeden, payload yakalamadan ve <code>redact</code> adımından
+    geçmiştir ve test çalıştırması için <code>MCPD_ENABLED=false</code>
+    ayarlandığında da açık kalır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="testing" title="bir birim testi" />
+
   <p>
     <code>RecordingSink</code> ağın yerine belleği koyar; böylece bir test,
     sınanan kodun ürettiği span'leri, logları, metrikleri, puanları ve geri

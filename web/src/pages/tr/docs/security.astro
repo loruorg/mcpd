@@ -166,8 +166,9 @@ const code = localeOf(Astro.url.pathname)
 
   <h2>Anahtarlar ve kapsamlar</h2>
   <p>
-    Kimlik doğrulama API anahtarlarıyla yapılır. Hesap yok, oturum yok, giriş
-    yok. Bir anahtar <code>Authorization: Bearer …</code> olarak veya
+    Kimlik doğrulama API anahtarlarıyla yapılır. Varsayılan olarak hesap yok,
+    oturum yok, giriş yok; <code>--signup</code> ve <code>--accounts</code>,
+    aşağıda anlatıldığı gibi bunları ekler. Bir anahtar <code>Authorization: Bearer …</code> olarak veya
     <code>X-Mcpd-Key</code> başlığında sunulur; karşılaştırmadan önce iki taraf
     da SHA-256 ile özetlenir, böylece ne yapılandırılmış anahtarın uzunluğu ne de
     ilk yanlış karakterin konumu zamanlamadan gözlenebilir.
@@ -216,6 +217,60 @@ const code = localeOf(Astro.url.pathname)
     <a href={urlFor('/docs/reference/api', code)} class="link">HTTP API</a>
     referansında yayımlanır; böylece “bu endpoint neye ihtiyaç duyar” sorusunun
     belge başına bir değil, tek bir yanıtı olur.
+  </p>
+
+  <h3>Hesaplar, --signup veya --accounts ile</h3>
+  <p>
+    <code>--signup</code> ile herkes bir e-posta ve bir parolayla hesap
+    açabilir; <code>--accounts</code> ile insanlar davet, tek oturum açma ya da
+    SCIM yoluyla gelir. Her hesap projesi bir kuruluşa aittir ve bir üyenin
+    oradaki rolü (owner, admin, member ya da viewer; isteğe bağlı olarak tek
+    bir projede başka bir rolle değiştirilir) altı kapsama eşlenir. Bir oturum,
+    rolün hesabın kuruluşlarındaki her projede izin verdiği kapsamları taşır;
+    bir anahtar ise tek bir projede tek bir kapsam taşır ve bunu yalnızca
+    oluşturan kişinin rolü hâlâ izin verdiği sürece yapar. Hesabın üyesi
+    olmadığı bir kuruluşun projesine hiçbir şey erişmez. Bir hesap anahtarının
+    gönderdiği sinyal, hangi projeyi adlandırırsa adlandırsın anahtarın
+    projesine saklanır ve idempotency anahtarı proje başına tutulur; böylece
+    bir hesap başka bir hesabın yığınını yeniden gönderim gibi gösteremez.
+    Anahtarları yalnızca bir oturum listeleyebilir, oluşturabilir ya da iptal
+    edebilir; yani sızan bir anahtar yenilerini üretemez.
+  </p>
+  <p>
+    Parolalar argon2id ile özetlenir. Belirteçler, anahtarlar, e-postayla
+    gönderilen bağlantılar, davet belirteçleri, kurtarma kodları ve SCIM
+    belirteçleri rastgele değerlerdir, bir kez gösterilir ve yalnızca SHA-256
+    özetleri olarak saklanır. Kayıt, giriş ve parola sıfırlama, bir adresin
+    hesabı olsa da olmasa da aynı yanıtı verir ve gerisini o adrese giden bir
+    e-postada söyler. Hesap giriş yapmadan önce adres bir bağlantıyla
+    doğrulanır. İki adımlı giriş zamana dayalı kodlar kullanır, daha önce
+    kullanılmış bir kodu reddeder ve tek kullanımlık on kurtarma kodu verir.
+    Her kimlik bilgisi kapısı istemci adresi başına, başarısız girişler de
+    e-posta başına sınırlanır. Parola oturumları 30 gün, tek oturum açma
+    oturumları 24 saat sürer; bir hesap oturumlarını listeleyip sonlandırabilir
+    ve parolayı değiştirmek ya da sıfırlamak diğer oturumları sonlandırır.
+  </p>
+  <p>
+    Tek oturum açma; PKCE, tek seferlik bir state ve bir nonce ile, artı girişi
+    başlatan tarayıcının tuttuğu bir sırla çalışan OpenID Connect'tir; böylece
+    bir giriş bağlantısı başkasına verilemez. ID belirtecinin imzası, vereni,
+    hedef kitlesi, son kullanma zamanı ve nonce değeri denetlenir; simetrik
+    algoritmalar reddedilir. Bir kişi, sağlayıcıdaki kimliğiyle bulunur; yeni
+    bir hesap yalnızca kuruluşun sahiplendiği bir alan adındaki bir adres için
+    oluşturulur, var olan bir hesap hiçbir zaman ele geçirilmez ve oturum
+    yalnızca o kuruluşun projelerine erişir. SCIM, bir kuruluşun kullanıcılarını
+    ve gruplarını başka hiçbir şeye erişmeyen bir belirteçle sağlar; sağlamanın
+    kaldırılması üyeliği, onun anahtarlarını ve oturumlarını sonlandırır.
+    <a href={urlFor('/docs/accounts', code)} class="link">Hesaplar ve kuruluşlar</a>
+    sayfasına bakın.
+  </p>
+  <p>
+    Bu mod, anahtarı olmayan bir kapsamın açık olduğu kuralını da kapatır:
+    kimlik bilgisi taşımayan bir istek, yoklamalar, kayıt ve giriş dışında her
+    yerde reddedilir. Yapılandırılmış anahtarlar önce denenir ve erişimlerini
+    korur. Seçenekler için
+    <a href={`${urlFor('/docs/configuration', code)}#signup`} class="link">Açık kayıt</a>
+    bölümüne bakın.
   </p>
 
   <h3>Geri düşme ve elinizdeki anahtar için anlamı</h3>
@@ -354,7 +409,9 @@ const code = localeOf(Astro.url.pathname)
     ve <code>admin</code> kapsamını ister.
   </p>
   <p>
-    On sekiz eylem kaydedilir: <code>get_trace</code>, <code>list_spans</code>,
+    Kırk dört eylem kaydedilir. Yirmisi verinin okunması ve silinmesidir:
+    <code>get_trace</code>, <code>get_trajectory</code>, önizleme
+    istendiğinde <code>list_traces</code>, <code>list_spans</code>,
     <code>list_logs</code>, <code>list_feedback</code>,
     <code>list_dataset_items</code>, <code>capture_into_dataset</code>,
     <code>read_trace_aspect_notes</code>, <code>get_theme</code>, <code>get_theme_flow</code>, <code>list_theme_history</code>, <code>list_theme_examples</code>,
@@ -365,10 +422,31 @@ const code = localeOf(Astro.url.pathname)
     payload'dır. Trace'leri listelemek adlardan, sürelerden, token
     sayılarından ve maliyetten oluşan, içinde prompt veya tamamlama bulunmayan bir
     izdüşüm döndürür, bu yüzden kaydedilmez; o trace'lerden birini açmak
-    kaydedilir, çünkü metin oradadır. Kalıcı çalıştırmaları listelemek
+    kaydedilir, çünkü metin oradadır. Girdi ve çıktı önizlemeleri istenen bir
+    liste de aynı nedenle kaydedilir. Kalıcı çalıştırmaları listelemek
     kaydedilir, çünkü listedeki her çalıştırma girdisini, çıktısını ve durum
     verisini gönderildikleri gibi taşır. Bir çalıştırmanın reddedilen bir
     okuması, çalıştırmanın sahibi olan projenin altında kaydedilir.
+  </p>
+  <p>
+    Diğer yirmi dördü, hesapları olan bir daemon'da kimin neye erişebildiğine
+    yapılan değişikliklerdir. Bir proje yerine kuruluşun kimliğine karşı
+    yazılır, özne olarak eylemi yapan hesabın e-postasını taşır ve bir admin
+    ya da owner tarafından <code>GET /v1/api/orgs/{'{org_id}'}/audit</code>
+    ile okunur:
+    <code>org_create</code>, <code>org_update</code>, <code>org_delete</code>,
+    <code>member_invite</code>, <code>invite_revoke</code>,
+    <code>invite_accept</code>, <code>member_role</code>,
+    <code>member_project_role</code>, <code>member_remove</code>,
+    <code>project_create</code>, <code>project_delete</code>,
+    <code>org_key_revoke</code>, <code>group_roles_update</code>,
+    <code>sso_update</code>, <code>sso_delete</code>, <code>sso_login</code>,
+    <code>scim_token_rotate</code>, <code>scim_token_revoke</code>,
+    <code>scim_user_create</code>, <code>scim_user_update</code>,
+    <code>scim_user_delete</code>, <code>scim_group_create</code>,
+    <code>scim_group_update</code> ve <code>scim_group_delete</code>. Bir SCIM
+    değişikliği özne olarak <code>scim</code>, sorumlu olarak da SCIM
+    belirtecinin özetini taşır.
   </p>
   <p>
     Worker çağrıları kaydedilmez: bir adımı talep etmek, başladığını bildirmek,
@@ -391,8 +469,10 @@ const code = localeOf(Astro.url.pathname)
       gelen bir istek <code>anonymous</code> olarak kaydedilir.
     </li>
     <li>
-      <strong>Kişi ingress'inizden gelir.</strong> Bir satır tek başına bir
-      eylemi bir anahtara bağlar. <code>subject</code> alanı,
+      <strong>Kişi bir oturumdan ya da ingress'inizden gelir.</strong> Bir
+      kuruluş değişikliğinin satırı, eylemi yapan hesabın e-postasını taşır.
+      Bir anahtar için satır, eylemi bir insana değil anahtara bağlar.
+      <code>subject</code> alanı,
       <code>--trusted-identity-header</code> ve
       <code>--trusted-proxy-cidr</code> birlikte ayarlandığında bir kimlik
       taşır, aksi hâlde boştur ve varsayılan budur. mcpd o kimliği hiçbir zaman
@@ -409,8 +489,8 @@ const code = localeOf(Astro.url.pathname)
       <strong>Hangi anahtarı kaydeder, isteğe bağlı olarak da kimi.</strong>
       Anahtar kendisi olarak değil, kısaltılmış bir özet olarak saklanır, yani
       günlük kimlik bilgilerinin biriktiği bir yer değildir. Bu, “bunu bir admin
-      anahtarı sildi” sorusunu yanıtlar. “Hangi kişi sildi” sorusunu
-      yanıtlamak için ingress'inizin zaten koyduğu başlığı ve onu koymasına izin
+      anahtarı sildi” sorusunu yanıtlar. Bir oturum, kuruluş değişikliklerinde
+      kişiyi de adlandırır. Anahtarlar için ingress'inizin zaten koyduğu başlığı ve onu koymasına izin
       verilen adresleri verin: <code>--trusted-proxy-cidr 10.42.0.0/16</code> ile
       birlikte <code>--trusted-identity-header x-forwarded-user</code>. İki yarım
       da gereklidir. Başlık, porta erişebilen herkesin gönderebileceği bir
@@ -441,8 +521,9 @@ const code = localeOf(Astro.url.pathname)
     <li>
       <strong>Arayüz.</strong> <code>/</code> üzerindeki işaretleme, porta
       erişebilen herkese sunulur. Arkasındaki veri sunulmaz: yaptığı her istek
-      sorgu API'sinden geçer ve aynı anahtarlarla karşılaşır. Daemon'da oturum açma
-      ekranı yoktur.
+      sorgu API'sinden geçer ve aynı anahtarlarla karşılaşır.
+      <code>--signup</code> ya da <code>--accounts</code> açık değilse
+      daemon'da oturum açma ekranı yoktur.
     </li>
     <li>
       <strong>Yoklamalar ve <code>/metrics</code>.</strong> Bilerek kimlik
@@ -484,25 +565,30 @@ const code = localeOf(Astro.url.pathname)
     sayfasındadır.
   </p>
   <p>
-    <strong>Kurallar alan adlarıyla eşleşir, bir değerin biçimiyle
-    değil.</strong> <code>content</code> ya da <code>question</code> adlı bir
-    alanda gelen bir değer gönderildiği gibi saklanır; bu yüzden kimlik
-    bilgilerini ve tanımlayıcıları taşıyan alanları adlandırın.
+    Kurallar alan adlarıyla eşleşir. Bir cümlenin ortasına yapıştırılmış bir
+    kimlik bilgisi <code>content</code> ya da <code>question</code> adlı bir
+    alanda gelir; bu yüzden her dize değerinde kimlik bilgilerinin aldığı
+    biçimler de aranır: özel anahtar blokları, JSON Web Token'lar, AWS erişim
+    anahtarı kimlikleri, <code>sk-</code> ile başlayan sağlayıcı anahtarları,
+    GitHub, Slack ve Google belirteçleri, bearer belirteçleri ve URL'lerdeki
+    parolalar. Her eşleşme yerinde değiştirilir ve cümlenin geri kalanı
+    korunur. Tablo
+    <a href={urlFor('/docs/privacy', code)} class="link">Maskeleme ve saklama</a>
+    sayfasındadır.
   </p>
-  <p>Maskelemenin kapsamı kesindir:</p>
+  <p>Maskelemenin kapsadıkları:</p>
   <ul>
-    <li>Kimlik bilgilerinin ve tanımlayıcıların yapılandırılmış biçimde toplanmasını durdurur, yani bir kimlik bilgisinin ne olduğunu söyleyen adda bir alanda gelmesini.</li>
-    <li>Alan adları üzerinde çalışır. Sıradan bir alan adı altındaki serbest metin gönderildiği gibi saklanır.</li>
-    <li>Bir span'in adını ve bir log kaydının mesajını gönderildiği gibi bırakır. Bunlar payload değil, gruplama için kullanılan tanımlayıcılardır ve yeniden yazmak gruplamayı bozardı. Bir span adını bir müşterinin e-posta adresinden kurmayın.</li>
-    <li>Çalıştırma deposunu gönderildiği gibi bırakır. Kalıcı bir çalıştırmanın payload'ları onun çalışma durumudur; yalnızca bir çalıştırmanın trace deposuna yazdığı span'ler maskelenir.</li>
+    <li>Ne olduklarını söyleyen adda bir alanda gelen kimlik bilgilerini ve tanımlayıcıları, bir de yukarıdaki biçimlerdeki kimlik bilgilerini bir dizenin neresinde olurlarsa olsunlar maskeler.</li>
+    <li>Bir cümleye yazılmış parola gibi sabit bir öneki olmayan bir sır, geldiği alana göre maskelenir.</li>
+    <li>Bir span'in adına ve bir log kaydının mesajına dokunmaz. Bunlar payload değil, gruplama için kullanılan tanımlayıcılardır ve yeniden yazmak gruplamayı bozardı. Bir span adını bir müşterinin e-posta adresinden kurmayın.</li>
+    <li>Çalıştırma deposuna dokunmaz. Kalıcı bir çalıştırmanın payload'ları onun çalışma durumudur ve gönderildikleri gibi tutulur; yalnızca bir çalıştırmanın trace deposuna yazdığı span'ler maskelenir.</li>
   </ul>
   <p>
-    Bir denetim biçim üzerinde, sonradan tespit olarak çalışır: yerleşik <code>no_leaked_secret</code> puanlayıcısı, <em>yanıtında</em> kimlik
-    bilgisine benzeyen bir belirteç taşıyan çalıştırmanın puanını düşürür; bunu
-    bilinen bir önekten ya da uzun, karışık büyük küçük harfli alfanümerik bir
-    diziden anlar. Zaten saklanmış bir çalıştırmanın yanıtını puanlar, hiçbir
-    şeyi kaldırmaz ve yalnızca siz istediğinizde çalışır. Bunu ikinci bir
-    maskeleme katmanı olarak değil, bunun olduğunu öğrenmek için kullanın.
+    Yerleşik <code>no_leaked_secret</code> puanlayıcısı sonradan tespit ekler:
+    <em>yanıtında</em> kimlik bilgisine benzeyen bir belirteç taşıyan
+    çalıştırmanın puanını düşürür; bunu bilinen bir önekten ya da uzun, karışık
+    büyük küçük harfli alfanümerik bir diziden anlar. Zaten saklanmış bir
+    çalıştırmayı puanlar ve yalnızca siz istediğinizde çalışır.
   </p>
   <p>
     Bir kural eşleşse de eşleşmese de iki sınır geçerlidir. 128 KiB'den uzun her
@@ -564,19 +650,7 @@ const code = localeOf(Astro.url.pathname)
         <td>TLS'i ingress'inizde veya mesh'inizde sonlandırın ve daemon'un portunu güvenilmeyen ağların dışında tutun.</td>
       </tr>
       <tr>
-        <td><strong>Tek oturum açma.</strong> Bir kişinin kimliği mcpd'nin önündeki proxy'den gelir.</td>
-        <td>Arayüzü, zaten çalıştırdığınız kimlik proxy'sinin arkasına koyun. Bir kişinin kimliği, o proxy'nin belirlediği şeydir.</td>
-      </tr>
-      <tr>
-        <td><strong>Sağlama.</strong> mcpd'nin içinde birim bir anahtardır.</td>
-        <td>Sağlamayı proxy'de yapın. mcpd'nin içinde bir anahtarı bir listeye ekleyin veya listeden çıkarın.</td>
-      </tr>
-      <tr>
-        <td><strong>Roller.</strong> Yetkilendirme altı kapsamdan biri ve bir proje listesidir.</td>
-        <td>Anahtara ve projeye göre ayırın. Bir ayrım önemliyse onu bir proje yapın.</td>
-      </tr>
-      <tr>
-        <td><strong>Bir kişinin kim olduğu.</strong> Denetim günlüğü, ingress'inizin öne sürdüğü özneyi yalnızca adını verdiğiniz bir adresten kaydeder.</td>
+        <td><strong>Bir kişinin kim olduğu, anahtarlar için.</strong> Oturumlar hesabı adlandırır. Bir anahtar için denetim günlüğü, ingress'inizin öne sürdüğü özneyi adını verdiğiniz bir adresten kaydeder.</td>
         <td><code>--trusted-identity-header</code> ve <code>--trusted-proxy-cidr</code> ayarlayın ki proxy'nizin zaten koyduğu başlık denetim satırına ulaşsın. Bunlar olmadan bir satır eylemi bir anahtara bağlar, ekip başına bir anahtar vermek de özeti daraltır.</td>
       </tr>
       <tr>

@@ -223,7 +223,9 @@ const MIGRATION_LOCK: i64 = 0x6d63_7064_0001;
 /// is safe only because every column of `traces` is derived.
 ///
 /// 7 adds `documents` and `document_labels`, two new tables.
-const SCHEMA_VERSION: i32 = 7;
+///
+/// 8 adds `leases`, one new table.
+const SCHEMA_VERSION: i32 = 8;
 
 /// The first version whose `traces` table is keyed by project as well.
 const TRACES_BY_PROJECT: i32 = 5;
@@ -3816,6 +3818,59 @@ impl Store for PostgresStore {
                 version: r.get::<_, i64>(2).clamp(0, i64::from(u32::MAX)) as u32,
             })
             .collect())
+    }
+
+    // -------------------------------------------------------------- leases
+
+    async fn claim_lease(&self, c: &crate::LeaseClaim<'_>) -> Result<crate::Lease> {
+        let conn = self.conn().await?;
+        let (now, expires) = (to_nanos(c.now), to_nanos(c.now + c.ttl));
+        // One statement, so it is the compare-and-set: a concurrent claim on
+        // the same row waits for this one's lock and then evaluates the
+        // `WHERE` against the row this one wrote. Every column on the right of
+        // `SET` reads the row as it was before.
+        conn.execute(
+            "INSERT INTO leases (job, holder, since, expires_at, progress)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (job) DO UPDATE SET
+                 since = CASE WHEN leases.holder = excluded.holder AND leases.expires_at > $3
+                              THEN leases.since ELSE excluded.since END,
+                 holder = excluded.holder,
+                 expires_at = excluded.expires_at,
+                 progress = COALESCE(excluded.progress, leases.progress)
+             WHERE leases.holder = excluded.holder OR leases.expires_at <= $3",
+            &[&c.job, &c.holder, &now, &expires, &c.progress],
+        )
+        .await
+        .map_err(be)?;
+        let r = conn
+            .query_one(
+                "SELECT job, holder, since, expires_at, progress FROM leases WHERE job = $1",
+                &[&c.job],
+            )
+            .await
+            .map_err(be)?;
+        Ok(crate::Lease {
+            job: r.get(0),
+            holder: r.get(1),
+            since: from_nanos(r.get(2)),
+            expires_at: from_nanos(r.get(3)),
+            progress: r.get(4),
+        })
+    }
+
+    async fn release_lease(&self, job: &str, holder: &str, now: OffsetDateTime) -> Result<()> {
+        let now = to_nanos(now);
+        self.conn()
+            .await?
+            .execute(
+                "UPDATE leases SET expires_at = $3
+                 WHERE job = $1 AND holder = $2 AND expires_at > $3",
+                &[&job, &holder, &now],
+            )
+            .await
+            .map_err(be)?;
+        Ok(())
     }
 
     // ----------------------------------------------------- aspect analysis

@@ -52,6 +52,9 @@ generation.setUsage({
   inputDetails: { cacheRead: 640 },
 })
 
+// モデルをどう呼び出したか。ペイロードではなく設定なので、取り込みを切っても残る。
+generation.setModelParameters({ temperature: 0, seed: 0, maxTokens: 1024 })
+
 // 自分で捕まえて処理した失敗。
 generation.setError('the provider timed out', {
   kind: 'TimeoutError',
@@ -160,7 +163,7 @@ const serverless = `export default async function handler(request: Request): Pro
   </p>
   <p>
     <code>capturePayloads: false</code> にすると、プロンプトと補完はプロセスの
-    中に留まります。スパンは所要時間、ステータス、使用量、モデル、相関、
+    中に留まります。スパンは所要時間、ステータス、使用量、モデル、モデルパラメーター、相関、
     エラーとともに記録され、<code>input</code> と <code>output</code> はキューに
     入る前に捨てられます。フラッシュで機密が外に出ることはありません。個々の
     スパンは開始オプションの <code>capturePayloads</code> でこの設定を上書き
@@ -229,12 +232,39 @@ const serverless = `export default async function handler(request: Request): Pro
     付き、エラーを設定すると同時にスパンのステータスも <code>error</code> になる
     ので、この 2 つが食い違うことはありません。
   </p>
+  <p>
+    <code>setModelParameters</code> は、呼び出しに使った設定を記録します。
+    <code>temperature</code>、<code>topP</code>、<code>topK</code>、
+    <code>maxTokens</code>、<code>seed</code>、<code>stopSequences</code>、
+    <code>hasResponseFormat</code> です。これらはペイロードではなく設定なので、
+    <code>capturePayloads: false</code> でも残ります。そして大事なのはまさにその
+    場合です。実行を再現する人が合わせなければならないのは、これらの値だから
+    です。省いたフィールドは存在せず、渡したフィールドは値が何であれ保たれるので、
+    <code>seed: 0</code> もシードです。<code>hasResponseFormat</code> の背後に
+    あるスキーマは記録されず、それが有効だったかどうかだけが記録されます。
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
     title="スパンが持つもの"
     samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: payload }]}
   />
+
+  <h3>ストリーミングの呼び出し</h3>
+  <p>
+    プロバイダーのストリームを <code>span.recordStream</code> に渡し、代わりに
+    ラッパーを読んでください。OpenAI の chat completion のチャンクと Anthropic の
+    message イベントを受け取り、すべてのチャンクはそのまま通ります。テキストか
+    ツール呼び出しを持つ最初のチャンクが、最初のトークンまでの時間を記録します。
+    ストリームが終わったとき、例外を投げたとき、<code>break</code> で抜けたときに、
+    スパンは、同じ呼び出しをストリーミングなしで行った場合に
+    <code>recordResponse</code> が記録する内容と、出力としてのテキストを受け取り、
+    終了します。ストリームからのエラーはスパンに記録され、そのままあなたに届きます。
+    保持するテキストは 32,768 文字までで、上限に達したときは
+    <code>mcpd.stream.truncated</code> が設定されます。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="stream" title="ストリーミングの呼び出し" />
 
   <h2>永続実行</h2>
   <p>
@@ -314,6 +344,21 @@ const serverless = `export default async function handler(request: Request): Pro
   </p>
 
   <h2>記録した内容の検証</h2>
+  <p>
+    <code>@mcpd/sdk/testing</code> の <code>TestClient</code> は、メモリに記録する
+    <code>Mcpd</code> です。あなたのコードがクライアントを受け取る場所に渡し、
+    記録された内容を読み返してください。名前や種別で引く <code>spans()</code>、
+    必ず存在するはずの 1 つのスパンを引く <code>span(name)</code>、実行ごとの
+    ツリーを返す <code>trees()</code>、そして <code>logs()</code>、
+    <code>metrics()</code>、<code>scores()</code>、
+    <code>recordedFeedback()</code>、<code>reset()</code> です。どのアクセサーも
+    先にフラッシュします。保持される内容は、デーモンへ向かうときと同じように
+    サンプリング、ペイロードの取り込み、<code>redact</code> を通っており、テストの
+    実行に <code>MCPD_ENABLED=false</code> が設定されていても有効なままです。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['typescript']} region="testing" title="ユニットテスト" />
+
   <p>
     <code>RecordingSink</code> はネットワークをメモリに置き換えます。テストは、
     サーバーもポートもなしに、対象のコードが作ったスパン、ログ、メトリクス、

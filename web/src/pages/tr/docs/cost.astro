@@ -4,8 +4,25 @@ import Waterfall from '@/components/Waterfall.astro'
 import Command from '@/components/Command.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
+import fs from 'node:fs'
+import path from 'node:path'
 
 const code = localeOf(Astro.url.pathname)
+
+/* The built-in book, read at build time from the file the daemon embeds, so
+   the counts and dates below cannot drift from what the binary prices with. */
+const book = JSON.parse(
+  fs.readFileSync(path.resolve(process.cwd(), '..', 'crates/mcpd-core/prices/builtin.json'), 'utf8'),
+)
+const bookTables = [
+  { name: 'models', note: 'birinci taraf liste fiyatları, hiçbir sağlayıcı tablosu uygulanmadığında kullanılır', count: Object.keys(book.models).length },
+  ...Object.entries(book.providers as Record<string, Record<string, unknown>>)
+    .map(([name, t]) => ({ name: `providers.${name}`, note: '', count: Object.keys(t).length }))
+    .sort((a, b) => b.count - a.count),
+]
+const tiered = Object.values(book.models as Record<string, { tiers?: unknown[] }>).filter((m) => m.tiers?.length).length
+const multipliers = Object.entries(book.service_tier_multipliers as Record<string, Record<string, number>>)
+  .flatMap(([p, t]) => Object.entries(t).map(([tier, m]) => ({ provider: p, tier, m })))
 
 /* Written here rather than read from an example program: these are queries a
    reader runs against their own daemon, not code CI can execute. */
@@ -206,6 +223,11 @@ const response = [
         <td><code>output</code> oranından ücretlenir.</td>
       </tr>
       <tr>
+        <td><code>image_input</code>, <code>image_output</code></td>
+        <td>Bir sağlayıcının metinden ayrı fiyatladığı yerde, görüntü token'ları.</td>
+        <td><code>input</code> ya da <code>output</code> oranından ücretlenir.</td>
+      </tr>
+      <tr>
         <td><code>reasoning</code></td>
         <td>Bir sağlayıcının ayrı faturaladığı yerde, gizli akıl yürütme token'ları.</td>
         <td>
@@ -217,6 +239,31 @@ const response = [
       </tr>
     </tbody>
   </table>
+
+  <h2>Uzun prompt'lar ve hizmet katmanları</h2>
+  <p>
+    Birkaç sağlayıcı, uzun bir prompt'un her token'ı için daha fazla ücret
+    alır. Bir model kaydı <code>tiers</code> taşıyabilir; her birinin bir
+    <code>above_input_tokens</code> eşiği ve kendi oranları vardır. Prompt,
+    önbellek token'larıyla birlikte ölçülür ve bir eşiği geçtiğinde çağrının
+    tamamı o katmandan fiyatlanır: <code>gemini-2.5-pro</code> modeline giden
+    300.000 token'lık bir prompt, 300.000 token'ın tamamı için uzun bağlam
+    oranını öder. Katmanın atladığı bir sayaç temel oranı korur.
+  </p>
+  <p>
+    Toplu istek gibi daha ucuz bir hizmet katmanındaki çağrı, sağlayıcının
+    indirimiyle fiyatlanır. mcpd katmanı önce
+    <code>gen_ai.response.service_tier</code>, sonra
+    <code>gen_ai.openai.response.service_tier</code>,
+    <code>mcpd.service_tier</code>, <code>llm.service_tier</code> ve bunlara
+    karşılık gelen istek özniteliklerinden okur. <code>default</code>,
+    <code>standard</code> ve <code>auto</code> standart katman olarak okunur.
+    Bir model, bir katman için kendi oranlarını <code>service_tiers</code>
+    altında taşıyabilir; yoksa kitabın o sağlayıcı için
+    <code>service_tier_multipliers</code> değerleri uygulanır. Değer katmanı
+    kaydeder; böylece toplu bir çağrı kitap olarak <code>builtin+batch</code>
+    saklar ve yarı fiyatlı olmasının nedeni okunur.
+  </p>
 
   <h2>Önbellekten gelen token bir kez ücretlenir</h2>
   <p>
@@ -245,13 +292,10 @@ const response = [
     her alanın çıkarılmasıdır.
   </p>
   <p>
-    Oranı olmayan sayaçlar için tek bir kural vardır. Kitabın oranını tutmadığı bir
-    sayaç yalnızca kalanın parçası olarak ücretlenir, yani sağlayıcı ayrıca bir
-    <code>text</code> sayısı gönderdiyse hiç ücretlenmez. Kitabınız akıl yürütme
-    token'larına kendi oranını vermediğinde onlar buradadır ve bir oran
-    tanımlamak bunu düzeltir. Görüntü token'ları her zaman buradadır, çünkü bir
-    kitabın verebileceği bir görüntü oranı yoktur; yani ağır çok kipli bir iş
-    yükünde değeri kesin değil, düşük okuyun.
+    Kitabın oranını tutmadığı bir sayaç, kalanın parçası olarak ücretlenir.
+    Sağlayıcınız akıl yürütme ya da görüntü token'larını ayrı faturalıyor ve
+    ayrıca ayrı bir <code>text</code> sayısı bildiriyorsa, onlara kendi
+    oranlarını verin.
   </p>
 
   <h2>Bilinmeyen bir modelin maliyeti yoktur, sıfır maliyeti değil</h2>
@@ -279,8 +323,10 @@ const response = [
   <p>
     Bir span'deki kimlik, istemcinizin gönderdiği şeydir ve istemciler onu
     süsler. Bir ağ geçidi sağlayıcısını öne ekler, bir bulut bölgesini öne ekler,
-    bir sağlayıcı bir yayım tarihi iliştirir. Bir kitap çıplak model adlarıyla
-    anahtarlanır, bu yüzden arama sırayla dört şey dener ve ilk isabette durur.
+    bir sağlayıcı bir yayım tarihi iliştirir. Span bir sağlayıcı adlandırdığında,
+    önce kitaptaki o sağlayıcının tablosunda, ardından birinci taraf
+    <code>models</code> tablosunda aranır. Her tabloda arama bu adımları sırayla
+    dener ve ilk isabette durur.
   </p>
 
   <table>
@@ -314,71 +360,111 @@ const response = [
 
   <p>
     Hem <code>-YYYY-MM-DD</code> hem <code>-YYYYMMDD</code> sonekleri tanınır.
-    Dört adımın da tutmaması bir hata değil, olağan bir sonuçtur: yukarıdaki
-    gibi, maliyet yok demektir.
+    Dört adımın hiçbiri modeli bulamadığında, adımlar bulut sürüm etiketi
+    atılmış kimlik üzerinde yeniden çalışır; böylece Vertex AI'daki
+    <code>claude-sonnet-4-5@20250929</code> ve Bedrock'taki
+    <code>anthropic.claude-sonnet-4-5-20250929-v1:0</code> çözülür. Ardından
+    rakamlar arasındaki noktalar tire olarak yazılarak bir kez daha çalışır;
+    böylece <code>claude-sonnet-4.5</code>, <code>claude-sonnet-4-5</code>
+    kaydını bulur. Hiç eşleşme yoksa, yukarıdaki gibi, maliyet de yoktur.
+  </p>
+  <p>
+    Sağlayıcı da aynı hoşgörülü biçimde eşleştirilir: verilen ad, kitabın
+    listelediği bir takma ad (<code>az.ai.openai</code> için <code>azure</code>)
+    ve baştaki tek bir sağlayıcı bölümü atılmış ad; böylece
+    <code>aws.bedrock</code>, <code>bedrock</code> tablosunu bulur.
   </p>
 
   <h2>Birlikte gelen kitap</h2>
   <p>
-    mcpd küçük bir yerleşik kitap taşır, böylece <code>docker run</code> hiç
+    mcpd yerleşik bir kitap taşır, böylece <code>docker run</code> hiç
     yapılandırma olmadan gerçek değerler üretir. Adı <code>builtin</code>'dir,
-    USD üzerinden fiyatlar ve ürettiği her maliyet bu adı kaydeder.
+    USD üzerinden fiyatlar ve ürettiği her maliyet bu adı kaydeder. Her büyük
+    model sağlayıcısının ve onların modellerini yeniden satan bulutların ve ağ
+    geçitlerinin liste fiyatlarını, {book.as_of} tarihindeki hâliyle tutar.
+    Birinci taraf modellerinden {tiered} tanesi uzun bağlam katmanları taşır.
   </p>
 
-  {/* Transcribed from `builtin_book` in crates/mcpd-core/src/cost.rs. When a
-      rate moves there, it moves here. */}
   <table>
     <thead>
-      <tr>
-        <th>Model</th><th>Girdi</th><th>Çıktı</th><th>Önbellek okuma</th><th>Önbelleğe yazma, 5 dk</th><th>Önbelleğe yazma, 1 saat</th>
-      </tr>
+      <tr><th>Tablo</th><th>Model</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>claude-opus-4</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-1</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-5</code></td><td>5.00</td><td>25.00</td><td>0.50</td><td>6.25</td><td>10.00</td></tr>
-      <tr><td><code>claude-sonnet-4</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-sonnet-4-5</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-haiku-4-5</code></td><td>1.00</td><td>5.00</td><td>0.10</td><td>1.25</td><td>2.00</td></tr>
-      <tr><td><code>claude-3-5-haiku</code></td><td>0.80</td><td>4.00</td><td>0.08</td><td>1.00</td><td>1.60</td></tr>
-      <tr><td><code>gpt-4o</code></td><td>2.50</td><td>10.00</td><td>1.25</td><td>girdi oranından</td><td>girdi oranından</td></tr>
-      <tr><td><code>gpt-4o-mini</code></td><td>0.15</td><td>0.60</td><td>0.075</td><td>girdi oranından</td><td>girdi oranından</td></tr>
-      <tr><td><code>gpt-4.1</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>girdi oranından</td><td>girdi oranından</td></tr>
-      <tr><td><code>gpt-4.1-mini</code></td><td>0.40</td><td>1.60</td><td>0.10</td><td>girdi oranından</td><td>girdi oranından</td></tr>
-      <tr><td><code>o3</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>girdi oranından</td><td>girdi oranından</td></tr>
-      <tr><td><code>o4-mini</code></td><td>1.10</td><td>4.40</td><td>0.275</td><td>girdi oranından</td><td>girdi oranından</td></tr>
-      <tr><td><code>gemini-2.5-pro</code></td><td>1.25</td><td>10.00</td><td>0.31</td><td>girdi oranından</td><td>girdi oranından</td></tr>
-      <tr><td><code>gemini-2.5-flash</code></td><td>0.30</td><td>2.50</td><td>0.075</td><td>girdi oranından</td><td>girdi oranından</td></tr>
-      <tr><td><code>text-embedding-3-small</code></td><td>0.02</td><td>0.00</td><td>girdi oranından</td><td>girdi oranından</td><td>girdi oranından</td></tr>
-      <tr><td><code>text-embedding-3-large</code></td><td>0.13</td><td>0.00</td><td>girdi oranından</td><td>girdi oranından</td><td>girdi oranından</td></tr>
+      {bookTables.map((t) => (
+        <tr><td><code>{t.name}</code>{t.note && <>: {t.note}</>}</td><td>{t.count}</td></tr>
+      ))}
+    </tbody>
+  </table>
+
+  <table>
+    <thead>
+      <tr><th>Sağlayıcı</th><th>Hizmet katmanı</th><th>Çarpan</th></tr>
+    </thead>
+    <tbody>
+      {multipliers.map((m) => (
+        <tr><td><code>{m.provider}</code></td><td><code>{m.tier}</code></td><td>{m.m}</td></tr>
+      ))}
     </tbody>
   </table>
 
   <p>
-    Milyon token başına USD; kitap, üçüncü taraf bir model kataloğuna karşı en
-    son denetlendiğinde bu durumdaydı ve kitap bunu kendi <code>as_of</code>
-    tarihi olarak kaydeder. Anthropic girdileri iki önbelleğe yazma oranını da
-    taşır, çünkü daemon bir saatlik orandan beş dakikalık orana geri düşer ve uzun
-    olanı atlayan bir kitap sessizce eksik faturalandırırdı. OpenAI kendi
-    önbelleğine yazmak için ücret almaz, bu yüzden oradaki bir önbelleğe yazma
-    girdi oranından faturalanır. <code>gemini-2.5-flash</code> ayrıca 1.00'lik
-    bir ses girdi oranı taşır; diğer her kayıt sesi kendi metin oranından
-    fiyatlar. <code>claude-haiku-4</code> diye bir şey yoktur: Anthropic'in
-    sunduğu kimlik <code>claude-haiku-4-5</code>'tir ve hiçbir şeye çözülmeyen
-    bir kimlik tahmin edilmez, fiyatsız bırakılır.
+    Bunlar yayımlanmış liste fiyatlarıdır. Herhangi bir modelin hangi fiyattan
+    fiyatlandığını görmek için, alımla aynı aramayı kullanan ikili dosyaya
+    sorun:
   </p>
+
+  <Command class="not-prose my-6" command="mcpd prices show claude-sonnet-4-5 --provider aws.bedrock" />
+
+  <h2>Kendi kitabınız</h2>
   <p>
-    Bunlar ABD doları cinsinden yayımlanmış liste fiyatlarıdır. Her kurulum
-    yukarıdaki yerleşik tabloyla fiyatlandırır ve bu tablonun adını vermediği bir
-    model fiyatsız kalır. Kitap bilerek kısadır, çünkü uzun bir kitap daha çok
-    yerde bayatlar.
+    Kendi kitabınızı <code>--price-book</code> ile ya da yapılandırma
+    dosyasının <code>price_book</code> anahtarıyla yükleyin. Bir kitap JSON'dur:
+    bir <code>id</code>, bir ISO 4217 <code>currency</code> ve her biri bir
+    model kimliğini yukarıdaki oranlara eşleyen <code>models</code> ve
+    <code>providers</code> tabloları. <code>"extends": "builtin"</code> ile
+    yerleşik kitabın üzerine serilir, böylece yalnızca farklı ödediğiniz
+    oranları içermesi yeterlidir:
   </p>
+
+  <pre><code>{`{
+  "id": "acme-2026-10",
+  "currency": "USD",
+  "extends": "builtin",
+  "providers": {
+    "bedrock": {
+      "anthropic.claude-sonnet-4-5-20250929-v1:0": { "input": 2.7, "output": 13.5 }
+    }
+  },
+  "models": {
+    "our-finetune": { "input": 0.5, "output": 1.5 }
+  }
+}`}</code></pre>
+
   <p>
-    Bir kitap; bir kimlik, bir ISO 4217 para birimi ve model kimliğinden
-    oranlara bir eşlemedir ve ürettiği her değer kendi kimliğiyle damgalanır,
-    böylece iki kitap sonradan birbirinden ayrılabilir. Bir projedeki fiyatlar
-    tek bir para birimini paylaşır; mcpd bir çalıştırmanın
-    span'lerini aritmetik olarak toplar ve para birimleri arasında dönüşüm yapmaz.
+    mcpd kitabı açılışta denetler ve negatif oranlı, katmanları sırasız ya da
+    para birimi üç harfli bir kod olmayan bir kitabı, kaydı adlandırarak
+    reddeder. Kitabınızdan gelen değerler onun kimliğini kaydeder, böylece
+    sonradan liste fiyatı tahminlerinden ayrılabilir. Bir projenin
+    çalıştırmaları span'lerini aritmetik olarak toplar, bu yüzden bir kitaptaki
+    bütün oranları tek bir para biriminde tutun.
+  </p>
+
+  <h2>Oranları yenilemek</h2>
+  <p>
+    Oranlar birkaç haftada bir değişir. <code>mcpd prices refresh</code>, açık
+    bir model kataloğundan bir kitap yazar; böylece bir dağıtım yeni bir sürüm
+    olmadan yeni oranları alabilir:
+  </p>
+
+  <Command class="not-prose my-6" command="mcpd prices refresh --out /etc/mcpd/prices.json" />
+
+  <p>
+    <code>--price-book</code> seçeneğini dosyaya yöneltin ve yeniden başlatın.
+    <code>--out</code> konumundaki kitabın zaten fiyatladığı ve kataloğun artık
+    listelemediği bir model korunur, çünkü emekliye ayrılmış bir modele giden
+    trafik gelmeye devam eder; <code>--prune</code> onu atar.
+    <code>--source</code>, aynı biçimdeki başka bir kataloğu, bir URL'yi ya da
+    bir dosyayı okur. Yerleşik kitap da aynı komutla yazılır.
   </p>
 
   <h2>Parayı geri okumak</h2>

@@ -406,6 +406,7 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
     <code>--write-key</code> は保存済みデータの変更を許します。スコア、
     フィードバック、データセット、実験、確認応答です。
     <code>--execute-key</code> は実行の開始、キャンセル、シグナル送信を許します。<code>--worker-key</code> はステップの受け取りと結果の報告を許し、ステップ本体を動かすプロセスに置く鍵がこれです。<code>--admin-key</code> はトレースの削除と監査ログの読み取りを許します。
+    設定されていないリストは、代わりにより広いリストを受け付けます。write は取り込みキーを、admin は読み取りキーを、execute と worker は書き込みキーを受け付けます。スコープが存在する前に設定したデプロイも、そのまま動き続けます。
   </p>
   <p>
     最初の分割が被害範囲を決めます。対象となる集団の大きさが違うからです。
@@ -522,6 +523,7 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
       { out: 'identity        off' },
       { out: 'client ip       peer address' },
       { out: 'sampling        keep everything' },
+      { out: 'tail sampling   off' },
       { out: 'quota           unlimited' },
       { out: 'redaction       on' },
       { out: 'redact key      set', tone: 'ok' },
@@ -654,14 +656,21 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
   </p>
   <p>
     これでシグナルは移りますが、ディスクにはファイルが 1 つ残ります。実行
-    ストアです。シグナルのストアが何であっても、これは組み込みの SQLite
-    です。<code>runs.enabled</code> が true（既定）なら、チャートはそれを
-    ボリュームに置き、レプリカを 1 つ動かします。複数の Pod を動かすには、
-    実行の機能を止めてください。するとチャートは
-    <code>replicaCount</code> 個の Pod を動かし、<code>Recreate</code> から
-    ローリングアップデートに切り替え、PersistentVolumeClaim を外します。
-    奪い合うローカルのものが何も残らないからです。デーモンは実行の
-    エンドポイントに、そのことを伝える 503 で応答します。実行が有効な間、
+    ストアです。既定では組み込みの SQLite です。<code>runs.enabled</code>
+    が true（既定）なら、チャートはそれをボリュームに置き、レプリカを 1 つ
+    動かします。複数の Pod を動かすには、実行も Postgres に移してください。
+    <code>runs.store</code> を <code>postgres</code> にし、接続文字列を
+    <code>runs.postgresUrl</code> に設定します。同じデータベースを指しても
+    かまいません。するとチャートは <code>replicaCount</code> 個の Pod を
+    動かし、<code>Recreate</code> からローリングアップデートに切り替え、
+    PersistentVolumeClaim を外します。奪い合うローカルのものが何も残らない
+    からです。どの Pod も、1 つのストアから実行を返します。チャートの外では、
+    同じ設定は <code>--runs-data postgres://...</code> です。
+  </p>
+  <p>
+    <code>runs.enabled=false</code> で実行の機能を止めても、同じように
+    スケールアウトできます。このときデーモンは実行のエンドポイントに、
+    そのことを伝える 503 で応答します。実行が組み込みのファイルにある間、
     チャートは 1 を超える <code>replicaCount</code> を拒否します。それぞれが
     自分だけの実行ストアを持つ Pod を起動するよりよいからです。
   </p>
@@ -671,7 +680,8 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
   --set keys.read=$READ_KEY \\
   --set externalStore.type=postgres \\
   --set externalStore.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
-  --set runs.enabled=false \\
+  --set runs.store=postgres \\
+  --set runs.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
   --set replicaCount=3`}</code></pre>
 
   <p>

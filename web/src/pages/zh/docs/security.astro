@@ -148,7 +148,8 @@ const linkTo = (route: string) => urlFor(route, code)
 
   <h2>密钥与作用域</h2>
   <p>
-    认证方式是 API 密钥。没有账号，没有会话，也没有登录。一把密钥通过
+    认证方式是 API 密钥。默认情况下没有账户，没有会话，也没有登录；
+    <code>--signup</code> 和 <code>--accounts</code> 会加上它们，见下文。一把密钥通过
     <code>Authorization: Bearer …</code> 或者 <code>X-Mcpd-Key</code> 请求头
     出示，比较之前两边都会用 SHA-256 哈希，所以无论是配置的密钥有多长，还是第一
     个不对的字符在哪个位置，都不会从耗时上被看出来。
@@ -195,6 +196,43 @@ const linkTo = (route: string) => urlFor(route, code)
     某个端点要哪个作用域，是在规范里逐个端点声明的，并发布在生成出来的
     <a href={linkTo('/docs/reference/api')} class="link">HTTP API</a> 参考里，
     所以“这个端点需要什么”只有一个答案，而不是每份文档一个。
+  </p>
+
+  <h3>账户，用 --signup 或 --accounts</h3>
+  <p>
+    开启 <code>--signup</code> 时，任何人都可以用邮箱和密码创建账户；开启
+    <code>--accounts</code> 时，人们通过邀请、单点登录或 SCIM 加入。每个账户项目
+    都属于一个组织，成员在组织里的角色（owner、admin、member 或 viewer，可以在
+    某个项目上单独替换）映射到六个作用域上。一个会话带着角色在账户所属各组织的
+    每个项目上允许的作用域；一把密钥只在一个项目上带一个作用域，并且只在创建它的
+    人的角色仍然允许时有效。账户不属于的组织，它的项目一概触及不到。账户密钥
+    发来的信号存进这把密钥的项目，无论信号里写的是哪个项目；幂等键按项目保存，
+    所以一个账户没法让另一个账户的批次看起来像一次重放。只有会话能列出、创建或
+    吊销密钥，所以一把泄露的密钥造不出更多密钥。
+  </p>
+  <p>
+    密码用 argon2id 哈希。token、密钥、邮件里的链接、邀请 token、恢复码和 SCIM
+    token 都是随机值，只显示一次，只以 SHA-256 摘要的形式存下。注册、登录和重置
+    密码，无论这个地址有没有账户，给出的答复都一样，其余的内容写在发往这个地址的
+    邮件里。地址要先通过链接确认，账户才能登录。两步登录使用基于时间的验证码，
+    拒绝用过的验证码，并给出十个一次性的恢复码。每一个凭据入口都按客户端地址
+    限流，失败的登录还按邮箱限流。密码会话持续 30 天，单点登录会话持续 24 小时；
+    账户可以列出并结束自己的会话，修改或重置密码会结束其他会话。
+  </p>
+  <p>
+    单点登录是 OpenID Connect，带 PKCE、一次性的 state 和 nonce，外加一个由发起
+    登录的浏览器持有的密文，所以登录链接没法转交给别人。ID token 的签名、颁发者、
+    受众、过期时间和 nonce 都会检查，对称算法会被拒绝。一个人按他在身份提供方那里
+    的身份来查找；只有地址属于组织所认领的域名时，才会创建新账户，已有的账户从不
+    会被接管，而会话只能触及那个组织的项目。SCIM 用一个触及不到别处的 token 为
+    组织开通用户和组；撤销开通会结束这个成员资格、它的密钥和它的会话。见
+    <a href={linkTo('/docs/accounts')} class="link">账户与组织</a>。
+  </p>
+  <p>
+    这种模式还会关掉“没有密钥的作用域是敞开的”这条规则：不带凭据的请求在所有
+    地方都会被拒绝，探针、注册和登录除外。配置好的密钥会被最先尝试，并保持它们
+    原有的触及范围。参数见
+    <a href={linkTo('/docs/configuration#signup')} class="link">开放注册</a>。
   </p>
 
   <h3>回退，以及它对你手上已有的密钥意味着什么</h3>
@@ -316,7 +354,9 @@ const linkTo = (route: string) => urlFor(route, code)
     <code>admin</code> 作用域。
   </p>
   <p>
-    记录下来的动作有十八个：<code>get_trace</code>、<code>list_spans</code>、
+    记录下来的动作有四十四个。其中二十个是对数据的读取和删除：
+    <code>get_trace</code>、<code>get_trajectory</code>、
+    请求预览时的 <code>list_traces</code>、<code>list_spans</code>、
     <code>list_logs</code>、<code>list_feedback</code>、
     <code>list_dataset_items</code>、<code>capture_into_dataset</code>、
     <code>read_trace_aspect_notes</code>、<code>get_theme</code>、<code>get_theme_flow</code>、<code>list_theme_history</code>、<code>list_theme_examples</code>、
@@ -325,9 +365,27 @@ const linkTo = (route: string) => urlFor(route, code)
     <code>list_run_events</code>、<code>get_step_cause</code> 和
     <code>cancel_run</code>。分界线是载荷，不是请求。列出 trace 返回的是一份由
     名称、各个时间、token 计数和成本构成的投影，里面没有提示词也没有补全，所以它
-    不被记录；而打开其中一条 trace 会被记录，因为文本就在那里。列出持久化运行
+    不被记录；而打开其中一条 trace 会被记录，因为文本就在那里。请求了输入和输出
+    预览的列表也会被记录，理由相同。列出持久化运行
     会被记录，因为列表里的每一次运行都带着按发来时原样保存的输入、输出和状态。
     对一次运行的一次被拒绝的读取，记在拥有这次运行的项目名下。
+  </p>
+  <p>
+    另外二十四个是在带账户的守护进程上，对“谁能触及什么”的改动。它们记在组织的
+    id 而不是某个项目名下，以执行操作的账户的邮箱作为 subject，由 admin 或 owner
+    用 <code>GET /v1/api/orgs/{'{org_id}'}/audit</code> 读取：
+    <code>org_create</code>、<code>org_update</code>、<code>org_delete</code>、
+    <code>member_invite</code>、<code>invite_revoke</code>、
+    <code>invite_accept</code>、<code>member_role</code>、
+    <code>member_project_role</code>、<code>member_remove</code>、
+    <code>project_create</code>、<code>project_delete</code>、
+    <code>org_key_revoke</code>、<code>group_roles_update</code>、
+    <code>sso_update</code>、<code>sso_delete</code>、<code>sso_login</code>、
+    <code>scim_token_rotate</code>、<code>scim_token_revoke</code>、
+    <code>scim_user_create</code>、<code>scim_user_update</code>、
+    <code>scim_user_delete</code>、<code>scim_group_create</code>、
+    <code>scim_group_update</code> 和 <code>scim_group_delete</code>。SCIM 改动
+    以 <code>scim</code> 作为 subject，以 SCIM token 的摘要作为主体。
   </p>
   <p>
     worker 的调用不被记录：领取一个步骤、声明它已经开始、心跳、complete 和
@@ -347,8 +405,8 @@ const linkTo = (route: string) => urlFor(route, code)
       <code>anonymous</code>。
     </li>
     <li>
-      <strong>人是从你的入口网关来的。</strong>单靠它自己，一行记录把一个动作
-      归给一把密钥。只有在
+      <strong>人来自会话或你的入口网关。</strong>组织改动的那一行带着执行操作的
+      账户的邮箱。对密钥来说，一行记录把一个动作归给这把密钥，而不是某个人。只有在
       <code>--trusted-identity-header</code> 和 <code>--trusted-proxy-cidr</code>
       两个都设置了的时候，<code>subject</code> 字段才带着一个身份，否则它是空的，
       而空正是默认。mcpd 从不自己确立这个身份；它记录的是一个由你指名的地址所
@@ -363,8 +421,8 @@ const linkTo = (route: string) => urlFor(route, code)
     <li>
       <strong>它记录哪把密钥，以及可选地记录是谁。</strong>密钥以一段截断过的
       摘要存下，从不存密钥本身，所以这份日志不是凭据堆积的地方。它回答的是
-      “某把 admin 密钥删掉了这个”。要回答“具体是哪个人”，就把你的入口网关本来
-      就在设置的那个请求头，以及允许设置它的那些地址交给它：
+      “某把 admin 密钥删掉了这个”。对组织改动，会话还会写明是哪个人。对密钥，
+      就把你的入口网关本来就在设置的那个请求头，以及允许设置它的那些地址交给它：
       <code>--trusted-identity-header x-forwarded-user</code> 配上
       <code>--trusted-proxy-cidr 10.42.0.0/16</code>。两半缺一不可。一个请求头
       是任何能连到这个端口的人都能发的字符串，所以 mcpd 只从你指名的地址读它；
@@ -390,7 +448,8 @@ const linkTo = (route: string) => urlFor(route, code)
     <li>
       <strong>界面。</strong><code>/</code> 上的那份标记，谁能连到这个端口就发给谁。
       它背后的数据不是：它发出的每一次请求都要走查询 API，遇到的是同一批密钥。
-      守护进程里没有登录页。
+      除非开启了 <code>--signup</code> 或 <code>--accounts</code>，守护进程里
+      没有登录页。
     </li>
     <li>
       <strong>探针和 <code>/metrics</code>。</strong>它们有意不做认证，因为一个
@@ -424,23 +483,24 @@ const linkTo = (route: string) => urlFor(route, code)
     <a href={linkTo('/docs/privacy')} class="link">脱敏与保留期</a>。
   </p>
   <p>
-    <strong>规则匹配的是字段名，不是值的形态。</strong>一个挂在叫
-    <code>content</code> 或 <code>question</code> 的字段下到达的值，会按发来的
-    样子存下，所以请写明携带凭据和标识符的那些字段。
+    规则匹配的是字段名。一份粘贴在句子中间的凭据，到达时挂在叫
+    <code>content</code> 或 <code>question</code> 的字段下，所以每一个字符串值
+    还会按凭据的形态搜索一遍：私钥块、JSON Web Token、AWS 访问密钥 id、以
+    <code>sk-</code> 开头的供应商密钥、GitHub、Slack 和 Google 的 token、bearer
+    token，以及 URL 里的密码。每一处命中都就地替换，句子的其余部分保留。表格在
+    <a href={linkTo('/docs/privacy')} class="link">脱敏与保留期</a>。
   </p>
-  <p>脱敏覆盖的是一个明确的范围：</p>
+  <p>脱敏覆盖的范围：</p>
   <ul>
-    <li>它挡住的是凭据和标识符的结构化采集，也就是一份凭据到达时，就装在一个以它自己是什么来命名的字段里。</li>
-    <li>它按字段名工作。挂在普通字段名下的自由文本会按发来的样子存下。</li>
-    <li>它让一个 span 的名称和一条日志记录的消息保持发来的样子。那些是用来分组的标识符，不是载荷，改写它们会把分组破坏掉。不要用客户的邮箱地址去拼一个 span 的名称。</li>
-    <li>它让运行存储保持发来的样子。一次持久化运行的载荷是它的工作状态；只有一次运行写进 trace 存储的那些 span 会被脱敏。</li>
+    <li>它遮蔽装在以自己是什么来命名的字段里的凭据和标识符，以及字符串里任何位置出现的上述形态的凭据。</li>
+    <li>没有固定前缀的密文，比如敲进一句话里的密码，按它所在的字段来遮蔽。</li>
+    <li>它不碰一个 span 的名称和一条日志记录的消息。那些是用来分组的标识符，不是载荷，改写它们会把分组破坏掉。不要用客户的邮箱地址去拼一个 span 的名称。</li>
+    <li>它不碰运行存储。一次持久化运行的载荷是它的工作状态，按发来时的原样保存；只有一次运行写进 trace 存储的那些 span 会被脱敏。</li>
   </ul>
   <p>
-    有一项控制手段按形态工作，作为事后发现：内置的
-    <code>no_leaked_secret</code> 评分器会给<em>答案</em>里带有疑似凭据的
-    token 的运行扣分，依据是已知的前缀，或者一长串大小写混排的字母数字。它评的
-    是一次已经存下的运行的答案，什么也不移除，而且只有你要它时它才会运行。用它来
-    得知这件事已经发生了，而不是把它当作脱敏的第二道防线。
+    内置的 <code>no_leaked_secret</code> 评分器提供事后的发现：它会给<em>答案</em>
+    里带有疑似凭据的 token 的运行扣分，依据是已知的前缀，或者一长串大小写混排的
+    字母数字。它评的是一次已经存下的运行，而且只有你要它时它才会运行。
   </p>
   <p>
     有两条上限，无论规则是否命中都适用。任何单个字符串超过 128 KiB，都会在一个
@@ -493,19 +553,7 @@ const linkTo = (route: string) => urlFor(route, code)
         <td>在你的入口网关或者服务网格里终止 TLS，并且让守护进程的端口远离任何不受信任的网络。</td>
       </tr>
       <tr>
-        <td><strong>单点登录。</strong>一个人的身份来自 mcpd 前面的那个代理。</td>
-        <td>把界面放到你本来就在运行的那个身份代理后面。一个人的身份，就是那个代理所确立的东西。</td>
-      </tr>
-      <tr>
-        <td><strong>开通。</strong>在 mcpd 内部，单位是一把密钥。</td>
-        <td>在代理那一层开通。在 mcpd 内部，把一把密钥加进一个列表，或者从中删掉。</td>
-      </tr>
-      <tr>
-        <td><strong>角色。</strong>授权就是六个作用域之一加一个项目列表。</td>
-        <td>按密钥和按项目来分隔。如果某个区分很重要，就把它做成一个项目。</td>
-      </tr>
-      <tr>
-        <td><strong>一个人是谁。</strong>审计日志记录的是你的入口网关所声称的 subject，而且只从一个由你指名的地址接受。</td>
+        <td><strong>对密钥来说，一个人是谁。</strong>会话会写明账户。对一把密钥，审计日志记录的是你的入口网关所声称的 subject，而且只从一个由你指名的地址接受。</td>
         <td>设置 <code>--trusted-identity-header</code> 和 <code>--trusted-proxy-cidr</code>，让你的代理本来就在设置的那个请求头到达审计记录。没有它们，一行记录把一个动作归给一把密钥，而每个团队发一把密钥，就把那段摘要的范围收窄了。</td>
       </tr>
       <tr>

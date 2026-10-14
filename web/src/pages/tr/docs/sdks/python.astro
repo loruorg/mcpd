@@ -40,6 +40,9 @@ with mcpd.trace("handler", traceparent=request.headers.get("traceparent")) as ru
 const payload = `generation.set_model("gpt-4o-mini", provider="openai")
 generation.set_usage(input_tokens=812, output_tokens=96, cache_read=128)
 
+# Modelin nasıl çağrıldığı. Payload değil ayardır: yakalama kapalıyken de tutulur.
+generation.set_model_parameters(temperature=0, seed=0, max_tokens=1024)
+
 # Kendiniz yakalayıp kararını kendiniz verdiğiniz bir hata.
 generation.set_error("the provider timed out", kind="TimeoutError", retryable=True)
 
@@ -204,6 +207,15 @@ const serverless = `def handler(event, context):
     yapamaz.
   </p>
 
+  <p>
+    <code>set_model_parameters</code>, çağrının yapıldığı ayarları kaydeder:
+    <code>temperature</code>, <code>top_p</code>, <code>top_k</code>, <code>max_tokens</code>, <code>seed</code>, <code>stop_sequences</code> ve <code>has_response_format</code>. Bunlar payload değil ayardır, bu yüzden
+    <code>capture_payloads=False</code> olduğunda da korunurlar. Önemli olan da tam bu
+    durumdur: çalıştırmayı yeniden üretmeye çalışan birinin eşleştirmesi gereken
+    değerler bunlardır. Vermediğiniz bir argüman yoktur, verdiğiniz bir argüman ise ne olursa olsun tutulur; yani <code>seed=0</code> da bir seed'dir. <code>has_response_format</code> arkasındaki şema
+    kaydedilmez, yalnızca bir şemanın geçerli olup olmadığı kaydedilir.
+  </p>
+
   <CodeSwitcher
     class="not-prose my-6"
     title="bir span neler taşır"
@@ -221,6 +233,25 @@ const serverless = `def handler(event, context):
     ve üstlük kurmak için hiç kullanılmaz.
   </p>
 
+  <h3>Akışlı çağrılar</h3>
+  <p>
+    Sağlayıcının akışını <code>span.record_stream</code> işlevine verin ve onun
+    yerine sarmalayıcıyı okuyun: bir yineleyici için bir üreteç, eşzamansız bir
+    yineleyici için eşzamansız bir üreteç. OpenAI chat-completion parçalarını ve
+    Anthropic mesaj olaylarını sözlük olarak ya da sağlayıcı SDK'sının kendi
+    nesneleri olarak alır, her parça değişmeden geçer.
+    Metin ya da araç çağrısı taşıyan ilk parça, ilk token'a kadar geçen süreyi
+    işaretler. Akış bittiğinde, hata fırlattığında ya da bir
+    <code>break</code> ile bırakıldığında span, aynı çağrı akışsız yapılsaydı
+    <code>record_response</code> neyi kaydedecek idiyse onu ve çıktı olarak
+    metni alır ve biter. Akıştan gelen bir hata span'i işaretler ve size
+    değişmeden ulaşır.
+    Tutulan metin 32,768 karakterle sınırlıdır ve sınıra ulaşıldığında
+    <code>mcpd.stream.truncated</code> ayarlanır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="stream" title="akışlı bir çağrı" />
+
   <h2>Payload'lar, sink'ler ve bitmiş span'ler</h2>
   <p>
     Sink, boşaltılan bir yığının gittiği yerdir. Varsayılan olan HTTP
@@ -237,6 +268,25 @@ const serverless = `def handler(event, context):
     title="kaydedileni doğrulama"
     samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: sinks }]}
   />
+
+  <p>
+    <code>mcpd.testing</code> içindeki <code>TestClient</code>, belleğe
+    kaydeden bir <code>Mcpd</code>'dir. Kodunuz bir istemci aldığı her yerde
+    onu verin, sonra kaydettiğini geri okuyun: ada ya da türe göre
+    <code>spans()</code>, var olması gereken tek span için
+    <code>recorded_span(name)</code>, her çalıştırma bir ağaç olarak
+    <code>trees()</code>, <code>logs()</code>, <code>metrics()</code>,
+    <code>scores()</code>, <code>recorded_feedback()</code> ve
+    <code>reset()</code>.
+    Her erişimci önce flush eder. Tuttuğu şey, bir daemon'a giderken olacağı
+    gibi örneklemeden, payload yakalamadan ve <code>redact</code> adımından
+    geçmiştir ve test çalıştırması için <code>MCPD_ENABLED=false</code>
+    ayarlandığında da açık kalır.
+    <code>recorded_span</code> <code>AssertionError</code> fırlatır, böylece
+    eksik bir span testi gördüğü adlarla birlikte başarısız kılar.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="testing" title="bir birim testi" />
 
   <p>
     <code>mcpd.record(span)</code>, çoktan bitmiş bir <code>SpanRecord</code>

@@ -2,6 +2,7 @@
 import Doc from '@/layouts/Doc.astro'
 import SearchDemo from '@/components/SearchDemo.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const code0 = localeOf(Astro.url.pathname)
@@ -321,8 +322,8 @@ while True:
         <td>期間。実行の開始時刻を基準に比べます。</td>
       </tr>
       <tr>
-        <td><code>min_duration_ms</code></td>
-        <td>少なくともこれだけ遅い実行。ミリ秒で指定します。</td>
+        <td><code>min_duration_ms</code>、<code>max_duration_ms</code></td>
+        <td>少なくとも、または多くともこれだけ遅い実行。ミリ秒で指定します。</td>
       </tr>
       <tr>
         <td><code>min_cost</code></td>
@@ -332,12 +333,42 @@ while True:
         </td>
       </tr>
       <tr>
+        <td><code>max_cost</code></td>
+        <td>多くともこれだけかかった実行。</td>
+      </tr>
+      <tr>
+        <td><code>min_tokens</code></td>
+        <td>入力と出力を合わせて、少なくともこれだけのトークンを使った実行。</td>
+      </tr>
+      <tr>
         <td><code>has_score</code></td>
         <td>このスコアラー id のスコアを持つ実行。</td>
       </tr>
       <tr>
         <td><code>score_below</code></td>
         <td><code>has_score</code> と併せて使い、そのスコアラーがこの値を下回る評価を付けた実行を返します。</td>
+      </tr>
+      <tr>
+        <td><code>score_above</code></td>
+        <td>
+          <code>has_score</code> と併せて使い、そのスコアラーがこの値を上回る評価を
+          付けた実行を返します。<code>score_below</code> も指定すると、1 つのスコアが
+          2 つの値のあいだに入る必要があります。
+        </td>
+      </tr>
+      <tr>
+        <td><code>preview</code></td>
+        <td>
+          <code>true</code> にすると、各実行の <code>input_preview</code> と
+          <code>output_preview</code> を埋めます。監査ログに記録されます。
+        </td>
+      </tr>
+      <tr>
+        <td><code>has_feedback</code></td>
+        <td>
+          <code>true</code> で人がフィードバックを付けた実行、<code>false</code>
+          でフィードバックのない実行を返します。
+        </td>
       </tr>
       <tr>
         <td><code>sort</code></td>
@@ -380,9 +411,13 @@ while True:
   <h2>一覧の 1 行にかかるコスト</h2>
   <p>
     もっと軽い 2 つ目の実行一覧はありません。最初のものがすでに軽いからです。保存
-    されるトレースの射影は、入力も出力も属性も一切持ちません。名前、件数、時刻、
-    コスト、タグ、相関だけで、モデルが言ったことは何も入りません。ペイロードを
-    取ってくるのは、実行を開いたときです。
+    されるトレースの射影は、入力も出力も属性も持ちません。名前、件数、時刻、
+    コスト、タグ、相関だけです。<code>preview=true</code> を付けて尋ねると、各行に
+    <code>input_preview</code> と <code>output_preview</code> が加わります。ルート
+    ステップの入力と出力の先頭をプレーンテキストにしたもので、それぞれ最大 240
+    文字です。チャットの入力では、プレビューは最後のユーザーメッセージです。
+    プレビュー付きの一覧はモデルが見たテキストを運ぶので、その読み取りは監査ログに
+    記録されます。ペイロード全体を取ってくるのは、実行を開いたときです。
   </p>
   <p>
     現実的な実行 1 つで測った結果です。3 つのポリシー文書を取得し、2 つのツールを呼び、
@@ -432,11 +467,18 @@ while True:
     この規則は実行の一覧だけのものではありません。<code>GET /v1/api/spans</code>、
     <code>/v1/api/logs</code>、<code>/v1/api/scores</code>、
     <code>/v1/api/metrics</code>、<code>/v1/api/feedback</code> は、それぞれ自分の
-    語彙を同じやり方で強制します。出会う前に知っておく価値があるものが 2 つ
-    あります。スコアの一覧は <code>order</code> を受け取りません。新しい順で固定
-    されており、そのカーソルは一方向にしか比較しないからです。そしてフィードバックの
-    一覧は <code>trace_id</code> を必須にします。フィードバックは 1 回に 1 つの実行
-    について読むものだからです。
+    語彙を同じやり方で強制します。スコアの一覧は <code>order</code> を受け取り
+    ません。新しい順で固定されており、そのカーソルは一方向にしか比較しないから
+    です。フィードバックの一覧はプロジェクト全体を新しい順に読み、
+    <code>trace_id</code>、<code>span_id</code>、<code>kind</code>、
+    <code>author_kind</code>、そして <code>from</code> と <code>to</code> の期間で
+    絞り込みます。次のページにはカーソルを使います。ログの一覧は行の相関で絞り
+    込みます。<code>environment</code>、<code>service_name</code>、
+    <code>service_version</code>、<code>session_id</code>、
+    <code>thread_id</code>、<code>user_id</code>、<code>run_id</code>、
+    <code>request_id</code>、<code>experiment_id</code>、
+    <code>release</code> で、どれも完全一致です。ユーザー id は手元にあるとおりに
+    送ってください。保存されたものと同じやり方でハッシュされます。
   </p>
 
   <h2 id="filling-a-filter-box">フィルター欄の埋め方</h2>
@@ -501,6 +543,22 @@ while True:
     かのどちらかになります。<code>signal=scores</code> は、空のページで答えるのでは
     なく拒否されます。
   </p>
+
+  <h3>ライブテール</h3>
+  <p>
+    同じリクエストを <code>Accept: text/event-stream</code> 付きで送ると、接続が
+    開いたままになります。デーモンは毎秒ポーリングし、行をもたらしたバッチごとに、
+    上の応答を 1 つの <code>delta</code> イベントとして送ります。イベント id は
+    その後ろのカーソルです。切断したクライアントはそのカーソルで再接続し、何も
+    取りこぼしません。テールは 30 分で閉じ、クライアントは同じやり方で再接続
+    します。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="新しい実行を届いたそばから追う"
+    command="curl -N -H 'accept: text/event-stream' 'localhost:4317/v1/api/deltas?signal=traces'"
+  />
 
   <h2>このデプロイで何ができるか</h2>
   <p>
@@ -583,6 +641,7 @@ while True:
   <p>
     受け取るのは <code>q</code>、<code>kind</code>、<code>status</code>、
     <code>name</code>、<code>model</code>、<code>trace_id</code>、
+    <code>prompt</code>、<code>prompt_version</code>、
     <code>from</code>、<code>to</code>、<code>min_duration_ms</code>、
     <code>sort</code>、<code>order</code>、<code>limit</code>、
     <code>cursor</code> で、意味も既定値も同じです。ここには <code>tags</code>、

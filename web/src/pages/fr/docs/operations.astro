@@ -214,6 +214,20 @@ const scrape = `scrape_configs:
           <td>jauge</td>
           <td>Secondes écoulées depuis le démarrage de ce processus</td>
         </tr>
+        <tr>
+          <td><code>mcpd_model_input_tokens_total</code>, <code>mcpd_model_output_tokens_total</code></td>
+          <td>compteur</td>
+          <td>
+            Tokens des spans stockés, étiquetés par <code>provider</code> et
+            <code>model</code>. Au plus 200 séries ; les spans au-delà sont
+            comptés sous <code>other</code>
+          </td>
+        </tr>
+        <tr>
+          <td><code>mcpd_model_cost_total</code></td>
+          <td>compteur</td>
+          <td>Coût tarifé des spans stockés, par fournisseur, modèle et <code>currency</code></td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -702,6 +716,61 @@ const scrape = `scrape_configs:
     n’importe quelle adresse pourrait alors poser l’en-tête et être enregistrée
     comme la personne qu’il nomme.
   </p>
+
+  <h3>Ce qui tourne sans la commande</h3>
+  <p>
+    Il faut savoir que <code>mcpd doctor</code> existe pour le lancer, et aucune
+    des erreurs qu’il trouve ne s’annonce d’elle-même : le déploiement qui en
+    porte une est donc généralement celui sur lequel personne ne l’a lancé. Les
+    groupes qui ne lisent que la configuration tournent donc à chaque
+    démarrage : <code>keys</code>, <code>identity</code>, <code>limits</code> et
+    <code>judge</code>. Ils n’ont besoin ni d’un aller-retour vers le stockage
+    ni du réseau, donc un démarrage ne paie que quelques microsecondes pour eux.
+    Les huit autres restent dans la commande, parce que chacun lit le stockage
+    ou contacte les destinations de transfert, et qu’un démarrage ne doit
+    attendre ni l’un ni l’autre.
+  </p>
+  <p>
+    Une faute trouvée au démarrage arrête le daemon ; un avertissement est
+    journalisé et le daemon continue. Ce qui les sépare, c’est si la
+    configuration demande quelque chose qui ne peut pas fonctionner : une
+    entrée de clé vide ou avec une espace à une extrémité, une plage de
+    confiance qui contient tout l’internet, un <code>sample</code> de projet
+    hors de 0.0 à 1.0, ou un juge qui ne peut jamais répondre. Chacun de ces cas
+    est une fonction que vous avez activée et qui ne fait rien sans le dire, ce
+    qui est pire qu’une fonction qui échoue, parce que personne ne va la
+    chercher. Une clé courte, une clé partagée par deux projets, un plafond plus
+    petit qu’un lot : ceux-là fonctionnent, et sont peut-être ce que vous
+    vouliez, donc ils sont journalisés et jamais fatals.
+  </p>
+  <p>
+    L’ouverture avec laquelle mcpd est livré fait exception. Une portée
+    d’ingestion ou de lecture ouverte sur une adresse qui n’est pas de bouclage
+    est une faute pour <code>mcpd doctor</code>, qui bloque un déploiement, et
+    un avertissement au démarrage, qui ne le bloque pas. Refuser à cet endroit
+    voudrait dire une première exécution qui ne démarre jamais.
+  </p>
+  <p>
+    <code>mcpd config</code> et <code>mcpd doctor</code> tournent eux-mêmes sur
+    une configuration qu’un démarrage refuserait. Ce sont les deux commandes
+    qui existent pour expliquer une mauvaise configuration, donc aucune des deux
+    ne peut être la commande qui refuse de tourner.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="un juge qui n’aurait jamais pu produire de score"
+    lines={[
+      { cmd: 'mcpd --config-file /etc/mcpd/config.json' },
+      { out: 'Error: the configuration cannot do what it says, so mcpd will', tone: 'warn' },
+      { out: 'not start:', tone: 'warn' },
+      { out: '  judge: the judge at https://api.example.com/v1 has no criteria,', tone: 'warn' },
+      { out: '  so every judged scorer declines with `is not a configured', tone: 'warn' },
+      { out: '  criterion` and no judged score is ever produced. Add entries', tone: 'warn' },
+      { out: '  under `judge.criteria` in --config-file.', tone: 'warn' },
+      { out: 'Fix the lines above, or run `mcpd doctor` for the whole report.', tone: 'warn' },
+    ]}
+  />
 
   <h2>Les réglages à vérifier avant qu’il soit joignable</h2>
   <p>

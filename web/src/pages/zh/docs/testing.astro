@@ -2,8 +2,11 @@
 import Doc from '@/layouts/Doc.astro'
 import Command from '@/components/Command.astro'
 import Waterfall from '@/components/Waterfall.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import { exampleLanguages } from '@/lib/snippets'
 import { localeOf, urlFor } from '@/lib/i18n'
 
+const experimentLangs = exampleLanguages('experiment')
 const code = localeOf(Astro.url.pathname)
 const linkTo = (route: string) => urlFor(route, code)
 ---
@@ -45,6 +48,16 @@ const linkTo = (route: string) => urlFor(route, code)
 
   <Waterfall class="not-prose my-8" />
 
+  <h2>冻结一个数据集</h2>
+  <p>
+    数据集会随着运行被采集进来而增长。要在同一批用例上比较一个智能体的两个版本，
+    先把它冻结：<code>POST /v1/api/datasets/{'{id}'}/versions</code> 把当前的用例
+    复制成一个带编号、永不改变的版本，而再次冻结同一批用例，只会确认那个版本，
+    不会再复制一份。用 <code>GET /v1/api/datasets/{'{id}'}/items?version=2</code>
+    读一个版本的用例，用 <code>GET /v1/api/datasets/{'{id}'}/versions</code>
+    列出所有版本。
+  </p>
+
   <h2>运行自己的答案不是期望答案</h2>
   <p>
     <code>use_output_as_expected</code> 默认是关的，而这个默认值才是要紧的地方。
@@ -58,7 +71,7 @@ const linkTo = (route: string) => urlFor(route, code)
 
   <h2>内置的评分器</h2>
   <p>
-    mcpd 自带十三个确定性的评分器：就是普通代码，读一次存下来的运行，返回一个
+    mcpd 自带二十二个确定性的评分器：就是普通代码，读一次存下来的运行，返回一个
     数字。它们不花钱，从不调用模型，跑两遍给出同样的答案，而这正是一个回归测试
     需要、一个裁判模型没有的性质。
   </p>
@@ -80,12 +93,34 @@ const linkTo = (route: string) => urlFor(route, code)
       <tr><td><code>no_leaked_secret</code></td><td>答案里没有出现密钥、令牌或凭据。</td></tr>
       <tr><td><code>span_present</code></td><td>这次运行记录下了要求的那种类型或名字的 span。</td></tr>
       <tr><td><code>tool_succeeded</code></td><td>要求的那个工具跑过了，并且至少有一次调用正常结束。</td></tr>
+      <tr><td><code>excludes</code></td><td>答案里不含 <code>forbidden</code> 中的任何一个短语。</td></tr>
+      <tr><td><code>keyword_coverage</code></td><td>分级：答案提到的 <code>keywords</code> 所占的比例。</td></tr>
+      <tr><td><code>similarity</code></td><td>分级：一减去与 <code>expected</code> 的编辑距离除以较长的长度。</td></tr>
+      <tr><td><code>matches_pattern</code></td><td>答案匹配正则表达式 <code>pattern</code>。</td></tr>
+      <tr><td><code>tool_call_accuracy</code></td><td>分级：这次运行调用了的 <code>expected_tools</code> 所占的比例。</td></tr>
+      <tr><td><code>tool_order</code></td><td>这次运行按顺序调用了 <code>expected_tools</code>，中间允许夹着别的调用。</td></tr>
+      <tr><td><code>tool_not_called</code></td><td>这次运行没有调用 <code>forbidden_tools</code> 中的任何一个。</td></tr>
+      <tr><td><code>answer_length</code></td><td>答案的字符数在 <code>min_chars</code> 和 <code>max_chars</code> 之间。</td></tr>
+      <tr><td><code>json_schema</code></td><td>答案是满足 <code>json_schema</code> 的 JSON，带不带代码围栏都可以。</td></tr>
+      <tr><td><code>trajectory</code></td><td>这次运行的路径：它调用的工具与 <code>expected_tools</code> 对照，按 <code>trajectory_match</code> 指定的方式比较（<code>strict</code>、<code>ordered</code> 或 <code>unordered</code>，可得部分分），它的步数与 <code>max_steps</code> 对照，以及它有没有得出答案。取所要求各部分的平均值。<code>GET /v1/api/traces/{'{id}'}/trajectory</code> 显示它读取的路径。</td></tr>
     </tbody>
   </table>
   <p>
-    <code>GET /v1/api/scorers</code> 返回同一份清单，外加一个
-    <code>needs_config</code> 标志。一个需要期望答案却没拿到的评分器会弃权，
-    而不是去猜，并且这次弃权会被报出来。
+    文本比较不区分大小写，除非设置了 <code>case_sensitive</code>。工具名与四种
+    工具类型中任何一种的工具调用 span 的名字按精确匹配比较。<code>json_schema</code>
+    检查 <code>type</code>、<code>properties</code>、<code>required</code>、
+    <code>items</code>、<code>enum</code>、<code>minimum</code>、
+    <code>maximum</code>、<code>minLength</code>、<code>maxLength</code> 和
+    <code>additionalProperties: false</code>，并在理由里点出最多五处违反。一个
+    编译不了的正则表达式，或者一个不是对象的 schema，会在读任何运行之前被 400
+    拒掉。
+  </p>
+  <p>
+    <code>GET /v1/api/scorers</code> 返回这个守护进程知道的每一个评分器，连同它的
+    <code>kind</code>（<code>code</code>、<code>judge</code> 或
+    <code>criterion</code>）、它的 <code>direction</code>、它读取的
+    <code>config_keys</code>，以及它是否 <code>available</code>。一个需要某项设置
+    却没拿到的评分器会弃权，而不是去猜，并且弃权时会点出那项设置的名字。
   </p>
 
   <h2>让模型来打分的时候</h2>
@@ -126,10 +161,45 @@ const linkTo = (route: string) => urlFor(route, code)
     问题，就会建起一列谁也不敢信的数据。
   </p>
   <p>
-    配置出来的准则不会出现在 <code>GET /v1/api/scorers</code> 里。那个端点只列
-    十三个内置评分器，别的什么都不列，所以一个照着它拼出评分器菜单的客户端，
-    不会把你的准则列出来。守护进程唯一一次把它们的名字报给你，是在你给出一个
-    未知评分器 id 时得到的那个错误里，它会把内置的和配置出来的准则一起列出来。
+    配置出来的准则会出现在 <code>GET /v1/api/scorers</code> 里，类型为
+    <code>criterion</code>。一个与自带评分细则同 id 的准则，会在这个守护进程上
+    取代那份细则。
+  </p>
+
+  <h3>自带的评分细则</h3>
+  <p>
+    配置了 <code>judge</code> 块之后，有九份评分细则不用写任何准则就能点名使用。
+    每一份都分四步运行。<strong>预处理</strong>由代码完成，收集问题（来自根 span
+    的输入）、答案、评分器配置里的 <code>expected</code> 答案，以及上下文：这次
+    运行的 <code>retrieval</code> 和 <code>rag_vector_operation</code> span 输出
+    里的每一段文字，或者配置里的 <code>context</code> 列表。<strong>分析</strong>
+    是唯一的一次模型调用：裁判把答案、期望答案或上下文拆成条目，给每一条一个
+    是、否或不确定的裁决。<strong>打分</strong>由代码完成，统计这些裁决，所以
+    这个数字是对逐条裁决做的算术，绝不是模型自己挑的数字。<strong>理由</strong>
+    由代码完成，点出让分数降低的那些条目。
+  </p>
+  <table>
+    <thead>
+      <tr><th>评分细则</th><th>读取</th><th>值</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>faithfulness</code></td><td>答案、上下文</td><td>答案的论断中有上下文支持的比例。</td></tr>
+      <tr><td><code>hallucination</code></td><td>答案、上下文</td><td>答案的论断中与上下文矛盾的比例。越低越好。</td></tr>
+      <tr><td><code>answer_relevance</code></td><td>问题、答案</td><td>答案的陈述中回应了问题的比例。</td></tr>
+      <tr><td><code>answer_correctness</code></td><td>问题、答案、期望答案</td><td>期望答案的事实中被答案传达出来的比例。</td></tr>
+      <tr><td><code>context_precision</code></td><td>问题、上下文</td><td>有用段落在各自排名上的平均精确率。</td></tr>
+      <tr><td><code>context_recall</code></td><td>期望答案、上下文</td><td>期望答案的句子中被上下文覆盖的比例。</td></tr>
+      <tr><td><code>context_relevance</code></td><td>问题、上下文</td><td>与问题相关的段落所占的比例。</td></tr>
+      <tr><td><code>toxicity</code></td><td>答案</td><td>答案的陈述中有毒内容的比例。越低越好。</td></tr>
+      <tr><td><code>bias</code></td><td>答案</td><td>答案的观点中带有偏见的比例。越低越好。</td></tr>
+    </tbody>
+  </table>
+  <p>
+    一个不确定的裁决算半个。一个没有任何可评判内容的答案，在三份越低越好的细则上
+    得 0 分，在其余细则上弃权。每个评分都把逐条裁决存在 <code>metadata.steps</code>
+    下，把模型、尝试次数和 token 数存在 <code>metadata.judge</code> 下，并把这次
+    调用按守护进程价目表算出的花费存在 <code>cost</code> 里。它的
+    <code>scorer_version</code> 写明细则版本和模型。
   </p>
 
   <Command
@@ -179,7 +249,11 @@ const linkTo = (route: string) => urlFor(route, code)
       </tr>
       <tr>
         <td>连不上模型</td>
-        <td>弃权，并带上状态码和响应体。限流是一个理由，不是一个零分。</td>
+        <td>当端点答 429、502、503 或 504，或者连接失败时，短暂停顿后再试两次，前提是截止时间还留有余地。然后弃权，并带上状态码和响应体。限流是一个理由，不是一个零分。</td>
+      </tr>
+      <tr>
+        <td>细则的某一步没能完成</td>
+        <td>弃权，并点出是哪一步：运行缺少细则要读的某一部分时是 <code>preprocess</code>，回复不是一份由是、否和不确定组成的裁决列表时是 <code>analyze</code>，没有东西可统计时是 <code>score</code>。</td>
       </tr>
       <tr>
         <td>回复超过 1 MiB</td>
@@ -187,7 +261,7 @@ const linkTo = (route: string) => urlFor(route, code)
       </tr>
       <tr>
         <td>请求的截止时间已不够这次调用</td>
-        <td>不调用模型就拒绝。这一轮评分会在截止时间内用已完成的分数作答，而不是返回 503。</td>
+        <td>不调用模型就弃权。这一轮评分会在截止时间内用已完成的分数作答，而不是返回 503。</td>
       </tr>
     </tbody>
   </table>
@@ -195,6 +269,59 @@ const linkTo = (route: string) => urlFor(route, code)
     每一个由裁判给出的评分，都把模型记为自己的 <code>scorer_version</code>。
     来自两个不同裁判的两个评分不可比较，而这个字段就是在记录上把这件事说出来的
     地方。
+  </p>
+  <p>
+    每一个由裁判给出的评分，还会在 <code>score_trace_id</code> 里写明它自己那次
+    模型调用的运行。那次运行是一个 <code>scorer_run</code> span，里面有发给裁判的
+    提示词、它写下的回复、它的 token 和花费，以及一个指向它所评分的那次运行的
+    链接。一个看起来不对的评分，可以像任何别的模型调用一样打开来读；在应用里，
+    评分旁边的<em>裁判调用</em>链接会打开它。
+  </p>
+
+  <h2>你自己定义的评分器</h2>
+  <p>
+    一个项目用 <code>POST /v1/api/scorer-definitions</code> 存下它自己的评分器。
+    <code>judge</code> 定义是一条为你的智能体写的准则，比如
+    <q>答案点出了它所依据的退款政策条款</q>，由配置好的裁判按 0 到 1 打分。
+    <code>code</code> 定义是上面某个评分器加上固定的设置，比如带着你的答案必须
+    提到的关键词的 <code>keyword_coverage</code>。
+  </p>
+  <p>
+    每次保存都是一个新版本，一模一样的请求体不会再存一次。凡是接受评分器 id 的
+    地方都可以点名一个定义：<code>cites_policy</code> 运行最新版本，
+    <code>cites_policy@2</code> 运行第 2 版。版本号写在每一个评分上，所以改一句
+    提示词，永远不会改变一个旧评分的含义。定义不能占用 mcpd 自带评分器的 id，也
+    不能占用配置文件里某条准则的 id。<code>GET /v1/api/scorers?project=</code>
+    把一个项目的定义和自带评分器列在一起，类型为 <code>custom</code>。应用里的
+    评估页面可以创建和编辑它们。
+  </p>
+
+  <h2>实时评分</h2>
+  <p>
+    一条评估规则在运行结束时于后台给它们打分，写下来源为 <code>live</code> 的
+    评分。它写明要跑哪些评分器、给多大比例的运行打分，以及针对哪些运行：根步骤
+    名、类型、环境、结果、标签。用 <code>POST /v1/api/evaluation-rules</code>
+    存下一条。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="在 checkout 运行结束时给其中十分之一打分"
+    command={`curl -X POST 'localhost:4317/v1/api/evaluation-rules?project=support-desk' \\
+  -H 'content-type: application/json' \\
+  -d '{"id": "checkout-quality", "enabled": true, "scorers": ["answered", "cites_policy"],
+       "sample_rate": 0.1, "name": "checkout"}'`}
+  />
+
+  <p>
+    除非请求把规则打开，它存下时是关着的，而它点名的每一个评分器都在存下时解析。
+    哪些运行被抽中，由规则 id 和 trace id 的哈希决定，所以同一次运行在每个副本上、
+    每次重启之后，要么都在里面，要么都不在，而两条 10% 的规则打分的是不同的十分
+    之一。每次运行只被一条规则打分一次。一份存储上的几个副本轮流来，同一时间只有一个，
+    所以每一次评判调用只发出一次。<code>max_judged_per_minute</code>（默认
+    30）限制一条规则发出的模型调用次数；超出上限的运行会被跳过，不会排队。对规则
+    的改动是一个新版本，从下一轮起生效，每 15 秒一轮。用
+    <code>"enabled": false</code> 发送这条规则，就能停掉它。
   </p>
 
   <h2>打分是事后进行的</h2>
@@ -231,6 +358,32 @@ const linkTo = (route: string) => urlFor(route, code)
     以来的全部运行打分。
   </p>
 
+  <h2>从代码里跑一次实验</h2>
+  <p>
+    每个 SDK 都有一个实验运行器。给它一个数据集和你自己的函数：它记下一次实验，
+    对每个用例在一次写明了实验和用例的运行里调用一次这个函数，拿每个答案和那个
+    用例的期望答案比较打分，然后逐个用例返回结果，外加每个评分器的均值。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    example="experiment"
+    region="experiment"
+    only={experimentLangs}
+    title="让一个数据集跑过你的代码"
+  />
+
+  <p>
+    除非你传入别的 <code>concurrency</code>，同时跑四个用例。函数抛错的用例会被
+    记为一次带着错误的失败运行，它之后的用例照样运行。每次运行的根 span 带着
+    <code>correlation.experiment_id</code> 和属性
+    <code>mcpd.dataset_item_id</code>，你的函数打开的 span 嵌套在它下面，所以一个
+    失败的用例可以像任何别的运行一样在瀑布图里打开。当运行器自己无法完成时，这次
+    实验会被标为 <code>failed</code> 并带上原因。之后用
+    <code>GET /v1/api/experiments/{'{id}'}/results</code> 再次读取结果，用
+    <code>GET /v1/api/traces/{'{id}'}/trajectory</code> 读取一次运行的路径。
+  </p>
+
   <h2>比较两个版本</h2>
   <p>
     为你想比较的每一个版本记一次实验，把它的评分打上那次实验的 id，然后向 mcpd
@@ -244,14 +397,36 @@ const linkTo = (route: string) => urlFor(route, code)
   />
 
   <p>
-    答案是按评分器给出的差值，两边各自带着样本量，还有一个
-    <code>decidable</code> 标志。观测数不到二十个时，mcpd 会说这次比较判定不了，
-    而不是报出一个变化。
+    答案是按评分器给出的差值，两边各自带着样本量，还有差值的 95% 置信区间
+    （<code>ci_low</code>、<code>ci_high</code>）和一个双侧
+    <code>p_value</code>，两者都来自 Welch t 检验，它不假定两个版本的波动相同。
+    每边观测数不到二十个时，<code>decidable</code> 为 false，什么都不会被称为
+    回归。
   </p>
   <p>
-    这是一条故意做得很钝的规则，不是显著性检验。它挡住的是那个常见的失败：一个
-    在四次运行上动了的均值，不带次数就印了出来，被当成结果读，然后被发了出去。
-    把次数印在差值旁边，才是让噪声不被误当作发现的那一步。
+    当一个评分器可判定，并且整个区间都落在零的较差一侧时，它就是
+    <code>regressed</code>。较差的方向由评分器的 <code>direction</code> 决定：
+    <code>faithfulness</code> 下降是回归，<code>toxicity</code> 下降是改进。一个
+    在自身噪声范围内移动的均值，会带着它的区间报告出来，而不是作为一个发现。
+  </p>
+
+  <h3>用它把关一次发布</h3>
+  <p>
+    <code>mcpd eval</code> 向一个正在运行的守护进程要同样的比较，并把它变成一个
+    退出码：没有评分器回归时为 0，有一个回归时为 1，比较做不成时为 2。把它放进
+    用数据集跑候选版本的那个 CI 任务里，放在评分存下之后。
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="出现回归就让构建失败"
+    command="mcpd eval --baseline v3 --candidate v4 --endpoint https://mcpd.internal"
+  />
+
+  <p>
+    它和 SDK 一样读取 <code>MCPD_ENDPOINT</code> 和 <code>MCPD_API_KEY</code>，
+    打印一张列出每个评分器及其区间的表，用 <code>--json</code> 则输出 JSON；加上
+    <code>--require-decidable</code>，当某个评分器每边观测数不到二十个时也会失败。
   </p>
 
   <h2>这些跑在哪里</h2>

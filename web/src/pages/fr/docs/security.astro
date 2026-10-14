@@ -171,8 +171,10 @@ const code = localeOf(Astro.url.pathname)
 
   <h2>Clés et portées</h2>
   <p>
-    L’authentification se fait par clés d’API. Il n’y a pas de compte, pas de
-    session et pas de connexion. Une clé est présentée sous la forme
+    L’authentification se fait par clés d’API. Par défaut, il n’y a pas de
+    compte, pas de session et pas de connexion ; <code>--signup</code> et
+    <code>--accounts</code> les ajoutent, comme décrit plus bas. Une clé est
+    présentée sous la forme
     <code>Authorization: Bearer …</code> ou dans l’en-tête
     <code>X-Mcpd-Key</code>, et les deux valeurs sont hachées en SHA-256 avant
     d’être comparées : ni la longueur de la clé configurée ni la position du
@@ -222,6 +224,64 @@ const code = localeOf(Astro.url.pathname)
     <a href={urlFor('/docs/reference/api', code)} class="link">API HTTP</a>
     générée : il y a donc une seule réponse à « de quoi cet endpoint a-t-il
     besoin ? » plutôt qu’une réponse par document.
+  </p>
+
+  <h3>Comptes, avec --signup ou --accounts</h3>
+  <p>
+    Avec <code>--signup</code>, n’importe qui peut créer un compte avec une
+    adresse e-mail et un mot de passe ; avec <code>--accounts</code>, les
+    personnes arrivent par invitation, par authentification unique ou par SCIM.
+    Chaque projet de compte appartient à une organisation, et le rôle d’un
+    membre dans celle-ci (owner, admin, member ou viewer, éventuellement
+    remplacé sur un projet) se traduit dans les six portées. Une session porte
+    les portées que le rôle autorise sur chaque projet des organisations du
+    compte ; une clé porte une portée sur un projet, et seulement tant que le
+    rôle de son créateur l’autorise encore. Rien n’atteint un projet d’une
+    organisation à laquelle le compte n’appartient pas. Un signal qu’envoie une
+    clé de compte est stocké dans le projet de la clé, quel que soit le projet
+    qu’il nomme, et une clé d’idempotence est tenue par projet : un compte ne
+    peut donc pas faire passer le lot d’un autre pour une rediffusion. Seule une
+    session peut lister, créer ou révoquer des clés, donc une clé qui fuit ne
+    peut pas en créer d’autres.
+  </p>
+  <p>
+    Les mots de passe sont hachés avec argon2id. Les jetons, les clés, les liens
+    envoyés par e-mail, les jetons d’invitation, les codes de récupération et
+    les jetons SCIM sont des valeurs aléatoires, affichées une fois, et stockées
+    uniquement sous forme d’empreintes SHA-256. L’inscription, la connexion et
+    la réinitialisation du mot de passe donnent la même réponse qu’une adresse
+    ait un compte ou non, et disent le reste dans un e-mail envoyé à l’adresse.
+    Une adresse est confirmée par un lien avant que le compte puisse se
+    connecter. La connexion en deux étapes utilise des codes basés sur le
+    temps, refuse un code déjà utilisé, et donne dix codes de récupération à
+    usage unique. Chaque point d’entrée d’identifiants est limité par adresse
+    cliente, et les connexions échouées par adresse e-mail. Les sessions par mot
+    de passe durent 30 jours et les sessions par authentification unique
+    24 heures ; un compte peut lister et clore ses sessions, et changer ou
+    réinitialiser le mot de passe clôt les autres.
+  </p>
+  <p>
+    L’authentification unique passe par OpenID Connect avec PKCE, un état à
+    usage unique et un nonce, plus un secret détenu par le navigateur qui a
+    lancé la connexion : un lien de connexion ne peut donc pas être transmis à
+    quelqu’un d’autre. La signature, l’émetteur, l’audience, l’expiration et le
+    nonce du jeton d’identité sont vérifiés, et les algorithmes symétriques sont
+    refusés. Une personne est retrouvée par son identité chez le fournisseur ;
+    un nouveau compte n’est créé que pour une adresse d’un domaine que
+    l’organisation revendique, un compte existant n’est jamais repris, et la
+    session n’atteint que les projets de cette organisation. SCIM provisionne
+    les utilisateurs et les groupes d’une organisation avec un jeton qui
+    n’atteint rien d’autre ; le déprovisionnement met fin à l’adhésion, à ses
+    clés et à ses sessions. Voir
+    <a href="/docs/accounts" class="link">comptes et organisations</a>.
+  </p>
+  <p>
+    Ce mode désactive aussi la règle selon laquelle une portée sans clé est
+    ouverte : une requête sans identifiant est refusée partout, sauf sur les
+    sondes, l’inscription et la connexion. Les clés configurées sont essayées en
+    premier et gardent leur portée. Voir
+    <a href={`${urlFor('/docs/configuration', code)}#signup`} class="link">Inscription ouverte</a>
+    pour les options.
   </p>
 
   <h3>Le repli, et ce qu’il implique pour une clé que vous avez déjà</h3>
@@ -369,8 +429,10 @@ const code = localeOf(Astro.url.pathname)
     plus ancienne, et exige la portée <code>admin</code>.
   </p>
   <p>
-    Dix-huit actions sont enregistrées : <code>get_trace</code>,
-    <code>list_spans</code>, <code>list_logs</code>,
+    Quarante-quatre actions sont enregistrées. Vingt sont des lectures et des
+    suppressions de données : <code>get_trace</code>,
+    <code>get_trajectory</code>, <code>list_traces</code> quand on lui demande
+    des aperçus, <code>list_spans</code>, <code>list_logs</code>,
     <code>list_feedback</code>, <code>list_dataset_items</code>,
     <code>capture_into_dataset</code>,
     <code>read_trace_aspect_notes</code>, <code>get_theme</code>, <code>get_theme_flow</code>, <code>list_theme_history</code>, <code>list_theme_examples</code>,
@@ -381,10 +443,32 @@ const code = localeOf(Astro.url.pathname)
     Lister des traces renvoie une projection de noms, de durées, de nombres de
     tokens et de coûts, sans aucun prompt ni aucune complétion : ce n’est donc
     pas enregistré. Ouvrir l’une de ces traces l’est, parce que c’est là qu’est
-    le texte. Lister des exécutions durables est enregistré, parce que chaque
+    le texte. Une liste à laquelle on demande des aperçus de l’entrée et de la
+    sortie est enregistrée aussi, pour la même raison. Lister des exécutions
+    durables est enregistré, parce que chaque
     exécution de la liste porte son entrée, sa sortie et son état tels qu’ils
     ont été envoyés. Une lecture refusée d’une exécution est enregistrée sous le
     projet qui possède l’exécution.
+  </p>
+  <p>
+    Les vingt-quatre autres sont des changements de qui peut atteindre quoi, sur
+    un daemon avec comptes. Elles sont écrites au nom de l’identifiant de
+    l’organisation plutôt que d’un projet, portent l’adresse e-mail du compte
+    qui agit comme sujet, et se lisent avec
+    <code>GET /v1/api/orgs/{'{org_id}'}/audit</code> par un admin ou un owner :
+    <code>org_create</code>, <code>org_update</code>, <code>org_delete</code>,
+    <code>member_invite</code>, <code>invite_revoke</code>,
+    <code>invite_accept</code>, <code>member_role</code>,
+    <code>member_project_role</code>, <code>member_remove</code>,
+    <code>project_create</code>, <code>project_delete</code>,
+    <code>org_key_revoke</code>, <code>group_roles_update</code>,
+    <code>sso_update</code>, <code>sso_delete</code>, <code>sso_login</code>,
+    <code>scim_token_rotate</code>, <code>scim_token_revoke</code>,
+    <code>scim_user_create</code>, <code>scim_user_update</code>,
+    <code>scim_user_delete</code>, <code>scim_group_create</code>,
+    <code>scim_group_update</code> et <code>scim_group_delete</code>. Un
+    changement SCIM porte <code>scim</code> comme sujet et l’empreinte du jeton
+    SCIM comme principal.
   </p>
   <p>
     Les appels de worker ne sont pas enregistrés : réclamer une étape, déclarer
@@ -408,8 +492,10 @@ const code = localeOf(Astro.url.pathname)
       est enregistrée comme <code>anonymous</code>.
     </li>
     <li>
-      <strong>La personne vient de votre ingress.</strong> Seule, une ligne
-      attribue une action à une clé. Le champ <code>subject</code> porte
+      <strong>La personne vient d’une session ou de votre ingress.</strong>
+      Une ligne pour un changement d’organisation porte l’adresse e-mail du
+      compte qui agit. Pour une clé, une ligne attribue une action à la clé et
+      non à un humain. Le champ <code>subject</code> porte
       une identité quand <code>--trusted-identity-header</code> et
       <code>--trusted-proxy-cidr</code> sont tous deux définis, et il est vide
       sinon, ce qui est le cas par défaut. mcpd n’établit jamais cette identité
@@ -427,8 +513,9 @@ const code = localeOf(Astro.url.pathname)
       <strong>Il enregistre quelle clé, et en option qui.</strong> La clé est
       stockée sous forme d’empreinte tronquée, jamais la clé elle-même, donc
       le journal n’est pas un endroit où s’accumulent des identifiants. Cela
-      répond à « une clé d’administration a supprimé ceci ». Pour répondre à
-      « quelle personne l’a fait », donnez-lui l’en-tête que
+      répond à « une clé d’administration a supprimé ceci ». Une session nomme
+      aussi la personne pour les changements d’organisation. Pour les clés,
+      donnez-lui l’en-tête que
       votre ingress pose déjà et les adresses autorisées à le poser :
       <code>--trusted-identity-header x-forwarded-user</code> avec
       <code>--trusted-proxy-cidr 10.42.0.0/16</code>. Les deux moitiés sont
@@ -463,7 +550,8 @@ const code = localeOf(Astro.url.pathname)
       <strong>L’interface.</strong> Le balisage servi à <code>/</code> l’est à
       quiconque atteint le port. Les données derrière ne le sont pas : chaque
       requête qu’elle émet passe par l’API de consultation et rencontre les
-      mêmes clés. Il n’y a pas d’écran de connexion dans le daemon.
+      mêmes clés. Il n’y a pas d’écran de connexion dans le daemon, sauf si
+      <code>--signup</code> ou <code>--accounts</code> est actif.
     </li>
     <li>
       <strong>Les sondes et <code>/metrics</code>.</strong> Sans
@@ -507,26 +595,30 @@ const code = localeOf(Astro.url.pathname)
     <a href={urlFor('/docs/privacy', code)} class="link">Masquage et conservation</a>.
   </p>
   <p>
-    <strong>Les règles reconnaissent des noms de champs, pas la forme d’une
-    valeur.</strong> Une valeur qui arrive sous un champ nommé
-    <code>content</code> ou <code>question</code> est stockée telle qu’envoyée :
-    nommez donc les champs qui portent des secrets et des identifiants.
+    Les règles reconnaissent des noms de champs. Un secret collé au milieu
+    d’une phrase arrive sous un champ nommé <code>content</code> ou
+    <code>question</code>, donc chaque valeur de type chaîne est aussi
+    parcourue à la recherche des formes que prennent les secrets : blocs de clé
+    privée, JSON Web Tokens, identifiants de clé d’accès AWS, clés de
+    fournisseur commençant par <code>sk-</code>, jetons GitHub, Slack et
+    Google, jetons bearer et mots de passe dans les URL. Chaque correspondance
+    est remplacée sur place et le reste de la phrase est conservé. La table est
+    sur
+    <a href={urlFor('/docs/privacy', code)} class="link">Masquage et conservation</a>.
   </p>
-  <p>Le masquage couvre un périmètre précis :</p>
+  <p>Ce que couvre le masquage :</p>
   <ul>
-    <li>Il arrête la capture structurée des secrets et des identifiants, là où un secret arrive dans un champ nommé d’après ce qu’il est.</li>
-    <li>Il travaille sur les noms de champs. Le texte libre sous un nom de champ ordinaire est stocké tel qu’envoyé.</li>
+    <li>Il masque les secrets et les identifiants qui arrivent dans un champ nommé d’après ce qu’ils sont, et les secrets des formes ci-dessus où qu’ils apparaissent dans une chaîne.</li>
+    <li>Un secret sans préfixe fixe, comme un mot de passe tapé dans une phrase, est masqué par le champ dans lequel il arrive.</li>
     <li>Il laisse le nom d’un span et le message d’un enregistrement de log tels qu’envoyés. Ce sont des identifiants qui servent au regroupement plutôt que des payloads, et les réécrire casserait ce regroupement. Ne construisez pas un nom de span à partir de l’adresse e-mail d’un client.</li>
     <li>Il laisse le stockage des exécutions tel qu’envoyé. Les payloads d’une exécution durable sont ses données de travail ; seuls les spans qu’une exécution écrit dans le stockage des traces sont masqués.</li>
   </ul>
   <p>
-    Un contrôle travaille sur la forme, en détection après coup : le scorer
-    intégré <code>no_leaked_secret</code> pénalise une exécution dont la
-    <em>réponse</em> porte un jeton qui ressemble à un secret, par préfixe connu
-    ou par une longue suite alphanumérique à casse mixte. Il note la réponse
-    d’une exécution déjà stockée, ne supprime rien, et ne s’exécute que si vous
-    le demandez. Servez-vous-en pour apprendre que cela s’est produit, pas comme
-    une deuxième ligne de masquage.
+    Le scorer intégré <code>no_leaked_secret</code> ajoute une détection après
+    coup : il pénalise une exécution dont la <em>réponse</em> porte un jeton qui
+    ressemble à un secret, par préfixe connu ou par une longue suite
+    alphanumérique à casse mixte. Il note une exécution déjà stockée et ne
+    s’exécute que si vous le demandez.
   </p>
   <p>
     Deux bornes s’appliquent qu’une règle ait reconnu quelque chose ou non.
@@ -590,19 +682,7 @@ const code = localeOf(Astro.url.pathname)
         <td>Terminez le TLS sur votre ingress ou dans votre mesh, et gardez le port du daemon hors de tout réseau non fiable.</td>
       </tr>
       <tr>
-        <td><strong>L’authentification unique.</strong> L’identité d’une personne vient du proxy placé devant mcpd.</td>
-        <td>Placez l’interface derrière le proxy d’identité que vous exploitez déjà. L’identité d’une personne est celle que ce proxy établit.</td>
-      </tr>
-      <tr>
-        <td><strong>Le provisionnement.</strong> Dans mcpd, l’unité est une clé.</td>
-        <td>Provisionnez au niveau du proxy. Dans mcpd, ajoutez une clé à une liste ou retirez-la.</td>
-      </tr>
-      <tr>
-        <td><strong>Les rôles.</strong> L’autorisation est l’une des six portées et une liste de projets.</td>
-        <td>Séparez par clé et par projet. Si une distinction compte, faites-en un projet.</td>
-      </tr>
-      <tr>
-        <td><strong>Qui est une personne.</strong> Le journal d’audit enregistre le sujet que votre ingress a affirmé, et seulement depuis une adresse que vous avez nommée.</td>
+        <td><strong>Qui est une personne, pour les clés.</strong> Les sessions nomment le compte. Pour une clé, le journal d’audit enregistre le sujet que votre ingress a affirmé, depuis une adresse que vous avez nommée.</td>
         <td>Définissez <code>--trusted-identity-header</code> et <code>--trusted-proxy-cidr</code> pour que l’en-tête que votre proxy pose déjà atteigne la ligne d’audit. Sans eux, une ligne attribue une action à une clé, et émettre une clé par équipe resserre l’empreinte.</td>
       </tr>
       <tr>

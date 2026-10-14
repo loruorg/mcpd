@@ -645,6 +645,20 @@ mod tests {
             ) -> mcpd_store::Result<Vec<mcpd_store::DocumentLabel>> {
                 unimplemented!()
             }
+            async fn claim_lease(
+                &self,
+                _: &mcpd_store::LeaseClaim<'_>,
+            ) -> mcpd_store::Result<mcpd_store::Lease> {
+                unimplemented!()
+            }
+            async fn release_lease(
+                &self,
+                _: &str,
+                _: &str,
+                _: time::OffsetDateTime,
+            ) -> mcpd_store::Result<()> {
+                Ok(())
+            }
             async fn record_audit(&self, _: &mcpd_core::AuditEvent) -> mcpd_store::Result<()> {
                 Ok(())
             }

@@ -53,6 +53,9 @@ mcpd.span("checkout", traceparent = headers["traceparent"]) { span ->
 const payload = `generation.setModel("gpt-4o", provider = "openai")
 generation.setUsage(inputTokens = 1_180, outputTokens = 96)
 
+// モデルをどう呼び出したか。ペイロードではなく設定なので、取り込みを切っても残る。
+generation.setModelParameters(temperature = 0.0, seed = 0, maxTokens = 1_024)
+
 // setError はすでに持っている throwable を取るので、メッセージ、クラス、
 // スタックはすべてそこから取れる。
 tool.setError(e, retryable = true)
@@ -61,7 +64,7 @@ tool.setError(e, retryable = true)
 tool.setError("the shipping service returned 503")`
 
 const surface = `// プロンプトと補完はプロセスの中に留める。スパンは所要時間、ステータス、
-// 使用量、モデル、相関、エラーをそのまま持つ。
+// 使用量、モデル、モデルパラメーター、相関、エラーをそのまま持つ。
 val quiet = Mcpd(McpdConfig(capturePayloads = false))
 quiet.span("draft_answer", input = question, capturePayloads = true) { }  // これだけは残す
 
@@ -215,6 +218,17 @@ Mcpd(McpdConfig(project = "batch")).use { mcpd ->
     <code>error</code> になり、メッセージは必ず入ります。「何かが失敗した」では、
     打つ手が決まりません。
   </p>
+  <p>
+    <code>setModelParameters</code> は、呼び出しに使った設定を記録します。
+    <code>temperature</code>、<code>topP</code>、<code>topK</code>、
+    <code>maxTokens</code>、<code>seed</code>、<code>stopSequences</code>、
+    <code>hasResponseFormat</code> です。これらはペイロードではなく設定なので、
+    <code>capturePayloads = false</code> でも残ります。そして大事なのはまさにその
+    場合です。実行を再現する人が合わせなければならないのは、これらの値だから
+    です。省いた引数は存在せず、渡した引数は値が何であれ保たれるので、
+    <code>seed = 0</code> もシードです。<code>hasResponseFormat</code> の背後に
+    あるスキーマは記録されず、それが有効だったかどうかだけが記録されます。
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -234,6 +248,23 @@ Mcpd(McpdConfig(project = "batch")).use { mcpd ->
     ことはありません。
   </p>
 
+  <h3>ストリーミングの呼び出し</h3>
+  <p>
+    プロバイダーの <code>Flow</code> を <code>span.recordStream</code> に渡し、
+    代わりに返ってきた flow を collect してください。OpenAI の chat completion の
+    チャンクと Anthropic の message イベントを、<code>JsonElement</code> としても
+    <code>Map</code> としても受け取り、すべてのチャンクはそのまま通ります。テキストか
+    ツール呼び出しを持つ最初のチャンクが、最初のトークンまでの時間を記録します。
+    flow が完了したとき、例外を投げたとき、<code>take</code>、<code>first</code>、
+    キャンセルで途中でやめたときに、スパンは、同じ呼び出しをストリーミングなしで
+    行った場合に <code>recordResponse</code> が記録する内容と、出力としての
+    テキストを受け取り、終了します。flow からの例外はスパンに記録され、そのまま
+    あなたに届きます。保持するテキストは 32,768 文字までで、上限に達したときは
+    <code>mcpd.stream.truncated</code> が設定されます。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="stream" title="ストリーミングの呼び出し" />
+
   <h2>ペイロード、シンク、完了済みスパン</h2>
   <p>
     <code>capturePayloads = false</code> にすると、<code>input</code> と
@@ -252,6 +283,21 @@ Mcpd(McpdConfig(project = "batch")).use { mcpd ->
     title="取得、記録、検証"
     samples={[{ lang: 'kotlin', label: 'Kotlin', shiki: 'kotlin', code: surface }]}
   />
+
+  <p>
+    <code>dev.mcpd.testing.TestClient</code> はメモリに記録し、その
+    <code>client</code> は <code>Mcpd</code> です。あなたのコードがクライアントを
+    受け取る場所にそれを渡し、記録された内容を読み返してください。名前や種別で引く
+    <code>spans()</code>、必ず存在するはずの 1 つのスパンを引く
+    <code>span(name)</code>、実行ごとのツリーを返す <code>trees()</code>、そして
+    <code>logs()</code>、<code>metrics()</code>、<code>scores()</code>、
+    <code>recordedFeedback()</code>、<code>reset()</code> です。どのアクセサーも
+    先にフラッシュします。保持される内容は、デーモンへ向かうときと同じように
+    サンプリング、ペイロードの取り込み、<code>redact</code> を通っており、テストの
+    実行に <code>MCPD_ENABLED=false</code> が設定されていても有効なままです。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['kotlin']} region="testing" title="ユニットテスト" />
 
   <h2>永続実行</h2>
   <p>

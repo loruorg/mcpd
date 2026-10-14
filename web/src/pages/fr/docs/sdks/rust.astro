@@ -194,6 +194,19 @@ async fn main() {
     peuvent jamais se contredire, et le message est un argument obligatoire
     plutôt qu’une option.
   </p>
+  <p>
+    <code>set_model_parameters</code> enregistre les réglages avec lesquels
+    l’appel a été fait : <code>temperature</code>, <code>top_p</code>,
+    <code>top_k</code>, <code>max_tokens</code>, <code>seed</code>,
+    <code>stop_sequences</code> et <code>has_response_format</code>. Ce sont des
+    réglages et non du payload, ils survivent donc à
+    <code>with_capture_payloads(false)</code>, et c’est le cas qui compte : ce
+    sont eux que doit reproduire quiconque rejoue l’exécution.
+    <code>None</code> est absent et <code>Some(0)</code> est une valeur, donc
+    une graine à zéro est une graine. Le schéma derrière
+    <code>has_response_format</code> n’est pas enregistré, seulement le fait
+    qu’un schéma était en vigueur.
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -210,11 +223,32 @@ async fn main() {
     span peut donc être renseigné depuis partout où il est emprunté.
   </p>
 
+  <h3>Appels en streaming</h3>
+  <p>
+    Passez le flux du fournisseur à <code>span.record_stream</code> et lisez à
+    sa place le flux qu’il rend. Ses éléments sont des <code>Result</code>, et
+    les fragments peuvent être des fragments chat-completion d’OpenAI ou des
+    événements de message d’Anthropic, chacun sous forme de
+    <code>serde_json::Value</code> ou de tout type qui se sérialise en un tel
+    objet. Chaque élément passe sans changement. Le premier fragment qui porte
+    du texte ou un appel d’outil marque le délai jusqu’au premier token. Le
+    wrapper possède le span : quand le flux se termine, produit un
+    <code>Err</code> ou est libéré avant la fin, le span reçoit ce que
+    <code>record_response</code> aurait enregistré pour le même appel sans
+    streaming, avec le texte comme sortie, puis se termine. Un
+    <code>Err</code> marque le span avec son texte <code>Display</code> et vous
+    parvient quand même. Le texte conservé est plafonné à 32 768 caractères, et
+    <code>mcpd.stream.truncated</code> est posé quand le plafond a été atteint.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="stream" title="un appel en streaming" />
+
   <h2>Payloads, sinks et spans terminés</h2>
   <p>
     <code>Config::with_capture_payloads(false)</code> garde les prompts et les
     complétions dans le processus : les spans portent toujours leurs temps, leur
-    statut, leur consommation, leur modèle, leur corrélation et leurs erreurs,
+    statut, leur consommation, leur modèle, les paramètres du modèle, leur
+    corrélation et leurs erreurs,
     et <code>input</code> et <code>output</code> sont écartés avant d’atteindre
     la file d’attente. Un span change le réglage du client pour lui-même avec
     <code>span.capture_payloads(..)</code>, dans un sens comme dans l’autre.
@@ -230,6 +264,22 @@ async fn main() {
     <code>dropped</code>, <code>capacity</code>, <code>exported</code>,
     <code>failed</code> et <code>rejected</code>.
   </p>
+  <p>
+    <code>mcpd_sdk::testing::TestClient</code> enveloppe un client qui
+    enregistre en mémoire. Passez <code>test.client()</code> partout où votre
+    code prend un <code>&amp;Mcpd</code>, puis relisez ce qu’il a enregistré :
+    <code>spans(name, kind)</code>, <code>span(name)</code> pour le span qui
+    doit exister, <code>trees()</code> pour chaque exécution sous forme
+    d’arbre, <code>logs()</code>, <code>metrics()</code>,
+    <code>scores()</code>, <code>recorded_feedback()</code> et
+    <code>reset()</code>. Chaque accesseur fait d’abord un flush. Ce qu’il
+    détient est passé par l’échantillonnage, la capture des payloads et
+    <code>redact</code> comme en route vers un daemon, et
+    <code>TestClient::new()</code> reste actif quand
+    <code>MCPD_ENABLED=false</code> est posé pour l’exécution des tests.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="testing" title="un test unitaire" />
   <p>
     <code>mcpd.record(span)</code> met en file un span déjà terminé, avec les
     identifiants, le parent, le début et la fin, tel que le détient un

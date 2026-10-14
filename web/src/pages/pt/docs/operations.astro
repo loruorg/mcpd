@@ -213,6 +213,20 @@ const scrape = `scrape_configs:
           <td>gauge</td>
           <td>Segundos desde que este processo começou</td>
         </tr>
+        <tr>
+          <td><code>mcpd_model_input_tokens_total</code>, <code>mcpd_model_output_tokens_total</code></td>
+          <td>counter</td>
+          <td>
+            Tokens nos spans armazenados, com os rótulos <code>provider</code> e
+            <code>model</code>. No máximo 200 séries; os spans além disso são
+            contados sob <code>other</code>
+          </td>
+        </tr>
+        <tr>
+          <td><code>mcpd_model_cost_total</code></td>
+          <td>counter</td>
+          <td>Custo precificado dos spans armazenados, por provedor, modelo e <code>currency</code></td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -598,7 +612,7 @@ const scrape = `scrape_configs:
         </tr>
         <tr>
           <td><code>forwarding</code></td>
-          <td>Um resultado por destino: uma exportação vazia, enviada no protocolo do próprio destino (o Helicone não é contatado), e as entradas, os bytes, a entrada mais antiga e as entradas em <code>dead/</code> do spool dele. Um aviso quando há entradas em <code>dead/</code>, quando a entrada mais antiga tem mais de uma hora, ou quando um destino define <code>enabled</code> como false</td>
+          <td>Um resultado por destino: uma exportação vazia, enviada no protocolo do próprio destino (o Helicone não é contatado), e as entradas, os bytes, a entrada mais antiga e as entradas mortas do spool dele. Um aviso quando há entradas mortas, quando a entrada mais antiga tem mais de uma hora, ou quando um destino define <code>enabled</code> como false</td>
         </tr>
         <tr>
           <td><code>judge</code></td>
@@ -688,6 +702,59 @@ const scrape = `scrape_configs:
     internet inteira é tratada do mesmo jeito, pela mesma razão: qualquer endereço
     poderia então definir o cabeçalho e ser registrado como quem ele nomear.
   </p>
+
+  <h3>O que roda sem o comando</h3>
+  <p>
+    Você precisa saber que o <code>mcpd doctor</code> existe para rodá-lo, e
+    nenhum dos erros que ele encontra se anuncia, então a implantação que
+    carrega um costuma ser justamente aquela para a qual ninguém o apontou. Por
+    isso, os grupos que leem só a configuração rodam em toda partida:
+    <code>keys</code>, <code>identity</code>, <code>limits</code> e
+    <code>judge</code>. Eles não precisam de ida e volta ao armazenamento nem de
+    rede, então uma partida paga microssegundos por eles. Os outros oito ficam
+    no comando, porque cada um lê o armazenamento ou contata os destinos de
+    encaminhamento, e uma partida não pode esperar por nenhum dos dois.
+  </p>
+  <p>
+    Uma falha encontrada na partida para o daemon; um aviso é registrado e ele
+    segue em frente. O que separa os dois é se a configuração pede algo que não
+    pode funcionar: uma entrada de chave vazia ou com espaço em branco em uma
+    ponta, uma faixa confiável que contém a internet inteira, um
+    <code>sample</code> de projeto fora de 0.0 a 1.0, ou um juiz que nunca
+    consegue responder. Cada um desses é um recurso que você ligou e que, em
+    silêncio, não faz nada, o que é pior do que um que falha, porque ninguém vai
+    procurá-lo. Uma chave curta, uma chave que dois projetos compartilham, um
+    teto menor que um lote: esses funcionam, e podem ser o que você quis, então
+    são registrados e nunca são fatais.
+  </p>
+  <p>
+    A abertura com que o mcpd vem é a exceção. Um escopo de ingestão ou de
+    leitura aberto em um endereço que não é loopback é uma falha para o
+    <code>mcpd doctor</code>, que serve de portão para uma implantação, e um
+    aviso na partida, que não serve. Recusar ali significaria uma primeira
+    execução que nunca começa.
+  </p>
+  <p>
+    O <code>mcpd config</code> e o <code>mcpd doctor</code> rodam mesmo contra
+    uma configuração que uma partida recusaria. São os dois comandos que
+    existem para explicar uma configuração ruim, então nenhum deles pode ser o
+    comando que não roda.
+  </p>
+
+  <TerminalCast
+    class="not-prose my-8"
+    title="um juiz que nunca poderia ter produzido uma nota"
+    lines={[
+      { cmd: 'mcpd --config-file /etc/mcpd/config.json' },
+      { out: 'Error: the configuration cannot do what it says, so mcpd will', tone: 'warn' },
+      { out: 'not start:', tone: 'warn' },
+      { out: '  judge: the judge at https://api.example.com/v1 has no criteria,', tone: 'warn' },
+      { out: '  so every judged scorer declines with `is not a configured', tone: 'warn' },
+      { out: '  criterion` and no judged score is ever produced. Add entries', tone: 'warn' },
+      { out: '  under `judge.criteria` in --config-file.', tone: 'warn' },
+      { out: 'Fix the lines above, or run `mcpd doctor` for the whole report.', tone: 'warn' },
+    ]}
+  />
 
   <h2>Os ajustes a conferir antes de ele ficar alcançável</h2>
   <p>

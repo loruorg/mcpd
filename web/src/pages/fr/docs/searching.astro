@@ -2,6 +2,7 @@
 import Doc from '@/layouts/Doc.astro'
 import SearchDemo from '@/components/SearchDemo.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const loc = localeOf(Astro.url.pathname)
@@ -329,8 +330,8 @@ while True:
         <td>La fenêtre, mesurée sur l’heure de début de l’exécution.</td>
       </tr>
       <tr>
-        <td><code>min_duration_ms</code></td>
-        <td>Les exécutions au moins aussi lentes, en millisecondes.</td>
+        <td><code>min_duration_ms</code>, <code>max_duration_ms</code></td>
+        <td>Les exécutions au moins, ou au plus, aussi lentes, en millisecondes.</td>
       </tr>
       <tr>
         <td><code>min_cost</code></td>
@@ -340,12 +341,43 @@ while True:
         </td>
       </tr>
       <tr>
+        <td><code>max_cost</code></td>
+        <td>Les exécutions qui coûtent au plus cela.</td>
+      </tr>
+      <tr>
+        <td><code>min_tokens</code></td>
+        <td>Les exécutions qui ont utilisé au moins ce nombre de tokens, entrée et sortie confondues.</td>
+      </tr>
+      <tr>
         <td><code>has_score</code></td>
         <td>Les exécutions portant un score de ce scorer.</td>
       </tr>
       <tr>
         <td><code>score_below</code></td>
         <td>Avec <code>has_score</code> : les exécutions que ce scorer a mises sous cette valeur.</td>
+      </tr>
+      <tr>
+        <td><code>score_above</code></td>
+        <td>
+          Avec <code>has_score</code> : les exécutions que ce scorer a mises au-dessus
+          de cette valeur. Avec <code>score_below</code> en plus, un même score doit
+          se situer entre les deux.
+        </td>
+      </tr>
+      <tr>
+        <td><code>preview</code></td>
+        <td>
+          <code>true</code> pour remplir le <code>input_preview</code> et le
+          <code>output_preview</code> de chaque exécution. Enregistré dans le
+          journal d’audit.
+        </td>
+      </tr>
+      <tr>
+        <td><code>has_feedback</code></td>
+        <td>
+          <code>true</code> pour les exécutions sur lesquelles une personne a donné
+          un retour, <code>false</code> pour celles qui n’en ont aucun.
+        </td>
       </tr>
       <tr>
         <td><code>sort</code></td>
@@ -392,8 +424,14 @@ while True:
     Il n’existe pas de seconde liste d’exécutions plus légère, parce que la
     première l’est déjà. La projection de trace stockée ne porte aucune entrée,
     aucune sortie et aucun attribut : des noms, des comptes, des temps, un coût,
-    des étiquettes et la corrélation, et rien de ce qu’un modèle a dit. C’est
-    l’ouverture d’une exécution qui va chercher le payload.
+    des étiquettes et la corrélation. Demandez avec <code>preview=true</code> et
+    chaque ligne ajoute <code>input_preview</code> et
+    <code>output_preview</code>, le début de l’entrée et de la sortie de l’étape
+    racine en texte brut, 240 caractères au plus chacun ; pour une entrée de
+    chat, l’aperçu est le dernier message de l’utilisateur. Une lecture de liste
+    avec aperçus porte du texte qu’un modèle a vu, elle est donc enregistrée dans
+    le journal d’audit. C’est l’ouverture d’une exécution qui va chercher le
+    payload complet.
   </p>
   <p>
     Mesuré sur une exécution réaliste, un agent de support en huit étapes qui
@@ -447,11 +485,20 @@ while True:
     <code>GET /v1/api/spans</code>, <code>/v1/api/logs</code>,
     <code>/v1/api/scores</code>, <code>/v1/api/metrics</code> et
     <code>/v1/api/feedback</code> imposent chacun leur propre vocabulaire de la
-    même façon. Deux méritent d’être connus avant que vous ne les rencontriez :
-    la liste des scores ne prend pas d’<code>order</code>, parce qu’elle va du
-    plus récent au plus ancien et que son curseur ne compare que dans un sens ;
-    et la liste des retours exige un <code>trace_id</code>, parce que les
-    retours se lisent une exécution à la fois.
+    même façon. La liste des scores ne prend pas d’<code>order</code>, parce
+    qu’elle va du plus récent au plus ancien et que son curseur ne compare que
+    dans un sens. La liste des retours lit un projet entier, du plus récent au
+    plus ancien, et se restreint par <code>trace_id</code>,
+    <code>span_id</code>, <code>kind</code>, <code>author_kind</code> et une
+    fenêtre <code>from</code> et <code>to</code>, avec un curseur pour la page
+    suivante. La liste des logs filtre sur la corrélation d’une ligne :
+    <code>environment</code>, <code>service_name</code>,
+    <code>service_version</code>, <code>session_id</code>,
+    <code>thread_id</code>, <code>user_id</code>, <code>run_id</code>,
+    <code>request_id</code>, <code>experiment_id</code> et
+    <code>release</code>, chacun en correspondance exacte. Envoyez un
+    identifiant d’utilisateur tel que vous le connaissez ; il est haché comme
+    l’a été celui qui est stocké.
   </p>
 
   <h2 id="filling-a-filter-box">Remplir une boîte de filtre</h2>
@@ -521,6 +568,23 @@ while True:
     répéterait chaque ligne à l’infini. <code>signal=scores</code> est refusé
     plutôt que répondu par une page vide.
   </p>
+
+  <h3>Un suivi en direct</h3>
+  <p>
+    Envoyez la même requête avec <code>Accept: text/event-stream</code> et elle
+    reste ouverte. Le daemon interroge chaque seconde et envoie chaque lot qui
+    apporte des lignes sous la forme d’un événement <code>delta</code> contenant
+    la réponse ci-dessus, avec le curseur qui la suit comme identifiant
+    d’événement. Un client qui décroche se reconnecte avec ce curseur et ne
+    perd rien. Un suivi se ferme au bout de trente minutes, et le client se
+    reconnecte de la même façon.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="suivre les nouvelles exécutions à leur arrivée"
+    command="curl -N -H 'accept: text/event-stream' 'localhost:4317/v1/api/deltas?signal=traces'"
+  />
 
   <h2>Ce que ce déploiement sait faire</h2>
   <p>
@@ -607,6 +671,7 @@ while True:
   <p>
     Il accepte <code>q</code>, <code>kind</code>, <code>status</code>,
     <code>name</code>, <code>model</code>, <code>trace_id</code>,
+    <code>prompt</code>, <code>prompt_version</code>,
     <code>from</code>, <code>to</code>, <code>min_duration_ms</code>,
     <code>sort</code>, <code>order</code>, <code>limit</code> et
     <code>cursor</code>, avec les mêmes sens et les mêmes valeurs par défaut. Il

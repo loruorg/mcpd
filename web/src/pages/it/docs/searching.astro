@@ -2,6 +2,7 @@
 import Doc from '@/layouts/Doc.astro'
 import SearchDemo from '@/components/SearchDemo.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import Command from '@/components/Command.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
 
 const loc = localeOf(Astro.url.pathname)
@@ -329,8 +330,8 @@ while True:
         <td>La finestra, misurata sull’ora di inizio dell’esecuzione.</td>
       </tr>
       <tr>
-        <td><code>min_duration_ms</code></td>
-        <td>Le esecuzioni lente almeno così, in millisecondi.</td>
+        <td><code>min_duration_ms</code>, <code>max_duration_ms</code></td>
+        <td>Le esecuzioni lente almeno, o al massimo, così, in millisecondi.</td>
       </tr>
       <tr>
         <td><code>min_cost</code></td>
@@ -341,12 +342,43 @@ while True:
         </td>
       </tr>
       <tr>
+        <td><code>max_cost</code></td>
+        <td>Le esecuzioni che costano al massimo questo.</td>
+      </tr>
+      <tr>
+        <td><code>min_tokens</code></td>
+        <td>Le esecuzioni che hanno usato almeno questo numero di token, input e output insieme.</td>
+      </tr>
+      <tr>
         <td><code>has_score</code></td>
         <td>Le esecuzioni che portano un punteggio di questo id di scorer.</td>
       </tr>
       <tr>
         <td><code>score_below</code></td>
         <td>Insieme a <code>has_score</code>: le esecuzioni che quello scorer ha messo sotto questo valore.</td>
+      </tr>
+      <tr>
+        <td><code>score_above</code></td>
+        <td>
+          Insieme a <code>has_score</code>: le esecuzioni che quello scorer ha
+          messo sopra questo valore. Con anche <code>score_below</code>, un
+          punteggio deve stare tra i due.
+        </td>
+      </tr>
+      <tr>
+        <td><code>preview</code></td>
+        <td>
+          <code>true</code> per riempire <code>input_preview</code> e
+          <code>output_preview</code> di ogni esecuzione. Registrato nel log di
+          audit.
+        </td>
+      </tr>
+      <tr>
+        <td><code>has_feedback</code></td>
+        <td>
+          <code>true</code> per le esecuzioni su cui una persona ha dato un
+          feedback, <code>false</code> per quelle senza.
+        </td>
       </tr>
       <tr>
         <td><code>sort</code></td>
@@ -394,8 +426,13 @@ while True:
     Non c’è un secondo elenco di esecuzioni più leggero, perché il primo è già
     leggero. La proiezione archiviata di una traccia non porta nessun input,
     nessun output e nessun attributo: nomi, conteggi, tempi, costo, tag e
-    correlazione, e niente di quello che ha detto un modello. È l’apertura di
-    un’esecuzione a portarsi dietro il payload.
+    correlazione. Chiedi con <code>preview=true</code> e ogni riga aggiunge
+    <code>input_preview</code> e <code>output_preview</code>, l’inizio
+    dell’input e dell’output del passo radice come testo semplice, al massimo
+    240 caratteri ciascuno; per un input di chat l’anteprima è l’ultimo
+    messaggio dell’utente. Una lettura dell’elenco con le anteprime porta testo
+    che un modello ha visto, quindi viene registrata nel log di audit. È
+    l’apertura di un’esecuzione a portarsi dietro il payload completo.
   </p>
   <p>
     Misurato su un’esecuzione realistica, un agente di assistenza in otto passi
@@ -450,11 +487,19 @@ while True:
     <code>GET /v1/api/spans</code>, <code>/v1/api/logs</code>,
     <code>/v1/api/scores</code>, <code>/v1/api/metrics</code> e
     <code>/v1/api/feedback</code> fanno valere ciascuno il proprio vocabolario
-    allo stesso modo. Vale la pena conoscerne due prima di incontrarli:
-    l’elenco dei punteggi non prende <code>order</code>, perché va dal più
-    recente e il suo cursore confronta in una sola direzione, e l’elenco dei
-    feedback vuole un <code>trace_id</code>, perché il feedback si legge
-    un’esecuzione alla volta.
+    allo stesso modo. L’elenco dei punteggi non prende <code>order</code>,
+    perché va dal più recente e il suo cursore confronta in una sola
+    direzione. L’elenco dei feedback legge un progetto intero, dal più
+    recente, e restringe per <code>trace_id</code>, <code>span_id</code>,
+    <code>kind</code>, <code>author_kind</code> e una finestra
+    <code>from</code> e <code>to</code>, con un cursore per la pagina
+    successiva. L’elenco dei log filtra sulla correlazione di una riga:
+    <code>environment</code>, <code>service_name</code>,
+    <code>service_version</code>, <code>session_id</code>,
+    <code>thread_id</code>, <code>user_id</code>, <code>run_id</code>,
+    <code>request_id</code>, <code>experiment_id</code> e
+    <code>release</code>, ciascuno a corrispondenza esatta. Manda un id utente
+    così come lo conosci; viene sottoposto a hash come quello archiviato.
   </p>
 
   <h2 id="filling-a-filter-box">Riempire una casella di filtro</h2>
@@ -523,6 +568,22 @@ while True:
     ripeterebbe ogni riga per sempre. <code>signal=scores</code> è rifiutato,
     non risposto con una pagina vuota.
   </p>
+
+  <h3>Una coda dal vivo</h3>
+  <p>
+    Manda la stessa richiesta con <code>Accept: text/event-stream</code> e
+    resta aperta. Il daemon fa polling ogni secondo e manda ogni batch che
+    porta righe come un evento <code>delta</code> con dentro la risposta qui
+    sopra, con il cursore successivo come id dell’evento. Un client che cade si
+    riconnette con quel cursore e non perde niente. Una coda si chiude dopo
+    trenta minuti, e il client si riconnette allo stesso modo.
+  </p>
+
+  <Command
+    class="not-prose my-6"
+    title="segui le nuove esecuzioni man mano che arrivano"
+    command="curl -N -H 'accept: text/event-stream' 'localhost:4317/v1/api/deltas?signal=traces'"
+  />
 
   <h2>Che cosa sa fare questo deploy</h2>
   <p>
@@ -610,6 +671,7 @@ while True:
   <p>
     Prende <code>q</code>, <code>kind</code>, <code>status</code>,
     <code>name</code>, <code>model</code>, <code>trace_id</code>,
+    <code>prompt</code>, <code>prompt_version</code>,
     <code>from</code>, <code>to</code>, <code>min_duration_ms</code>,
     <code>sort</code>, <code>order</code>, <code>limit</code> e
     <code>cursor</code>, con gli stessi significati e gli stessi valori

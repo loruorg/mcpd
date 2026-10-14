@@ -10,7 +10,7 @@ const href = (route: string) => urlFor(route, locale)
 
 <Doc
   title="Moniteurs et alertes"
-  description="Comment mcpd surveille le taux d’erreur, la latence, le coût et les moyennes de score, pourquoi un moniteur se verrouille, pourquoi une fenêtre calme n’efface pas une alerte, et le webhook posté."
+  description="Comment mcpd surveille le taux d’erreur, la latence, le coût, les scores et la forme des exécutions, pourquoi un moniteur reste verrouillé jusqu’à son acquittement, et son webhook."
   lede="Une condition qui mérite d’être surveillée, surveillée. mcpd évalue à intervalle régulier, verrouille ce qu’il trouve, et vous le dit une fois."
   og="docs"
 >
@@ -98,6 +98,266 @@ const href = (route: string) => urlFor(route, locale)
       </tr>
     </tbody>
   </table>
+
+  <h2>Quand vous ne pouvez pas nommer le nombre</h2>
+  <p>
+    Chaque surveillance ci-dessus compare une mesure à un plafond que vous avez
+    choisi. Cela fonctionne tant que vous savez ce que la mesure devrait être.
+    L’emballement le plus difficile à attraper est celui qui n’atteint jamais
+    le plafond que vous auriez pensé à fixer : une exécution qui boucle huit
+    fois au lieu de deux, se termine, coûte quatre fois ce qu’elle devrait, et
+    ne signale aucune erreur. Son nombre d’étapes n’est pas élevé dans
+    l’absolu. Il est élevé <em>pour cette définition</em>, et seules les
+    exécutions récentes de cette définition peuvent le dire.
+  </p>
+  <p>
+    <code>step_count_divergence</code> ne fixe aucun seuil en étapes. Pour
+    chaque version de définition, il prend le nombre d’étapes des exécutions
+    récemment terminées de cette version, en prend le milieu comme forme
+    habituelle, et signale les exécutions qui s’en écartent plus qu’une borne
+    standardisée ne le permet. Personne n’a besoin de savoir que
+    <code>checkout</code> prend normalement onze étapes, et personne n’a à
+    revoir le nombre quand il commence à en prendre quatorze.
+  </p>
+
+  <h3>La statistique, et pourquoi celle-ci</h3>
+  <p>
+    La mesure de l’écart d’une exécution est le z-score modifié :
+    <span class="data">0.6745 &times; (étapes &minus; médiane) &divide; MAD</span>,
+    où MAD est la médiane des écarts absolus à la médiane. Une exécution
+    diverge quand ce score dépasse <code>z_bound</code>, qui vaut
+    <span class="data">3.5</span> par défaut.
+  </p>
+  <p>
+    Les deux constantes sont les valeurs conventionnelles et aucune n’est
+    arbitraire. Pour des données distribuées normalement, l’écart absolu
+    médian converge vers 0.6745&sigma; et non vers &sigma;, donc le rapport brut
+    se mesure en unités d’environ deux tiers d’écart type. Multiplier par
+    0.6745 le ramène en unités de &sigma;, ce qui permet à 3.5 de signifier ce
+    que tout le monde y lit. 3.5 est la borne publiée avec la statistique,
+    environ une exécution sur deux mille sur des données normales. Les nombres
+    d’étapes ne suivent pas une loi normale : traitez-la comme la valeur à
+    partir de laquelle ajuster, plutôt que comme un taux de fausses alertes
+    promis.
+  </p>
+  <p>
+    La médiane et la MAD sont utilisées plutôt qu’une moyenne et un écart type
+    parce qu’elles résistent à ce que l’on cherche. Une seule exécution qui a
+    pris quarante fois le nombre habituel d’étapes déplace une moyenne et gonfle
+    un écart type assez pour se cacher ; l’écart absolu médian tolère jusqu’à
+    la moitié de son échantillon en valeurs aberrantes avant de bouger.
+  </p>
+
+  <h3>Garde-fous intégrés</h3>
+  <ul>
+    <li>
+      <strong>Un échantillon assez grand pour juger.</strong> Une version de
+      définition a besoin de <span class="data">12</span> exécutions terminées
+      dans la fenêtre avant que la surveillance ne compare quoi que ce soit à
+      elle. La médiane de douze se situe entre la sixième et la septième
+      valeur, donc aucune exécution seule ne décide où est le milieu. En
+      dessous, une seule exécution inhabituelle déplace le milieu lui-même, et
+      la référence décrit alors la valeur aberrante plutôt que la norme. Une
+      version qui en a trop peu se lit comme insuffisante, ce qui laisse une
+      alerte en cours exactement là où elle était. Les douze sont comptées dans
+      la fenêtre du moniteur, donc réglez les deux ensemble : une définition qui
+      tourne quelques fois par heure a besoin d’un <code>window_seconds</code>
+      mesuré en heures pour les atteindre.
+    </li>
+    <li>
+      <strong>Pas de division par zéro.</strong> Une définition sans boucle ni
+      branche prend le même nombre d’étapes à chaque fois, donc sa MAD est
+      nulle et chaque écart est infiniment anormal. Émettre l’infini n’est pas
+      une réponse : cela ne se compare pas, cela s’affiche <code>inf</code> dans
+      une phrase sur laquelle quelqu’un doit agir, et cela arrive à un webhook
+      sous la forme <code>null</code>. mcpd se replie sur l’écart absolu moyen,
+      multiplié par &radic;(&pi;/2) pour estimer le même &sigma;. Quand même
+      celui-ci est nul, parce que chaque exécution de l’échantillon a pris
+      exactement le même nombre d’étapes, il n’y a pas de rapport à signaler et
+      l’alerte le dit en étapes : « chacune des 12 dernières exécutions
+      terminées en a pris 9 ». Dans ce seul cas, <code>z_bound</code> ne
+      s’applique pas, parce qu’il n’y a aucun score à lui opposer : relever la
+      borne élargit ce qui compte comme variation ordinaire, et une cohorte sans
+      variation n’a rien à élargir.
+    </li>
+    <li>
+      <strong>Une version de définition à la fois.</strong> Les exécutions sont
+      regroupées par <em>version</em> de définition. Une nouvelle version est un
+      changement de forme délibéré, donc une exécution de v3 n’est pas anormale
+      parce qu’elle diffère d’une exécution de v2, et les mélanger donne un
+      échantillon à deux bosses dont la médiane ne décrit aucune des deux. Une
+      version fraîchement publiée ne signale donc rien tant qu’elle n’a pas
+      douze exécutions terminées à elle, ce qui est le bon sens.
+    </li>
+    <li>
+      <strong>Un signalement par échec.</strong> Seules les exécutions
+      terminées entrent dans la référence, et seule une exécution terminée est
+      signalée pour avoir pris trop <em>peu</em> d’étapes. Finir court, c’est
+      ce que signifient échouer, être annulée, expirer et ne pas avoir encore
+      fini, et c’est la seule surveillance qui existe pour voir ce que le taux
+      d’erreur ne voit pas. Une exécution encore en cours est notée, en
+      revanche : une exécution déjà partie trop loin est signalée pendant
+      qu’elle tourne encore, ce qui est tout l’intérêt de la surveillance.
+    </li>
+  </ul>
+
+  <h3>La configurer</h3>
+  <p>
+    Cette surveillance a deux nombres parce qu’elle pose deux questions.
+    <code>z_bound</code> demande à quelle distance une exécution doit se
+    trouver, et c’est un score standardisé, donc le même 3.5 sert une
+    définition qui prend habituellement quatre étapes et une qui en prend
+    quatre cents. <code>threshold</code> demande ensuite combien d’exécutions
+    de ce genre une fenêtre peut contenir avant que quelqu’un soit prévenu, ce
+    qui est un choix opérationnel. Réglez-le à <code>0</code> avec
+    <code>above</code> pour être prévenu de chacune. <code>below</code> n’a pas
+    d’usage sur cette surveillance : que chaque exécution soit ordinaire est
+    l’état sain, pas celui pour lequel réveiller quelqu’un.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitors": [
+    {
+      "id": "checkout-shape",
+      "name": "A checkout run took an unusual number of steps",
+      "project": "support-desk",
+      "watch": "step_count_divergence",
+      "compare": "above",
+      "threshold": 0,
+      "z_bound": 3.5,
+      "window_seconds": 3600,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    La valeur mesurée est le nombre d’exécutions qui ont divergé, donc
+    <code>compare</code> et <code>threshold</code> comptent des exécutions et
+    non des étapes. Le détail nomme les trois pires : <code>checkout v1 run r_9f2 took 40 steps
+    against a usual 10 (z 20.2)</code>.
+  </p>
+  <p>
+    Cette surveillance lit le stockage des exécutions durables plutôt que les
+    traces stockées, parce que seul un en-tête d’exécution sait quelle version
+    de définition une exécution a épinglée et combien d’étapes elle a prises.
+    <code>run_repetition</code>, ci-dessous, le lit aussi, et ce sont les deux
+    seules. Un daemon qui ne sert aucune exécution le signale comme
+    insuffisant et le dit. <code>min_samples</code> n’est pas lu ici :
+    l’échantillon qui compte est par version de définition, pas par fenêtre.
+  </p>
+
+  <h2>Quand une exécution refait sans cesse la même chose</h2>
+  <p>
+    La divergence demande à quel point une exécution s’écarte de la forme que
+    prend habituellement sa définition, et il lui faut une cohorte
+    d’exécutions récentes avant de pouvoir répondre. Il existe une question
+    plus étroite qui n’a besoin d’aucune cohorte : combien de fois une
+    exécution est-elle repassée par le même nœud ?
+  </p>
+  <p>
+    Deux défauts échappent ici au taux d’erreur. Une boucle qui rentre sans
+    cesse dans un même nœud réussit, et une tempête de nouvelles tentatives qui
+    finit par aboutir est un succès. Les deux refont le même travail encore et
+    encore pendant que le taux d’erreur reste à zéro. C’est aussi la lecture
+    qu’un nombre d’étapes ne peut pas donner seul : une exécution de quarante
+    étapes qui a visité quarante nœuds une fois est une longue définition, et
+    une exécution de quarante étapes qui a visité un nœud quarante fois est
+    bloquée.
+  </p>
+  <p>
+    <code>run_repetition</code> compte les tentatives. Pour chaque exécution de
+    la fenêtre, il prend le nombre de tentatives faites sur chaque nœud de la
+    définition de cette exécution, garde le plus grand, et lit la moyenne de ce
+    nombre sur la fenêtre. Une nouvelle tentative écrit une tentative de plus
+    sur le nœud qu’elle relance, et une itération de boucle écrit une nouvelle
+    position sur le nœud où elle rentre, donc les deux comptent.
+    <span class="data">1</span> signifie qu’aucun nœud n’a tourné deux fois.
+  </p>
+  <p>
+    Contrairement à la divergence, celle-ci a un seuil dans l’unité qu’elle
+    mesure. Une définition de quarante étapes et une définition de quatre
+    étapes lisent toutes deux <span class="data">1</span> quand rien ne se
+    répète, donc le nombre veut dire la même chose dans chaque projet et vous
+    pouvez lui fixer un plafond. C’est donc une surveillance à seuil ordinaire,
+    et seule sa lecture du stockage des exécutions est empruntée à la
+    surveillance ci-dessus.
+  </p>
+
+  <h3>Ce qu’elle compte</h3>
+  <ul>
+    <li>
+      <strong>Une distribution en éventail compte.</strong> Un
+      <code>foreach</code> sur neuf éléments fait neuf tentatives sur un nœud,
+      et le journal ne peut pas le distinguer d’une boucle qui a tourné neuf
+      fois : ce sont dans les deux cas des positions indexées sous un même
+      nœud, et seule la définition sait quelle construction les a écrites. Un
+      projet dont les définitions se déploient en éventail lit donc haut, et
+      son seuil doit être réglé en conséquence. Chaque évaluation porte sa
+      valeur, déclenchée ou non : lisez ce qu’une fenêtre ordinaire rapporte
+      avant d’en choisir un.
+    </li>
+    <li>
+      <strong>Une position sautée ne compte pas.</strong> Une garde
+      <code>when</code> fausse écrit une ligne de tentative alors que le nœud
+      n’a jamais tourné, et la compter ferait passer un <code>foreach</code> sur
+      une liste filtrée pour de la répétition.
+    </li>
+    <li>
+      <strong>Une exécution qui n’a rien tenté est laissée de côté.</strong>
+      Elle ne compte pas pour zéro : elle n’a rien répété parce qu’elle n’a rien
+      exécuté, et un zéro dans l’échantillon tirerait la moyenne sous le
+      <span class="data">1</span> par rapport auquel le seuil est fixé.
+    </li>
+    <li>
+      <strong>Une exécution encore en cours est comptée.</strong> C’est
+      l’essentiel. Une exécution coincée dans une boucle de nouvelles tentatives
+      entre dans la lecture pendant qu’elle boucle encore, et non après avoir
+      enfin abandonné.
+    </li>
+  </ul>
+
+  <h3>La configurer</h3>
+  <p>
+    Un seul nombre, contrairement à la divergence. <code>threshold</code> est
+    le nombre moyen de tentatives que la fenêtre peut atteindre avant que
+    quelqu’un soit prévenu, et <span class="data">1.2</span> correspond à un
+    cinquième des exécutions d’une fenêtre qui repassent deux fois.
+    <code>below</code> n’a pas d’usage ici : chaque exécution de l’échantillon
+    a tenté au moins un nœud au moins une fois, donc la lecture a un plancher
+    de <span class="data">1</span> et ne peut jamais passer en dessous.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitors": [
+    {
+      "id": "checkout-repetition",
+      "name": "Checkout runs are going round the same step",
+      "project": "support-desk",
+      "watch": "run_repetition",
+      "compare": "above",
+      "threshold": 1.2,
+      "window_seconds": 3600,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    <code>min_samples</code> est lu ici, et il compte les exécutions que la
+    surveillance a lues dans le stockage des exécutions plutôt que les traces,
+    donc un déploiement dont les spans sont ingérés ailleurs est quand même
+    jugé sur ses exécutions. Une fenêtre en dessous se signale comme
+    insuffisante, ce qui laisse une alerte en cours exactement là où elle
+    était.
+  </p>
+  <p>
+    Le détail nomme les trois pires exécutions et le nœud par lequel chacune
+    est repassée : <code>checkout v1 run r_9f2 attempted settle 11 times</code>.
+    Les exécutions qui n’ont rien répété ne sont pas nommées, parce qu’il n’y a
+    rien à y ouvrir.
+  </p>
 
   <h2>Un objectif, quand un seuil est la mauvaise question</h2>
   <p>
@@ -228,7 +488,9 @@ const href = (route: string) => urlFor(route, locale)
     transition. Le corps est générique à dessein : Slack, PagerDuty, Opsgenie et
     tous les outils de workflow acceptent un webhook entrant, et façonner le
     payload pour l’un d’eux voudrait dire entretenir un jeu d’intégrations
-    propriétaires qui se périment.
+    propriétaires qui se périment. Avec plusieurs répliques sur un même
+    stockage, une seule à la fois détient le bail des moniteurs et poste la
+    transition : le destinataire la reçoit une fois.
   </p>
 
   <pre><code class="language-json">{`{

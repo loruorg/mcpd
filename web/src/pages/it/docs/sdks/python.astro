@@ -44,6 +44,9 @@ with mcpd.trace("handler", traceparent=request.headers.get("traceparent")) as ru
 const payload = `generation.set_model("gpt-4o-mini", provider="openai")
 generation.set_usage(input_tokens=812, output_tokens=96, cache_read=128)
 
+# Come è stato chiamato il modello. Impostazioni, non payload: restano con la cattura spenta.
+generation.set_model_parameters(temperature=0, seed=0, max_tokens=1024)
+
 # Un errore che hai intercettato e su cui hai deciso tu.
 generation.set_error("the provider timed out", kind="TimeoutError", retryable=True)
 
@@ -140,7 +143,8 @@ const serverless = `def handler(event, context):
     spegnere mcpd nei test senza cambiare il codice sotto test.
     <code>capture_payloads=False</code> tiene i prompt e le completion dentro il
     processo: gli span vengono registrati lo stesso, con i loro tempi, lo stato,
-    il consumo, il modello, la correlazione e gli errori, e <code>input</code> e
+    il consumo, il modello, i parametri del modello, la correlazione e gli
+    errori, e <code>input</code> e
     <code>output</code> vengono scartati prima di arrivare alla coda. Uno span
     può dire il contrario per sé con <code>capture_payloads=True</code> fra i
     campi con cui parte, e viceversa.
@@ -212,6 +216,19 @@ const serverless = `def handler(event, context):
     <code>status</code> a <code>error</code> nello stesso gesto, e riempie
     sempre un messaggio: «qualcosa è fallito» non dice a nessuno che cosa fare.
   </p>
+  <p>
+    <code>set_model_parameters</code> registra le impostazioni con cui è stata
+    fatta la chiamata: <code>temperature</code>, <code>top_p</code>,
+    <code>top_k</code>, <code>max_tokens</code>, <code>seed</code>,
+    <code>stop_sequences</code> e <code>has_response_format</code>. Sono
+    impostazioni e non payload, quindi sopravvivono a
+    <code>capture_payloads=False</code>, che è il caso che conta: sono quello
+    che deve riprodurre chi rifà l’esecuzione. Un argomento che lasci fuori è
+    assente e uno che passi viene tenuto qualunque sia, quindi
+    <code>seed=0</code> è un seed. Lo schema dietro
+    <code>has_response_format</code> non viene registrato, solo se ce n’era uno
+    in vigore.
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -230,6 +247,25 @@ const serverless = `def handler(event, context):
     mai usato per costruire l’albero.
   </p>
 
+  <h3>Chiamate in streaming</h3>
+  <p>
+    Passa lo stream del provider a <code>span.record_stream</code> e leggi
+    invece il wrapper: un generatore per un iteratore, un generatore asincrono
+    per un iteratore asincrono. Prende i chunk di chat completion di OpenAI e
+    gli eventi dei messaggi di Anthropic, come dict o come oggetti dell’SDK del
+    provider, e ogni chunk passa invariato. Il primo chunk con testo o con una
+    chiamata a uno strumento segna il tempo fino al primo token. Quando lo
+    stream finisce, solleva un’eccezione o viene lasciato con un
+    <code>break</code>, lo span riceve quello che <code>record_response</code>
+    avrebbe registrato per la stessa chiamata senza streaming, con il testo
+    come output, e si chiude. Un errore dello stream segna lo span e ti arriva
+    invariato. Il testo tenuto ha un tetto di 32.768 caratteri, e
+    <code>mcpd.stream.truncated</code> viene impostato quando il tetto è stato
+    raggiunto.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="stream" title="una chiamata in streaming" />
+
   <h2>Payload, sink e span già conclusi</h2>
   <p>
     Un sink è il posto dove finisce un batch svuotato. Il trasporto HTTP è
@@ -246,6 +282,24 @@ const serverless = `def handler(event, context):
     title="verificare quello che è stato registrato"
     samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: sinks }]}
   />
+
+  <p>
+    <code>TestClient</code> di <code>mcpd.testing</code> è un
+    <code>Mcpd</code> che registra in memoria. Passalo ovunque il tuo codice
+    prenda un client, poi rileggi quello che ha registrato:
+    <code>spans()</code> per nome o per tipo, <code>recorded_span(name)</code>
+    per l’unico span che deve esistere, <code>trees()</code> per ogni
+    esecuzione come albero, <code>logs()</code>, <code>metrics()</code>,
+    <code>scores()</code>, <code>recorded_feedback()</code> e
+    <code>reset()</code>. Ogni accessor fa prima un flush. Quello che tiene è
+    passato per campionamento, cattura dei payload e <code>redact</code> come
+    farebbe sulla strada verso un daemon, e resta acceso quando per i test è
+    impostato <code>MCPD_ENABLED=false</code>. <code>recorded_span</code>
+    solleva <code>AssertionError</code>, così uno span mancante fa fallire il
+    test con i nomi che ha visto.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="testing" title="uno unit test" />
 
   <p>
     <code>mcpd.record(span)</code> mette in coda uno <code>SpanRecord</code> già

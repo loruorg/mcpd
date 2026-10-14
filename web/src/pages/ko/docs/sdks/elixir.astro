@@ -138,13 +138,70 @@ end`}</code></pre>
   <p>
     <code>capture_payloads: false</code>, 또는
     <code>MCPD_CAPTURE_PAYLOADS=false</code>는 프롬프트와 컴플리션을 있던 자리에 그대로
-    둡니다. 스팬은 여전히 시각과 상태와 사용량과 모델과 상관 정보와 오류를 싣고 나가고,
+    둡니다. 스팬은 여전히 시각과 상태와 사용량과 모델과 모델 매개변수와 상관 정보와 오류를 싣고 나가고,
     <code>input:</code>과 <code>output:</code>과 블록이 담은 값은 큐에 닿기 전에
     버려집니다. 그래서 민감한 것은 큐에 들어가지도 않고, 플러시를 타고 나가지도 않습니다.
     스팬 하나는 <code>capture_payloads: true</code>로 자기 몫만 달리 정할 수 있습니다.
   </p>
 
+  <h2>모델을 어떻게 호출했는지</h2>
+  <p>
+    <code>model_parameters:</code>는 모델 호출에 쓴 설정을 기록합니다.
+    <code>temperature</code>, <code>top_p</code>, <code>top_k</code>,
+    <code>max_tokens</code>, <code>seed</code>, <code>stop_sequences</code>,
+    <code>has_response_format</code>입니다. 키워드 리스트를 넘기거나, 이미 들고
+    있다면 <code>%Mcpd.ModelParameters&#123;&#125;</code>를 넘기십시오.
+  </p>
+
+  <pre><code class="language-elixir">{`Mcpd.span mcpd, "answer",
+  kind: :model_generation,
+  model_parameters: [temperature: 0.0, seed: 0, max_tokens: 1024] do
+  call_the_model()
+end`}</code></pre>
+
+  <p>
+    이것들은 페이로드가 아니라 설정이므로 <code>capture_payloads: false</code>에서도
+    남습니다. 중요한 것이 바로 이 경우입니다. 실행을 재현하려는 사람이 맞춰야 하는
+    값이 이것들이기 때문입니다. 빠뜨린 필드는 없는 것이고 넘긴 필드는 무엇이든
+    보관되므로, <code>seed: 0</code>도 시드입니다. <code>has_response_format</code>
+    뒤의 스키마는 기록하지 않고, 스키마가 적용되었는지만 기록합니다. 세터가 아니라
+    옵션인 이유는 Elixir 스팬을 여는 옵션이 그 스팬을 기술하기 때문입니다.
+    <code>model:</code>, <code>provider:</code>, <code>usage:</code>도 이미 그렇습니다.
+  </p>
+
+  <h3>스트리밍 호출</h3>
+  <p>
+    제공업체의 스트림을 <code>Mcpd.ModelCall.record_stream/4</code>에 넘기고, 대신
+    그것이 돌려주는 스트림을 읽으십시오. OpenAI chat-completion 청크와 Anthropic
+    메시지 이벤트를 받고, 모든 청크는 바뀌지 않은 채 지나갑니다. 스팬은 스트림을
+    처음 읽을 때 프로세스에서 활성인 스팬 아래에 열리고, 텍스트나 도구 호출이 담긴
+    첫 청크가 첫 토큰까지의 시간을 표시합니다. 스트림이 끝나거나, 예외를 일으키거나,
+    <code>Enum.take/2</code>나 <code>Enum.find/2</code>로 일찍 멈추면, 스팬은 같은
+    호출을 스트리밍 없이 했을 때 <code>Mcpd.ModelCall.options/2</code>가 줄 내용과
+    출력으로서의 텍스트를 받고 끝납니다. 스트림에서 난 오류는 스팬에 표시되고
+    바뀌지 않은 채 전달됩니다.
+    보관하는 텍스트는 32,768자에서 잘리며, 그 한도에 이르면
+    <code>mcpd.stream.truncated</code>가 설정됩니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="stream" title="스트리밍 호출" />
+
   <h2>기록한 것을 검증하기</h2>
+  <p>
+    <code>Mcpd.Testing.start/1</code>은 메모리에 기록하는 클라이언트를 테스트에
+    연결해 시작합니다. 코드가 클라이언트를 받는 곳 어디에든
+    <code>testing.client</code>를 넘긴 다음, 기록된 것을 다시 읽으십시오. 이름이나
+    종류로 찾는 <code>spans/2</code>, 반드시 있어야 하는 스팬 하나를 찾는
+    <code>span/2</code>, 실행마다 트리로 돌려주는 <code>trees/1</code>,
+    <code>logs/1</code>, <code>metrics/1</code>, <code>scores/1</code>,
+    <code>recorded_feedback/1</code>, <code>reset/1</code>이 있습니다. 각 읽기
+    함수는 먼저 플러시합니다. 담긴 것은 데몬으로 갈 때와 똑같이 샘플링, 페이로드
+    수집, <code>redact</code>를 거쳤고, 테스트 실행에
+    <code>MCPD_ENABLED=false</code>를 설정해도 켜진 채로 남습니다.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="testing" title="단위 테스트" />
+
   <p>
     싱크는 비워 낸 배치가 가는 곳입니다. 기본값은 HTTP 전송 계층입니다.
     <code>Mcpd.Sink.Recorder</code>는 모든 배치를 메모리에 들고 있어서, 테스트가 데몬

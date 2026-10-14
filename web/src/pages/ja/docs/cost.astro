@@ -4,9 +4,26 @@ import Waterfall from '@/components/Waterfall.astro'
 import Command from '@/components/Command.astro'
 import CodeSwitcher from '@/components/CodeSwitcher.astro'
 import { localeOf, urlFor } from '@/lib/i18n'
+import fs from 'node:fs'
+import path from 'node:path'
 
 const locale = localeOf(Astro.url.pathname)
 const linkTo = (route: string) => urlFor(route, locale)
+
+/* The built-in book, read at build time from the file the daemon embeds, so
+   the counts and dates below cannot drift from what the binary prices with. */
+const book = JSON.parse(
+  fs.readFileSync(path.resolve(process.cwd(), '..', 'crates/mcpd-core/prices/builtin.json'), 'utf8'),
+)
+const bookTables = [
+  { name: 'models', note: 'ファーストパーティの定価。当てはまるプロバイダーの表がないときに使います', count: Object.keys(book.models).length },
+  ...Object.entries(book.providers as Record<string, Record<string, unknown>>)
+    .map(([name, t]) => ({ name: `providers.${name}`, note: '', count: Object.keys(t).length }))
+    .sort((a, b) => b.count - a.count),
+]
+const tiered = Object.values(book.models as Record<string, { tiers?: unknown[] }>).filter((m) => m.tiers?.length).length
+const multipliers = Object.entries(book.service_tier_multipliers as Record<string, Record<string, number>>)
+  .flatMap(([p, t]) => Object.entries(t).map(([tier, m]) => ({ provider: p, tier, m })))
 
 /* Written here rather than read from an example program: these are queries a
    reader runs against their own daemon, not code CI can execute. */
@@ -206,6 +223,11 @@ const response = [
         <td><code>output</code> で課金します。</td>
       </tr>
       <tr>
+        <td><code>image_input</code>、<code>image_output</code></td>
+        <td>画像のトークン。プロバイダーがテキストと別に値付けする場合です。</td>
+        <td><code>input</code> または <code>output</code> で課金します。</td>
+      </tr>
+      <tr>
         <td><code>reasoning</code></td>
         <td>隠れた推論トークン。プロバイダーがこれを別に課金する場合です。</td>
         <td>
@@ -217,6 +239,31 @@ const response = [
       </tr>
     </tbody>
   </table>
+
+  <h2>長いプロンプトとサービスティア</h2>
+  <p>
+    いくつかのプロバイダーは、長いプロンプトではすべてのトークンを高く課金
+    します。モデルの項目は <code>tiers</code> を持てます。それぞれが
+    <code>above_input_tokens</code> のしきい値と自分の単価を持ちます。
+    プロンプトはキャッシュされたトークンも含めて測り、しきい値を超えると、
+    呼び出し全体がそのティアで値付けされます。<code>gemini-2.5-pro</code>
+    への 300,000 トークンのプロンプトは、300,000 すべてに長いコンテキストの
+    単価を払います。ティアが省いた計測項目は、基本の単価のままです。
+  </p>
+  <p>
+    バッチリクエストのような安いサービスティアでの呼び出しは、プロバイダーの
+    割引で値付けされます。mcpd はティアを
+    <code>gen_ai.response.service_tier</code>、次いで
+    <code>gen_ai.openai.response.service_tier</code>、
+    <code>mcpd.service_tier</code>、<code>llm.service_tier</code>、そして
+    対応するリクエストの属性から読みます。<code>default</code>、
+    <code>standard</code>、<code>auto</code> は標準のティアとして読みます。
+    モデルは <code>service_tiers</code> の下に、ティアごとの自分の単価を
+    持てます。持たないときは、価格表のそのプロバイダーの
+    <code>service_tier_multipliers</code> が適用されます。値はティアを記録
+    するので、バッチの呼び出しは価格表として <code>builtin+batch</code> を
+    保存し、半額である理由が読み取れます。
+  </p>
 
   <h2>キャッシュされたトークンは、一度だけ課金されます</h2>
   <p>
@@ -245,13 +292,10 @@ const response = [
     フィールドをすべて引いたものです。
   </p>
   <p>
-    単価の無い計測項目には、1 つの規則が当てはまります。価格表が単価を持たない
-    計測項目は、残りの一部としてしか課金されないので、プロバイダーが
-    <code>text</code> の数も送っていた場合は、まったく課金されません。推論
-    トークンは、価格表がそれ自身の単価を与えていないときに、いつでもここに
-    落ちます。単価を 1 つ書けば直ります。画像トークンは常にここに落ちます。
-    価格表に与えられる画像の単価が無いからです。マルチモーダルの比重が大きい
-    処理では、この値は正確な額ではなく、低めの額として読んでください。
+    価格表が単価を持たない計測項目は、残りの一部として課金されます。
+    プロバイダーが推論トークンや画像トークンを別に課金し、別の
+    <code>text</code> の数も報告する場合は、それらに自分の単価を与えて
+    ください。
   </p>
 
   <h2>未知のモデルにはコストがありません。コストがゼロなのではありません</h2>
@@ -281,8 +325,9 @@ const response = [
     スパンに載る id は、あなたのクライアントが送ったそのままであり、
     クライアントはそこに飾りを付けます。ゲートウェイはベンダー名を前に付け、
     クラウドはリージョンを前に付け、プロバイダーはリリース日を後ろに留めます。
-    価格表は素のモデル名を鍵にしているので、検索は 4 つを順に試し、最初に当たった
-    ところで止まります。
+    スパンがプロバイダーを名指ししていれば、価格表のそのプロバイダーの表を先に
+    探し、ファーストパーティの <code>models</code> の表をその後に探します。
+    それぞれの表で、検索は次の段階を順に試し、最初に当たったところで止まります。
   </p>
 
   <table>
@@ -316,70 +361,110 @@ const response = [
 
   <p>
     <code>-YYYY-MM-DD</code> と <code>-YYYYMMDD</code> のどちらの接尾辞も認識
-    します。4 つの段階すべてに外れることは、エラーではなく普通の結果です。上に
-    書いたとおり、コストが無いという意味になります。
+    します。4 つのどれでもモデルが見つからないときは、クラウドのバージョン
+    タグを取り除いた id でもう一度試します。だから Vertex AI の
+    <code>claude-sonnet-4-5@20250929</code> も、Bedrock の
+    <code>anthropic.claude-sonnet-4-5-20250929-v1:0</code> も解決します。
+    さらに、数字の間のドットをダッシュに書き換えて試すので、
+    <code>claude-sonnet-4.5</code> は <code>claude-sonnet-4-5</code> に当たります。
+    どれにも当たらなければ、上に書いたとおりコストはありません。
+  </p>
+  <p>
+    プロバイダーも同じく寛容に照合します。与えられたままの名前、価格表が挙げる
+    別名（<code>az.ai.openai</code> に対する <code>azure</code>）、そして先頭の
+    ベンダーの区切りを 1 つ取り除いた名前です。だから
+    <code>aws.bedrock</code> は <code>bedrock</code> の表に当たります。
   </p>
 
   <h2>同梱の価格表</h2>
   <p>
-    mcpd は小さな組み込みの価格表を持っています。設定を 1 つもしなくても
+    mcpd は組み込みの価格表を持っています。設定を 1 つもしなくても
     <code>docker run</code> が実際の値を出すためです。名前は
     <code>builtin</code>、通貨は USD で、そこから出たコストはすべて、その名前を
-    記録します。
+    記録します。主要なモデルベンダーすべてと、そのモデルを再販するクラウドや
+    ゲートウェイの定価を、{book.as_of} 時点の状態で持っています。
+    ファーストパーティのモデルのうち {tiered} 個が長いコンテキストのティアを
+    持っています。
   </p>
 
-  {/* Transcribed from `builtin_book` in crates/mcpd-core/src/cost.rs. When a
-      rate moves there, it moves here. */}
   <table>
     <thead>
-      <tr>
-        <th>モデル</th><th>入力</th><th>出力</th><th>キャッシュ読み取り</th><th>キャッシュ書き込み、5 分</th><th>キャッシュ書き込み、1 時間</th>
-      </tr>
+      <tr><th>表</th><th>モデル</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>claude-opus-4</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-1</code></td><td>15.00</td><td>75.00</td><td>1.50</td><td>18.75</td><td>30.00</td></tr>
-      <tr><td><code>claude-opus-4-5</code></td><td>5.00</td><td>25.00</td><td>0.50</td><td>6.25</td><td>10.00</td></tr>
-      <tr><td><code>claude-sonnet-4</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-sonnet-4-5</code></td><td>3.00</td><td>15.00</td><td>0.30</td><td>3.75</td><td>6.00</td></tr>
-      <tr><td><code>claude-haiku-4-5</code></td><td>1.00</td><td>5.00</td><td>0.10</td><td>1.25</td><td>2.00</td></tr>
-      <tr><td><code>claude-3-5-haiku</code></td><td>0.80</td><td>4.00</td><td>0.08</td><td>1.00</td><td>1.60</td></tr>
-      <tr><td><code>gpt-4o</code></td><td>2.50</td><td>10.00</td><td>1.25</td><td>入力と同じ</td><td>入力と同じ</td></tr>
-      <tr><td><code>gpt-4o-mini</code></td><td>0.15</td><td>0.60</td><td>0.075</td><td>入力と同じ</td><td>入力と同じ</td></tr>
-      <tr><td><code>gpt-4.1</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>入力と同じ</td><td>入力と同じ</td></tr>
-      <tr><td><code>gpt-4.1-mini</code></td><td>0.40</td><td>1.60</td><td>0.10</td><td>入力と同じ</td><td>入力と同じ</td></tr>
-      <tr><td><code>o3</code></td><td>2.00</td><td>8.00</td><td>0.50</td><td>入力と同じ</td><td>入力と同じ</td></tr>
-      <tr><td><code>o4-mini</code></td><td>1.10</td><td>4.40</td><td>0.275</td><td>入力と同じ</td><td>入力と同じ</td></tr>
-      <tr><td><code>gemini-2.5-pro</code></td><td>1.25</td><td>10.00</td><td>0.31</td><td>入力と同じ</td><td>入力と同じ</td></tr>
-      <tr><td><code>gemini-2.5-flash</code></td><td>0.30</td><td>2.50</td><td>0.075</td><td>入力と同じ</td><td>入力と同じ</td></tr>
-      <tr><td><code>text-embedding-3-small</code></td><td>0.02</td><td>0.00</td><td>入力と同じ</td><td>入力と同じ</td><td>入力と同じ</td></tr>
-      <tr><td><code>text-embedding-3-large</code></td><td>0.13</td><td>0.00</td><td>入力と同じ</td><td>入力と同じ</td><td>入力と同じ</td></tr>
+      {bookTables.map((t) => (
+        <tr><td><code>{t.name}</code>{t.note && <>：{t.note}</>}</td><td>{t.count}</td></tr>
+      ))}
+    </tbody>
+  </table>
+
+  <table>
+    <thead>
+      <tr><th>プロバイダー</th><th>サービスティア</th><th>倍率</th></tr>
+    </thead>
+    <tbody>
+      {multipliers.map((m) => (
+        <tr><td><code>{m.provider}</code></td><td><code>{m.tier}</code></td><td>{m.m}</td></tr>
+      ))}
     </tbody>
   </table>
 
   <p>
-    100 万トークンあたりの USD で、第三者のモデルカタログと最後に突き合わせた
-    時点の価格表の状態です。その日付は、価格表が <code>as_of</code> として記録
-    しています。Anthropic の項目が両方のキャッシュ書き込み単価を持っているのは、
-    デーモンが 1 時間の単価から 5 分の単価へフォールバックするからで、長いほうを
-    省いた価格表は、黙って過少請求になります。OpenAI はキャッシュへの書き込みに
-    課金しないので、そこでのキャッシュ書き込みは入力の単価で計算します。
-    <code>gemini-2.5-flash</code> は、音声入力の単価 1.00 も持っています。それ
-    以外の項目は、音声をテキストの単価で値付けします。
-    <code>claude-haiku-4</code> はありません。Anthropic が提供している id は
-    <code>claude-haiku-4-5</code> であり、何にも解決しない id は、推測せずに
-    未値付けのままにします。
+    これらは公開された定価です。どのモデルがいくらで値付けされるかは、
+    バイナリに尋ねてください。取り込みと同じ検索を使います。
   </p>
+
+  <Command class="not-prose my-6" command="mcpd prices show claude-sonnet-4-5 --provider aws.bedrock" />
+
+  <h2>自分の価格表</h2>
   <p>
-    これは米ドル建ての公開された定価です。どのデプロイも上の組み込みの表で
-    値付けし、この表に名前の無いモデルは未値付けのままです。価格表が短いのは
-    意図したことです。長い表は、より多くの箇所で古びていくからです。
+    自分の価格表は <code>--price-book</code>、または設定ファイルの
+    <code>price_book</code> キーで読み込みます。価格表は JSON で、
+    <code>id</code>、ISO 4217 の <code>currency</code>、そして
+    <code>models</code> と <code>providers</code> の表を持ち、それぞれが
+    モデル id を上の単価に対応させます。<code>"extends": "builtin"</code>
+    を付けると組み込みの価格表の上に重なるので、払う単価が違うものだけを
+    書けば足ります。
   </p>
+
+  <pre><code>{`{
+  "id": "acme-2026-10",
+  "currency": "USD",
+  "extends": "builtin",
+  "providers": {
+    "bedrock": {
+      "anthropic.claude-sonnet-4-5-20250929-v1:0": { "input": 2.7, "output": 13.5 }
+    }
+  },
+  "models": {
+    "our-finetune": { "input": 0.5, "output": 1.5 }
+  }
+}`}</code></pre>
+
   <p>
-    価格表は、id と、ISO 4217 の通貨と、モデル id から単価への対応表です。
-    そこから出た値にはすべて価格表の id が刻まれるので、後から 2 つの価格表を
-    見分けられます。1 つのプロジェクトの価格は 1 つの通貨にそろいます。mcpd は
-    実行のスパンをそのまま足し合わせ、通貨の換算はしません。
+    mcpd は起動時に価格表を確かめ、負の単価、順序の乱れたティア、3 文字の
+    コードでない通貨を持つものは、その項目を挙げて拒否します。自分の価格表から
+    出た値にはその id が記録されるので、後から定価による推定と見分けられます。
+    プロジェクトの実行はスパンを算術的に足し合わせるので、1 つの価格表の
+    単価はすべて 1 つの通貨にそろえてください。
+  </p>
+
+  <h2>単価を更新する</h2>
+  <p>
+    単価は数週間ごとに動きます。<code>mcpd prices refresh</code> は公開の
+    モデルカタログから価格表を書き出すので、デプロイは新しいリリースなしに
+    新しい単価を取り込めます。
+  </p>
+
+  <Command class="not-prose my-6" command="mcpd prices refresh --out /etc/mcpd/prices.json" />
+
+  <p>
+    <code>--price-book</code> をそのファイルに向けて再起動してください。
+    <code>--out</code> の価格表がすでに値付けしていて、カタログにもう載って
+    いないモデルは残します。引退したモデルへのトラフィックも届き続けるから
+    です。<code>--prune</code> はそれを落とします。<code>--source</code> は、
+    同じ形の別のカタログを URL かファイルから読みます。組み込みの価格表も、
+    同じコマンドで書き出しています。
   </p>
 
   <h2>使った金額を読み出す</h2>

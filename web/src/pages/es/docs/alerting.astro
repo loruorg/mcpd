@@ -9,7 +9,7 @@ const locale = localeOf(Astro.url.pathname)
 
 <Doc
   title="Monitores y alertas"
-  description="Cómo vigila mcpd la tasa de error, la latencia, el costo y las medias de puntuación, por qué un monitor se enclava, por qué una ventana tranquila no borra una alerta activa y el cuerpo del webhook."
+  description="Cómo vigila mcpd la tasa de error, la latencia, el costo, las puntuaciones y la forma de las ejecuciones, por qué un monitor se enclava hasta que alguien lo reconoce, y su webhook."
   lede="Una condición que merece vigilancia, vigilada. mcpd evalúa con un temporizador, enclava lo que encuentra y te lo dice una vez."
   og="docs"
 >
@@ -98,6 +98,255 @@ const locale = localeOf(Astro.url.pathname)
       </tr>
     </tbody>
   </table>
+
+  <h2>Cuando no puedes nombrar el número</h2>
+  <p>
+    Cada vigilancia de arriba compara una medida con un techo que elegiste tú.
+    Eso funciona mientras sabes cuánto debería valer la medida. La ejecución
+    desbocada más difícil de atrapar es la que nunca llega a ningún techo que se
+    te habría ocurrido poner: una ejecución que da ocho vueltas en lugar de dos,
+    termina, cuesta cuatro veces lo que debería y no informa de ningún error. Su
+    número de pasos no es alto en términos absolutos. Es alto <em>para esa
+    definición</em>, y solo las ejecuciones recientes de esa misma definición lo
+    pueden decir.
+  </p>
+  <p>
+    <code>step_count_divergence</code> no fija ningún umbral en pasos. Para cada
+    versión de definición toma el número de pasos de las ejecuciones de esa
+    versión completadas hace poco, toma el centro de ellas como la forma
+    habitual, e informa de las ejecuciones que quedan más lejos de lo que permite
+    una cota estandarizada. Nadie tiene que saber que <code>checkout</code>
+    suele dar once pasos, y nadie tiene que revisar el número cuando empieza a
+    dar catorce.
+  </p>
+
+  <h3>El estadístico, y por qué es este</h3>
+  <p>
+    La medida de lo lejos que queda una ejecución es el z-score modificado:
+    <span class="data">0.6745 &times; (pasos &minus; mediana) &divide; MAD</span>,
+    donde MAD es la mediana de las desviaciones absolutas respecto a la mediana.
+    Una ejecución diverge cuando esa puntuación supera <code>z_bound</code>, que
+    por defecto vale <span class="data">3.5</span>.
+  </p>
+  <p>
+    Las dos constantes son las convencionales y ninguna es arbitraria. Con datos
+    de distribución normal, la desviación absoluta mediana converge a
+    0.6745&sigma; y no a &sigma;, así que el cociente en bruto se mide en
+    unidades de unos dos tercios de desviación típica. Multiplicar por 0.6745 lo
+    devuelve a unidades de &sigma;, que es lo que permite que 3.5 signifique lo
+    que todo el mundo entiende. 3.5 es la cota publicada con el estadístico,
+    alrededor de una ejecución de cada dos mil con datos normales. El número de
+    pasos no sigue una distribución normal, así que tómalo como el valor del que
+    partir para ajustar y no como una tasa de falsas alarmas prometida.
+  </p>
+  <p>
+    Se usan la mediana y la MAD en lugar de una media y una desviación típica
+    porque resisten justo lo que se busca. Una sola ejecución que dio cuarenta
+    veces los pasos habituales mueve una media e infla una desviación típica lo
+    suficiente para ocultarse; la desviación absoluta mediana tolera que hasta la
+    mitad de su muestra sean valores atípicos antes de moverse siquiera.
+  </p>
+
+  <h3>Salvaguardas integradas</h3>
+  <ul>
+    <li>
+      <strong>Una muestra lo bastante grande para juzgar.</strong> Una versión de
+      definición necesita <span class="data">12</span> ejecuciones completadas en
+      la ventana antes de que la vigilancia compare nada con ella. La mediana de
+      doce queda entre el sexto y el séptimo valor, así que ninguna ejecución
+      sola decide dónde está el centro. Por debajo de eso, una ejecución inusual
+      mueve el propio centro, y la línea base describe el valor atípico en lugar
+      de la norma. Una versión con muy pocas se lee como insuficiente, lo que
+      deja una alerta activa exactamente donde estaba. Las doce se cuentan dentro
+      de la ventana del propio monitor, así que fija las dos cosas juntas: una
+      definición que se ejecuta unas pocas veces por hora necesita un
+      <code>window_seconds</code> medido en horas para alcanzarlas.
+    </li>
+    <li>
+      <strong>Sin divisiones por cero.</strong> Una definición sin bucles ni
+      ramas da siempre el mismo número de pasos, así que su MAD es cero y
+      cualquier desviación es infinitamente anómala. Emitir infinito no es una
+      respuesta: no se puede comparar, se imprime como <code>inf</code> en una
+      frase sobre la que alguien tiene que actuar, y llega a un webhook como
+      <code>null</code>. mcpd recurre a la desviación absoluta media, escalada por
+      &radic;(&pi;/2) para que estime la misma &sigma;. Cuando incluso eso es
+      cero, porque todas las ejecuciones de la muestra dieron exactamente el
+      mismo número de pasos, no hay cociente que informar y la alerta lo dice en
+      pasos: «every one of the last 12 completed runs took 9». En ese
+      único caso <code>z_bound</code> no se aplica, porque no hay puntuación que
+      comparar con él: subir la cota amplía lo que cuenta como variación
+      corriente, y un grupo sin variación no tiene nada que ampliar.
+    </li>
+    <li>
+      <strong>Una versión de definición cada vez.</strong> Las ejecuciones se
+      agrupan por <em>versión</em> de definición. Una versión nueva es un cambio
+      de forma deliberado, así que una ejecución de v3 no es anómala por
+      diferir de una de v2, y juntarlas da una muestra con dos jorobas cuya
+      mediana no describe a ninguna. Por eso una versión recién publicada no
+      informa de nada hasta tener doce ejecuciones completadas propias, que es
+      lo correcto.
+    </li>
+    <li>
+      <strong>Un informe por fallo.</strong> Solo las ejecuciones completadas
+      entran en la línea base, y solo se informa de una ejecución completada por
+      dar demasiado <em>pocos</em> pasos. Terminar antes de tiempo es lo que
+      significan fallar, ser cancelada, agotar el tiempo y no haber terminado
+      todavía, y esta es la única vigilancia que existe para ver lo que la tasa
+      de error no ve. Una ejecución todavía en curso sí se puntúa: una ejecución
+      que ya se ha alargado se informa mientras sigue en marcha, que es todo el
+      sentido de la vigilancia.
+    </li>
+  </ul>
+
+  <h3>Configurarla</h3>
+  <p>
+    Esta vigilancia tiene dos números porque hace dos preguntas.
+    <code>z_bound</code> pregunta lo lejos que tiene que quedar una sola
+    ejecución, y es una puntuación estandarizada, así que el mismo 3.5 sirve
+    para una definición que suele dar cuatro pasos y para una que suele dar
+    cuatrocientos. <code>threshold</code> pregunta después cuántas ejecuciones
+    así puede contener una ventana antes de avisar a alguien, que es una
+    decisión operativa. Ponlo a <code>0</code> con <code>above</code> para que
+    te avisen de cualquiera. <code>below</code> no sirve en esta vigilancia: que
+    todas las ejecuciones sean corrientes es el estado sano, no el que merece
+    despertar a nadie.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitors": [
+    {
+      "id": "checkout-shape",
+      "name": "A checkout run took an unusual number of steps",
+      "project": "support-desk",
+      "watch": "step_count_divergence",
+      "compare": "above",
+      "threshold": 0,
+      "z_bound": 3.5,
+      "window_seconds": 3600,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    El valor medido es el número de ejecuciones que divergieron, así que
+    <code>compare</code> y <code>threshold</code> cuentan ejecuciones y no
+    pasos. El detalle nombra las tres peores: <code>checkout v1 run r_9f2 took 40 steps
+    against a usual 10 (z 20.2)</code>.
+  </p>
+  <p>
+    Esta vigilancia lee el almacén de ejecuciones duraderas en lugar de las
+    trazas guardadas, porque solo la cabecera de una ejecución sabe qué versión
+    de definición fijó y cuántos pasos lleva. <code>run_repetition</code>, más
+    abajo, también lo lee, y son las dos únicas que lo hacen. Un daemon que no
+    sirve ejecuciones lo informa como insuficiente y lo dice.
+    <code>min_samples</code> no se lee aquí: la muestra que importa es por
+    versión de definición, no por ventana.
+  </p>
+
+  <h2>Cuando una ejecución sigue haciendo lo mismo</h2>
+  <p>
+    La divergencia pregunta cuánto se aparta una ejecución de la forma que suele
+    tener su propia definición, y necesita un grupo de ejecuciones recientes
+    antes de poder responder. Hay una pregunta más estrecha que no necesita
+    ningún grupo: ¿cuántas veces dio vueltas una ejecución sobre el mismo nodo?
+  </p>
+  <p>
+    Aquí hay dos fallos que se esconden de la tasa de error. Un bucle que vuelve
+    a entrar una y otra vez en un nodo tiene éxito, y una tormenta de reintentos
+    que al final lo consigue es un éxito. Los dos hacen el mismo trabajo una y
+    otra vez mientras la tasa de error sigue en cero. Es además la lectura que un
+    número de pasos no da por sí solo: una ejecución de cuarenta pasos que
+    visitó cuarenta nodos una vez es una definición larga, y una ejecución de
+    cuarenta pasos que visitó un nodo cuarenta veces está atascada.
+  </p>
+  <p>
+    <code>run_repetition</code> cuenta intentos. Para cada ejecución de la
+    ventana toma el número de intentos hechos en cada nodo de la definición de
+    esa ejecución, se queda con el mayor, y lee la media de ese número en toda
+    la ventana. Un reintento escribe otro intento en el nodo que reintentó, y
+    una iteración de bucle escribe una posición nueva en el nodo en el que
+    volvió a entrar, así que los dos cuentan. <span class="data">1</span>
+    significa que ningún nodo se ejecutó dos veces.
+  </p>
+  <p>
+    A diferencia de la divergencia, esta tiene un umbral en la unidad que mide.
+    Una definición de cuarenta pasos y una de cuatro leen las dos
+    <span class="data">1</span> cuando nada se repite, así que el número
+    significa lo mismo en todos los proyectos y puedes ponerle un techo. Eso la
+    convierte en una vigilancia de umbral corriente, y de la vigilancia anterior
+    solo toma prestada su lectura del almacén de ejecuciones.
+  </p>
+
+  <h3>Qué cuenta</h3>
+  <ul>
+    <li>
+      <strong>Un fan-out cuenta.</strong> Un <code>foreach</code> sobre nueve
+      elementos son nueve intentos en un nodo, y el diario no lo distingue de un
+      bucle que dio nueve vueltas: las dos cosas son posiciones indexadas bajo un
+      nodo, y solo la definición sabe qué construcción las escribió. Así que un
+      proyecto cuyas definiciones hacen fan-out da lecturas altas, y su umbral se
+      tiene que fijar para eso. Cada evaluación lleva su valor, se dispare o no,
+      así que lee lo que informa una ventana corriente antes de elegir uno.
+    </li>
+    <li>
+      <strong>Una posición saltada no cuenta.</strong> Una guarda
+      <code>when</code> falsa escribe una fila de intento y el nodo nunca se
+      ejecutó, así que contarla haría que un <code>foreach</code> sobre una lista
+      filtrada se leyera como repetición.
+    </li>
+    <li>
+      <strong>Una ejecución que no intentó nada queda fuera.</strong> No se
+      cuenta como cero: no ha repetido nada porque no ha ejecutado nada, y un
+      cero en la muestra bajaría la media por debajo del
+      <span class="data">1</span> con el que se fija el umbral.
+    </li>
+    <li>
+      <strong>Una ejecución todavía en curso cuenta.</strong> Ese es casi todo el
+      sentido. Una ejecución atascada en un bucle de reintentos aparece en la
+      lectura mientras sigue dando vueltas, y no cuando por fin se rinde.
+    </li>
+  </ul>
+
+  <h3>Configurarla</h3>
+  <p>
+    Un solo número, a diferencia de la divergencia. <code>threshold</code> es la
+    media de intentos que puede alcanzar la ventana antes de avisar a alguien, y
+    <span class="data">1.2</span> es una quinta parte de las ejecuciones de una
+    ventana dando dos vueltas. <code>below</code> no sirve aquí: cada ejecución
+    de la muestra intentó al menos un nodo al menos una vez, así que la lectura
+    tiene un suelo de <span class="data">1</span> y nunca puede bajar de él.
+  </p>
+
+  <pre><code class="language-json">{`{
+  "monitors": [
+    {
+      "id": "checkout-repetition",
+      "name": "Checkout runs are going round the same step",
+      "project": "support-desk",
+      "watch": "run_repetition",
+      "compare": "above",
+      "threshold": 1.2,
+      "window_seconds": 3600,
+      "min_samples": 20,
+      "webhook": "https://hooks.example.com/mcpd"
+    }
+  ]
+}`}</code></pre>
+
+  <p>
+    <code>min_samples</code> sí se lee aquí, y cuenta las ejecuciones que la
+    vigilancia leyó del almacén de ejecuciones y no las trazas, así que un
+    despliegue cuyos spans se ingieren en otro sitio se sigue juzgando por sus
+    ejecuciones. Una ventana por debajo de él se informa como insuficiente, lo
+    que deja una alerta activa exactamente donde estaba.
+  </p>
+  <p>
+    El detalle nombra las tres peores ejecuciones y el nodo sobre el que dio
+    vueltas cada una: <code>checkout v1 run r_9f2 attempted settle 11 times</code>.
+    Las ejecuciones que no repitieron nada no se nombran, porque no hay nada en
+    ellas que abrir.
+  </p>
 
   <h2>Un objetivo, cuando el umbral es la pregunta equivocada</h2>
   <p>
@@ -229,7 +478,9 @@ const locale = localeOf(Astro.url.pathname)
     por POST. El cuerpo es genérico a propósito: Slack, PagerDuty, Opsgenie y
     todas las herramientas de flujo de trabajo aceptan un webhook entrante, y dar
     forma al payload para una de ellas significaría mantener un conjunto de
-    integraciones con proveedores que se quedan obsoletas.
+    integraciones con proveedores que se quedan obsoletas. Con varias réplicas
+    sobre un mismo almacén, una sola a la vez tiene el lease de los monitores y
+    envía la transición, así que el receptor la recibe una vez.
   </p>
 
   <pre><code class="language-json">{`{

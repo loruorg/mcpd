@@ -23,6 +23,13 @@ rather than every commit.
 - **Mail over HTTPS, with `--mail-http-url` and `--mail-http-token`.** The
   daemon posts each mail as JSON to an endpoint, such as a Cloudflare Email
   Worker, for hosts where SMTP ports are closed.
+- **One replica per background job.** Replicas that share a store take turns
+  through a lease in it, on SQLite, Postgres and ClickHouse alike. Live
+  scoring and tail sampling run on one replica at a time, so each judged call
+  is made and paid for once, and only one replica posts a monitor or
+  objective webhook. The holder renews the lease on every pass and gives it up
+  on shutdown; if it stops, another replica takes over within three passes and
+  continues live scoring from where the last holder stopped.
 - **`--skip-email-verification`.** Sign-up opens the account at once, with no
   confirmation mail, for a daemon without a mail server.
 - **Prompt management.** Store prompts as numbered versions, text or chat
@@ -226,6 +233,10 @@ rather than every commit.
 
 ### Fixed
 
+- **Elixir records a JSON null as null.** A null inside a dataset case's
+  input, a span payload or a run's input was sent as the string `"null"`, and
+  a `nil` inside one as `"nil"`. `create_experiment` with no `experiment_id`
+  or `item_count` now creates a new experiment instead of getting a 422.
 - **The derived `outcome` aspect reaches a snapshot.** Its notes were stamped
   with the time of the pass that wrote them, which put them outside the window
   that pass reads, and each later pass moved them again. They are now stamped

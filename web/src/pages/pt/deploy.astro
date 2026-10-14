@@ -403,8 +403,14 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
     <code>--ingest-key</code> permite escrever sinais. <code>--read-key</code>
     permite lê-los. <code>--write-key</code> permite mudar dados armazenados:
     notas, feedback, datasets, experimentos e reconhecimentos.
-    <code>--execute-key</code> permite iniciar, cancelar e sinalizar execuções. <code>--worker-key</code> permite reivindicar etapas e relatar o que aconteceu com elas, e é a chave que vive no processo que executa suas etapas. <code>--admin-key</code> permite apagar um trace e ler o log de
-    auditoria.
+    <code>--execute-key</code> permite iniciar, cancelar e sinalizar execuções.
+    <code>--worker-key</code> permite reivindicar etapas e relatar o que
+    aconteceu com elas, e é a chave que vive no processo que executa os corpos
+    das suas etapas. <code>--admin-key</code> permite apagar um trace e ler o
+    log de auditoria. Uma lista não definida aceita uma mais ampla no lugar
+    dela: a escrita aceita as chaves de ingest, admin aceita as chaves de
+    leitura, e execute e worker aceitam as chaves de escrita. Uma implantação
+    configurada antes de um escopo existir continua funcionando.
   </p>
   <p>
     A primeira separação é a que decide o seu raio de dano, porque as populações
@@ -521,6 +527,7 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
       { out: 'identity        off' },
       { out: 'client ip       peer address' },
       { out: 'sampling        keep everything' },
+      { out: 'tail sampling   off' },
       { out: 'quota           unlimited' },
       { out: 'redaction       on' },
       { out: 'redact key      set', tone: 'ok' },
@@ -652,16 +659,23 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
   </p>
   <p>
     Isso move os sinais e deixa um arquivo no disco: o armazenamento de
-    execuções, que é SQLite embutido qualquer que seja o armazenamento de
-    sinais. Com <code>runs.enabled</code> em true, o padrão, o chart o mantém no
-    volume e roda uma réplica. Para rodar vários pods, desligue a superfície de
-    execuções. O chart então roda <code>replicaCount</code> pods, troca
-    <code>Recreate</code> por uma atualização gradual e larga o
-    PersistentVolumeClaim, porque não sobra nada local pelo qual brigar, e o
-    daemon responde aos endpoints de execuções com um 503 que diz isso. O chart
-    recusa um <code>replicaCount</code> acima de 1 enquanto as execuções estão
-    ligadas, em vez de iniciar pods que guardam cada um o próprio armazenamento
-    de execuções.
+    execuções, que por padrão é SQLite embutido. Com <code>runs.enabled</code>
+    em true, o padrão, o chart o mantém no volume e roda uma réplica. Para rodar
+    vários pods, mova as execuções também para o Postgres: defina
+    <code>runs.store</code> como <code>postgres</code> e a string de conexão em
+    <code>runs.postgresUrl</code>, que pode apontar para o mesmo banco. O chart
+    então roda <code>replicaCount</code> pods, troca <code>Recreate</code> por
+    uma atualização gradual e larga o PersistentVolumeClaim, porque não sobra
+    nada local pelo qual brigar. Todo pod serve as execuções a partir do mesmo
+    armazenamento. Fora do chart, a mesma configuração é
+    <code>--runs-data postgres://...</code>.
+  </p>
+  <p>
+    Desligar a superfície de execuções com <code>runs.enabled=false</code>
+    escala da mesma forma, e o daemon responde aos endpoints de execuções com um
+    503 que diz isso. O chart recusa um <code>replicaCount</code> acima de 1
+    enquanto as execuções estão em um arquivo embutido, em vez de iniciar pods
+    que guardam cada um o próprio armazenamento de execuções.
   </p>
 
   <pre><code class="language-bash">{`helm install mcpd ./deploy/helm/mcpd \\
@@ -669,7 +683,8 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
   --set keys.read=$READ_KEY \\
   --set externalStore.type=postgres \\
   --set externalStore.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
-  --set runs.enabled=false \\
+  --set runs.store=postgres \\
+  --set runs.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
   --set replicaCount=3`}</code></pre>
 
   <p>

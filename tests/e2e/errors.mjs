@@ -40,20 +40,18 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
-import { LANGUAGES, ROOT, freePort, languageFilter } from './languages.mjs'
+import { LANGUAGES, ROOT, freePort, languageFilter, mcpdBinary } from './languages.mjs'
 
 const PROJECT = 'errors-e2e'
 const INGEST_KEY = 'ingest-errors-e2e'
 
-const bin = ['target/debug/mcpd', 'target/release/mcpd']
-  .map((p) => path.join(ROOT, p))
-  .find(existsSync)
+const bin = mcpdBinary()
 
 if (!bin) {
   console.error('No mcpd binary. Run `cargo build -p mcpd` first.')
@@ -79,11 +77,6 @@ let checks = 0
  * the same reason: one open gap must not be able to hide the next one.
  */
 const KNOWN_GAPS = {
-  'elixir:the SDK keeps its diagnostics off the agent\'s stdout':
-    'warn_once in sdks/elixir/lib/mcpd/worker.ex calls Logger.warning, and Elixir\'s default '
-    + 'console backend writes to stdout rather than stderr. Every other SDK writes its '
-    + 'diagnostic to stderr. The line can arrive after the program\'s own output, so a run '
-    + 'whose result is read from stdout gets telemetry in the middle of it.',
 }
 
 /** Every `<language>:<check>` this run evaluated, and the ones named in

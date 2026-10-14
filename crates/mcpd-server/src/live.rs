@@ -9,6 +9,9 @@
 //! process. Only runs that started after the daemon did are read, so a restart
 //! does not score the past again. And each rule's judged scores are capped per
 //! minute, so a burst of traffic cannot turn into a burst of model calls.
+//!
+//! Replicas sharing a store take turns through a lease (see [`crate::lease`]),
+//! so only one of them scores at a time and a judged call is made once.
 
 use crate::definitions::to_rule;
 use crate::eval::{plan, score_trace, Pass};
@@ -50,25 +53,59 @@ struct Memory {
 /// Always started: rules are data written through the API, so there is
 /// nothing in the configuration to say whether any will exist. A pass with no
 /// enabled rule reads one list per project and stops.
+///
+/// One replica runs it at a time, the holder of the `live-scoring` lease, so
+/// several replicas sharing a store make each judged call once. After each
+/// pass the holder records how far it got; a replica that takes the lease
+/// over skips the runs that finished before that point, which the previous
+/// holder has already scored.
 pub fn spawn(state: Arc<AppState>) {
     let started = OffsetDateTime::now_utc();
     let memory = Arc::new(Mutex::new(Memory::default()));
+    let duty = Arc::new(crate::lease::Duty::new(JOB, crate::lease::ttl_for(INTERVAL)));
     let looped = Arc::clone(&state);
-    crate::spawn_loop(
+    let held = Arc::clone(&duty);
+    crate::lease::spawn_leased(
         &state,
-        "live scoring",
+        duty,
         INTERVAL,
         crate::FirstPass::AfterInterval,
-        move || {
+        move |granted| {
             let state = Arc::clone(&looped);
             let memory = Arc::clone(&memory);
+            let duty = Arc::clone(&held);
             async move {
-                if let Err(e) = pass(&state, &memory, started, OffsetDateTime::now_utc()).await {
-                    tracing::warn!(error = %e, "a live scoring pass failed; the next one retries");
+                let Some(granted) = granted else { return };
+                let now = OffsetDateTime::now_utc();
+                let after = if granted.fresh {
+                    granted.lease.progress.as_deref().and_then(parse_progress)
+                } else {
+                    None
+                };
+                match pass_after(&state, &memory, started, after, now).await {
+                    Ok(_) => {
+                        let reached = format_progress(now - SETTLE);
+                        duty.claim(&state, Some(&reached)).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "a live scoring pass failed; the next one retries");
+                    }
                 }
             }
         },
     );
+}
+
+/// The name of live scoring's lease.
+pub const JOB: &str = "live-scoring";
+
+/// Progress as the lease records it: nanoseconds since the epoch.
+fn format_progress(t: OffsetDateTime) -> String {
+    t.unix_timestamp_nanos().to_string()
+}
+
+fn parse_progress(s: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::from_unix_timestamp_nanos(s.parse().ok()?).ok()
 }
 
 /// One pass over every project. Public so a test can drive it without a timer.
@@ -80,6 +117,21 @@ pub async fn pass(
     state: &Arc<AppState>,
     memory: &Arc<Mutex<impl MemoryLike>>,
     started: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<u32, mcpd_store::Error> {
+    pass_after(state, memory, started, None, now).await
+}
+
+/// [`pass`], skipping every run that finished at or before `after`: the
+/// point a previous holder of the lease recorded it had reached.
+///
+/// # Errors
+/// As [`pass`].
+pub async fn pass_after(
+    state: &Arc<AppState>,
+    memory: &Arc<Mutex<impl MemoryLike>>,
+    started: OffsetDateTime,
+    after: Option<OffsetDateTime>,
     now: OffsetDateTime,
 ) -> Result<u32, mcpd_store::Error> {
     let mut written = 0u32;
@@ -111,7 +163,10 @@ pub async fn pass(
         let finished: Vec<&Trace> = page
             .items
             .iter()
-            .filter(|t| t.is_complete && t.end_time.is_some_and(|e| e <= now - SETTLE))
+            .filter(|t| {
+                t.is_complete
+                    && t.end_time.is_some_and(|e| e <= now - SETTLE && after.is_none_or(|a| e > a))
+            })
             .collect();
         if finished.is_empty() {
             continue;

@@ -48,6 +48,14 @@ generation.set_usage(TokenUsage {
 // Or, when the breakdown does not matter:
 generation.set_tokens(412, 96);
 
+// How the model was called. Settings, not payload: kept with capture off.
+generation.set_model_parameters(ModelParameters {
+    temperature: Some(0.0),
+    seed: Some(0),
+    max_tokens: Some(1024),
+    ..ModelParameters::default()
+});
+
 // A message is required. "Something failed" is not actionable.
 tool.set_error("sms gateway timed out after 5s");
 
@@ -177,6 +185,15 @@ async fn main() {
     成本。记录一个错误的同时会把这个 span 的状态设成 <code>error</code>，所以
     这两者不可能对不上；而那条消息是一个必填参数，不是一个可选项。
   </p>
+  <p>
+    <code>set_model_parameters</code> 记录这次调用所用的设置：
+    <code>temperature</code>、<code>top_p</code>、<code>top_k</code>、
+    <code>max_tokens</code>、<code>seed</code>、<code>stop_sequences</code> 和
+    <code>has_response_format</code>。它们是设置而不是载荷，所以在 <code>with_capture_payloads(false)</code> 下也会保留，而这正是
+    要紧的情况：想重现这次运行的人必须对上它们。<code>None</code> 表示没有，<code>Some(0)</code> 是一个值，所以
+    零种子也是一个种子。<code>has_response_format</code>
+    背后的 schema 不会被记录，只记录当时是否有一个在生效。
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -193,10 +210,26 @@ async fn main() {
     span 在任何借到它的地方都能往里填东西。
   </p>
 
+  <h3>流式调用</h3>
+  <p>
+    把供应商的流交给 <code>span.record_stream</code>，然后改读它返回的流。它的
+    条目是 <code>Result</code>，分片可以是 OpenAI 的 chat-completion 分片或
+    Anthropic 的 message 事件，每个都是一个 <code>serde_json::Value</code>，或者
+    任何能序列化成它的类型。每个条目都原样通过。第一个带文本或工具调用的分片
+    标记首个 token 的时间。这个包装拥有 span：当流结束、产出一个
+    <code>Err</code>，或者被提前 drop 时，span 会得到
+    <code>record_response</code> 对同一次非流式调用会记录的内容，以文本作为
+    输出，然后结束。一个 <code>Err</code> 会用它的 <code>Display</code> 文本
+    标记 span，并照样交给你。保留的文本上限是 32,768 个字符，达到上限时会设置
+    <code>mcpd.stream.truncated</code>。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="stream" title="一次流式调用" />
+
   <h2>载荷、sink 与已经结束的 span</h2>
   <p>
     <code>Config::with_capture_payloads(false)</code> 把提示词和补全留在进程里：
-    span 照样带着它的时间、状态、用量、模型、关联信息和错误，而
+    span 照样带着它的时间、状态、用量、模型、模型参数、关联信息和错误，而
     <code>input</code> 和 <code>output</code> 在进入队列之前就被丢掉。单个 span
     可以用 <code>span.capture_payloads(..)</code> 为自己覆盖客户端的设置，两个
     方向都可以。
@@ -210,6 +243,19 @@ async fn main() {
     <code>queued</code>、<code>dropped</code>、<code>capacity</code>、
     <code>exported</code>、<code>failed</code> 和 <code>rejected</code>。
   </p>
+  <p>
+    <code>mcpd_sdk::testing::TestClient</code> 包着一个记录到内存里的客户端。把
+    <code>test.client()</code> 传给你的代码里任何接收 <code>&amp;Mcpd</code>
+    的地方，然后把它记下的东西读回来：<code>spans(name, kind)</code>、读那个
+    必须存在的 span 的 <code>span(name)</code>、把每次运行读成一棵树的
+    <code>trees()</code>，还有 <code>logs()</code>、<code>metrics()</code>、
+    <code>scores()</code>、<code>recorded_feedback()</code> 和
+    <code>reset()</code>。每个访问方法都会先刷出。它持有的内容，像发往守护进程时
+    一样经过了采样、载荷采集和 <code>redact</code>；测试运行时设置了
+    <code>MCPD_ENABLED=false</code>，<code>TestClient::new()</code> 也照样开着。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="testing" title="一个单元测试" />
   <p>
     <code>mcpd.record(span)</code> 把一个已经结束的 span 排进队列，连同 id、
     父级、开始和结束时间，按一个适配器或者一次导入手上的样子来：绝不重新指定

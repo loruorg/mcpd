@@ -317,10 +317,12 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
 
   <h2>Le chart Helm</h2>
   <p>
-    Le chart rend les mêmes quatre objets avec des valeurs devant eux, plus cinq
+    Le chart rend les mêmes quatre objets avec des valeurs devant eux, plus six
     qui restent inactifs jusqu’à ce qu’une valeur les active : un Ingress, une
-    NetworkPolicy, un PodDisruptionBudget, un ServiceAccount et un
-    ServiceMonitor. Générez d’abord les clés et gardez-les là où votre équipe
+    NetworkPolicy, un PodDisruptionBudget, un ServiceAccount, un
+    ServiceMonitor, et un ConfigMap ou un Secret pour le fichier de
+    configuration. Chaque version le publie dans le même registre que l’image.
+    Générez d’abord les clés et gardez-les là où votre équipe
     garde ses secrets, parce que l’installation ne vous les réaffichera pas :
   </p>
 
@@ -405,8 +407,15 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
     <code>--ingest-key</code> permet d’écrire des signaux.
     <code>--read-key</code> permet de les lire. <code>--write-key</code> permet
     de changer des données stockées : scores, retours, datasets,
-    expériences et acquittements. <code>--execute-key</code> permet de démarrer, d’annuler et de signaler des exécutions. <code>--worker-key</code> permet de réclamer des étapes et de rapporter ce qui leur est arrivé ; c’est la clé qui vit dans le processus qui exécute vos étapes. <code>--admin-key</code> permet de supprimer
-    une trace et de lire le journal d’audit.
+    expériences et acquittements. <code>--execute-key</code> permet de
+    démarrer, d’annuler et de signaler des exécutions. <code>--worker-key</code>
+    permet de réclamer des étapes et de rapporter ce qui leur est arrivé ;
+    c’est la clé qui vit dans le processus qui exécute vos étapes.
+    <code>--admin-key</code> permet de supprimer une trace et de lire le journal
+    d’audit. Une liste non définie accepte à sa place une liste plus large :
+    write accepte les clés d’ingestion, admin accepte les clés de lecture, et
+    execute et worker acceptent les clés d’écriture. Un déploiement configuré
+    avant l’existence d’une portée continue de fonctionner.
   </p>
   <p>
     La première séparation est celle qui décide de votre rayon d’explosion,
@@ -527,6 +536,7 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
       { out: 'identity        off' },
       { out: 'client ip       peer address' },
       { out: 'sampling        keep everything' },
+      { out: 'tail sampling   off' },
       { out: 'quota           unlimited' },
       { out: 'redaction       on' },
       { out: 'redact key      set', tone: 'ok' },
@@ -661,17 +671,25 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
   </p>
   <p>
     Cela déplace les signaux et laisse un fichier sur disque : le magasin
-    d’exécutions, qui est un SQLite embarqué quel que soit le magasin des
-    signaux. Avec <code>runs.enabled</code> à true, la valeur par défaut, le
-    chart le garde sur le volume et fait tourner une réplique. Pour faire
-    tourner plusieurs pods, coupez la surface d’exécutions. Le chart fait alors
-    tourner <code>replicaCount</code> pods, passe de <code>Recreate</code> à une
-    mise à jour progressive, et abandonne le PersistentVolumeClaim, parce qu’il
-    ne reste rien de local à se disputer, et le daemon répond aux endpoints
+    d’exécutions, qui est un SQLite embarqué par défaut. Avec
+    <code>runs.enabled</code> à true, la valeur par défaut, le chart le garde
+    sur le volume et fait tourner une réplique. Pour faire tourner plusieurs
+    pods, déplacez aussi les exécutions vers Postgres : posez
+    <code>runs.store</code> à <code>postgres</code> et la chaîne de connexion
+    dans <code>runs.postgresUrl</code>, qui peut nommer la même base. Le chart
+    fait alors tourner <code>replicaCount</code> pods, passe de
+    <code>Recreate</code> à une mise à jour progressive, et abandonne le
+    PersistentVolumeClaim, parce qu’il ne reste rien de local à se disputer.
+    Chaque pod sert les exécutions depuis le même magasin. Hors du chart, le
+    même réglage est <code>--runs-data postgres://...</code>.
+  </p>
+  <p>
+    Couper la surface d’exécutions avec <code>runs.enabled=false</code> permet
+    de monter en charge de la même façon, et le daemon répond aux endpoints
     d’exécutions par un 503 qui le dit. Le chart refuse un
-    <code>replicaCount</code> supérieur à 1 tant que les exécutions sont
-    actives, plutôt que de démarrer des pods qui tiendraient chacun leur propre
-    magasin d’exécutions.
+    <code>replicaCount</code> supérieur à 1 tant que les exécutions sont sur un
+    fichier embarqué, plutôt que de démarrer des pods qui tiendraient chacun
+    leur propre magasin d’exécutions.
   </p>
 
   <pre><code class="language-bash">{`helm install mcpd ./deploy/helm/mcpd \\
@@ -679,7 +697,8 @@ kubectl -n mcpd rollout restart deploy/mcpd`}</code></pre>
   --set keys.read=$READ_KEY \\
   --set externalStore.type=postgres \\
   --set externalStore.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
-  --set runs.enabled=false \\
+  --set runs.store=postgres \\
+  --set runs.postgresUrl=postgres://mcpd:$PGPASSWORD@db:5432/mcpd \\
   --set replicaCount=3`}</code></pre>
 
   <p>

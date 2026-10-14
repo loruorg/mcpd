@@ -437,6 +437,10 @@ async fn notify(state: &Arc<AppState>, s: &MonitorState) {
 /// `mcpd config` prints the raised value, because that is the one that runs.
 pub const MIN_INTERVAL_SECONDS: u64 = 5;
 
+/// The name of the lease whose holder announces monitor and objective
+/// transitions.
+pub const JOB: &str = "monitors";
+
 /// Run the monitors on a timer for the life of the process.
 ///
 /// A transition is always logged, and posted to the monitor's webhook when it
@@ -456,13 +460,24 @@ pub fn spawn(state: Arc<AppState>) {
 
     // One interval before the first pass, so a monitor never judges an empty
     // window at start-up. A panic in one pass is logged and the next runs.
+    //
+    // Every replica evaluates, so each answers `GET /v1/api/monitors` from its
+    // own readings and a replica that takes over already knows which alerts
+    // are latched. Only the holder of the `monitors` lease announces a
+    // transition, so a webhook is posted once however many replicas there are.
     let looped = Arc::clone(&state);
-    crate::spawn_loop(&state, "monitor", every, crate::FirstPass::AfterInterval, move || {
+    let duty = Arc::new(crate::lease::Duty::new(JOB, crate::lease::ttl_for(every)));
+    crate::lease::spawn_leased(&state, duty, every, crate::FirstPass::AfterInterval, move |g| {
         let state = Arc::clone(&looped);
         async move {
             let at = OffsetDateTime::now_utc();
+            let slos = tick_slos(&state, at).await;
+            let monitors = tick(&state, at).await;
+            if g.is_none() {
+                return;
+            }
 
-            for s in tick_slos(&state, at).await {
+            for s in slos {
                 let r = s.last.as_ref();
                 match s.condition {
                     Condition::Tripped => tracing::error!(
@@ -486,7 +501,7 @@ pub fn spawn(state: Arc<AppState>) {
                 notify_slo(&state, &s).await;
             }
 
-            for s in tick(&state, at).await {
+            for s in monitors {
                 let value = s.last.as_ref().and_then(|r| r.value);
                 match s.condition {
                     Condition::Tripped => tracing::error!(

@@ -42,6 +42,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 const payload = `span.SetModel("gpt-4o-mini", "openai")
 span.SetTokens(812, 96)
 
+// Modelin nasıl çağrıldığı. Payload değil ayardır: yakalama kapalıyken de tutulur.
+span.SetModelParameters(mcpd.ModelParameters{
+    Temperature: ptr(0.0),
+    Seed:        ptr(int64(0)),
+    MaxTokens:   ptr(uint64(1024)),
+})
+
 // Ya da tam döküm, böylece önbellekten gelen bir prompt öyle fiyatlandırılır.
 span.SetUsage(mcpd.TokenUsage{
     InputTokens:  ptr(uint64(812)),
@@ -148,6 +155,24 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     yalnızca ilişkilendirme için taşır.
   </p>
 
+  <p>
+    Kendi birim testleriniz için <code>mcpdtest.New</code>,
+    <code>mcpd.New</code> ile aynı seçenekleri alır ve <code>Client</code> alanı
+    belleğe kaydeden bir <code>*mcpd.Client</code> olan bir kaydedici döndürür.
+    Kodunuz bir istemci aldığı her yerde o istemciyi verin, sonra kaydettiğini
+    geri okuyun: ada ya da türe göre <code>Spans</code>, var olması gereken tek
+    span için <code>Span(name)</code> (<code>MustSpan(t, name)</code> testi sizin
+    yerinize başarısız kılar), her çalıştırma bir ağaç olarak
+    <code>Trees</code>, <code>Logs</code>, <code>Metrics</code>,
+    <code>Scores</code>, <code>RecordedFeedback</code> ve <code>Reset</code>.
+    Her erişimci önce flush eder. Tuttuğu şey, bir daemon'a giderken olacağı
+    gibi örneklemeden, payload yakalamadan ve <code>WithRedact</code> adımından
+    geçmiştir ve test çalıştırması için <code>MCPD_ENABLED=false</code>
+    ayarlandığında da açık kalır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="testing" title="bir birim testi" />
+
   <h2>Bir çalıştırmayı kaydetme</h2>
   <p>
     <code>Start</code> yeni bir context ve bir span döndürür,
@@ -204,6 +229,15 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     durumu <code>ok</code> yerine <code>error</code> olarak kaydeder.
   </p>
 
+  <p>
+    <code>SetModelParameters</code>, çağrının yapıldığı ayarları kaydeder:
+    <code>Temperature</code>, <code>TopP</code>, <code>TopK</code>, <code>MaxTokens</code>, <code>Seed</code>, <code>StopSequences</code> ve <code>HasResponseFormat</code>. Bunlar payload değil ayardır, bu yüzden
+    <code>WithCapturePayloads(false)</code> olduğunda da korunurlar. Önemli olan da tam bu
+    durumdur: çalıştırmayı yeniden üretmeye çalışan birinin eşleştirmesi gereken
+    değerler bunlardır. Nil bir alan yoktur, sıfırı gösteren bir pointer ise bir değerdir; yani sıfır bir <code>Seed</code> da bir seed'dir. <code>HasResponseFormat</code> arkasındaki şema
+    kaydedilmez, yalnızca bir şemanın geçerli olup olmadığı kaydedilir.
+  </p>
+
   <CodeSwitcher
     class="not-prose my-6"
     title="bir span neler taşır"
@@ -218,6 +252,26 @@ const serverless = `func Handler(ctx context.Context, event Event) (Response, er
     <code>Event</code> ve <code>EndWithStatus</code>. Aynı alanlar, span
     başlarken <code>With...</code> seçenekleriyle de verilebilir.
   </p>
+
+  <h3>Akışlı çağrılar</h3>
+  <p>
+    Span'i ve sağlayıcının akışını <code>mcpd.RecordStream</code> işlevine
+    verin ve onun yerine döndürdüğü akışı okuyun. Resmî OpenAI ve Anthropic Go
+    SDK'larının döndürdüğü <code>ssestream.Stream</code> ile aynı
+    <code>Next</code>, <code>Current</code>, <code>Err</code> ve
+    <code>Close</code> yöntemlerine sahiptir; OpenAI chat-completion
+    parçalarını ve Anthropic mesaj olaylarını alır, her parça değişmeden geçer.
+    Metin ya da araç çağrısı taşıyan ilk parça, ilk token'a kadar geçen süreyi
+    işaretler. <code>Next</code> false döndürdüğünde ya da sondan önce
+    <code>Close</code> çağırdığınızda span, aynı çağrı akışsız yapılsaydı
+    <code>RecordResponse</code> neyi kaydedecek idiyse onu ve çıktı olarak
+    metni alır ve biter. Akıştan gelen bir hata span'i işaretler ve size
+    <code>Err</code> üzerinden değişmeden ulaşır.
+    Tutulan metin 32,768 karakterle sınırlıdır ve sınıra ulaşıldığında
+    <code>mcpd.stream.truncated</code> ayarlanır.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['go']} region="stream" title="akışlı bir çağrı" />
 
   <h2>Kalıcı çalıştırmalar</h2>
   <p>

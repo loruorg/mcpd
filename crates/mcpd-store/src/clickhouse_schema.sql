@@ -363,3 +363,14 @@ CREATE TABLE IF NOT EXISTS mcpd.document_labels (
     project LowCardinality(String), kind LowCardinality(String), id String,
     label String, version UInt32, deleted UInt8, updated_at DateTime64(9,'UTC')
 ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (project, kind, id, label);
+
+-- Which replica runs each background job. There is no compare-and-set here,
+-- so every claimant writes its own row, one per job and holder, and every
+-- reader names the same winner: the live row whose term began first, the
+-- holder's name breaking a tie. Giving a lease up is a newer row that has
+-- already expired.
+CREATE TABLE IF NOT EXISTS mcpd.leases (
+    job String, holder String, since DateTime64(9,'UTC'),
+    expires_at DateTime64(9,'UTC'), progress Nullable(String),
+    updated_at DateTime64(9,'UTC')
+) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (job, holder);

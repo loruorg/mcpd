@@ -384,6 +384,18 @@ fn cost(total: f64) -> Cost {
 fn documented_answers() -> Answers {
     let mut e = Answers::new();
 
+    // Leases: one replica runs each background job, and another takes over
+    // when the holder stops renewing or gives the lease up.
+    e.insert("the first replica's next claim holds the lease", "a:true".into());
+    e.insert("another replica's claim on a held lease", "a:false".into());
+    e.insert("a renewal keeps the term's start and records progress", "true p1".into());
+    e.insert("a claim before the holder's lease expires", "a:false".into());
+    e.insert("after the holder lapses the next replica holds it", "b:true p1".into());
+    e.insert("the old holder's claim on its lost lease", "b:false".into());
+    e.insert("a release by a replica that does not hold the lease", "b:true".into());
+    e.insert("after a release the other replica holds it", "a:true p1".into());
+    e.insert("eight replicas racing, after one more claim each", "1 holder, all agree".into());
+
     // Tenancy. A trace id is shared across a service boundary by design, so
     // two projects can each hold a run under it; every other id is chosen by
     // the sender and belongs to the first project that stored it.
@@ -958,6 +970,25 @@ fn documented_capabilities(backend: &str) -> Answers {
     e.insert("capability idempotent_schema_init", "true".into());
     // Every backend folds case across Unicode, so `CAFÉ` finds `Café`.
     e.insert("capability unicode_case_folding", "true".into());
+    // A lease on SQLite and Postgres is one compare-and-set, so a claim on a
+    // free lease is granted at once and exactly one of several racing
+    // claimants gets it. ClickHouse has none: a claim on a free lease is a
+    // candidacy, granted at the next claim, so a race ends with nobody holding
+    // the lease for one pass and exactly one holder after it.
+    let at_once = if backend == "clickhouse" { "candidate:false" } else { "a:true" };
+    e.insert("a claim on a free lease", at_once.into());
+    e.insert(
+        "a claim on an expired lease",
+        if backend == "clickhouse" { "candidate:false" } else { "b:true" }.into(),
+    );
+    e.insert(
+        "a claim on a released lease",
+        if backend == "clickhouse" { "candidate:false" } else { "a:true" }.into(),
+    );
+    e.insert(
+        "eight replicas racing for a free lease, holders",
+        if backend == "clickhouse" { "0" } else { "1" }.into(),
+    );
     if backend == "clickhouse" {
         // A ClickHouse delete is a mutation: accepted now, applied later.
         e.insert("capability immediate_deletes", "false".into());
@@ -2722,6 +2753,102 @@ async fn observe_retention(store: &dyn Store, project: String) -> Answers {
     a
 }
 
+/// Two replicas, `a` and `b`, passing a lease between them, and eight racing
+/// for one. Times are given, not read, so expiry is exact and the suite does
+/// not wait for a lease to run out.
+async fn observe_leases(store: &dyn Store, job: String) -> Answers {
+    use mcpd_store::LeaseClaim;
+    let mut a = Answers::new();
+    let t0 = OffsetDateTime::now_utc();
+    let ttl = Duration::seconds(30);
+    let claim = |holder: &'static str, at: i64, progress: Option<&'static str>| {
+        let job = job.clone();
+        async move {
+            let now = t0 + Duration::seconds(at);
+            let lease = store
+                .claim_lease(&LeaseClaim { job: &job, holder, now, ttl, progress })
+                .await
+                .expect("claim a lease");
+            let held = lease.held_by(holder, now);
+            let shown = if lease.holder == holder && !held {
+                "candidate:false".to_owned()
+            } else {
+                format!("{}:{held}", lease.holder)
+            };
+            (lease, shown)
+        }
+    };
+
+    a.insert("a claim on a free lease", claim("a", 0, None).await.1);
+    a.insert("the first replica's next claim holds the lease", claim("a", 1, None).await.1);
+    a.insert("another replica's claim on a held lease", claim("b", 2, None).await.1);
+    let (renewed, _) = claim("a", 10, Some("p1")).await;
+    a.insert(
+        "a renewal keeps the term's start and records progress",
+        format!("{} {}", renewed.since == t0, renewed.progress.unwrap_or_default()),
+    );
+    a.insert("a claim before the holder's lease expires", claim("b", 20, None).await.1);
+    // `a` renewed at 10 for 30 seconds, so the lease lapses at 40.
+    a.insert("a claim on an expired lease", claim("b", 41, None).await.1);
+    let (taken, shown) = claim("b", 42, None).await;
+    a.insert(
+        "after the holder lapses the next replica holds it",
+        format!("{shown} {}", taken.progress.unwrap_or_default()),
+    );
+    a.insert("the old holder's claim on its lost lease", claim("a", 43, None).await.1);
+    store.release_lease(&job, "a", t0 + Duration::seconds(44)).await.expect("release");
+    a.insert("a release by a replica that does not hold the lease", claim("b", 45, None).await.1);
+    store.release_lease(&job, "b", t0 + Duration::seconds(46)).await.expect("release");
+    a.insert("a claim on a released lease", claim("a", 47, None).await.1);
+    let (back, shown) = claim("a", 48, None).await;
+    a.insert(
+        "after a release the other replica holds it",
+        format!("{shown} {}", back.progress.unwrap_or_default()),
+    );
+
+    // Eight claims at once on a lease nobody holds, each from its own task
+    // so they really do race, then one more claim each.
+    let raced = format!("{job}-race");
+    let holders: Vec<String> = (0..8).map(|i| format!("r{i}")).collect();
+    let round = |at: i64| {
+        let raced = raced.clone();
+        let holders = holders.clone();
+        async move {
+            let now = t0 + Duration::seconds(at);
+            let claims = holders.iter().map(|h| {
+                let raced = raced.clone();
+                async move {
+                    let lease = store
+                        .claim_lease(&LeaseClaim {
+                            job: &raced,
+                            holder: h,
+                            now,
+                            ttl,
+                            progress: None,
+                        })
+                        .await
+                        .expect("claim in a race");
+                    (lease.held_by(h, now), lease.holder)
+                }
+            });
+            futures::future::join_all(claims).await
+        }
+    };
+    let first = round(0).await;
+    a.insert(
+        "eight replicas racing for a free lease, holders",
+        first.iter().filter(|(held, _)| *held).count().to_string(),
+    );
+    let second = round(1).await;
+    let holding = second.iter().filter(|(held, _)| *held).count();
+    let named: std::collections::BTreeSet<&String> = second.iter().map(|(_, h)| h).collect();
+    a.insert(
+        "eight replicas racing, after one more claim each",
+        format!("{holding} holder, all {}", if named.len() == 1 { "agree" } else { "disagree" }),
+    );
+    a
+}
+
 /* ------------------------------------------------------------- the harness -- */
 
 /// A name no other run of this suite will produce.
@@ -2949,6 +3076,7 @@ async fn every_backend_gives_the_documented_answer_to_the_same_question() {
         answers
             .extend(observe_log_correlation(store.as_ref(), unique(&format!("lc-{name}"))).await);
         answers.extend(observe_themes(store.as_ref(), unique(&format!("thm-{name}"))).await);
+        answers.extend(observe_leases(store.as_ref(), unique(&format!("lease-{name}"))).await);
         answers.extend(
             observe_tenancy(
                 store.as_ref(),

@@ -48,6 +48,14 @@ generation.set_usage(TokenUsage {
 // あるいは、内訳が要らないときは:
 generation.set_tokens(412, 96);
 
+// モデルをどう呼び出したか。ペイロードではなく設定なので、取り込みを切っても残る。
+generation.set_model_parameters(ModelParameters {
+    temperature: Some(0.0),
+    seed: Some(0),
+    max_tokens: Some(1024),
+    ..ModelParameters::default()
+});
+
 // メッセージは必須。「何かが失敗した」では手の打ちようがない。
 tool.set_error("sms gateway timed out after 5s");
 
@@ -184,6 +192,17 @@ async fn main() {
     <code>error</code> になるので、この 2 つが食い違うことはありません。メッセージは
     省略できる引数ではなく、必須の引数です。
   </p>
+  <p>
+    <code>set_model_parameters</code> は、呼び出しに使った設定を記録します。
+    <code>temperature</code>、<code>top_p</code>、<code>top_k</code>、
+    <code>max_tokens</code>、<code>seed</code>、<code>stop_sequences</code>、
+    <code>has_response_format</code> です。これらはペイロードではなく設定なので、
+    <code>with_capture_payloads(false)</code> でも残ります。そして大事なのはまさに
+    その場合です。実行を再現する人が合わせなければならないのは、これらの値だから
+    です。<code>None</code> は存在せず、<code>Some(0)</code> は値なので、ゼロの
+    シードもシードです。<code>has_response_format</code> の背後にあるスキーマは
+    記録されず、それが有効だったかどうかだけが記録されます。
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -200,11 +219,29 @@ async fn main() {
     スパンは借用できる場所ならどこからでも埋められます。
   </p>
 
+  <h3>ストリーミングの呼び出し</h3>
+  <p>
+    プロバイダーのストリームを <code>span.record_stream</code> に渡し、代わりに
+    返ってきたストリームを読んでください。その要素は <code>Result</code> で、
+    チャンクは OpenAI の chat completion のチャンクか Anthropic の message
+    イベントです。どれも <code>serde_json::Value</code> か、それにシリアライズ
+    できる任意の型です。すべての要素はそのまま通ります。テキストかツール呼び出しを
+    持つ最初のチャンクが、最初のトークンまでの時間を記録します。ラッパーがスパンを
+    所有します。ストリームが終わったとき、<code>Err</code> を返したとき、途中で
+    drop されたときに、スパンは、同じ呼び出しをストリーミングなしで行った場合に
+    <code>record_response</code> が記録する内容と、出力としてのテキストを受け取り、
+    終了します。<code>Err</code> はその <code>Display</code> のテキストでスパンに
+    記録され、それでもあなたに届きます。保持するテキストは 32,768 文字までで、
+    上限に達したときは <code>mcpd.stream.truncated</code> が設定されます。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="stream" title="ストリーミングの呼び出し" />
+
   <h2>ペイロード、シンク、完了済みスパン</h2>
   <p>
     <code>Config::with_capture_payloads(false)</code> にすると、プロンプトと補完
     はプロセスの中に留まります。スパンは所要時間、ステータス、使用量、モデル、
-    相関、エラーを持ったままで、<code>input</code> と
+    モデルパラメーター、相関、エラーを持ったままで、<code>input</code> と
     <code>output</code> はキューに入る前に捨てられます。個々のスパンは
     <code>span.capture_payloads(..)</code> でクライアントの設定を上書きでき、
     有効にも無効にもできます。
@@ -220,6 +257,21 @@ async fn main() {
     <code>capacity</code>、<code>exported</code>、<code>failed</code>、
     <code>rejected</code> を返します。
   </p>
+  <p>
+    <code>mcpd_sdk::testing::TestClient</code> は、メモリに記録するクライアントを
+    包みます。あなたのコードが <code>&amp;Mcpd</code> を受け取る場所に
+    <code>test.client()</code> を渡し、記録された内容を読み返してください。
+    <code>spans(name, kind)</code>、必ず存在するはずの 1 つのスパンを引く
+    <code>span(name)</code>、実行ごとのツリーを返す <code>trees()</code>、そして
+    <code>logs()</code>、<code>metrics()</code>、<code>scores()</code>、
+    <code>recorded_feedback()</code>、<code>reset()</code> です。どのアクセサーも
+    先にフラッシュします。保持される内容は、デーモンへ向かうときと同じように
+    サンプリング、ペイロードの取り込み、<code>redact</code> を通っており、
+    <code>TestClient::new()</code> は、テストの実行に
+    <code>MCPD_ENABLED=false</code> が設定されていても有効なままです。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['rust']} region="testing" title="ユニットテスト" />
   <p>
     <code>mcpd.record(span)</code> は、すでに終了したスパンを、id、親、開始時刻、
     終了時刻ごと、アダプターやインポートが持っているままキューに入れます。親を

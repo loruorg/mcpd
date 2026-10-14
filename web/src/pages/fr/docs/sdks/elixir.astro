@@ -148,15 +148,80 @@ end`}</code></pre>
     <code>capture_payloads: false</code>, ou
     <code>MCPD_CAPTURE_PAYLOADS=false</code>, garde les prompts et les
     complétions là où ils sont. Les spans sortent toujours avec leurs temps,
-    leur statut, leur consommation, leur modèle, leur corrélation et leurs
-    erreurs ; <code>input:</code>, <code>output:</code> et la valeur capturée
+    leur statut, leur consommation, leur modèle, les paramètres du modèle, leur corrélation
+    et leurs erreurs ; <code>input:</code>, <code>output:</code> et la valeur capturée
     d’un bloc sont écartés avant d’atteindre la file d’attente, si bien que rien
     de sensible n’est mis en file et que rien de sensible ne sort lors d’un
     flush. Un span peut décider autrement pour lui-même avec
     <code>capture_payloads: true</code>.
   </p>
 
+  <h2>Comment le modèle a été appelé</h2>
+  <p>
+    <code>model_parameters:</code> enregistre les réglages avec lesquels un
+    appel au modèle a été fait : <code>temperature</code>, <code>top_p</code>,
+    <code>top_k</code>, <code>max_tokens</code>, <code>seed</code>,
+    <code>stop_sequences</code> et <code>has_response_format</code>.
+    Donnez-lui une liste de mots-clés, ou un
+    <code>%Mcpd.ModelParameters&#123;&#125;</code> si vous en avez déjà un.
+  </p>
+
+  <pre><code class="language-elixir">{`Mcpd.span mcpd, "answer",
+  kind: :model_generation,
+  model_parameters: [temperature: 0.0, seed: 0, max_tokens: 1024] do
+  call_the_model()
+end`}</code></pre>
+
+  <p>
+    Ce sont des réglages et non du payload, ils survivent donc à
+    <code>capture_payloads: false</code>, et c’est le cas qui compte : ce sont
+    eux que doit reproduire quiconque rejoue l’exécution. Un champ que vous
+    omettez est absent et un champ que vous donnez est gardé quelle que soit sa
+    valeur, donc <code>seed: 0</code> est une graine. Le schéma derrière
+    <code>has_response_format</code> n’est pas enregistré, seulement le fait
+    qu’un schéma était en vigueur. C’est une option et non un setter parce
+    qu’un span Elixir est décrit par les options avec lesquelles il a été
+    ouvert, comme le sont déjà <code>model:</code>, <code>provider:</code> et
+    <code>usage:</code>.
+  </p>
+
+  <h3>Appels en streaming</h3>
+  <p>
+    Passez le flux du fournisseur à
+    <code>Mcpd.ModelCall.record_stream/4</code> et lisez à sa place le flux
+    qu’il renvoie. Il accepte les fragments chat-completion d’OpenAI et les
+    événements de message d’Anthropic, et chaque fragment passe sans
+    changement. Le span s’ouvre à la première lecture du flux, sous le span
+    actif dans votre processus, et le premier fragment qui porte du texte ou un
+    appel d’outil marque le délai jusqu’au premier token. Quand le flux se
+    termine, lève une exception ou que vous vous arrêtez plus tôt avec
+    <code>Enum.take/2</code> ou <code>Enum.find/2</code>, le span reçoit ce que
+    <code>Mcpd.ModelCall.options/2</code> donnerait pour le même appel sans
+    streaming, avec le texte comme sortie, puis se termine. Une erreur du flux
+    marque le span et vous parvient sans changement. Le texte conservé est
+    plafonné à 32 768 caractères, et <code>mcpd.stream.truncated</code> est
+    posé quand le plafond a été atteint.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="stream" title="un appel en streaming" />
+
   <h2>Vérifier ce que vous avez enregistré</h2>
+  <p>
+    <code>Mcpd.Testing.start/1</code> démarre un client qui enregistre en
+    mémoire, lié à votre test. Passez <code>testing.client</code> partout où
+    votre code prend un client, puis relisez ce qu’il a enregistré :
+    <code>spans/2</code> par nom ou par type, <code>span/2</code> pour le span
+    qui doit exister, <code>trees/1</code> pour chaque exécution sous forme
+    d’arbre, <code>logs/1</code>, <code>metrics/1</code>,
+    <code>scores/1</code>, <code>recorded_feedback/1</code> et
+    <code>reset/1</code>. Chaque lecteur fait d’abord un flush. Ce qu’il
+    détient est passé par l’échantillonnage, la capture des payloads et
+    <code>redact</code> comme en route vers un daemon, et il reste actif quand
+    <code>MCPD_ENABLED=false</code> est posé pour l’exécution des tests.
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['elixir']} region="testing" title="un test unitaire" />
+
   <p>
     Un sink est l’endroit où part un lot vidé. Le transport HTTP est le sink par
     défaut ; <code>Mcpd.Sink.Recorder</code> garde chaque lot en mémoire, si

@@ -40,6 +40,9 @@ with mcpd.trace("handler", traceparent=request.headers.get("traceparent")) as ru
 const payload = `generation.set_model("gpt-4o-mini", provider="openai")
 generation.set_usage(input_tokens=812, output_tokens=96, cache_read=128)
 
+# How the model was called. Settings, not payload: kept with capture off.
+generation.set_model_parameters(temperature=0, seed=0, max_tokens=1024)
+
 # A failure you caught and decided about yourself.
 generation.set_error("the provider timed out", kind="TimeoutError", retryable=True)
 
@@ -129,7 +132,7 @@ const serverless = `def handler(event, context):
     <code>enabled=False</code> 让每一次记录调用都变成空操作，但仍然返回合法的
     对象，所以你可以在测试里把 mcpd 关掉，而不用改被测代码。
     <code>capture_payloads=False</code> 把提示词和补全留在进程里：span 照样
-    记录，带着它的时间、状态、用量、模型、关联信息和错误，而 <code>input</code>
+    记录，带着它的时间、状态、用量、模型、模型参数、关联信息和错误，而 <code>input</code>
     和 <code>output</code> 在进入队列之前就被丢掉。单个 span 可以在自己的启动
     字段里用 <code>capture_payloads=True</code> 说自己不一样，反过来也可以。
   </p>
@@ -193,6 +196,15 @@ const serverless = `def handler(event, context):
     一个异常，同时把 <code>status</code> 设成 <code>error</code>，并且一定会填上
     一条消息：“出了点问题”没法拿来做任何事。
   </p>
+  <p>
+    <code>set_model_parameters</code> 记录这次调用所用的设置：
+    <code>temperature</code>、<code>top_p</code>、<code>top_k</code>、
+    <code>max_tokens</code>、<code>seed</code>、<code>stop_sequences</code> 和
+    <code>has_response_format</code>。它们是设置而不是载荷，所以在 <code>capture_payloads=False</code> 下也会保留，而这正是
+    要紧的情况：想重现这次运行的人必须对上它们。你没传的参数表示没有，你传了的参数不论是什么值都会保留，所以
+    <code>seed=0</code> 也是一个种子。<code>has_response_format</code>
+    背后的 schema 不会被记录，只记录当时是否有一个在生效。
+  </p>
 
   <CodeSwitcher
     class="not-prose my-6"
@@ -210,6 +222,21 @@ const serverless = `def handler(event, context):
     系统的父级，只带着用于关联，绝不用来决定父子关系。
   </p>
 
+  <h3>流式调用</h3>
+  <p>
+    把供应商的流交给 <code>span.record_stream</code>，然后改读它返回的包装：
+    迭代器得到一个生成器，异步迭代器得到一个异步生成器。它接受 OpenAI 的
+    chat-completion 分片和 Anthropic 的 message 事件，可以是 dict，也可以是
+    供应商 SDK 自己的对象，每一个分片都原样通过。第一个带文本或工具调用的分片
+    标记首个 token 的时间。当流结束、抛出异常，或者被 <code>break</code> 跳出时，
+    span 会得到 <code>record_response</code> 对同一次非流式调用会记录的内容，以
+    文本作为输出，然后结束。来自流的错误会标记到 span 上，并原样交给你。保留的
+    文本上限是 32,768 个字符，达到上限时会设置
+    <code>mcpd.stream.truncated</code>。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="stream" title="一次流式调用" />
+
   <h2>载荷、sink 与已经结束的 span</h2>
   <p>
     sink 就是一个批次被排空之后去的地方，默认是 HTTP 传输层。
@@ -225,6 +252,22 @@ const serverless = `def handler(event, context):
     title="断言记下了什么"
     samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: sinks }]}
   />
+
+  <p>
+    <code>mcpd.testing</code> 里的 <code>TestClient</code> 是一个记录到内存里的
+    <code>Mcpd</code>。把它传给你的代码里任何接收客户端的地方，然后把它记下的
+    东西读回来：<code>spans()</code> 按名称或类型读，
+    <code>recorded_span(name)</code> 读那个必须存在的 span，<code>trees()</code>
+    把每次运行读成一棵树，还有 <code>logs()</code>、<code>metrics()</code>、
+    <code>scores()</code>、<code>recorded_feedback()</code> 和
+    <code>reset()</code>。每个访问方法都会先刷出。它持有的内容，像发往守护进程时
+    一样经过了采样、载荷采集和 <code>redact</code>；测试运行时设置了
+    <code>MCPD_ENABLED=false</code>，它也照样开着。<code>recorded_span</code>
+    抛出的是 <code>AssertionError</code>，所以缺了一个 span 时，测试会失败，并
+    列出它实际看到的名称。
+  </p>
+
+  <CodeSwitcher class="not-prose my-6" only={['python']} region="testing" title="一个单元测试" />
 
   <p>
     <code>mcpd.record(span)</code> 把一个已经结束的 <code>SpanRecord</code>

@@ -221,6 +221,62 @@ const linkTo = (route: string) => urlFor(route, code)
     对象，于是一个测试套件不用碰任何代码就能把 mcpd 关掉。
   </p>
 
+  <h3>记录一次模型调用</h3>
+  <p>
+    把供应商的响应交给 span，其余的由 SDK 读取：TypeScript 和 Kotlin 里是
+    <code>recordResponse</code>，Python 和 Rust 里是 <code>record_response</code>，
+    Go 里是 <code>RecordResponse</code>，Elixir 里是
+    <code>Mcpd.ModelCall.options/2</code>。它接受 OpenAI 的 chat-completions 或
+    responses API 响应，或者 Anthropic 的 messages 响应，记录模型、供应商、带缓存
+    和推理计量的 token 用量，以及响应 id、结束原因和服务等级。它从不记录文本，
+    文本留不留由你决定。<code>usage_from_openai</code> 和
+    <code>usage_from_anthropic</code> 只做 token 映射。
+  </p>
+  <p>
+    <code>mark_first_token</code> 把首个流式 token 的时间记为
+    <code>mcpd.time_to_first_token_ms</code>，只记一次，所以它可以放在流式循环
+    里面。<code>set_guardrail</code> 记录护栏是否触发，以及原因。
+  </p>
+  <p>
+    流式调用只需要一个包装：TypeScript 和 Kotlin 里是 <code>recordStream</code>，
+    Python 和 Rust 里是 <code>record_stream</code>，Go 里是
+    <code>RecordStream</code>，Elixir 里是
+    <code>Mcpd.ModelCall.record_stream</code>。你读这个包装，代替读供应商的流，
+    每一个分片都原样通过。流结束、失败或被提前放下时，span 会得到
+    <code>record_response</code> 对同一次非流式调用会记录的内容，加上首个 token
+    的时间，以及作为输出的文本。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    only={['typescript', 'python', 'rust', 'go', 'kotlin', 'elixir']}
+    region="stream"
+    title="一次流式调用"
+  />
+
+  <h3>测试你的接入代码</h3>
+  <p>
+    每个 SDK 都带一个测试客户端：TypeScript、Python、Kotlin 和 Rust 里是
+    <code>TestClient</code>，Go 里是 <code>mcpdtest</code>，Elixir 里是
+    <code>Mcpd.Testing</code>。它是一个真正的客户端，只是记录到内存里，所以你的
+    代码产生的 span、日志、评分和反馈，会像发往守护进程时一样经过采样、载荷采集
+    和脱敏。你的单元测试按名称或类型把它们读回来，或者按每次运行的树读回来，不需要
+    守护进程，也不需要端口。
+  </p>
+
+  <CodeSwitcher
+    class="not-prose my-6"
+    only={['typescript', 'python', 'rust', 'go', 'kotlin', 'elixir']}
+    region="testing"
+    title="一个单元测试"
+  />
+  <p>
+    客户端选项 <code>redact</code> 是一个函数，在任何东西入队之前，作用于每个
+    span 的 input、output、attributes 和 metadata，以及每行日志的 fields，所以你
+    遮蔽的值从不离开进程。抛出异常的脱敏函数会丢掉这个字段，而不是发送原值，
+    客户端的统计会把它计入。
+  </p>
+
   <h3>它们可以互换，而且这一点有测试</h3>
   <p>
     单元测试能证明每个 SDK 做的是它自己的作者想做的事，却证明不了这六个彼此一致。
