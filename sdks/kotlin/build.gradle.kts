@@ -4,8 +4,8 @@ plugins {
     `java-library`
     `maven-publish`
     signing
-    kotlin("jvm") version "2.4.20"
-    kotlin("plugin.serialization") version "2.4.20"
+    kotlin("jvm") version "2.4.21"
+    kotlin("plugin.serialization") version "2.4.21"
 }
 
 group = "dev.mcpd"
