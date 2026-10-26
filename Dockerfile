@@ -19,7 +19,7 @@
 # --- the cross-compilation helpers --------------------------------------------
 # xx maps TARGETPLATFORM to a Rust target triple, installs the target's C
 # libraries into a sysroot, and points cargo's linker and the cc crate at it.
-FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.6.1@sha256:923441d7c25f1e2eb5789f82d987693c47b8ed987c4ab3b075d6ed2b5d6779a3 AS xx
+FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.10.0@sha256:40fe21f44bb8cddf1eb1226db190d0a984118f62ee02a91b77d99448d28264a6 AS xx
 
 # --- the web application -----------------------------------------------------
 # Static files, the same bytes on every platform, so built once on the build
@@ -58,7 +58,7 @@ RUN cd web && npm run build
 #
 # release.yml pins its binary builds to the same compiler (1.98.1, the one in
 # this digest), so an archive and an image of one tag are built alike.
-FROM --platform=$BUILDPLATFORM rust:1.98-alpine@sha256:1716b3aa042d735f4566d14dc54e8037de9d69556e2d5dd58131d93a613d173d AS build
+FROM --platform=$BUILDPLATFORM rust:1.99-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87 AS build
 
 COPY --from=xx / /
 # clang and lld cross-link for any target; musl-dev is the build machine's own
