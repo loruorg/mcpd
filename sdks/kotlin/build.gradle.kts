@@ -4,8 +4,8 @@ plugins {
     `java-library`
     `maven-publish`
     signing
-    kotlin("jvm") version "2.4.20"
-    kotlin("plugin.serialization") version "2.4.20"
+    kotlin("jvm") version "2.4.21"
+    kotlin("plugin.serialization") version "2.4.21"
 }
 
 group = "dev.mcpd"
@@ -21,8 +21,8 @@ dependencies {
     // classpath. Timestamps are `kotlin.time.Instant` from the standard
     // library, which kotlinx.serialization 1.9 and later serialise on their
     // own, so kotlinx-datetime is no longer a dependency.
-    api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
-    api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+    api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
+    api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.12.0")
 
     testImplementation(kotlin("test"))
 }
