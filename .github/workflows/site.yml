@@ -1,0 +1,56 @@
+# Deploys the site at https://mcpd.sh on every push to main.
+#
+# Blog posts are committed straight to main by an outside writer and nobody
+# deploys them by hand, so this workflow is how a post goes live. Every push
+# deploys, not only a push under web/: the documentation reads the example
+# programs and the spec at build time, so a change outside web/ changes pages
+# too.
+name: site
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time. A newer push replaces a deploy still waiting to start,
+# and a deploy that has started is never cut off halfway.
+concurrency:
+  group: site-deploy
+  cancel-in-progress: false
+
+env:
+  ASTRO_TELEMETRY_DISABLED: '1'
+  WRANGLER_SEND_METRICS: 'false'
+
+jobs:
+  deploy:
+    name: deploy mcpd.sh
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22' }
+      - name: build
+        working-directory: web
+        env:
+          # The operator interface on mcpd.sh talks to the hosted daemon.
+          PUBLIC_MCPD_ENDPOINT: https://api.mcpd.sh
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      # The token can deploy Workers in the account and edit Workers routes
+      # and DNS on the mcpd.sh zone, nothing else. wrangler is pinned for the
+      # same reason the actions are.
+      - name: deploy
+        working-directory: web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_VERSION: 4.156.0
+        run: npx --yes "wrangler@$WRANGLER_VERSION" deploy

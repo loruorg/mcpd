@@ -1,0 +1,186 @@
+---
+/**
+ * One blog post: `src/content/blog/<slug>.md` at `/blog/<slug>`.
+ *
+ * The front matter keys are in `src/content.config.ts`. A post that brings its
+ * own `schema_json` gets it printed as it is, in place of the BlogPosting and
+ * FAQPage documents built here.
+ */
+import { render } from 'astro:content'
+import Base from '@/layouts/Base.astro'
+import PostBody from '@/components/blog/PostBody.astro'
+import PostList from '@/components/blog/PostList.astro'
+import BlogCta from '@/components/blog/BlogCta.astro'
+import { SITE } from '@/lib/site'
+import {
+  BLOG,
+  absolute,
+  allPosts,
+  isoDay,
+  jsonLd,
+  longDay,
+  postPath,
+  readingMinutes,
+  relatedPosts,
+  type Post,
+} from '@/lib/blog'
+
+export async function getStaticPaths() {
+  return (await allPosts()).map((post) => ({ params: { slug: post.id }, props: { post } }))
+}
+
+interface Props {
+  post: Post
+}
+
+const { post } = Astro.props
+const d = post.data
+const { Content } = await render(post)
+
+const url = absolute(postPath(post.id))
+const image = d.image ? absolute(d.image) : undefined
+const published = isoDay(d.publishDate)
+const updated = d.updatedDate && d.updatedDate.getTime() !== d.publishDate.getTime() ? isoDay(d.updatedDate) : undefined
+const minutes = readingMinutes(post.body ?? '')
+const related = relatedPosts(post, await allPosts())
+
+const breadcrumbs = {
+  '@context': 'https://schema.org',
+  '@type': 'BreadcrumbList',
+  itemListElement: [
+    { '@type': 'ListItem', position: 1, name: SITE.name, item: SITE.url },
+    { '@type': 'ListItem', position: 2, name: BLOG.title, item: absolute(BLOG.path) },
+    { '@type': 'ListItem', position: 3, name: d.title, item: url },
+  ],
+}
+
+const posting = {
+  '@context': 'https://schema.org',
+  '@type': 'BlogPosting',
+  headline: d.title,
+  description: d.description,
+  url,
+  mainEntityOfPage: url,
+  datePublished: published,
+  dateModified: updated ?? published,
+  inLanguage: 'en',
+  ...(image ? { image } : {}),
+  ...(d.author ? { author: { '@type': 'Person', name: d.author } } : {}),
+  ...(d.tags.length ? { keywords: d.tags.join(', ') } : {}),
+  isPartOf: { '@type': 'Blog', name: `${SITE.name} ${BLOG.title.toLowerCase()}`, url: absolute(BLOG.path) },
+}
+
+const faqPage = d.faq?.length
+  ? {
+      '@context': 'https://schema.org',
+      '@type': 'FAQPage',
+      mainEntity: d.faq.map((f) => ({
+        '@type': 'Question',
+        name: f.question,
+        acceptedAnswer: { '@type': 'Answer', text: f.answer },
+      })),
+    }
+  : undefined
+
+/* A post's own JSON-LD replaces the documents built here. It may carry its own
+   breadcrumb trail, and two trails for one page contradict each other. */
+const schema = d.schema_json
+  ? [d.schema_json, ...(d.schema_json.includes('BreadcrumbList') ? [] : [jsonLd(breadcrumbs)])]
+  : [jsonLd(posting), jsonLd(breadcrumbs), ...(faqPage ? [jsonLd(faqPage)] : [])]
+
+/* An answer is plain text. A blank line starts a new paragraph. */
+const paragraphs = (text: string) => text.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean)
+---
+
+<Base
+  title={d.title}
+  description={d.description}
+  kind="article"
+  published={published}
+  updated={updated}
+  tags={d.tags}
+  image={image}
+  imageAlt={d.image_alt}
+  schema={schema}
+>
+  <link slot="head" rel="alternate" type="application/rss+xml" title={`${BLOG.title} · ${SITE.name}`} href={BLOG.feed} />
+
+  <article class="mx-auto max-w-[46rem] px-5 py-12 sm:px-8 sm:py-16">
+    <header>
+      <h1 class="display text-[clamp(1.9rem,4vw,2.75rem)]">{d.title}</h1>
+      <p class="mt-5 flex flex-wrap gap-x-2 gap-y-1 text-[0.875rem] text-ink-3">
+        <time datetime={published}>{longDay(d.publishDate)}</time>
+        {
+          updated && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span>Updated <time datetime={updated}>{longDay(d.updatedDate!)}</time></span>
+            </>
+          )
+        }
+        <span aria-hidden="true">·</span>
+        <span>{minutes} min read</span>
+        {
+          d.author && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span>{d.author}</span>
+            </>
+          )
+        }
+      </p>
+      {d.tags.length > 0 && <p class="mt-1 text-[0.8125rem] text-ink-3">{d.tags.join(' · ')}</p>}
+    </header>
+
+    {
+      image && (
+        <img
+          src={image}
+          alt={d.image_alt ?? ''}
+          class="mt-10 w-full rounded-[8px] border border-scribe-2"
+          fetchpriority="high"
+          decoding="async"
+        />
+      )
+    }
+
+    <div class="mt-10">
+      <PostBody><Content /></PostBody>
+    </div>
+
+    {
+      d.faq && d.faq.length > 0 && (
+        <section class="mt-16" aria-labelledby="faq">
+          <h2 id="faq" class="text-[1.5rem] font-semibold tracking-[-0.015em] text-ink">Frequently asked questions</h2>
+          <div class="mt-6 border-t border-scribe-2">
+            {d.faq.map((f) => (
+              <div class="border-b border-scribe-2 py-5">
+                <h3 class="text-[1.0625rem] font-semibold leading-snug text-ink">{f.question}</h3>
+                <div class="mt-2 max-w-[68ch] space-y-3 text-[1rem] leading-[1.7] text-ink-2">
+                  {paragraphs(f.answer).map((p) => <p>{p}</p>)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )
+    }
+
+    <div class="mt-16">
+      <BlogCta />
+    </div>
+
+    {
+      related.length > 0 && (
+        <section class="mt-16" aria-labelledby="more-posts">
+          <h2 id="more-posts" class="text-[1.25rem] font-semibold tracking-[-0.015em] text-ink">More from the blog</h2>
+          <div class="mt-5">
+            <PostList posts={related} heading="h3" compact />
+          </div>
+        </section>
+      )
+    }
+
+    <p class="mt-8 text-[0.9375rem]"><a href={BLOG.path} class="link">All posts</a></p>
+  </article>
+</Base>

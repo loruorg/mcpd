@@ -88,9 +88,12 @@ function checkMotion() {
   const pages = walk('web/src/pages')
   // The interface is itself live; the 404 page is a dead end, not a page to read.
   const exempt = new Set(['web/src/pages/app.astro', 'web/src/pages/404.astro'])
+  // A blog post has no product state for a figure to be computed from, so the
+  // blog pages carry no graphic.
+  const isBlog = (p) => p.startsWith(path.join('web/src/pages/blog') + path.sep)
   let ok = 0
   for (const p of pages) {
-    if (exempt.has(p)) continue
+    if (exempt.has(p) || isBlog(p)) continue
     const src = read(p)
     // An import is not a render. Require the component to actually appear as an
     // element, or a page that imports a graphic and never uses it passes.
@@ -791,11 +794,15 @@ function checkProse() {
   // layouts/ and content/ are included deliberately: the page <title> is built
   // in a layout, and the generated reference pages are markdown in content/.
   // Both were invisible to this check once, and both shipped em-dashes.
+  //
+  // Blog posts are left out. They are committed by an outside writer and go
+  // live with the deploy that the commit starts, so a failure here would arrive
+  // after the post is public, on a file nobody in this repository wrote.
   const files = [
     ...walk('web/src/pages'),
     ...walk('web/src/components'),
     ...walk('web/src/layouts'),
-    ...walkExt('web/src/content', '.md'),
+    ...walkExt('web/src/content', '.md').filter((f) => !f.startsWith(path.join('web/src/content/blog') + path.sep)),
     'README.md', 'sdks/SDK-CONTRACT.md',
   ].filter(exists)
 
@@ -1334,7 +1341,9 @@ function checkLocaleCoverage(built) {
       fail(p.where, `sits under /${first}, which reads as a locale prefix but is not in the locale list (${from})`)
     }
     counted.set(p.locale, (counted.get(p.locale) ?? 0) + 1)
-    if (!p.noindex) docsPerLocale.get(p.locale)?.add(p.doc)
+    // The blog is written in English only, so its posts are no locale's gap.
+    const blog = p.doc === '/blog' || p.doc.startsWith('/blog/')
+    if (!p.noindex && !blog) docsPerLocale.get(p.locale)?.add(p.doc)
   }
 
   const total = docsPerLocale.get(DEFAULT_LOCALE)?.size ?? 0

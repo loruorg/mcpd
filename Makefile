@@ -151,7 +151,17 @@ site: ## Typecheck and build the documentation site
 	# both snippet maps, but nothing ran the typechecker, so adding a sixth SDK
 	# surfaced as a crash halfway through the build instead of a type error.
 	cd web && npx tsc --noEmit -p tsconfig.json
+	$(MAKE) blog-check
 	cd web && $(NPM) run build
+
+# Builds with a fixture post that sets every front matter key, reads each key
+# back out of the pages, the feed and the sitemap, and removes the fixture
+# again, whether the build passed or not. `site` builds again after it, so
+# web/dist never holds the fixture once `make check` is done.
+.PHONY: blog-check
+blog-check: ## Prove a blog post with every front matter key renders
+	cd web && cp tests/fixtures/blog/every-key.md src/content/blog/ && \
+	  { $(NPM) run build && node tests/blog.mjs; s=$$?; rm -f src/content/blog/every-key.md; exit $$s; }
 
 .PHONY: fmt
 fmt: ## Format everything

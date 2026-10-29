@@ -402,6 +402,17 @@ export const UI_STRINGS = {
     tr: 'Katkıda bulunma',
     pt: 'Contribuir',
   },
+  'colophon.blog': {
+    en: 'Blog',
+    fr: 'Blog',
+    es: 'Blog',
+    zh: '博客',
+    ja: 'ブログ',
+    ko: '블로그',
+    it: 'Blog',
+    tr: 'Blog',
+    pt: 'Blog',
+  },
   'colophon.promise': {
     en: 'No telemetry. Run it yourself, or use it free at mcpd.sh.',
     fr: 'Pas de télémétrie. Hébergez-le vous-même, ou utilisez-le gratuitement sur mcpd.sh.',

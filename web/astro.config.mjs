@@ -1,4 +1,5 @@
 // @ts-check
+import fs from 'node:fs'
 import { defineConfig } from 'astro/config'
 import react from '@astrojs/react'
 import sitemap from '@astrojs/sitemap'
@@ -13,6 +14,13 @@ export const SITE = 'https://mcpd.sh'
    `zh-Hans`. Built from the one locale table so the sitemap cannot disagree
    with the `lang` attribute the layout writes. */
 const sitemapLocales = Object.fromEntries(LOCALES.map((l) => [l.code, l.tag]))
+
+/* The blog index joins the sitemap with the first post. Until then it is one
+   line under `noindex`, and listing it would ask a crawler to index a page that
+   tells it not to. */
+const blogHasPosts = fs
+  .readdirSync(new URL('./src/content/blog/', import.meta.url))
+  .some((f) => f.endsWith('.md'))
 
 export default defineConfig({
   site: SITE,
@@ -46,7 +54,12 @@ export default defineConfig({
     sitemap({
       // The operator UI is a live application, not a document. Indexing it
       // would put someone else's empty dashboard in a search result.
-      filter: (page) => !page.includes('/app') && !page.endsWith('/404'),
+      // Matched on the path, so a post slug that starts with "app" stays in.
+      filter: (page) => {
+        const path = new URL(page).pathname.replace(/\/$/, '')
+        if (path === '/app' || path.startsWith('/app/') || path.endsWith('/404')) return false
+        return blogHasPosts || path !== '/blog'
+      },
       // Emits the xhtml:link alternates. The integration builds each group from
       // the pages that were actually built, so a route translated into three
       // locales lists three alternates and never points at a page nobody wrote.
