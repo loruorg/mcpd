@@ -1,0 +1,226 @@
+---
+import Guide from '@/layouts/Guide.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import Callout from '@/components/guides/Callout.astro'
+
+const tagTs = `await mcpd.withSpan('answer_question', async (run) => {
+  run.setCorrelation({ userId: customer.id })
+  // ... your model calls, recorded as model_generation spans
+})`
+
+const tagPy = `with mcpd.trace("answer_question", user_id=customer.id) as run:
+    ...  # your model calls, recorded as model_generation spans`
+
+const tagOtel = `# On the root span of the run, with any OpenTelemetry SDK.
+span.set_attribute("user.id", customer.id)`
+
+const daemon = `# The key mcpd hashes user ids with. Keep it as secret as a password.
+mcpd --redact-key "$MCPD_REDACT_KEY"`
+
+const cost = `curl -s --get http://localhost:4317/v1/api/analytics/cost \\
+  --data-urlencode 'project=support' \\
+  --data-urlencode 'from=-30d' \\
+  --data-urlencode 'group_by=user_id' \\
+  | jq -c '.groups[] | {user: .key, runs: .count, cost: .total_cost, input_tokens, output_tokens}'`
+
+const costTs = `const res = await fetch(
+  'http://localhost:4317/v1/api/analytics/cost?' +
+    new URLSearchParams({ project: 'support', from: '-30d', group_by: 'user_id' }),
+)
+const { groups, currency } = await res.json()
+for (const g of groups) console.log(g.key, g.count, g.total_cost, currency)`
+
+const costPy = `import requests
+
+res = requests.get(
+    "http://localhost:4317/v1/api/analytics/cost",
+    params={"project": "support", "from": "-30d", "group_by": "user_id"},
+)
+body = res.json()
+for g in body["groups"]:
+    print(g["key"], g["count"], g["total_cost"], body["currency"])`
+
+const digestPy = `import hashlib
+
+
+def mcpd_digest(user_id: str, redact_key: str) -> str:
+    """The value mcpd stores for user_id under that redact key."""
+    raw = hashlib.sha256(redact_key.encode() + user_id.encode()).hexdigest()
+    return "sha256:" + raw[:24]
+
+
+# Map the report back to your own customers.
+names = {mcpd_digest(c.id, REDACT_KEY): c.email for c in customers}`
+
+const digestTs = `import { createHash } from 'node:crypto'
+
+/** The value mcpd stores for userId under that redact key. */
+function mcpdDigest(userId: string, redactKey: string): string {
+  const raw = createHash('sha256').update(redactKey).update(userId).digest('hex')
+  return 'sha256:' + raw.slice(0, 24)
+}
+
+// Map the report back to your own customers.
+const names = new Map(customers.map((c) => [mcpdDigest(c.id, REDACT_KEY), c.email]))`
+
+const digestSh = `printf '%s%s' "$MCPD_REDACT_KEY" "customer-7" | sha256sum | cut -c1-24 | sed 's/^/sha256:/'`
+
+const oneUser = `# One customer's most expensive runs this month. Pass the plain id.
+curl -s --get http://localhost:4317/v1/api/traces \\
+  --data-urlencode 'project=support' \\
+  --data-urlencode 'user_id=customer-7' \\
+  --data-urlencode 'from=-30d' \\
+  --data-urlencode 'sort=cost' \\
+  | jq -r '.traces[] | [.trace_id, .name, .cost.total_cost] | @tsv'`
+---
+
+<Guide
+  slug="llm-cost-per-user"
+  lede="mcpd prices every model call when it arrives. Put the end user's id on each run, and one API call gives you cost and tokens per user over any window."
+  related={['log-openai-api-calls', 'trace-chat-conversations', 'slack-alerts']}
+>
+  <p>
+    When you finish, you can see what each of your customers cost you in model
+    calls this month, and open the runs behind any figure. You need runs in mcpd
+    whose model calls carry token counts: the
+    <a href="/docs/guides/log-openai-api-calls" class="link">OpenAI guide</a> and
+    the framework guides set them up.
+  </p>
+
+  <h2>1. Put the user's id on every run</h2>
+  <p>
+    Set the user id on the root span of each run. With an SDK it is a
+    correlation field. With OpenTelemetry, mcpd reads <code>user.id</code>,
+    <code>enduser.id</code> or <code>mcpd.user_id</code>.
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="tag the run"
+    samples={[
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: tagTs },
+      { lang: 'python', label: 'Python', shiki: 'python', code: tagPy },
+    ]}
+  />
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="with OpenTelemetry"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: tagOtel }]}
+  />
+  <p>
+    Use an id that does not change, such as your customer id. Do not use an
+    email address: run names and log messages are not redacted, and a stable id
+    is all the report needs.
+  </p>
+
+  <h2>2. Set the key mcpd hashes user ids with</h2>
+  <p>
+    mcpd does not store the id you send. At ingest it replaces it with a keyed
+    digest, <code>sha256:</code> and 24 hex characters. The same id always gives
+    the same digest under one key, so grouping and filtering still work, and the
+    stored data does not say who the person is.
+  </p>
+  <p>
+    The built-in key is in the public source, so set your own in any real
+    deployment:
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="start the daemon" samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: daemon }]} />
+  <Callout tone="warning">
+    Changing the key later changes every digest. Runs stored before the change no
+    longer group with runs stored after it. See
+    <a href="/docs/privacy">Redaction and retention</a>.
+  </Callout>
+
+  <h2>3. Get cost per user</h2>
+  <p>
+    <code>GET /v1/api/analytics/cost</code> with <code>group_by=user_id</code>
+    returns one row per user: the number of runs, the cost, and the input and
+    output tokens. Runs sent with no user id share the row
+    <code>(none)</code>.
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="cost per user, last 30 days"
+    samples={[
+      { lang: 'curl', label: 'cURL', shiki: 'bash', code: cost },
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: costTs },
+      { lang: 'python', label: 'Python', shiki: 'python', code: costPy },
+    ]}
+  />
+  <TerminalCast
+    class="not-prose my-8"
+    title="cost per user"
+    lines={[
+      { cmd: "curl -s --get http://localhost:4317/v1/api/analytics/cost --data-urlencode 'project=support' --data-urlencode 'from=-30d' --data-urlencode 'group_by=user_id' | jq -c '.groups[] | {user: .key, runs: .count, cost: .total_cost, input_tokens, output_tokens}'" },
+      { out: '{"user":"sha256:9c23932e466b80d09d174f67","runs":5,"cost":0.00038399999999999996,"input_tokens":1624,"output_tokens":74}', tone: 'ok' },
+      { out: '{"user":"(none)","runs":2,"cost":0.00038399999999999996,"input_tokens":1624,"output_tokens":74}' },
+      { out: '{"user":"sha256:dcce23461766dc17e1d4c11d","runs":1,"cost":0.0,"input_tokens":0,"output_tokens":0}', tone: 'ok' },
+    ]}
+  />
+  <table>
+    <thead>
+      <tr><th>Parameter</th><th>Values</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>from</code>, <code>to</code></td><td>RFC 3339 or relative, such as <code>-30d</code>. The default window is the last seven days.</td></tr>
+      <tr><td><code>group_by</code></td><td><code>user_id</code> here. Also <code>model</code>, <code>provider</code>, <code>session_id</code>, <code>environment</code> and more.</td></tr>
+      <tr><td><code>bucket</code></td><td>Add <code>1d</code> for a daily series per user next to the totals.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    The same breakdown is in the interface: open <strong>Spend</strong> and group
+    by <strong>user</strong>.
+  </p>
+
+  <h2>4. Turn digests back into your users</h2>
+  <p>
+    The report shows digests. Your application knows the ids and the key, so it
+    can compute the same digest for each customer and look the rows up. The
+    digest is the first 12 bytes of SHA-256 over the redact key followed by the
+    user id:
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="the digest mcpd stores"
+    samples={[
+      { lang: 'python', label: 'Python', shiki: 'python', code: digestPy },
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: digestTs },
+      { lang: 'curl', label: 'Shell', shiki: 'bash', code: digestSh },
+    ]}
+  />
+  <p>
+    For one customer you do not need the digest at all. The trace list hashes a
+    <code>user_id</code> filter the same way before it matches, so you pass the
+    plain id:
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="one customer's runs" samples={[{ lang: 'curl', label: 'cURL', shiki: 'bash', code: oneUser }]} />
+
+  <h2>Troubleshooting</h2>
+  <table>
+    <thead>
+      <tr><th>What you see</th><th>Why, and what to do</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Your digests do not match the report</td>
+        <td>
+          The daemon runs with a different <code>--redact-key</code> than the one you hash with, or the
+          key changed since those runs were stored. A daemon started with <code>--no-redact</code> stores
+          plain ids.
+        </td>
+      </tr>
+      <tr>
+        <td>A user's cost is lower than the provider's bill</td>
+        <td>
+          Some calls have no cost: their model is not in mcpd's price book. mcpd leaves an unknown model
+          unpriced rather than at zero. Check with <code>mcpd prices show &lt;model&gt;</code> and see
+          <a href="/docs/cost" class="link">Cost accounting</a>.
+        </td>
+      </tr>
+      <tr>
+        <td>A large share of the cost is in the row <code>(none)</code></td>
+        <td>Those runs were sent without a user id. Set it on the root span of every run.</td>
+      </tr>
+    </tbody>
+  </table>
+</Guide>

@@ -1,0 +1,171 @@
+---
+import Guide from '@/layouts/Guide.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+
+const install = `pip install "pydantic-ai-slim[openai]" \\
+  openinference-instrumentation-pydantic-ai \\
+  opentelemetry-sdk opentelemetry-exporter-otlp-proto-http`
+
+const env = `# The base URL. The exporter adds /v1/traces itself.
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+# Only when mcpd runs with --ingest-key.
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer YOUR_INGEST_KEY"`
+
+const setup = `from opentelemetry import trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from openinference.instrumentation.pydantic_ai import OpenInferenceSpanProcessor
+from pydantic_ai import Agent
+
+provider = TracerProvider(resource=Resource.create({"service.name": "support-agent"}))
+# Order matters: rewrite each span first, then export it.
+provider.add_span_processor(OpenInferenceSpanProcessor())
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+trace.set_tracer_provider(provider)
+
+# Every agent in the process emits spans from here on.
+Agent.instrument_all()`
+
+const agent = `agent = Agent(
+    "openai:gpt-4.1-mini",
+    name="support_agent",
+    instructions="You answer questions about orders.",
+)
+
+
+@agent.tool_plain
+def lookup_order(order_id: str) -> str:
+    """Look up where an order is."""
+    return f"Order {order_id} is at the Leeds depot."
+
+
+result = agent.run_sync("Where is order 4417?")
+print(result.output)
+
+# A script exits before the batch is sent unless you flush. A server does not need this.
+provider.shutdown()`
+
+const readBack = `TRACE=$(curl -s "http://localhost:4317/v1/api/traces?limit=1" | jq -r '.traces[0].trace_id')
+curl -s "http://localhost:4317/v1/api/traces/$TRACE" \\
+  | jq -r '.spans[] | [.name, .kind, .model, .usage.input_tokens, .cost.total_cost] | @tsv'`
+---
+
+<Guide
+  slug="trace-pydantic-ai"
+  lede="Pydantic AI emits OpenTelemetry spans for every agent run, model request and tool call. Send them to mcpd with the standard OpenTelemetry SDK: no Logfire account and no mcpd code in your agent."
+  related={['trace-langchain-agents', 'trace-chat-conversations', 'llm-cost-per-user']}
+>
+  <p>
+    When you finish, each agent run is one trace in mcpd with the prompt and
+    answer of every model request, the arguments and result of every tool call,
+    and the tokens and cost of the run. You need a Pydantic AI agent and a running
+    mcpd daemon on port 4317 (see the
+    <a href="/docs/quickstart" class="link">Quickstart</a>).
+  </p>
+
+  <h2>1. Install the packages</h2>
+  <p>
+    Besides Pydantic AI, install the OpenTelemetry SDK, its OTLP over HTTP
+    exporter, and the OpenInference span processor for Pydantic AI.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="install" samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: install }]} />
+  <p>
+    The span processor is what makes prompts readable and searchable in mcpd.
+    Pydantic AI writes the messages of a model request in the attributes
+    <code>gen_ai.input.messages</code> and <code>gen_ai.output.messages</code>.
+    mcpd keeps them under <strong>Attributes</strong> but does not show them as the
+    step's input and output, and full-text search does not read them. The
+    processor copies them into <code>input.value</code> and
+    <code>output.value</code>, which mcpd stores as the input and the output.
+  </p>
+
+  <h2>2. Point the exporter at mcpd</h2>
+  <p>
+    mcpd takes OTLP on port 4317, over HTTP and gRPC. The HTTP exporter defaults
+    to port 4318, so name the endpoint.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="environment" samples={[{ lang: 'curl', label: 'Environment', shiki: 'bash', code: env }]} />
+
+  <h2>3. Set up tracing and instrument every agent</h2>
+  <p>
+    Run this once when the process starts. <code>Agent.instrument_all()</code>
+    turns on instrumentation for every agent, using the tracer provider you set.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="tracing setup" samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: setup }]} />
+
+  <h2>4. Run an agent</h2>
+  <p>
+    The agent code does not change. The agent's <code>name</code> becomes the
+    name of the run in mcpd.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="agent.py" samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: agent }]} />
+
+  <h2>5. Read the trace</h2>
+  <p>
+    Open <a href="http://localhost:4317" class="link" rel="noopener">localhost:4317</a>
+    and select the newest run in <strong>Runs</strong>, or read it from the API:
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="read the run" samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: readBack }]} />
+  <TerminalCast
+    class="not-prose my-8"
+    title="one agent run with a tool call"
+    lines={[
+      { cmd: "curl -s \"http://localhost:4317/v1/api/traces/$TRACE\" | jq -r '.spans[] | [.name, .kind, .model, .usage.input_tokens, .cost.total_cost] | @tsv'" },
+      { out: 'invoke_agent support_agent\tagent_run\t\t\t' },
+      { out: 'chat gpt-4.1-mini\tmodel_generation\tgpt-4.1-mini\t812\t0.000384', tone: 'ok' },
+      { out: 'execute_tool lookup_order\ttool_call\t\t\t' },
+      { out: 'chat gpt-4.1-mini\tmodel_generation\tgpt-4.1-mini\t812\t0.000384', tone: 'ok' },
+    ]}
+  />
+  <table>
+    <thead>
+      <tr><th>Pydantic AI span</th><th>mcpd kind</th><th>What it holds</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>invoke_agent &lt;name&gt;</code></td><td><code>agent_run</code></td><td>The run: the user prompt and the final output</td></tr>
+      <tr><td><code>chat &lt;model&gt;</code></td><td><code>model_generation</code></td><td>One model request, with tokens and cost</td></tr>
+      <tr><td><code>execute_tool &lt;tool&gt;</code></td><td><code>tool_call</code></td><td>One tool call, with its arguments and result</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Pydantic AI also sets <code>gen_ai.conversation.id</code> on its spans, and
+    mcpd records it as the run's session id. The
+    <a href="/docs/guides/trace-chat-conversations" class="link">conversations guide</a>
+    shows how to read a session back.
+  </p>
+
+  <h2>Troubleshooting</h2>
+  <table>
+    <thead>
+      <tr><th>What you see</th><th>Why, and what to do</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Steps have no input or output, and search finds nothing</td>
+        <td>The <code>OpenInferenceSpanProcessor</code> is missing, or it was added after the exporter's processor.</td>
+      </tr>
+      <tr>
+        <td>A prompt served from the provider's cache costs as much as an uncached one</td>
+        <td>
+          Pydantic AI reports cached tokens as <code>gen_ai.usage.cache_read.input_tokens</code>,
+          a name mcpd does not read yet. mcpd prices those tokens at the full input rate, so the
+          figure is an upper bound when caching is on.
+        </td>
+      </tr>
+      <tr>
+        <td>No trace arrives</td>
+        <td>
+          A script exited before the batch was sent: call <code>provider.shutdown()</code>. Or
+          <code>Agent.instrument_all()</code> was never called.
+        </td>
+      </tr>
+      <tr>
+        <td>The exporter logs 401 or 403</td>
+        <td>The daemon has ingest keys. Set <code>OTEL_EXPORTER_OTLP_HEADERS</code> as in step 2.</td>
+      </tr>
+    </tbody>
+  </table>
+</Guide>

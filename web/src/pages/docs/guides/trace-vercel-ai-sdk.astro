@@ -1,0 +1,182 @@
+---
+import Guide from '@/layouts/Guide.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import Callout from '@/components/guides/Callout.astro'
+
+const install = `npm install ai @ai-sdk/openai @ai-sdk/otel zod \\
+  @arizeai/openinference-vercel \\
+  @opentelemetry/sdk-node @opentelemetry/exporter-trace-otlp-proto`
+
+const setup = `// tracing.ts: import this once, before the first AI SDK call.
+import { NodeSDK } from '@opentelemetry/sdk-node'
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto'
+import { OpenInferenceBatchSpanProcessor } from '@arizeai/openinference-vercel'
+import { registerTelemetry } from 'ai'
+import { LegacyOpenTelemetry } from '@ai-sdk/otel'
+
+export const sdk = new NodeSDK({
+  serviceName: 'support-agent',
+  spanProcessors: [new OpenInferenceBatchSpanProcessor({ exporter: new OTLPTraceExporter() })],
+})
+sdk.start()
+
+registerTelemetry(new LegacyOpenTelemetry())`
+
+const env = `# The base URL. The exporter adds /v1/traces itself.
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+# Only when mcpd runs with --ingest-key.
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer YOUR_INGEST_KEY"`
+
+const call = `import { sdk } from './tracing.ts'
+import { generateText, stepCountIs, tool } from 'ai'
+import { openai } from '@ai-sdk/openai'
+import { z } from 'zod'
+
+const { text } = await generateText({
+  model: openai('gpt-4.1-mini'),
+  system: 'You answer questions about orders.',
+  prompt: 'Where is order 4417?',
+  tools: {
+    lookupOrder: tool({
+      description: 'Look up where an order is.',
+      inputSchema: z.object({ orderId: z.string() }),
+      execute: async ({ orderId }) => ({ orderId, depot: 'Leeds' }),
+    }),
+  },
+  stopWhen: stepCountIs(5),
+  // Names the run: the root span becomes "ai.generateText support-agent".
+  telemetry: { functionId: 'support-agent' },
+})
+console.log(text)
+
+// A script exits before the batch is sent unless you shut down. A server does not need this.
+await sdk.shutdown()`
+
+const readBack = `TRACE=$(curl -s "http://localhost:4317/v1/api/traces?limit=1" | jq -r '.traces[0].trace_id')
+curl -s "http://localhost:4317/v1/api/traces/$TRACE" \\
+  | jq -r '.spans[] | [.name, .kind, .model, .usage.input_tokens, .cost.total_cost] | @tsv'`
+---
+
+<Guide
+  slug="trace-vercel-ai-sdk"
+  lede="The AI SDK records its calls as OpenTelemetry spans. Register its telemetry, add the OpenInference span processor, and export to mcpd: every generateText call arrives as a run with its prompt, tool calls, tokens and cost."
+  related={['log-openai-api-calls', 'trace-chat-conversations', 'llm-cost-per-user']}
+>
+  <p>
+    When you finish, each <code>generateText</code> call is one trace in mcpd:
+    the call, every model step with its input, output, tokens and cost, and every
+    tool call with its arguments and result. You need Node.js 22 or later, AI SDK
+    7, and a running mcpd daemon on port 4317 (see the
+    <a href="/docs/quickstart" class="link">Quickstart</a>).
+  </p>
+
+  <h2>1. Install the packages</h2>
+  <p>
+    <code>@ai-sdk/otel</code> holds the AI SDK's OpenTelemetry integration.
+    <code>@arizeai/openinference-vercel</code> rewrites its spans in the
+    OpenInference conventions, which is where mcpd finds each step's input and
+    output.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="install" samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: install }]} />
+
+  <h2>2. Register the telemetry</h2>
+  <p>
+    Start the OpenTelemetry SDK with the OpenInference processor in front of the
+    OTLP exporter, then register the AI SDK's <code>LegacyOpenTelemetry</code>
+    integration. Telemetry is on for every call once an integration is
+    registered.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="tracing.ts" samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: setup }]} />
+  <Callout>
+    Use <code>LegacyOpenTelemetry</code>, not <code>OpenTelemetry</code>. The newer
+    integration repeats the token counts of every model call on the root
+    <code>invoke_agent</code> span. mcpd adds up the usage of every span in a run,
+    so the run's tokens and cost would count each call twice.
+  </Callout>
+
+  <h2>3. Point the exporter at mcpd</h2>
+  <p>
+    The OTLP exporter reads its endpoint from the environment. Name port 4317:
+    mcpd serves OTLP there, and the HTTP exporter would otherwise try 4318.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="environment" samples={[{ lang: 'curl', label: 'Environment', shiki: 'bash', code: env }]} />
+
+  <h2>4. Name the call</h2>
+  <p>
+    Your calls need no change. Add <code>telemetry.functionId</code> so the run
+    has a name you can filter on. Without it the root span is named
+    <code>ai.generateText</code> for every call.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="agent.ts" samples={[{ lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: call }]} />
+
+  <h2>5. Read the trace</h2>
+  <p>
+    Open <a href="http://localhost:4317" class="link" rel="noopener">localhost:4317</a>
+    and select the newest run in <strong>Runs</strong>, or read it from the API:
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="read the run" samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: readBack }]} />
+  <TerminalCast
+    class="not-prose my-8"
+    title="one generateText call with a tool"
+    lines={[
+      { cmd: "curl -s \"http://localhost:4317/v1/api/traces/$TRACE\" | jq -r '.spans[] | [.name, .kind, .model, .usage.input_tokens, .cost.total_cost] | @tsv'" },
+      { out: 'ai.generateText support-agent\tagent_run\tgpt-4.1-mini\t\t' },
+      { out: 'ai.generateText.doGenerate\tmodel_generation\tgpt-4.1-mini\t812\t0.000384', tone: 'ok' },
+      { out: 'ai.toolCall\ttool_call\t\t\t' },
+      { out: 'ai.generateText.doGenerate\tmodel_generation\tgpt-4.1-mini\t812\t0.000384', tone: 'ok' },
+    ]}
+  />
+  <table>
+    <thead>
+      <tr><th>AI SDK span</th><th>mcpd kind</th><th>What it holds</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>ai.generateText</code></td><td><code>agent_run</code></td><td>The whole call: the prompt and the final text</td></tr>
+      <tr><td><code>ai.generateText.doGenerate</code></td><td><code>model_generation</code></td><td>One request to the provider, with model, tokens and cost</td></tr>
+      <tr><td><code>ai.toolCall</code></td><td><code>tool_call</code></td><td>One tool execution, with its input and result</td></tr>
+    </tbody>
+  </table>
+  <p>
+    The cost of the run is the sum of its model steps. Each step is priced from
+    its token counts and mcpd's price book, as
+    <a href="/docs/cost" class="link">Cost accounting</a> explains.
+  </p>
+
+  <h2>Troubleshooting</h2>
+  <table>
+    <thead>
+      <tr><th>What you see</th><th>Why, and what to do</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>The run's tokens and cost are twice the sum of its model steps</td>
+        <td>The process registered <code>OpenTelemetry</code> from <code>@ai-sdk/otel</code>. Register <code>LegacyOpenTelemetry</code> instead.</td>
+      </tr>
+      <tr>
+        <td>Spans arrive with an empty input and output</td>
+        <td>
+          The OpenInference processor is missing, so the prompt stays in AI SDK attributes such as
+          <code>ai.prompt.messages</code>. They are under <strong>Attributes</strong> in the span panel,
+          but full-text search does not read them.
+        </td>
+      </tr>
+      <tr>
+        <td>A prompt served from the provider's cache costs as much as an uncached one</td>
+        <td>
+          The AI SDK reports cached tokens as <code>ai.usage.cachedInputTokens</code>, a name mcpd does
+          not read yet. mcpd prices those tokens at the full input rate, so the figure is an upper
+          bound when caching is on.
+        </td>
+      </tr>
+      <tr>
+        <td>No trace arrives from a script</td>
+        <td>The process exited first. Call <code>await sdk.shutdown()</code> before it ends.</td>
+      </tr>
+      <tr>
+        <td>The exporter logs 401 or 403</td>
+        <td>The daemon has ingest keys. Set <code>OTEL_EXPORTER_OTLP_HEADERS</code> as in step 3.</td>
+      </tr>
+    </tbody>
+  </table>
+</Guide>

@@ -1,0 +1,221 @@
+---
+import Guide from '@/layouts/Guide.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import MonitorChart from '@/components/MonitorChart.astro'
+
+const worker = `// A Cloudflare Worker that turns an mcpd alert into a Slack message.
+// Secrets: SLACK_WEBHOOK_URL, RELAY_TOKEN. Variable: MCPD_URL.
+export default {
+  async fetch(request, env) {
+    if (request.method !== 'POST') return new Response('POST only', { status: 405 })
+    if (new URL(request.url).searchParams.get('token') !== env.RELAY_TOKEN) {
+      return new Response('unknown token', { status: 401 })
+    }
+    const alert = await request.json()
+    const state = { tripped: 'Tripped', nominal: 'Recovered' }[alert.condition] ?? alert.condition
+    const res = await fetch(env.SLACK_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        text: \`\${state}: \${alert.detail ?? alert.name} <\${env.MCPD_URL}|Open mcpd>\`,
+      }),
+    })
+    return new Response(null, { status: res.ok ? 200 : 502 })
+  },
+}`
+
+const relayPy = `# relay.py: turns an mcpd alert into a Slack message. Standard library only.
+import json
+import os
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlparse
+
+SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]
+RELAY_TOKEN = os.environ["RELAY_TOKEN"]
+MCPD_URL = os.environ.get("MCPD_URL", "http://localhost:4317")
+
+
+class Relay(BaseHTTPRequestHandler):
+    def do_POST(self):
+        token = parse_qs(urlparse(self.path).query).get("token", [""])[0]
+        if token != RELAY_TOKEN:
+            self.send_response(401)
+            self.end_headers()
+            return
+        alert = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        state = {"tripped": "Tripped", "nominal": "Recovered"}.get(alert["condition"], alert["condition"])
+        text = f"{state}: {alert.get('detail') or alert['name']} <{MCPD_URL}|Open mcpd>"
+        req = urllib.request.Request(
+            SLACK_WEBHOOK_URL,
+            data=json.dumps({"text": text}).encode(),
+            headers={"content-type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as res:
+            self.send_response(200 if res.status == 200 else 502)
+        self.end_headers()
+
+
+HTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), Relay).serve_forever()`
+
+const config = `{
+  "monitor_interval_seconds": 60,
+  "monitors": [
+    {
+      "id": "support-error-rate",
+      "name": "Support agent error rate above 5%",
+      "project": "support",
+      "watch": "error_rate",
+      "compare": "above",
+      "threshold": 0.05,
+      "window_seconds": 900,
+      "min_samples": 20,
+      "webhook": "https://relay.example.com/?token=YOUR_RELAY_TOKEN"
+    },
+    {
+      "id": "support-daily-spend",
+      "name": "Support agent spent more than $50 in a day",
+      "project": "support",
+      "watch": "cost",
+      "compare": "above",
+      "threshold": 50,
+      "window_seconds": 86400,
+      "min_samples": 1,
+      "webhook": "https://relay.example.com/?token=YOUR_RELAY_TOKEN"
+    }
+  ]
+}`
+
+const start = `mcpd --config-file ./mcpd.json
+
+# Check what the daemon read, without starting it.
+mcpd config --config-file ./mcpd.json | grep monitors`
+
+const ack = `# What each monitor reads now, and since when it has been tripped.
+curl -s http://localhost:4317/v1/api/monitors | jq -c '.[] | {id: .monitor.id, condition, value: .last.value}'
+
+# Acknowledge an alert. It stays acknowledged until the number recovers.
+curl -s -X POST http://localhost:4317/v1/api/monitors/support-error-rate/ack`
+---
+
+<Guide
+  slug="slack-alerts"
+  lede="An mcpd monitor watches a number such as error rate or spend and posts each change of state to a webhook. A small relay turns that post into a Slack message."
+  related={['llm-cost-per-user', 'llm-regression-tests-github-actions', 'read-traces-in-claude-code']}
+  cta="self-host"
+>
+  <p>
+    When you finish, a Slack channel gets a message when your agent's error rate
+    or spend crosses a line, and another when it recovers. You need a self-hosted
+    mcpd that receives your runs, a Slack app with an incoming webhook for the
+    channel, and somewhere to run a 30-line relay: a Cloudflare Worker or any
+    small server.
+  </p>
+
+  <h2>1. Create a Slack incoming webhook</h2>
+  <p>
+    In your Slack app's settings, turn on incoming webhooks and add one for the
+    channel that should get the alerts. Slack gives you a URL that starts with
+    <code>https://hooks.slack.com/services/</code>. Keep it secret: anyone with
+    the URL can post to the channel.
+  </p>
+
+  <h2>2. Deploy the relay</h2>
+  <p>
+    mcpd posts one generic JSON body to a webhook, the same for every receiver.
+    Slack's incoming webhooks want a <code>text</code> field instead, so the
+    relay reads the alert and posts a message. The body mcpd sends:
+  </p>
+  <table>
+    <thead>
+      <tr><th>Field</th><th>Example</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>monitor_id</code>, <code>name</code>, <code>project</code></td><td><code>support-error-rate</code>, its name, <code>support</code></td></tr>
+      <tr><td><code>condition</code></td><td><code>tripped</code>, or <code>nominal</code> when it recovers</td></tr>
+      <tr><td><code>watch</code>, <code>threshold</code>, <code>value</code>, <code>samples</code></td><td><code>error_rate</code>, <code>0.05</code>, <code>0.5</code>, <code>40</code></td></tr>
+      <tr><td><code>detail</code></td><td>One sentence for a person: the name, the value, the threshold and the number of runs</td></tr>
+      <tr><td><code>at</code></td><td>When it was measured, in RFC 3339</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Both relays check a token in the query string, so nobody else can post
+    through them. mcpd never shows a webhook's full URL in its API, only the
+    host.
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="the relay"
+    samples={[
+      { lang: 'typescript', label: 'Cloudflare Worker', shiki: 'javascript', code: worker },
+      { lang: 'python', label: 'Python', shiki: 'python', code: relayPy },
+    ]}
+  />
+
+  <h2>3. Add the monitors</h2>
+  <p>
+    Monitors live in the daemon's JSON configuration file. Point each one's
+    <code>webhook</code> at the relay, with the token.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="mcpd.json" samples={[{ lang: 'curl', label: 'JSON', shiki: 'json', code: config }]} />
+  <table>
+    <thead>
+      <tr><th>Key</th><th>What it sets</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>watch</code></td><td><code>error_rate</code> (0 to 1), <code>latency_p95</code> (milliseconds), <code>cost</code> (in the price book's currency), <code>trace_count</code>, or <code>score_mean</code> with a <code>scorer_id</code></td></tr>
+      <tr><td><code>compare</code>, <code>threshold</code></td><td><code>above</code> or <code>below</code> the number</td></tr>
+      <tr><td><code>window_seconds</code></td><td>How far back each reading looks. Default 300.</td></tr>
+      <tr><td><code>min_samples</code></td><td>The fewest runs in the window before the monitor can trip. Default 20.</td></tr>
+      <tr><td><code>monitor_interval_seconds</code></td><td>How often every monitor is read. The floor is 5.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <a href="/docs/alerting" class="link">Monitors and alerts</a> lists every
+    watch, including the two that read durable runs.
+  </p>
+
+  <h2>4. Start mcpd with the file</h2>
+  <p>
+    mcpd refuses to start on an unknown key, so a misspelled
+    <code>threshold</code> fails loudly instead of watching nothing.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="start" samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: start }]} />
+  <p><code>mcpd config</code> prints a line such as <code>monitors        2, every 60s</code>.</p>
+
+  <h2>5. Read and acknowledge alerts</h2>
+  <MonitorChart class="not-prose my-8" />
+  <p>
+    A monitor latches. Once it trips it stays tripped until the number recovers,
+    and a quiet window with no runs does not clear it. Each change of state is
+    posted once: one message when it trips, one when it recovers.
+    Acknowledging silences it while it still breaches.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="read and acknowledge" samples={[{ lang: 'curl', label: 'cURL', shiki: 'bash', code: ack }]} />
+  <p>The <strong>Monitors</strong> screen in the interface shows the same state.</p>
+
+  <h2>Troubleshooting</h2>
+  <table>
+    <thead>
+      <tr><th>What you see</th><th>Why, and what to do</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>The monitor never trips, and its condition is <code>insufficient</code></td>
+        <td>The window holds fewer runs than <code>min_samples</code>. Lower it, or widen <code>window_seconds</code>.</td>
+      </tr>
+      <tr>
+        <td>The log says <code>could not reach the alert webhook</code></td>
+        <td>mcpd cannot connect to the relay. Check the URL from the machine mcpd runs on.</td>
+      </tr>
+      <tr>
+        <td>The log says <code>the alert webhook refused the notification</code></td>
+        <td>The relay answered with an error: a wrong token, or Slack refused the post. The log line has the status.</td>
+      </tr>
+      <tr>
+        <td>One alert was never posted</td>
+        <td>mcpd does not retry a failed delivery. It logs it and moves on. The monitor's state is still correct in <code>GET /v1/api/monitors</code>.</td>
+      </tr>
+    </tbody>
+  </table>
+</Guide>

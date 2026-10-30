@@ -1,0 +1,182 @@
+---
+import Guide from '@/layouts/Guide.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+
+const install = `pip install langchain langchain-openai \\
+  openinference-instrumentation-langchain \\
+  opentelemetry-sdk opentelemetry-exporter-otlp-proto-http`
+
+const env = `# The base URL. The exporter adds /v1/traces itself.
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+# Only when mcpd runs with --ingest-key.
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer YOUR_INGEST_KEY"`
+
+const setup = `from opentelemetry import trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from openinference.instrumentation.langchain import LangChainInstrumentor
+
+# Before any chain or agent runs.
+provider = TracerProvider(resource=Resource.create({"service.name": "support-agent"}))
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+trace.set_tracer_provider(provider)
+LangChainInstrumentor().instrument(tracer_provider=provider)`
+
+const agent = `from langchain.agents import create_agent
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from openinference.instrumentation import using_attributes
+
+
+@tool
+def lookup_order(order_id: str) -> str:
+    """Look up where an order is."""
+    return f"Order {order_id} is at the Leeds depot."
+
+
+agent = create_agent(
+    ChatOpenAI(model="gpt-4.1-mini"),
+    tools=[lookup_order],
+    system_prompt="You answer questions about orders.",
+)
+
+# Every span inside the block carries the session and the user.
+with using_attributes(session_id="chat-42", user_id="customer-7"):
+    result = agent.invoke({"messages": [{"role": "user", "content": "Where is order 4417?"}]})
+print(result["messages"][-1].content)
+
+# A script exits before the batch is sent unless you flush. A server does not need this.
+provider.shutdown()`
+
+const readBack = `TRACE=$(curl -s "http://localhost:4317/v1/api/traces?name=LangGraph&limit=1" | jq -r '.traces[0].trace_id')
+curl -s "http://localhost:4317/v1/api/traces/$TRACE" \\
+  | jq -r '.spans[] | [.name, .kind, .model, .usage.input_tokens, .cost.total_cost] | @tsv'`
+---
+
+<Guide
+  slug="trace-langchain-agents"
+  lede="The OpenInference instrumentor turns every chain, model call and tool call of a LangChain or LangGraph run into an OpenTelemetry span. mcpd reads those spans with no mcpd code in your agent."
+  related={['trace-chat-conversations', 'llm-cost-per-user', 'read-traces-in-claude-code']}
+>
+  <p>
+    When you finish, each agent run is one trace in mcpd: the graph, every model
+    call with its prompt, answer, tokens and cost, and every tool call with its
+    arguments and result. You need Python 3.10 or later, a LangChain 1.x agent,
+    and a running mcpd daemon on port 4317 (see the
+    <a href="/docs/quickstart" class="link">Quickstart</a>).
+  </p>
+
+  <h2>1. Install the packages</h2>
+  <p>
+    Install the OpenInference instrumentor for LangChain and the OpenTelemetry
+    SDK with its OTLP over HTTP exporter. The instrumentor covers LangGraph too,
+    because a LangGraph run goes through the same callbacks.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="install" samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: install }]} />
+
+  <h2>2. Point the exporter at mcpd</h2>
+  <p>
+    mcpd takes OTLP on the same port as everything else, 4317, over HTTP and
+    gRPC. The HTTP exporter defaults to port 4318, so name the endpoint.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="environment" samples={[{ lang: 'curl', label: 'Environment', shiki: 'bash', code: env }]} />
+
+  <h2>3. Instrument LangChain before the agent runs</h2>
+  <p>
+    Create the tracer provider and call the instrumentor once, at the start of
+    the process. The service name becomes the run's <code>service_name</code> in
+    mcpd.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="tracing setup" samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: setup }]} />
+
+  <h2>4. Run the agent with a session and a user</h2>
+  <p>
+    Nothing in the agent changes. Wrap the call in
+    <code>using_attributes</code> to put a session id and a user id on every span
+    of the run. mcpd reads <code>session.id</code> as the run's session and
+    <code>user.id</code> as its user, which lets you
+    <a href="/docs/guides/trace-chat-conversations" class="link">read a whole conversation</a>
+    and <a href="/docs/guides/llm-cost-per-user" class="link">add up cost per user</a>.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="agent.py" samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: agent }]} />
+
+  <h2>5. Read the trace</h2>
+  <p>
+    Open <a href="http://localhost:4317" class="link" rel="noopener">localhost:4317</a>
+    and select the newest run in <strong>Runs</strong>. The root span is named
+    <code>LangGraph</code>. You can also read it from the API:
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="read the run" samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: readBack }]} />
+  <TerminalCast
+    class="not-prose my-8"
+    title="one agent run, as mcpd stored it"
+    lines={[
+      { cmd: "curl -s \"http://localhost:4317/v1/api/traces/$TRACE\" | jq -r '.spans[] | [.name, .kind, .model, .usage.input_tokens, .cost.total_cost] | @tsv'" },
+      { out: 'LangGraph\tworkflow_run\t\t\t' },
+      { out: 'model\tworkflow_run\t\t\t' },
+      { out: 'ChatOpenAI\tmodel_generation\tgpt-4.1-mini\t812\t0.00019199999999999998', tone: 'ok' },
+      { out: 'tools\tworkflow_run\t\t\t' },
+      { out: 'lookup_order\ttool_call\t\t\t' },
+      { out: 'model\tworkflow_run\t\t\t' },
+      { out: 'ChatOpenAI\tmodel_generation\tgpt-4.1-mini\t812\t0.00019199999999999998', tone: 'ok' },
+    ]}
+  />
+  <p>mcpd maps each OpenInference span kind onto its own:</p>
+  <table>
+    <thead>
+      <tr><th><code>openinference.span.kind</code></th><th>mcpd kind</th><th>What it is in a LangChain run</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>CHAIN</code></td><td><code>workflow_run</code></td><td>The graph, and each node in it</td></tr>
+      <tr><td><code>LLM</code></td><td><code>model_generation</code></td><td>One chat model call, with tokens and cost</td></tr>
+      <tr><td><code>TOOL</code></td><td><code>tool_call</code></td><td>One tool call, with its input and output</td></tr>
+      <tr><td><code>RETRIEVER</code></td><td><code>retrieval</code></td><td>A retriever query</td></tr>
+      <tr><td><code>AGENT</code></td><td><code>agent_run</code></td><td>An agent span, where the integration emits one</td></tr>
+    </tbody>
+  </table>
+  <p>
+    The model name comes from <code>llm.model_name</code>, the token counts from
+    <code>llm.token_count.*</code>, and cached prompt tokens from
+    <code>llm.token_count.prompt_details.cache_read</code>. The full list is on the
+    <a href="/docs/opentelemetry" class="link">OpenTelemetry</a> page.
+  </p>
+
+  <h2>Troubleshooting</h2>
+  <table>
+    <thead>
+      <tr><th>What you see</th><th>Why, and what to do</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>No trace arrives</td>
+        <td>
+          A script exited before the batch processor sent its spans. Call
+          <code>provider.shutdown()</code> or <code>provider.force_flush()</code> before exit.
+          If that is not it, check that <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> names port 4317.
+        </td>
+      </tr>
+      <tr>
+        <td>Spans arrive, but not the chain or model spans</td>
+        <td>The instrumentor ran after the code it should wrap had already run. Call it at startup.</td>
+      </tr>
+      <tr>
+        <td>The exporter logs 401 or 403</td>
+        <td>
+          The daemon has ingest keys. Set <code>OTEL_EXPORTER_OTLP_HEADERS</code> to
+          <code>Authorization=Bearer</code> and one of them.
+        </td>
+      </tr>
+      <tr>
+        <td>Tokens are stored, but the cost is empty</td>
+        <td>
+          The model id is not in mcpd's price book. Check it with
+          <code>mcpd prices show &lt;model&gt;</code>, and add rates as
+          <a href="/docs/cost" class="link">Cost accounting</a> shows.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</Guide>

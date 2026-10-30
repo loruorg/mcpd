@@ -1343,7 +1343,9 @@ function checkLocaleCoverage(built) {
     counted.set(p.locale, (counted.get(p.locale) ?? 0) + 1)
     // The blog is written in English only, so its posts are no locale's gap.
     const blog = p.doc === '/blog' || p.doc.startsWith('/blog/')
-    if (!p.noindex && !blog) docsPerLocale.get(p.locale)?.add(p.doc)
+    // So are the task guides.
+    const guides = p.doc === '/docs/guides' || p.doc.startsWith('/docs/guides/')
+    if (!p.noindex && !blog && !guides) docsPerLocale.get(p.locale)?.add(p.doc)
   }
 
   const total = docsPerLocale.get(DEFAULT_LOCALE)?.size ?? 0

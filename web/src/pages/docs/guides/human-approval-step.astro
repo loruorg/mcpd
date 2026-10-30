@@ -1,0 +1,261 @@
+---
+import Guide from '@/layouts/Guide.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import DurableRun from '@/components/DurableRun.astro'
+
+const defTs = `import { Mcpd, Worker, when, workflow } from '@mcpd/sdk'
+
+const mcpd = new Mcpd({ project: 'support' })
+
+const refunds = workflow({ id: 'refund_request' })
+  // Your agent drafts the action. Its model calls are recorded under this step.
+  .agent('draft', async (ctx, input: { ticket: string; amountUsd: number }) => ({
+    amountUsd: input.amountUsd,
+    reason: 'item arrived damaged',
+  }))
+  // The run stops here until an event named refund_reviewed arrives with this
+  // ticket's key, or a day passes. No process is held open while it waits.
+  .waitFor('approval', {
+    event: 'refund_reviewed',
+    key: '\${input.ticket}',
+    timeoutMs: 24 * 3_600_000,
+    onTimeout: 'continue',
+  })
+  // Runs only when the reviewer approved. Skipped on a rejection or a timeout.
+  .step('issue_refund', async (ctx, input: { amountUsd: number }) => await issueRefund(input.amountUsd), {
+    input: { amountUsd: '\${steps.draft.output.amountUsd}' },
+    when: when('steps.approval.output.approved', 'eq', true),
+    effect: 'at_most_once',
+  })
+  .output({ refund: '\${steps.issue_refund.output}', review: '\${steps.approval.output}' })`
+
+const defPy = `from mcpd import Mcpd, Worker, when, workflow
+
+mcpd = Mcpd(project="support")
+
+refunds = workflow("refund_request")
+
+
+# Your agent drafts the action. Its model calls are recorded under this step.
+@refunds.agent("draft")
+def draft(ctx, input, prior):
+    return {"amount_usd": input["amount_usd"], "reason": "item arrived damaged"}
+
+
+# The run stops here until an event named refund_reviewed arrives with this
+# ticket's key, or a day passes. No process is held open while it waits.
+refunds.wait_for("approval", event="refund_reviewed", key="\${input.ticket}",
+                 timeout_ms=24 * 3_600_000, on_timeout="continue")
+
+
+# Runs only when the reviewer approved. Skipped on a rejection or a timeout.
+@refunds.step("issue_refund", input={"amount_usd": "\${steps.draft.output.amount_usd}"},
+              when=when("steps.approval.output.approved", "eq", True),
+              effect="at_most_once")
+def issue_refund_step(ctx, input, prior):
+    return issue_refund(input["amount_usd"])
+
+
+refunds.output({"refund": "\${steps.issue_refund.output}", "review": "\${steps.approval.output}"})`
+
+const workerTs = `const worker = new Worker(mcpd, { concurrency: 8 }).register(refunds)
+// Store the definition now, so a run can start before the first claim.
+await worker.registerDefinitions()
+// Serve the draft and issue_refund steps for as long as the process lives.
+void worker.serve()`
+
+const workerPy = `import threading
+
+worker = Worker(mcpd, concurrency=8).register(refunds)
+# Store the definition now, so a run can start before the first claim.
+worker.register_definitions()
+# Serve the draft and issue_refund steps on a thread of their own.
+threading.Thread(target=worker.serve, daemon=True).start()`
+
+const startTs = `const run = await mcpd.runs.start({
+  definitionId: 'refund_request',
+  input: { ticket: 'T-1042', amountUsd: 42 },
+})`
+
+const startPy = `run = mcpd.runs.start(refunds, input={"ticket": "T-1042", "amount_usd": 42})`
+
+const answerCurl = `# From your review screen: the reviewer approved ticket T-1042.
+curl -s -X POST http://localhost:4317/v1/api/events \\
+  -H 'content-type: application/json' \\
+  -H "authorization: Bearer $MCPD_EXECUTE_KEY" \\
+  -d '{"project": "support", "event": "refund_reviewed", "key": "T-1042",
+       "payload": {"approved": true, "by": "ops@example.com"},
+       "event_id": "review-T-1042"}'
+# → {"outcome":"delivered","event_id":"review-T-1042"}`
+
+const answerTs = `await mcpd.events.publish({
+  event: 'refund_reviewed',
+  key: 'T-1042',
+  payload: { approved: false, by: 'ops@example.com', note: 'outside policy' },
+  eventId: 'review-T-1042',
+})`
+
+const answerPy = `mcpd.events.publish("refund_reviewed", "T-1042",
+                    payload={"approved": False, "by": "ops@example.com", "note": "outside policy"},
+                    event_id="review-T-1042")`
+---
+
+<Guide
+  slug="human-approval-step"
+  lede="Some actions need a person to say yes first: a refund, an email to a customer, a change in production. A durable run in mcpd can stop before the action, wait days for the decision, and continue from the same step."
+  related={['slack-alerts', 'collect-user-feedback', 'read-traces-in-claude-code']}
+>
+  <p>
+    When you finish, your agent drafts an action, the run waits for a reviewer
+    with no process kept alive, and the action runs only if the reviewer approves.
+    A rejection or a timeout skips it. You need a running mcpd daemon and the mcpd
+    SDK for <a href="/docs/sdks/typescript" class="link">TypeScript</a> or
+    <a href="/docs/sdks/python" class="link">Python</a>.
+  </p>
+
+  <h2>1. Define the workflow with a wait</h2>
+  <p>
+    A workflow is a definition that mcpd stores and walks. Three steps: the agent
+    drafts, a <code>wait_event</code> step holds the run for the review, and the
+    action runs under a guard. The event's payload becomes the wait step's output,
+    which is what the guard reads.
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="the workflow"
+    samples={[
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: defTs },
+      { lang: 'python', label: 'Python', shiki: 'python', code: defPy },
+    ]}
+  />
+  <table>
+    <thead>
+      <tr><th>Wait option</th><th>What it does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>event</code></td><td>The event name the run waits for.</td></tr>
+      <tr><td><code>key</code></td><td>A template rendered per run, so one review answers one ticket and no other.</td></tr>
+      <tr><td><code>timeoutMs</code></td><td>How long to wait. The ceiling is 3,650 days.</td></tr>
+      <tr><td><code>onTimeout</code></td><td><code>fail</code> (the default) ends the run in error. <code>continue</code> goes on with no output, so the guard skips the action.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>effect: 'at_most_once'</code> is for a step with an effect outside the
+    run. If a worker loses the step after it started, the attempt fails rather
+    than runs again, so the refund is not paid twice.
+    <a href="/docs/workflows" class="link">Workflows</a> explains effects and
+    retries.
+  </p>
+
+  <h2>2. Serve the steps with a worker</h2>
+  <p>
+    The draft and the refund run in your process. A worker registers the
+    definition, claims those steps when they are due, and reports each result. The
+    wait itself is the daemon's: no worker is busy while it waits.
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="the worker"
+    samples={[
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: workerTs },
+      { lang: 'python', label: 'Python', shiki: 'python', code: workerPy },
+    ]}
+  />
+
+  <h2>3. Start a run</h2>
+  <p>Start one run per request, from anywhere that holds an execute key.</p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="start"
+    samples={[
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: startTs },
+      { lang: 'python', label: 'Python', shiki: 'python', code: startPy },
+    ]}
+  />
+  <DurableRun class="not-prose my-8" />
+  <p>
+    The run's status stays <code>running</code> while it waits. Its event log gets
+    a <code>run_waiting</code> entry, and a <code>run_resumed</code> entry when
+    the answer arrives. Your workers can restart, scale to zero or be redeployed
+    in the meantime.
+  </p>
+
+  <h2>4. Send the reviewer's decision</h2>
+  <p>
+    Your review screen publishes the event with the ticket as its key. Send your
+    own <code>event_id</code>: a second click or a retried webhook with the same id
+    is answered <code>duplicate</code> and changes nothing.
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="approve or reject"
+    samples={[
+      { lang: 'curl', label: 'cURL', shiki: 'bash', code: answerCurl },
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: answerTs },
+      { lang: 'python', label: 'Python', shiki: 'python', code: answerPy },
+    ]}
+  />
+  <table>
+    <thead>
+      <tr><th>Outcome</th><th>Meaning</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>delivered</code></td><td>A run was waiting. It took the event and moved on in the same transaction.</td></tr>
+      <tr><td><code>parked</code></td><td>No run was waiting yet. mcpd holds the event for 24 hours for a wait that opens later.</td></tr>
+      <tr><td><code>duplicate</code></td><td>That <code>event_id</code> was seen before. Nothing was written.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    To answer one run by its id instead of by key, post
+    <code>event</code>, <code>payload</code> and <code>event_id</code> to
+    <code>POST /v1/api/runs/&#123;run_id&#125;/signal</code>.
+  </p>
+
+  <h2>5. Check what happened</h2>
+  <p>
+    The run's output carries the decision and the result. With the approval it is
+    <code>{'{'}"refund": {'{'}...{'}'}, "review": {'{'}"approved": true, "by": "ops@example.com"{'}'}{'}'}</code>.
+    After a rejection, <code>refund</code> is <code>null</code> and the journal
+    shows <code>issue_refund</code> as skipped. After a timeout, both are
+    <code>null</code>. Read a run with <code>mcpd.runs.get(runId)</code>, or open
+    <strong>Workflows</strong> in the interface. Each step is also a span in the
+    run's trace, so the draft's model calls are in the waterfall; see
+    <a href="/docs/runs" class="link">Runs</a>.
+  </p>
+
+  <h2>Troubleshooting</h2>
+  <table>
+    <thead>
+      <tr><th>What you see</th><th>Why, and what to do</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>404 definition refund_request not found</code> when you start a run</td>
+        <td>
+          The definition is not stored yet. A worker stores it when it starts serving, which can be after
+          your first run starts. Call <code>registerDefinitions()</code>
+          (<code>register_definitions()</code>) first, as in step 2.
+        </td>
+      </tr>
+      <tr>
+        <td>The event comes back <code>parked</code> and the run keeps waiting</td>
+        <td>
+          The name, key or project does not match the run's wait. The key is the rendered template, here
+          the ticket id.
+        </td>
+      </tr>
+      <tr>
+        <td>The run failed at <code>approval</code></td>
+        <td>The wait timed out and <code>onTimeout</code> was <code>fail</code>, the default.</td>
+      </tr>
+      <tr>
+        <td><code>401</code> or <code>403</code> on start or publish</td>
+        <td>
+          Starting runs and publishing events need the execute scope (<code>--execute-key</code>), and the
+          worker needs the worker scope (<code>--worker-key</code>). With neither set, the daemon accepts
+          its write keys for both.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</Guide>

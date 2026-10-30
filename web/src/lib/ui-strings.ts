@@ -413,6 +413,17 @@ export const UI_STRINGS = {
     tr: 'Blog',
     pt: 'Blog',
   },
+  'colophon.guides': {
+    en: 'Guides',
+    fr: 'Guides',
+    es: 'Guías',
+    zh: '指南',
+    ja: 'ガイド',
+    ko: '가이드',
+    it: 'Guide',
+    tr: 'Rehberler',
+    pt: 'Guias',
+  },
   'colophon.promise': {
     en: 'No telemetry. Run it yourself, or use it free at mcpd.sh.',
     fr: 'Pas de télémétrie. Hébergez-le vous-même, ou utilisez-le gratuitement sur mcpd.sh.',

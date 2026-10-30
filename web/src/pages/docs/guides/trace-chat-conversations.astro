@@ -1,0 +1,201 @@
+---
+import Guide from '@/layouts/Guide.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import RunViews from '@/components/RunViews.astro'
+
+const ts = `import { Mcpd } from '@mcpd/sdk'
+
+const mcpd = new Mcpd({ project: 'support' })
+
+// One call per turn. conversationId is the same for every turn of one chat.
+async function chatTurn(conversationId: string, userId: string, message: string): Promise<string> {
+  return await mcpd.withSpan('chat_turn', async (run) => {
+    run.setCorrelation({ sessionId: conversationId, userId })
+    run.setInput({ message })
+    const reply = await callYourModel(message) // your model call, recorded as usual
+    run.setOutput({ reply })
+    return reply
+  })
+}`
+
+const py = `from mcpd import Mcpd
+
+mcpd = Mcpd(project="support")
+
+
+# One call per turn. conversation_id is the same for every turn of one chat.
+def chat_turn(conversation_id: str, user_id: str, message: str) -> str:
+    with mcpd.trace("chat_turn", session_id=conversation_id, user_id=user_id) as run:
+        run.set_input({"message": message})
+        reply = call_your_model(message)  # your model call, recorded as usual
+        run.set_output({"reply": reply})
+        return reply`
+
+const otel = `from opentelemetry import trace
+
+tracer = trace.get_tracer("support-agent")
+
+
+def chat_turn(conversation_id: str, user_id: str, message: str) -> str:
+    # Set both on the root span of the turn.
+    with tracer.start_as_current_span("chat_turn") as span:
+        span.set_attribute("session.id", conversation_id)
+        span.set_attribute("user.id", user_id)
+        return call_your_model(message)`
+
+const list = `# Every turn of one conversation, oldest first.
+curl -s --get http://localhost:4317/v1/api/traces \\
+  --data-urlencode 'project=support' \\
+  --data-urlencode 'session_id=chat-42' \\
+  --data-urlencode 'order=asc' \\
+  | jq -r '.traces[] | [.start_time, .name, .status, .cost.total_cost] | @tsv'`
+
+const listTs = `const res = await fetch(
+  'http://localhost:4317/v1/api/traces?' +
+    new URLSearchParams({ project: 'support', session_id: 'chat-42', order: 'asc' }),
+)
+const { traces } = await res.json()
+for (const t of traces) console.log(t.start_time, t.name, t.status, t.cost?.total_cost)`
+
+const listPy = `import requests
+
+res = requests.get(
+    "http://localhost:4317/v1/api/traces",
+    params={"project": "support", "session_id": "chat-42", "order": "asc"},
+)
+for t in res.json()["traces"]:
+    print(t["start_time"], t["name"], t["status"], (t.get("cost") or {}).get("total_cost"))`
+
+const summary = `# Runs, failures, latency, tokens and cost for each conversation in the last day.
+curl -s --get http://localhost:4317/v1/api/analytics/summary \\
+  --data-urlencode 'project=support' \\
+  --data-urlencode 'from=-24h' \\
+  --data-urlencode 'group_by=session_id' \\
+  | jq -c '.groups[] | {session: .key, turns: .count, errors: .error_count, cost: .total_cost}'`
+---
+
+<Guide
+  slug="trace-chat-conversations"
+  lede="A chat is many requests. Record each turn as its own run and give every turn of one conversation the same session id. mcpd then lists, measures and filters the conversation as one thing."
+  related={['log-openai-api-calls', 'llm-cost-per-user', 'collect-user-feedback']}
+>
+  <p>
+    When you finish, you can open every turn of one conversation in order, see
+    what the whole conversation cost, and find the conversations where something
+    failed. You need an agent that already sends runs to mcpd, through an
+    <a href="/docs/integrating" class="link">mcpd SDK</a> or
+    <a href="/docs/opentelemetry" class="link">OpenTelemetry</a>.
+  </p>
+
+  <h2>1. Choose the ids</h2>
+  <p>
+    Make one trace per turn: one user message and everything the agent did to
+    answer it. Then give each trace the ids that join it to the others:
+  </p>
+  <table>
+    <thead>
+      <tr><th>Field</th><th>Use it for</th><th>Example</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>session_id</code></td><td>One conversation. The same value on every turn of it.</td><td>the chat's id in your database</td></tr>
+      <tr><td><code>thread_id</code></td><td>A thread inside a session, when one conversation has several.</td><td>a side thread on a ticket</td></tr>
+      <tr><td><code>user_id</code></td><td>The person. mcpd hashes it before it stores it.</td><td>your customer id</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Use an id your application already has. A random id made per request gives
+    every turn its own session, and nothing joins them.
+  </p>
+
+  <h2>2. Set the session id on every turn</h2>
+  <p>
+    Set the ids on the root span of each turn. With an SDK, pass them when you
+    open the run. With OpenTelemetry, set the attribute <code>session.id</code>;
+    mcpd also reads <code>gen_ai.conversation.id</code> and
+    <code>mcpd.session_id</code>, and <code>user.id</code> or
+    <code>enduser.id</code> for the user.
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="one turn of a chat"
+    samples={[
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: ts },
+      { lang: 'python', label: 'Python', shiki: 'python', code: py },
+    ]}
+  />
+  <p>With the OpenTelemetry SDK and no mcpd SDK, the same turn:</p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="one turn, with OpenTelemetry"
+    samples={[{ lang: 'python', label: 'Python', shiki: 'python', code: otel }]}
+  />
+  <p>
+    Frameworks that follow the OpenTelemetry GenAI conventions may set
+    <code>gen_ai.conversation.id</code> for you. Pydantic AI does, so check
+    whether the value it picks is the one you want before you set your own.
+  </p>
+
+  <h2>3. Read one conversation</h2>
+  <p>
+    In the interface, open <strong>Runs</strong> and type the id into the
+    <strong>session</strong> filter. From the API, filter the trace list with
+    <code>session_id</code> and sort it oldest first:
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="one conversation"
+    samples={[
+      { lang: 'curl', label: 'cURL', shiki: 'bash', code: list },
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: listTs },
+      { lang: 'python', label: 'Python', shiki: 'python', code: listPy },
+    ]}
+  />
+  <p>
+    The match is exact, and it composes with every other filter on the list:
+    add <code>status=error</code> to see only the turns that failed, or
+    <code>q</code> to search the text of this conversation alone.
+    <a href="/docs/searching" class="link">Finding a run</a> lists them all.
+  </p>
+  <RunViews class="not-prose my-8" />
+  <p>
+    The <strong>Conversation</strong> screen shows a run as the messages that
+    were said rather than as spans. Runs that carry a <code>thread_id</code> are grouped on the
+    <strong>Threads</strong> screen, where the previous and next controls walk the
+    thread turn by turn.
+  </p>
+
+  <h2>4. Measure every conversation</h2>
+  <p>
+    The analytics summary groups by <code>session_id</code>: one row per
+    conversation with its number of runs, failures, latency, tokens and cost.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="per conversation" samples={[{ lang: 'curl', label: 'cURL', shiki: 'bash', code: summary }]} />
+  <p>
+    <code>GET /v1/api/analytics/cost</code> takes <code>group_by=session_id</code>
+    too, when you only need the money.
+  </p>
+
+  <h2>Troubleshooting</h2>
+  <table>
+    <thead>
+      <tr><th>What you see</th><th>Why, and what to do</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>A conversation is missing turns</td>
+        <td>Those turns were sent without the session id, or with a different one. Set it on every turn, at the root span.</td>
+      </tr>
+      <tr>
+        <td>Every turn is its own session</td>
+        <td>The id is made per request. Use the conversation's own id from your database.</td>
+      </tr>
+      <tr>
+        <td>Filtering by <code>user_id</code> finds nothing, but the runs have one</td>
+        <td>
+          Pass the plain id you sent. mcpd hashes the filter value the same way it hashed the stored
+          one. The <a href="/docs/guides/llm-cost-per-user" class="link">cost per user guide</a> explains the hash.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</Guide>

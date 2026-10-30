@@ -140,6 +140,18 @@ const TITLES: Record<string, Row> = {
     tr: "Mastra'dan geçiş",
     pt: 'Migrando do Mastra',
   },
+  // The guides are written in English only. The entry links the English index
+  // in every locale, with hreflang="en" on the link.
+  '/docs/guides': {
+    fr: 'Guides',
+    es: 'Guías',
+    zh: '指南',
+    ja: 'ガイド',
+    ko: '가이드',
+    it: 'Guide',
+    tr: 'Rehberler',
+    pt: 'Guias',
+  },
   '/docs/workflows': {
     fr: 'Workflows',
     es: 'Workflows',

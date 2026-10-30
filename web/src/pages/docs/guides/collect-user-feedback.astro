@@ -1,0 +1,213 @@
+---
+import Guide from '@/layouts/Guide.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import SignalFlow from '@/components/SignalFlow.astro'
+
+const answerTs = `// Your chat endpoint: return the trace id with the answer.
+app.post('/api/chat', async (req, res) => {
+  let traceId = ''
+  const answer = await mcpd.withSpan('chat_turn', async (run) => {
+    traceId = run.traceId
+    return await answerQuestion(req.body.message)
+  })
+  res.json({ answer, traceId })
+})`
+
+const answerPy = `# Your chat endpoint: return the trace id with the answer.
+@app.post("/api/chat")
+def chat(body: ChatRequest):
+    with mcpd.trace("chat_turn") as run:
+        answer = answer_question(body.message)
+        return {"answer": answer, "trace_id": run.trace_id}`
+
+const buttons = `<div class="feedback" data-trace-id="TRACE_ID_FROM_THE_ANSWER">
+  <button type="button" data-vote="up">Helpful</button>
+  <button type="button" data-vote="down">Not helpful</button>
+</div>
+
+<script>
+  document.addEventListener('click', async (e) => {
+    const button = e.target.closest('[data-vote]')
+    if (!button) return
+    const box = button.closest('.feedback')
+    await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ traceId: box.dataset.traceId, vote: button.dataset.vote }),
+    })
+    box.textContent = 'Thanks for the feedback.'
+  })
+</script>`
+
+const recordTs = `app.post('/api/feedback', (req, res) => {
+  const { traceId, vote, comment } = req.body
+  if (vote !== 'up' && vote !== 'down') return res.status(400).end()
+  mcpd.feedback({
+    kind: 'thumbs',
+    value: vote,
+    traceId,
+    comment,
+    authorKind: 'end_user',
+    authorId: req.user.id, // hashed by mcpd at ingest, like a user id
+  })
+  res.status(204).end()
+})`
+
+const recordPy = `from mcpd import FeedbackKind
+
+
+@app.post("/api/feedback")
+def feedback(body: FeedbackRequest, user: User):
+    if body.vote not in ("up", "down"):
+        raise HTTPException(400)
+    mcpd.feedback(
+        FeedbackKind.THUMBS,
+        body.vote,
+        trace_id=body.trace_id,
+        comment=body.comment,
+        author_kind="end_user",
+        author_id=user.id,  # hashed by mcpd at ingest, like a user id
+    )`
+
+const recordCurl = `# Needs a write key when the daemon has keys set.
+curl -s -X POST http://localhost:4317/v1/api/feedback \\
+  -H 'content-type: application/json' \\
+  -H "authorization: Bearer $MCPD_WRITE_KEY" \\
+  -d "{
+    \\"feedback_id\\": \\"\\",
+    \\"trace_id\\": \\"$TRACE\\",
+    \\"kind\\": \\"thumbs\\",
+    \\"value\\": \\"down\\",
+    \\"comment\\": \\"Named the wrong depot.\\",
+    \\"author_kind\\": \\"end_user\\",
+    \\"timestamp\\": \\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\\",
+    \\"correlation\\": { \\"project\\": \\"support\\" }
+  }"`
+
+const findDown = `# The thumbs-down votes of the last week, newest first, with the run each one judged.
+curl -s --get http://localhost:4317/v1/api/feedback \\
+  --data-urlencode 'project=support' \\
+  --data-urlencode 'kind=thumbs' \\
+  --data-urlencode 'from=-7d' \\
+  | jq -r '.feedback[] | select(.value == "down") | [.timestamp, .trace_id, .comment] | @tsv'
+
+# Or every run that has any feedback at all.
+curl -s "http://localhost:4317/v1/api/traces?project=support&has_feedback=true" \\
+  | jq -r '.traces[] | [.trace_id, .name, .status] | @tsv'`
+---
+
+<Guide
+  slug="collect-user-feedback"
+  lede="Put a thumbs-up and a thumbs-down button under each answer. Each vote is stored on the trace that produced the answer, so you can open the exact run a person disliked."
+  related={['trace-chat-conversations', 'llm-regression-tests-github-actions', 'read-traces-in-claude-code']}
+>
+  <p>
+    When you finish, every vote in your product is a feedback record in mcpd,
+    attached to the run it judges, and you have a query that lists the runs people
+    voted down. You need runs in mcpd from your chat or answer endpoint, sent with
+    an <a href="/docs/integrating" class="link">mcpd SDK</a>, and a backend that
+    serves your front end.
+  </p>
+
+  <h2>1. Return the trace id with each answer</h2>
+  <p>
+    A vote has to name the run it is about. Read the trace id from the root span
+    while it is open and send it to the browser with the answer.
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="the answer endpoint"
+    samples={[
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: answerTs },
+      { lang: 'python', label: 'Python', shiki: 'python', code: answerPy },
+    ]}
+  />
+
+  <h2>2. Add the buttons</h2>
+  <p>
+    The buttons post the vote to your own backend, never to mcpd. A key in a
+    browser is a public key, and mcpd answers no cross-origin browser request
+    unless it runs with <code>--cors-origin</code>.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="the buttons" samples={[{ lang: 'typescript', label: 'HTML', shiki: 'html', code: buttons }]} />
+
+  <h2>3. Record the vote from your backend</h2>
+  <p>
+    Your backend checks the vote and records it with the SDK. The SDK sends it in
+    its next batch, through the same door as your spans, with the ingest key it
+    already has.
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="record the vote"
+    samples={[
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: recordTs },
+      { lang: 'python', label: 'Python', shiki: 'python', code: recordPy },
+      { lang: 'curl', label: 'cURL', shiki: 'bash', code: recordCurl },
+    ]}
+  />
+  <p>A feedback record takes these fields:</p>
+  <table>
+    <thead>
+      <tr><th>Field</th><th>Value</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>kind</code></td><td><code>thumbs</code> here. Also <code>rating</code>, <code>correction</code>, <code>tag</code> and <code>comment</code>.</td></tr>
+      <tr><td><code>value</code></td><td><code>up</code> or <code>down</code> for <code>thumbs</code>. mcpd stores what you send, so check it first.</td></tr>
+      <tr><td><code>trace_id</code></td><td>The run the vote is about. Add <code>span_id</code> to judge one step.</td></tr>
+      <tr><td><code>comment</code></td><td>Optional text from the person. It is stored, and swept by retention and erasure.</td></tr>
+      <tr><td><code>author_kind</code></td><td>Who voted, such as <code>end_user</code> or <code>reviewer</code>. The feedback list filters on it.</td></tr>
+      <tr><td><code>author_id</code></td><td>Optional. Hashed at ingest with the same key as <code>user_id</code>.</td></tr>
+    </tbody>
+  </table>
+  <SignalFlow class="not-prose my-8" />
+  <p>
+    Feedback is one of the signals that share the run's trace id, so the vote
+    shows in the run next to its spans, logs and scores. Machine scores are a
+    separate signal, and mcpd never averages the two together; see
+    <a href="/docs/evaluation" class="link">Scores and feedback</a>.
+  </p>
+
+  <h2>4. Find the runs people voted down</h2>
+  <p>
+    The feedback list filters by kind and time window, newest first. Filter the
+    value with <code>jq</code>, then open each run by its trace id. The trace list
+    takes <code>has_feedback=true</code> for every run with a vote of any kind.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="the runs people disliked" samples={[{ lang: 'curl', label: 'cURL', shiki: 'bash', code: findDown }]} />
+  <p>
+    A run that was voted down is a good test case. The
+    <a href="/docs/guides/llm-regression-tests-github-actions" class="link">regression test guide</a>
+    turns runs like these into a dataset that runs on every pull request.
+  </p>
+
+  <h2>Troubleshooting</h2>
+  <table>
+    <thead>
+      <tr><th>What you see</th><th>Why, and what to do</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>422</code> with <code>missing field `feedback_id`</code> from <code>POST /v1/api/feedback</code></td>
+        <td>
+          The endpoint takes a whole feedback record. Send <code>feedback_id</code> (an empty string lets
+          mcpd make one), <code>timestamp</code> and <code>correlation</code>, as in the cURL example.
+        </td>
+      </tr>
+      <tr>
+        <td><code>401</code> or <code>403</code> from <code>POST /v1/api/feedback</code></td>
+        <td>
+          The endpoint needs a key with the write scope. With no <code>--write-key</code> set, the daemon
+          accepts its ingest keys there.
+        </td>
+      </tr>
+      <tr>
+        <td>The Python SDK logs <code>feedback was dropped</code></td>
+        <td>
+          The call named no trace id and no span was active. Pass the trace id you returned with the
+          answer.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</Guide>

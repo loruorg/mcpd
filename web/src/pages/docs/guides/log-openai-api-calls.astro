@@ -1,0 +1,311 @@
+---
+import Guide from '@/layouts/Guide.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+
+const tsConnect = `import { Mcpd } from '@mcpd/sdk'
+import OpenAI from 'openai'
+
+// Reads MCPD_ENDPOINT and MCPD_API_KEY. With neither set it talks to
+// http://localhost:4317 with no key.
+const mcpd = new Mcpd({ project: 'support', serviceName: 'support-api' })
+const openai = new OpenAI()`
+
+const pyConnect = `from mcpd import Mcpd, SpanKind
+from openai import OpenAI
+
+# Reads MCPD_ENDPOINT and MCPD_API_KEY. With neither set it talks to
+# http://localhost:4317 with no key.
+mcpd = Mcpd(project="support", service_name="support-api")
+client = OpenAI()`
+
+const tsCall = `async function answer(question: string, userId: string): Promise<string> {
+  return await mcpd.withSpan('answer_question', async (run) => {
+    run.setCorrelation({ userId })
+    run.setInput({ question })
+    const messages = [
+      { role: 'system' as const, content: 'You answer questions about orders.' },
+      { role: 'user' as const, content: question },
+    ]
+    const text = await mcpd.withSpan(
+      'chat',
+      async (generation) => {
+        generation.setInput(messages)
+        generation.setModelParameters({ temperature: 0.2, maxTokens: 300 })
+        const response = await openai.chat.completions.create({
+          model: 'gpt-4.1-mini',
+          messages,
+          temperature: 0.2,
+          max_tokens: 300,
+        })
+        // Model, provider, token counts, response id and finish reason.
+        generation.recordResponse(response)
+        const text = response.choices[0]?.message.content ?? ''
+        generation.setOutput(text)
+        return text
+      },
+      { kind: 'model_generation' },
+    )
+    run.setOutput({ answer: text })
+    return text
+  })
+}`
+
+const pyCall = `def answer(question: str, user_id: str) -> str:
+    with mcpd.trace("answer_question", user_id=user_id) as run:
+        run.set_input({"question": question})
+        messages = [
+            {"role": "system", "content": "You answer questions about orders."},
+            {"role": "user", "content": question},
+        ]
+        with mcpd.span("chat", kind=SpanKind.MODEL_GENERATION) as generation:
+            generation.set_input(messages)
+            generation.set_model_parameters(temperature=0.2, max_tokens=300)
+            response = client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=messages,
+                temperature=0.2,
+                max_tokens=300,
+            )
+            # Model, provider, token counts, response id and finish reason.
+            generation.record_response(response)
+            text = response.choices[0].message.content
+            generation.set_output(text)
+        run.set_output({"answer": text})
+        return text`
+
+const tsStream = `async function streamAnswer(question: string): Promise<string> {
+  return await mcpd.withSpan(
+    'chat',
+    async (generation) => {
+      const messages = [{ role: 'user' as const, content: question }]
+      generation.setInput(messages)
+      const stream = await openai.chat.completions.create({
+        model: 'gpt-4.1-mini',
+        messages,
+        stream: true,
+        // Without this, OpenAI sends no token counts on a stream.
+        stream_options: { include_usage: true },
+      })
+      let text = ''
+      for await (const chunk of generation.recordStream(stream)) {
+        text += chunk.choices[0]?.delta.content ?? ''
+      }
+      return text
+    },
+    { kind: 'model_generation' },
+  )
+}`
+
+const pyStream = `def stream_answer(question: str) -> str:
+    with mcpd.span("chat", kind=SpanKind.MODEL_GENERATION) as generation:
+        messages = [{"role": "user", "content": question}]
+        generation.set_input(messages)
+        stream = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=messages,
+            stream=True,
+            # Without this, OpenAI sends no token counts on a stream.
+            stream_options={"include_usage": True},
+        )
+        text = ""
+        for chunk in generation.record_stream(stream):
+            if chunk.choices:
+                text += chunk.choices[0].delta.content or ""
+        return text`
+
+const tsFlush = `console.log(await answer('Where is order 4417?', 'customer-7'))
+console.log(await streamAnswer('Where is order 4417?'))
+// Sends what is still queued. A server that keeps running does not need it.
+await mcpd.shutdown()`
+
+const pyFlush = `print(answer("Where is order 4417?", "customer-7"))
+print(stream_answer("Where is order 4417?"))
+# Sends what is still queued. A server that keeps running does not need it.
+mcpd.shutdown()`
+
+const readBack = `# The newest run named answer_question.
+TRACE=$(curl -s "http://localhost:4317/v1/api/traces?project=support&name=answer_question&limit=1" \\
+  | jq -r '.traces[0].trace_id')
+
+# Every step of it, with the model, the tokens and the cost.
+curl -s "http://localhost:4317/v1/api/traces/$TRACE?project=support" \\
+  | jq -c '.spans[] | {name, kind, model, usage, cost: .cost.total_cost}'`
+---
+
+<Guide
+  slug="log-openai-api-calls"
+  lede="Wrap each chat completion in a span and hand the response to the mcpd SDK. mcpd stores the prompt, the answer, the token counts and the cost of every call."
+  related={['trace-chat-conversations', 'llm-cost-per-user', 'collect-user-feedback']}
+>
+  <p>
+    When you finish, every OpenAI call your code makes is stored inside the run
+    that made it, with its input messages, its answer, the tokens it used and
+    what it cost. You need a running mcpd daemon (the
+    <a href="/docs/quickstart" class="link">Quickstart</a> starts one on port
+    4317), the official <code>openai</code> package, and the mcpd SDK for
+    <a href="/docs/sdks/typescript" class="link">TypeScript</a> or
+    <a href="/docs/sdks/python" class="link">Python</a>.
+  </p>
+
+  <h2>1. Create the clients</h2>
+  <p>
+    Create one mcpd client per process, next to your OpenAI client. The project
+    groups the runs in mcpd, and the service name tells you which program sent
+    them.
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="clients"
+    samples={[
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: tsConnect },
+      { lang: 'python', label: 'Python', shiki: 'python', code: pyConnect },
+    ]}
+  />
+  <p>Each option can also come from the environment, so the same code runs everywhere:</p>
+  <table>
+    <thead>
+      <tr><th>Variable</th><th>Default</th><th>What it sets</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>MCPD_ENDPOINT</code></td><td><code>http://localhost:4317</code></td><td>The daemon the SDK sends to.</td></tr>
+      <tr><td><code>MCPD_API_KEY</code></td><td>none</td><td>An ingest key, when the daemon runs with <code>--ingest-key</code>.</td></tr>
+      <tr><td><code>MCPD_PROJECT</code></td><td><code>default</code></td><td>The project, when the code does not name one.</td></tr>
+      <tr><td><code>MCPD_CAPTURE_PAYLOADS</code></td><td><code>true</code></td><td>Set <code>false</code> to keep prompts and answers in the process and send only timings, tokens and cost.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>2. Wrap each call in a model span</h2>
+  <p>
+    Open a root span for the request, and a <code>model_generation</code> span
+    around the OpenAI call. Pass the response to
+    <code>recordResponse</code> (<code>record_response</code> in Python). It
+    reads the model, the provider, the token counts with their cached and
+    reasoning parts, the response id and the finish reason. It never records the
+    answer text, so set that with <code>setOutput</code>.
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="one chat completion, recorded"
+    samples={[
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: tsCall },
+      { lang: 'python', label: 'Python', shiki: 'python', code: pyCall },
+    ]}
+  />
+  <p>What the span carries after the call:</p>
+  <table>
+    <thead>
+      <tr><th>From the OpenAI response</th><th>Stored on the span as</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>model</code></td><td><code>model</code>, with <code>provider</code> set to <code>openai</code></td></tr>
+      <tr><td><code>usage.prompt_tokens</code></td><td><code>usage.input_tokens</code></td></tr>
+      <tr><td><code>usage.prompt_tokens_details.cached_tokens</code></td><td><code>usage.input_details.cache_read</code>, priced at the cached rate</td></tr>
+      <tr><td><code>usage.completion_tokens</code></td><td><code>usage.output_tokens</code></td></tr>
+      <tr><td><code>id</code>, <code>finish_reason</code></td><td>the attributes <code>gen_ai.response.id</code> and <code>gen_ai.response.finish_reasons</code></td></tr>
+    </tbody>
+  </table>
+  <p>
+    mcpd prices the call when it arrives, from the token counts and its own
+    price book, and stores the figure on the span. The run's total is the sum of
+    its spans. <a href="/docs/cost" class="link">Cost accounting</a> explains the
+    rates and how to add your own.
+  </p>
+
+  <h2>3. Record streamed calls</h2>
+  <p>
+    For a streamed completion, read the stream through
+    <code>recordStream</code> (<code>record_stream</code>). Every chunk comes
+    through unchanged. When the stream ends, the span gets the full text as its
+    output, the usage from the last chunk, and the time to the first token as the
+    attribute <code>mcpd.time_to_first_token_ms</code>.
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="a streamed completion"
+    samples={[
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: tsStream },
+      { lang: 'python', label: 'Python', shiki: 'python', code: pyStream },
+    ]}
+  />
+  <p>
+    Keep <code>stream_options: {'{'} include_usage: true {'}'}</code>. OpenAI
+    sends the token counts of a stream only when you ask for them, and a span with
+    no token counts has no cost.
+  </p>
+
+  <h2>4. Send it and read it back</h2>
+  <p>
+    The SDK queues spans and sends them in batches every two seconds. A script
+    that exits straight after its work has to flush first; a long-running server
+    does not.
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="run it"
+    samples={[
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: tsFlush },
+      { lang: 'python', label: 'Python', shiki: 'python', code: pyFlush },
+    ]}
+  />
+  <p>
+    Open <a href="http://localhost:4317" class="link" rel="noopener">localhost:4317</a>
+    and select the run in <strong>Runs</strong>, or read it from the
+    <a href="/docs/reference/api" class="link">HTTP API</a>:
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="read the run"
+    samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: readBack }]}
+  />
+  <TerminalCast
+    class="not-prose my-8"
+    title="the run, step by step"
+    lines={[
+      { cmd: "curl -s \"http://localhost:4317/v1/api/traces/$TRACE?project=support\" | jq -c '.spans[] | {name, kind, model, usage, cost: .cost.total_cost}'" },
+      { out: '{"name":"answer_question","kind":"agent_run","model":null,"usage":null,"cost":null}' },
+      { out: '{"name":"chat","kind":"model_generation","model":"gpt-4.1-mini","usage":{"input_tokens":812,"output_tokens":37,"total_tokens":849,"input_details":{"text":172,"cache_read":640}},"cost":0.00019199999999999998}', tone: 'ok' },
+    ]}
+  />
+  <p>
+    In that run, 640 of the 812 prompt tokens came from OpenAI's prompt cache,
+    so mcpd charged them at the cached rate.
+  </p>
+
+  <h2>Troubleshooting</h2>
+  <table>
+    <thead>
+      <tr><th>What you see</th><th>Why, and what to do</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>No runs arrive from a script</td>
+        <td>The process exited before the batch was sent. Call <code>shutdown()</code> (or <code>flush()</code>) before it exits.</td>
+      </tr>
+      <tr>
+        <td>No runs arrive from a server</td>
+        <td>
+          The SDK never throws from instrumentation, so a refused batch does not stop your code. If the
+          daemon runs with <code>--ingest-key</code>, set <code>MCPD_API_KEY</code> to one of those keys.
+          <code>mcpd.stats().failed</code> counts the batches the daemon refused.
+        </td>
+      </tr>
+      <tr>
+        <td>A streamed call has no tokens and no cost</td>
+        <td>The request did not set <code>stream_options.include_usage</code>.</td>
+      </tr>
+      <tr>
+        <td>Tokens are stored, but the cost is empty</td>
+        <td>
+          The model id is not in mcpd's price book. mcpd leaves an unknown model unpriced rather than at
+          zero. Check a model with <code>mcpd prices show gpt-4.1-mini</code>, and add rates as
+          <a href="/docs/cost" class="link">Cost accounting</a> shows.
+        </td>
+      </tr>
+      <tr>
+        <td>Prompts and answers are missing</td>
+        <td><code>MCPD_CAPTURE_PAYLOADS</code> is <code>false</code> in that process.</td>
+      </tr>
+    </tbody>
+  </table>
+</Guide>

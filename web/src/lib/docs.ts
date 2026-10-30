@@ -27,6 +27,7 @@ export const DOCS: DocSection[] = [
       { href: '/docs/install', title: 'Install', blurb: 'Docker, Compose, the Helm chart, Cargo, or built from source.' },
       { href: '/docs/concepts', title: 'Concepts', blurb: 'Traces, spans, the six signals, and the words mcpd uses for them.' },
       { href: '/docs/from-mastra', title: 'Coming from Mastra', blurb: 'Where mcpd is ahead, where it is behind, and how to move.' },
+      { href: '/docs/guides', title: 'Guides', blurb: 'One job per page: trace a framework, cost per user, alerts, CI and approvals.' },
     ],
   },
   {

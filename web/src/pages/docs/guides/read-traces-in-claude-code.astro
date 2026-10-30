@@ -1,0 +1,174 @@
+---
+import Guide from '@/layouts/Guide.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+import Callout from '@/components/guides/Callout.astro'
+
+const keys = `# A read key for the coding agent, and an admin key so the read key cannot delete.
+mcpd --ingest-key "$INGEST_KEY" --read-key "$AGENT_READ_KEY" --admin-key "$ADMIN_KEY"`
+
+const claude = `claude mcp add mcpd \\
+  -e MCPD_ENDPOINT=https://mcpd.example.com \\
+  -e MCPD_API_KEY=YOUR_READ_KEY \\
+  -- mcpd mcp`
+
+const cursor = `{
+  "mcpServers": {
+    "mcpd": {
+      "command": "mcpd",
+      "args": ["mcp"],
+      "env": {
+        "MCPD_ENDPOINT": "https://mcpd.example.com",
+        "MCPD_API_KEY": "YOUR_READ_KEY"
+      }
+    }
+  }
+}`
+
+const smoke = `printf '%s\\n' \\
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"check","version":"0"}}}' \\
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \\
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"find_runs","arguments":{"since":"-1h"}}}' \\
+  | MCPD_ENDPOINT=https://mcpd.example.com MCPD_API_KEY=YOUR_READ_KEY mcpd mcp \\
+  | tail -n 1 | jq -r '.result.content[0].text'`
+---
+
+<Guide
+  slug="read-traces-in-claude-code"
+  lede="mcpd is also an MCP server. Add it to Claude Code or Cursor and your coding agent can find the run that failed, read its steps and prompts, and check whether it is one run or a pattern, while it works on the fix."
+  related={['log-openai-api-calls', 'trace-langchain-agents', 'collect-user-feedback']}
+>
+  <p>
+    When you finish, you can ask your coding agent "why did the last support run
+    fail?" and it answers from your traces. You need the <code>mcpd</code> binary
+    on the machine where Claude Code or Cursor runs (see
+    <a href="/docs/install" class="link">Install</a>), a daemon that holds your
+    runs, and a read key for it when the daemon has keys set.
+  </p>
+
+  <h2>1. Make a read key for the agent</h2>
+  <p>
+    <code>mcpd mcp</code> is a client of a running daemon. It opens no data
+    itself, and every tool call is a request to the daemon's query API with the
+    key you give it. What the key reaches is what the agent reaches.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="keys on the daemon" samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: keys }]} />
+  <Callout tone="warning">
+    Until the daemon has an admin key, a read key can also delete traces, because
+    the admin scope falls back to the read keys. Set <code>--admin-key</code>
+    before you give an agent a read key. See <a href="/docs/security">Security</a>.
+  </Callout>
+  <p>
+    On a local daemon with no keys set, skip this step and leave
+    <code>MCPD_API_KEY</code> out below. The endpoint defaults to
+    <code>http://127.0.0.1:4317</code>.
+  </p>
+
+  <h2>2. Add mcpd to Claude Code</h2>
+  <p>
+    Claude Code starts the server as a child process when a session needs it. The
+    <code>-e</code> options set its environment, and everything after
+    <code>--</code> is the command.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="Claude Code" samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: claude }]} />
+  <p>
+    The server is added for you in this project. Add <code>-s project</code> to
+    write it to <code>.mcp.json</code> for the whole team, and keep the key out of
+    that file. Run <code>/mcp</code> inside Claude Code to see that the server is
+    connected.
+  </p>
+
+  <h2>3. Add mcpd to Cursor</h2>
+  <p>
+    Put the server in <code>.cursor/mcp.json</code> in the project, or in
+    <code>~/.cursor/mcp.json</code> for every project. Cursor asks before it runs
+    an MCP tool, unless you change that.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title=".cursor/mcp.json" samples={[{ lang: 'curl', label: 'JSON', shiki: 'json', code: cursor }]} />
+
+  <h2>4. Ask about your runs</h2>
+  <p>The server has three tools. The agent picks them; you ask in plain words.</p>
+  <table>
+    <thead>
+      <tr><th>Tool</th><th>What it answers</th><th>Arguments it takes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>find_runs</code></td>
+        <td>Which runs: one line each with id, age, status, duration, cost and steps. Last 24 hours by default.</td>
+        <td><code>status</code>, <code>q</code>, <code>name</code>, <code>model</code>, <code>environment</code>, <code>session_id</code>, <code>user_id</code>, <code>tags</code>, <code>since</code>, <code>until</code>, <code>min_duration_ms</code>, <code>sort</code>, <code>limit</code></td>
+      </tr>
+      <tr>
+        <td><code>get_run</code></td>
+        <td>What happened in one run: the waterfall, the failing step and its error, the prompts and answers, the logs and scores.</td>
+        <td><code>trace_id</code>, <code>payloads</code> (<code>all</code>, <code>errors</code> or <code>none</code>), <code>max_payload_chars</code></td>
+      </tr>
+      <tr>
+        <td><code>run_stats</code></td>
+        <td>One run or a pattern: runs, failures, latency, tokens and cost over a window.</td>
+        <td><code>since</code>, <code>until</code>, <code>group_by</code> (<code>model</code>, <code>name</code>, <code>status</code>, <code>user_id</code> and more)</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>Questions that work well:</p>
+  <ul>
+    <li>"Find the support_agent runs that failed in the last hour and tell me which step failed."</li>
+    <li>"Open the slowest run today and show me the prompt the model got."</li>
+    <li>"Is the error in this run common? Compare failures by model over the last day."</li>
+  </ul>
+  <p>
+    Every tool takes <code>project</code> too, and uses the daemon's default
+    project when the agent leaves it out. Results come back as text, not JSON, so
+    a run with forty steps costs the agent a few hundred tokens of context.
+    Payloads are cut at 1,200 characters a step and 20,000 a run.
+  </p>
+
+  <h2>5. Check the server from a terminal</h2>
+  <p>
+    The server speaks JSON-RPC over standard input and output, so you can call a
+    tool without an agent. This asks for the runs of the last hour:
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="call find_runs by hand" samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: smoke }]} />
+  <TerminalCast
+    class="not-prose my-8"
+    title="what the agent reads from find_runs"
+    lines={[
+      { out: '5 runs in project "default", matching since=-1h.' },
+      { out: 'Ages are relative to 2026-10-30 06:16:13Z.' },
+      { out: '' },
+      { out: 'trace_id                          age  status  duration       cost  steps  failed  name' },
+      { out: '22513f03006692c0234fdc02617f4484  11m  ok          33ms  $0.000768      4       0  ai.generateText support-agent', tone: 'ok' },
+      { out: 'b88940b91edb3192054ba6f41db7f9ce  11m  ok          56ms  $0.000768      4       0  invoke_agent support_agent', tone: 'ok' },
+      { out: '7a5421ccc21bc12f857691a42b77bbb1  11m  error       55ms  $0.000768      5       1  invoke_agent support_agent', tone: 'warn' },
+      { out: 'b296ba7068b0efa2cdc2d42f64be1d83  12m  ok          35ms  $0.000768      4       0  ai.generateText support-agent', tone: 'ok' },
+      { out: '25f87801d1208c1d8085bd97ac98245e  17m  ok          20ms  $0.000384      7       0  LangGraph', tone: 'ok' },
+      { out: '' },
+      { out: 'Pass a trace_id to get_run for the waterfall, the failing step and the prompts.' },
+    ]}
+  />
+
+  <h2>Troubleshooting</h2>
+  <table>
+    <thead>
+      <tr><th>What the agent reports</th><th>Why, and what to do</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>Cannot reach the mcpd daemon at ...</code></td>
+        <td>The daemon is not running or <code>MCPD_ENDPOINT</code> names the wrong address. The address must work from the machine the editor runs on.</td>
+      </tr>
+      <tr>
+        <td><code>The daemon refused the credential</code></td>
+        <td><code>MCPD_API_KEY</code> is missing or is not one of the daemon's read keys.</td>
+      </tr>
+      <tr>
+        <td><code>That key is not allowed to read this</code></td>
+        <td>The key is scoped to another project. Ask about a project the key covers.</td>
+      </tr>
+      <tr>
+        <td>The server does not start</td>
+        <td>The editor cannot find <code>mcpd</code> on its <code>PATH</code>. Put the full path to the binary in the command.</td>
+      </tr>
+    </tbody>
+  </table>
+</Guide>

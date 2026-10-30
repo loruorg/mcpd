@@ -1,0 +1,234 @@
+---
+import Guide from '@/layouts/Guide.astro'
+import CodeSwitcher from '@/components/CodeSwitcher.astro'
+import TerminalCast from '@/components/TerminalCast.astro'
+
+const dataset = `# A dataset, then its cases. Each case is an input and the answer you expect.
+curl -s -X POST "$MCPD_ENDPOINT/v1/api/datasets" \\
+  -H 'content-type: application/json' -H "authorization: Bearer $MCPD_API_KEY" \\
+  -d '{"dataset_id": "support-questions", "name": "Support questions", "item_count": 0,
+       "created_at": "2026-10-30T00:00:00Z", "correlation": {"project": "support"}}'
+
+curl -s -X POST "$MCPD_ENDPOINT/v1/api/datasets/support-questions/items?project=support" \\
+  -H 'content-type: application/json' -H "authorization: Bearer $MCPD_API_KEY" \\
+  -d '[{"item_id": "q1", "dataset_id": "support-questions",
+        "input": {"question": "Where is order 4417?"},
+        "expected": "Order 4417 ships tomorrow."}]'
+# → {"added":1}`
+
+const runPy = `# eval/run_experiment.py: runs every case through the agent and scores it.
+import os
+
+from mcpd import Mcpd
+
+from support_agent import answer  # your agent: takes the case input, returns the answer
+
+mcpd = Mcpd(project="support")
+name = os.environ.get("GITHUB_SHA", "local")[:12]
+
+results = mcpd.run_experiment(
+    "support-questions",
+    lambda case: answer(case["question"]),
+    name=f"ci-{name}",
+    scorers=["exact_match", "similarity"],
+)
+for scorer in results.scorers:
+    print(f"{scorer.scorer_id}: mean {scorer.mean:.3f} over {scorer.n}")
+
+# Hand the id to the next step of the job.
+with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a") as out:
+    out.write(f"experiment={results.experiment_id}\\n")
+mcpd.shutdown()`
+
+const runTs = `// eval/run-experiment.ts: runs every case through the agent and scores it.
+import { appendFileSync } from 'node:fs'
+import { Mcpd } from '@mcpd/sdk'
+import { answer } from '../src/support-agent.ts' // your agent
+
+const mcpd = new Mcpd({ project: 'support' })
+const name = (process.env.GITHUB_SHA ?? 'local').slice(0, 12)
+
+const results = await mcpd.runExperiment(
+  'support-questions',
+  async (input: { question: string }) => await answer(input.question),
+  { name: \`ci-\${name}\`, scorers: ['exact_match', 'similarity'] },
+)
+for (const s of results.scorers) console.log(\`\${s.scorerId}: mean \${s.mean.toFixed(3)} over \${s.n}\`)
+
+// Hand the id to the next step of the job.
+if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, \`experiment=\${results.experimentId}\\n\`)
+await mcpd.shutdown()`
+
+const workflow = `# .github/workflows/llm-regression.yml
+name: llm regression
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    env:
+      MCPD_ENDPOINT: \${{ secrets.MCPD_ENDPOINT }}
+      MCPD_API_KEY: \${{ secrets.MCPD_API_KEY }}
+      MCPD_PROJECT: support
+      OPENAI_API_KEY: \${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -r requirements.txt
+      - id: run
+        run: python eval/run_experiment.py
+      - name: fail on a regression
+        if: github.event_name == 'pull_request'
+        env:
+          BASELINE: \${{ vars.MCPD_BASELINE }}
+          CANDIDATE: \${{ steps.run.outputs.experiment }}
+        run: |
+          curl -sf --get "$MCPD_ENDPOINT/v1/api/experiments/compare" \\
+            -H "authorization: Bearer $MCPD_API_KEY" \\
+            --data-urlencode "project=$MCPD_PROJECT" \\
+            --data-urlencode "baseline=$BASELINE" \\
+            --data-urlencode "candidate=$CANDIDATE" > compare.json
+          jq -r '.scorers[] | [.scorer_id, .baseline_mean, .candidate_mean, .delta, .decidable, .regressed] | @tsv' compare.json
+          jq -e '.scorers | length > 0' compare.json > /dev/null || { echo "no scores to compare"; exit 2; }
+          jq -e '.regressed == false' compare.json > /dev/null`
+
+const evalCli = `mcpd eval --baseline "$BASELINE" --candidate "$CANDIDATE"`
+
+const baseline = `# After a run on main: the id of its experiment becomes the new baseline.
+gh variable set MCPD_BASELINE --body "88ab7480d42d9a0f4d10cb01c8f31387"`
+---
+
+<Guide
+  slug="llm-regression-tests-github-actions"
+  lede="Run your agent over the same cases on every pull request, score the answers in mcpd, and fail the job when a score drops by more than chance explains."
+  related={['collect-user-feedback', 'slack-alerts', 'read-traces-in-claude-code']}
+>
+  <p>
+    When you finish, a pull request that makes your agent's answers worse turns
+    its check red, with a table of what moved. You need an mcpd daemon that GitHub's
+    runners can reach, a key for it, a set of test questions with the answers you
+    expect, and the mcpd SDK in the language of your agent.
+  </p>
+
+  <h2>1. Build a dataset</h2>
+  <p>
+    A dataset holds the cases: an input and, when there is one, the expected
+    answer. Create it once. You can also capture failed production runs into it
+    with <code>POST /v1/api/datasets/&#123;dataset_id&#125;/capture</code>; see
+    <a href="/docs/testing" class="link">Regression testing</a>.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="create the dataset" samples={[{ lang: 'curl', label: 'cURL', shiki: 'bash', code: dataset }]} />
+  <p>
+    Use at least 20 cases. mcpd calls a change a regression only when each side
+    has 20 or more scored runs; below that, the comparison is reported but never
+    fails.
+  </p>
+
+  <h2>2. Write the experiment script</h2>
+  <p>
+    The SDK's experiment runner calls your agent once per case, four at a time,
+    each inside its own run. It scores every answer against the case's expected
+    answer and records the experiment with a mean per scorer. The script prints
+    the means and passes the experiment id to the next step.
+  </p>
+  <CodeSwitcher
+    class="not-prose my-6"
+    title="the experiment"
+    samples={[
+      { lang: 'python', label: 'Python', shiki: 'python', code: runPy },
+      { lang: 'typescript', label: 'TypeScript', shiki: 'typescript', code: runTs },
+    ]}
+  />
+  <p>
+    <code>exact_match</code> and <code>similarity</code> are two of mcpd's 22
+    built-in scorers. They are deterministic and call no model, so a test run costs
+    only your agent's own model calls. Pick the ones that fit your answers from the
+    list on <a href="/docs/testing" class="link">Regression testing</a>.
+  </p>
+
+  <h2>3. Store the keys and a baseline</h2>
+  <p>
+    In the repository settings, add the secrets <code>MCPD_ENDPOINT</code> and
+    <code>MCPD_API_KEY</code>. The key needs the ingest and write scopes to record
+    runs, scores and the experiment, and the read scope to compare. Run the script
+    once on <code>main</code> and save its experiment id as the repository variable
+    <code>MCPD_BASELINE</code>:
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="set the baseline" samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: baseline }]} />
+
+  <h2>4. Add the workflow</h2>
+  <p>
+    On a pull request the job runs the experiment, asks mcpd to compare it with the
+    baseline, and fails when <code>regressed</code> is true. On <code>main</code>
+    it records an experiment you can promote to the next baseline.
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="the workflow" samples={[{ lang: 'curl', label: 'YAML', shiki: 'yaml', code: workflow }]} />
+  <p>
+    If the runner has the <code>mcpd</code> binary, one command does the same
+    comparison and prints a table. It reads <code>MCPD_ENDPOINT</code>,
+    <code>MCPD_API_KEY</code> and <code>MCPD_PROJECT</code>, and exits 0 with no
+    regression, 1 on a regression, and 2 when it cannot compare:
+  </p>
+  <CodeSwitcher class="not-prose my-6" title="the same check, with the binary" samples={[{ lang: 'curl', label: 'Shell', shiki: 'bash', code: evalCli }]} />
+
+  <h2>5. Read the result</h2>
+  <TerminalCast
+    class="not-prose my-8"
+    title="a regression, as mcpd eval reports it"
+    lines={[
+      { cmd: 'mcpd eval --baseline 88ab7480d42d9a0f4d10cb01c8f31387 --candidate 846c8e751b0aeba0b3c71412117a8517' },
+      { out: 'scorer                           baseline        candidate    delta         95% interval  reading' },
+      { out: 'exact_match                    1.000 n=24       0.500 n=24   -0.500     -0.716 to -0.284  REGRESSED', tone: 'warn' },
+      { out: 'mcpd eval: 846c8e751b0aeba0b3c71412117a8517 regressed against 88ab7480d42d9a0f4d10cb01c8f31387', tone: 'warn' },
+    ]}
+  />
+  <p>Each scorer gets one row:</p>
+  <table>
+    <thead>
+      <tr><th>Field</th><th>Meaning</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>delta</code></td><td>Candidate mean minus baseline mean.</td></tr>
+      <tr><td><code>ci_low</code>, <code>ci_high</code></td><td>The 95% confidence interval on the delta, from Welch's t-test.</td></tr>
+      <tr><td><code>decidable</code></td><td><code>false</code> when either side has fewer than 20 scored runs.</td></tr>
+      <tr><td><code>regressed</code></td><td><code>true</code> when the comparison is decidable and the whole interval is on the worse side of zero.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    "Worse" follows each scorer's direction, so a rise in a lower-is-better scorer
+    is the regression. A mean that moved inside its own noise is reported but does
+    not fail the job.
+  </p>
+
+  <h2>Troubleshooting</h2>
+  <table>
+    <thead>
+      <tr><th>What you see</th><th>Why, and what to do</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>mcpd eval</code> exits 2 with <code>neither experiment has a score in project</code></td>
+        <td>
+          The ids or the project are wrong. Compare experiment ids, not names: a name such as
+          <code>ci-1a2b3c</code> matches no scores. Check <code>MCPD_PROJECT</code>.
+        </td>
+      </tr>
+      <tr>
+        <td>The reading is <code>too few runs to decide</code></td>
+        <td>A side has fewer than 20 scored runs. Add cases. Pass <code>--require-decidable</code> to fail the job in that case.</td>
+      </tr>
+      <tr>
+        <td>The compare step stops with curl exit code 22</td>
+        <td>
+          mcpd answered with an HTTP error, and <code>-f</code> hid the body. Run the request without
+          <code>-f</code> to read the message. A <code>401</code> or <code>403</code> means the key
+          lacks the read scope.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</Guide>
