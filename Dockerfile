@@ -19,7 +19,7 @@
 # --- the cross-compilation helpers --------------------------------------------
 # xx maps TARGETPLATFORM to a Rust target triple, installs the target's C
 # libraries into a sysroot, and points cargo's linker and the cc crate at it.
-FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.6.1@sha256:923441d7c25f1e2eb5789f82d987693c47b8ed987c4ab3b075d6ed2b5d6779a3 AS xx
+FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.10.0@sha256:40fe21f44bb8cddf1eb1226db190d0a984118f62ee02a91b77d99448d28264a6 AS xx
 
 # --- the web application -----------------------------------------------------
 # Static files, the same bytes on every platform, so built once on the build
