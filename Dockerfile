@@ -24,7 +24,7 @@ FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.6.1@sha256:923441d7c25f1e2eb5789f
 # --- the web application -----------------------------------------------------
 # Static files, the same bytes on every platform, so built once on the build
 # machine.
-FROM --platform=$BUILDPLATFORM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS ui
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:143494b1da2945f061539253adc65e4f1569ddf07da2d384c022c791a9d90a4a AS ui
 
 WORKDIR /build
 # Copy manifests first so a source-only change does not reinstall the world.
